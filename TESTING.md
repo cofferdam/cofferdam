@@ -7,8 +7,10 @@ run is a **complement** to the test suite, never a substitute for it.
 
 ## Framework
 
-Standard-library test tooling, consistent with the v0.1 dependency policy ([`DESIGN.md`](DESIGN.md)).
-The exact test runner is confirmed in PR01 (CLI skeleton) / PR02 (guard).
+The test runner is the Python standard-library `unittest` module — no third-party test
+dependency, consistent with the v0.1 dependency policy ([`DESIGN.md`](DESIGN.md)). Tests are
+discovered from `tests/` and run with `python -m unittest discover -s tests -t .`. This choice is
+fixed as of PR01.
 
 ## Coverage targets — trust-boundary code
 
@@ -35,8 +37,9 @@ corresponding test:
 - **Operating systems:** Linux, macOS, Windows, and WSL.
 - **Git:** a minimum version floor sufficient for reliable `apply --check` and symlink semantics
   (exact floor confirmed in PR02/PR03, where those semantics are exercised).
-- **Runtime:** a minimum runtime version floor sufficient to avoid version-specific standard
-  library surprises (exact floor confirmed alongside the runtime choice in PR01).
+- **Runtime:** Python 3.9 or newer. The runtime is Python and the floor is fixed at 3.9 as of PR01
+  (declared in `pyproject.toml`); it may be raised in a later version if a specific standard-library
+  guarantee requires it.
 
 Every trust-boundary test in the matrix above runs on **both** a Windows and a POSIX platform
 before v0.1.0 ships — a Windows-only or POSIX-only green run is not sufficient, since path and

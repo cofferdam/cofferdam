@@ -11,3 +11,6 @@ release.
 - Foundation docs (PR0): `LICENSE`, `README.md`, `PROVENANCE.md`, `SAFETY-AND-RISK.md`,
   `SECURITY.md`, `TESTING.md`, `DESIGN.md`, `THREAT-MODEL.md`, `AUTHORS.md`, `.gitignore`, and a
   license-scan CI check. No product code yet.
+- CLI skeleton (PR1): the `cofferdam` package with `--version`, help output, an empty command
+  dispatch registry, the exit-code convention, and the stdout/stderr split. Standard-library only;
+  no guard, executor, approval, audit, provider, or network behaviour yet.
