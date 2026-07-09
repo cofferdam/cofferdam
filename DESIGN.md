@@ -5,9 +5,13 @@ authoritative, public description of what Cofferdam is and why it is safe.
 
 ## What Cofferdam is
 
-A deterministic safety layer between AI agents and your codebase. AI agents propose changes;
-Cofferdam decides, with a human in the loop, whether and how those changes are ever allowed to
-touch the filesystem — without depending on a model's judgment as the authority.
+Cofferdam is a controlled worksite for AI-assisted development. AI agents propose changes, plans,
+and actions inside the boundary; reviews critique them; a human decides; and only approved actions
+ever cross into the codebase or execution.
+
+The v0.1 wedge is the boundary itself — the deterministic trust core — because everything else is
+only trustworthy if the boundary is. Cofferdam is not only a blocker; it is the controlled
+workspace that the blocker makes possible.
 
 ## The design loop
 
