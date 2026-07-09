@@ -1,0 +1,33 @@
+name: license-scan
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  license-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify LICENSE is present and Apache-2.0
+        run: |
+          set -euo pipefail
+          test -f LICENSE
+          grep -q "Apache License" LICENSE
+          grep -q "Version 2.0" LICENSE
+          echo "LICENSE present and looks like Apache-2.0."
+
+      - name: Verify no disallowed license markers in tracked files
+        run: |
+          set -euo pipefail
+          if grep -RIl --exclude-dir=.git -E "GPL-3\.0|AGPL|SSPL|proprietary" . ; then
+            echo "Disallowed license marker found." >&2
+            exit 1
+          fi
+          echo "No disallowed license markers found."
+
+      # Placeholder: once dependencies exist (from the provider-adapter line onward),
+      # extend this job to scan the dependency manifest's licenses. v0.1 is
+      # stdlib-first / dependency-minimal by design (see DESIGN.md), so there is
+      # nothing to scan yet beyond this repo's own files.

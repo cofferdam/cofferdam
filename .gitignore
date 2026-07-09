@@ -1,0 +1,24 @@
+# Runtime / local workspace artifacts (never committed)
+.council/
+.cofferdam/
+*.log
+
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Common runtime artifacts (safe placeholders even before the runtime is chosen in PR01)
+__pycache__/
+*.pyc
+.venv/
+venv/
