@@ -58,9 +58,27 @@ symlink semantics differ between them.
   serialization over repeated evaluations, the fail-closed `try/except` wrapper (asserted directly,
   not inferred from fuzzing), the parse-before-evaluate contract, and a no-side-effects suite that
   sabotages `socket`, `subprocess`, and write-mode `open`.
+- **PR3a (binding foundation, non-mutating):** frozen known-vector tests for every domain-separated
+  hash and the `bound_hash` (recomputed independently from hardcoded tag literals + an 8-byte
+  big-endian length prefix, so a serialization change breaks them), plus length-prefix
+  boundary-ambiguity and field-reordering/sensitivity tests; pre-state sentinel vectors (absent vs
+  empty-regular vs regular) and their distinctness/determinism; bounded `read_bytes` (absent vs
+  empty, at/over the 10 MiB limit, directory/symlink rejected, no writes); canonicalization against
+  real temp dirs (regular/absent, symlink component/target/escape rejected, non-regular rejected,
+  determinism); the immutable content-light dry-run artifact (deterministic, no approval/nonce
+  fields, blocked/oversize fail closed, injection-as-data inert, building mutates nothing); and a
+  PR3a no-side-effects suite that sabotages `socket`, `subprocess`, write-mode `open`,
+  `Path.write_text`/`write_bytes`, `os.remove`/`unlink`/`replace`/`rename`/`mkdir`/`makedirs`/`chmod`.
+  Symlink-dependent cases skip cleanly where the platform cannot create a symlink. Balanced-review
+  regressions: the dry-run binds exactly `proposal.diff.encode("utf-8")` (no independent
+  caller-supplied patch — signature has only `proposal, repo_view`; a diff change moves both
+  `patch_hash` and `bound_hash`), and the repository root is owned by the view (no separate
+  `repo_root` argument; two roots give distinct `repo_root_id`/`bound_hash`; a non-existent root is
+  rejected; production code is proven not to import the test double).
 
 ## What is not yet covered
 
-The approval/executor/audit path (PR3) is not yet implemented; the corresponding coverage targets
-above (approval verification, the audit chain, the `git apply` executor and its fixed-argv guarantee)
-are backed by tests when that PR lands.
+The approval/authorization path, the `git apply` executor, and the audit chain (PR3b/PR3c/PR3d) are
+not yet implemented; the corresponding coverage targets above (approval verification, the audit
+chain, the `git apply` executor and its fixed-argv guarantee) are backed by tests when those PRs
+land. PR3a deliberately ships **no** approval, nonce, ledger, TTY, subprocess, or mutation.

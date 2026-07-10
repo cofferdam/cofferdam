@@ -1,9 +1,20 @@
 # Threat model
 
-**Status: the trust-core classifier is complete — the proposal schema and path containment (PR2a)
-plus the deterministic guard and diff validator (PR2b) are implemented and enforced. The
-approval/executor/audit path (PR3) is still forthcoming; sections that depend on it are marked
-_(forthcoming)_.**
+**Status: the trust-core classifier is complete (PR2), and the PR3a **binding foundation** is in
+place — read-only canonical target resolution, bounded pre-state reading, domain-separated hashing,
+and an immutable dry-run artifact. The artifact derives its patch bytes **only** from the validated
+`proposal.diff` (one authoritative artifact — a caller cannot validate one patch and bind another)
+and takes its repository root **only** from the repo view (which canonicalizes/validates its own
+root — a caller cannot hash one root while reading from another). That artifact's `bound_hash`
+(`TAG_BOUND = "cofferdam.binding.v1"`) proves **what** a change is (binding); it is **not**
+authorization. No approval, nonce, ledger, expiry, TTY, `git apply`, executor, or audit exists yet —
+the mutating/approval/audit path (PR3b/PR3c/PR3d) is still
+forthcoming; sections that depend on it are marked _(forthcoming)_. PR3a is strictly non-mutating:
+it performs no file write, subprocess, or network I/O; `read_bytes` is size-bounded (10 MiB) and
+symlink-rejecting; canonicalization rejects symlink/reparse components, root escapes, and
+non-regular targets, with case-insensitive / macOS-NFD / Windows-subst edges documented as PR4
+hardening. The frozen hash constants (tags, 8-byte big-endian length prefix, pre-state sentinels)
+are pinned by known test vectors and are the serialization contract PR3b/PR3d will build on.**
 
 Cofferdam's job is to decide, deterministically and with a human in the loop, whether an
 AI-proposed change is ever allowed to touch the filesystem. This document enumerates who might
