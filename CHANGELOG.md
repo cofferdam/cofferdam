@@ -28,3 +28,16 @@ release.
   truncated, oversized, and path-mismatched diffs all fail closed. Still `BLOCKED`/`NEEDS_APPROVAL`
   only — no `ALLOWED`. Standard-library only; no network, no subprocess, no file mutation.
   Approval/executor/audit remain PR3.
+- Trust-core binding foundation (PR3a — **non-mutating**): domain-separated, length-prefixed SHA-256
+  hashing utilities with frozen constants and known test vectors (`hashing.py`); read-only canonical
+  target resolution that rejects symlink/reparse components, root escapes, and non-regular targets
+  (`canonicalize.py`); a deterministic pre-state descriptor distinguishing absent / empty-regular /
+  non-empty-regular (`prestate.py`); a bounded, symlink-rejecting read-only `read_bytes` on the repo
+  view (`repo_view.py`); and an **immutable dry-run artifact** (`dryrun.py`). The artifact derives
+  its patch bytes **internally** from the validated proposal (`proposal.diff.encode("utf-8")`) — one
+  authoritative artifact, no independent caller-supplied patch — and takes its repository root
+  **only** from the repo view (the view canonicalizes/validates its root and owns
+  `root_real_path()`/`root_bytes()`), so path/root/pre-state cannot diverge across two roots. The
+  binding hash uses `TAG_BOUND = "cofferdam.binding.v1"` and proves **binding, not authorization**.
+  Standard library only; no file writes, no subprocess, no network. **No approval, nonce, ledger,
+  expiry, TTY, `git apply`, executor, or audit exists yet** — those are PR3b/PR3c/PR3d.
