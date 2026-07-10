@@ -51,9 +51,16 @@ symlink semantics differ between them.
   the read-only repo view, and the no-`ALLOWED` verdict vocabulary — all with negative-first tests
   (schema rejection, path-traversal/containment, protected paths, symlink/non-regular targets,
   determinism, and a no-network/no-subprocess/fail-closed suite).
+- **PR2b:** the deterministic guard and the positive-grammar diff validator — negative-first tests for
+  malformed / multi-file / binary / truncated / oversized diffs, strict diff-path matching (including
+  the one-sided `---`/`+++` mismatch bypass), Tier-1 and Tier-2 protected paths, symlink and
+  non-regular targets, injection-as-data, the frozen `evaluate` signature, byte-stable verdict
+  serialization over repeated evaluations, the fail-closed `try/except` wrapper (asserted directly,
+  not inferred from fuzzing), the parse-before-evaluate contract, and a no-side-effects suite that
+  sabotages `socket`, `subprocess`, and write-mode `open`.
 
 ## What is not yet covered
 
-The guard decision engine and diff validator (PR2b) and the approval/executor/audit path (PR3) are
-not yet implemented; the corresponding coverage targets above (approval verification, the audit
-chain, the `git apply` executor) are backed by tests when those PRs land.
+The approval/executor/audit path (PR3) is not yet implemented; the corresponding coverage targets
+above (approval verification, the audit chain, the `git apply` executor and its fixed-argv guarantee)
+are backed by tests when that PR lands.
