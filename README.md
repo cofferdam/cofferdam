@@ -1,6 +1,6 @@
 # Cofferdam
 
-![cofferdam](cofferdam MAIN.jpg)
+![cofferdam](cofferdam/cofferdam MAIN.jpeg)
 
 A controlled workspace where AI agents propose, reviews weigh in, and humans decide what crosses
 the boundary.
