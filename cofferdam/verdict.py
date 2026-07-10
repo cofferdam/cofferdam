@@ -1,8 +1,8 @@
 """Verdict vocabulary — the stable enums shared across the trust core.
 
-PR2a introduces only the *vocabulary*: the decision states, the risk
-annotation, and the reason-code taxonomy. The full ``Verdict`` container and
-its canonical, byte-stable serialization arrive with the guard body in PR2b.
+This is the single home for the guard's output contract: the decision states,
+the risk annotation, the reason-code taxonomy, and the immutable ``Verdict``
+container with its canonical, byte-stable serialization.
 
 Invariant (no-ALLOWED): a file-edit proposal is only ever ``BLOCKED`` or
 ``NEEDS_APPROVAL``. There is deliberately no ``ALLOWED`` / auto-apply state in
@@ -16,7 +16,10 @@ policy; do not repurpose an existing value.
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
 from enum import Enum
+from typing import Tuple
 
 
 class Decision(str, Enum):
@@ -74,3 +77,37 @@ class ReasonCode(str, Enum):
     # -- protected paths --
     PROTECTED_BLOCKED = "protected.blocked"
     PROTECTED_HIGH_RISK = "protected.high_risk"
+
+    # -- diff structure --
+    DIFF_EMPTY = "diff.empty"
+    DIFF_MALFORMED = "diff.malformed"
+    DIFF_MULTIPLE_FILES = "diff.multiple_files"
+    DIFF_BINARY = "diff.binary"
+    DIFF_TRUNCATED = "diff.truncated"
+    DIFF_PATH_MISMATCH = "diff.path_mismatch"
+    DIFF_TOO_LARGE = "diff.too_large"
+
+    # -- guard --
+    GUARD_INTERNAL_ERROR = "guard.internal_error"
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """The guard's output. ``reasons`` are deterministically ordered by the
+    guard; serialization is canonical and **byte-stable** (sorted keys, sorted
+    reasons, fixed separators, ``ensure_ascii``) so PR3 audit hashing can rely
+    on it."""
+
+    decision: Decision
+    risk: Risk
+    reasons: Tuple[ReasonCode, ...]
+
+    def to_canonical_json(self) -> str:
+        payload = {
+            "decision": self.decision.value,
+            "reasons": sorted(code.value for code in self.reasons),
+            "risk": self.risk.value,
+        }
+        return json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        )

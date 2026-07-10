@@ -20,3 +20,11 @@ release.
   vocabulary with a no-`ALLOWED` decision set (`verdict.py`). Finalized the PR2a-relevant sections of
   `THREAT-MODEL.md`. Standard-library only; no network, no subprocess, no file mutation. The guard
   decision engine and diff validator remain PR2b; approval/executor/audit remain PR3.
+- Deterministic guard and diff validator (PR2b): `guard.py` with the frozen
+  `evaluate(proposal, repo_view)` signature and an architectural fail-closed wrapper; `diffcheck.py`,
+  a positive-grammar validator for the narrow git unified-diff subset (newline normalization, hunk
+  line-count checking, and strict `---`/`+++` path matching against `target_path`); and the immutable
+  `Verdict` container with byte-stable canonical serialization. Malformed, multi-file, binary,
+  truncated, oversized, and path-mismatched diffs all fail closed. Still `BLOCKED`/`NEEDS_APPROVAL`
+  only — no `ALLOWED`. Standard-library only; no network, no subprocess, no file mutation.
+  Approval/executor/audit remain PR3.

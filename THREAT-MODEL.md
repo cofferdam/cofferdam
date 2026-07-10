@@ -1,8 +1,9 @@
 # Threat model
 
-**Status: the proposal-schema and path-containment foundation (PR2a) is implemented and enforced.
-The guard decision engine and diff validator (PR2b) and the approval/executor/audit path (PR3) are
-still forthcoming; sections that depend on them are marked _(forthcoming)_.**
+**Status: the trust-core classifier is complete — the proposal schema and path containment (PR2a)
+plus the deterministic guard and diff validator (PR2b) are implemented and enforced. The
+approval/executor/audit path (PR3) is still forthcoming; sections that depend on it are marked
+_(forthcoming)_.**
 
 Cofferdam's job is to decide, deterministically and with a human in the loop, whether an
 AI-proposed change is ever allowed to touch the filesystem. This document enumerates who might
@@ -14,11 +15,11 @@ attack that boundary, what they are after, and which invariant stops them.
   oversized, malformed, or injection-worded proposal (including prompt-injection text embedded in a
   diff or a filename) to gain a change it was not granted.
 - **A compromised or buggy upstream tool** feeding proposals into Cofferdam.
-- **A local concurrent process** racing the classify → (later) approve → apply window (TOCTOU). PR2a
-  narrows this by refusing symlink components and using a single repo-view snapshot per assessment;
-  full closure is PR3 _(forthcoming)_.
-- **Operator error** — an approval granted in haste _(the approval path is forthcoming; PR2a already
-  refuses to auto-clear anything)_.
+- **A local concurrent process** racing the classify → (later) approve → apply window (TOCTOU). The
+  guard narrows this by refusing symlink components and using a single repo-view snapshot per
+  evaluation; full closure is PR3 _(forthcoming)_.
+- **Operator error** — an approval granted in haste _(the approval path is forthcoming; the guard
+  already refuses to auto-clear anything)_.
 
 ## Assets
 
@@ -32,10 +33,30 @@ attack that boundary, what they are after, and which invariant stops them.
 
 ## Mitigating invariants
 
-Enforced as of PR2a:
+Enforced as of PR2b:
 
+- **I-1 deterministic guard** — `evaluate(proposal, repo_view)` is a pure function of its explicit
+  inputs (plus one repo-view snapshot): no clock, no randomness, no environment or locale reads, no
+  network, no subprocess, no mutation. Reasons are deduplicated and sorted by a fixed key, and the
+  `Verdict` serializes **byte-identically** (canonical JSON: sorted keys, sorted reasons, fixed
+  separators, `ensure_ascii`) so the PR3 audit chain can hash it.
 - **I-2 proposal-as-data** — proposal content is inert data. Injection-worded diffs and filenames
   classify identically to neutral content; nothing in a proposal changes control flow.
+- **I-3 advisory-cannot-relax** — `evaluate`'s signature is **frozen at exactly two positional
+  parameters** `(proposal, repo_view)`. No model/advisory channel exists anywhere in the guard path,
+  so nothing can relax a verdict. A test asserts the signature. Any future advisory layer must be a
+  separate wrapper with no access to guard internals.
+- **Diff structural integrity** — the diff validator accepts only a **narrow positive grammar** (one
+  `---`/`+++` header pair, hunk headers, and ` `/`+`/`-` body lines whose counts match the header,
+  plus the no-newline marker). Everything outside it is refused, so `diff --git`/`index`/mode/rename
+  headers, binary patches, multi-file diffs, truncated hunks, and exotic constructs all fail closed
+  by default rather than by enumeration. Newlines are normalized to `\n` before parsing.
+- **Strict diff-path matching** — **every** path reference in the diff (both `---` and `+++`, minus
+  one `a/`/`b/` prefix, with `/dev/null` handled for create/delete) must equal `target_path` **after
+  normalization**, by exact equality — never a suffix or loose match. This closes the bypass where a
+  crafted diff points `---` at a protected file and `+++` at an innocent one.
+- **No `ALLOWED` state** — a file-edit proposal is only ever `BLOCKED` or `NEEDS_APPROVAL`. There is
+  no auto-clear decision to be tricked into.
 - **I-7 path containment** — a target path must resolve inside the whitelisted root: absolute paths,
   `..`/`.` segments, drive letters, UNC paths, alternate-data-stream colons, control characters,
   over-long/over-deep paths, and reserved device names are all refused. Separators are normalized;
@@ -44,17 +65,14 @@ Enforced as of PR2a:
   install-executing manifests, Cofferdam's own config) is unconditionally blocked; Tier 2 (secrets,
   `.gitattributes`) is forced to the highest-scrutiny non-blocked state. Symlink/reparse-point
   components and non-regular targets are refused through a read-only injected repo view.
-- **I-10 fail-closed** — malformed or unknown input is rejected, never silently accepted; the parser
-  and path assessment never raise to the caller (a wrapper converts any internal error to a
-  rejection).
-- **I-14 zero network** — no network I/O, and no subprocess, anywhere in the schema/containment code
-  path (asserted by a test that sabotages `socket` and `subprocess`).
-- **I-1 determinism (foundation)** — schema parsing and path assessment are pure functions of their
-  explicit inputs (and, for type checks, one repo-view snapshot); identical inputs give identical
-  results. The full byte-stable verdict serialization lands with the guard in PR2b.
-- **I-3 advisory-cannot-relax (seam)** — there is no model/advisory input anywhere in this code path
-  that could relax a decision. The frozen guard signature that guarantees this structurally lands in
-  PR2b.
+- **I-10 fail-closed** — malformed, oversized, or unknown input is rejected, never silently accepted.
+  Unknown/extra keys are refused at **parse time**, before the guard is ever invoked. Fail-closed is
+  **architectural, not emergent**: a `try/except` wrapper at the `evaluate()` (and parser, and
+  validator) entry point converts any internal error into a `BLOCKED` verdict, and each wrapper has
+  its own dedicated test rather than relying on fuzzing to discover it.
+- **I-14 zero network** — no network I/O, and no subprocess, anywhere in the trust core (asserted by
+  tests that sabotage `socket`, `subprocess`, and write-mode `open` and then run the guard over a
+  hostile batch).
 
 Forthcoming: **I-4/I-5/I-6** (hash-bound, single-use, re-checked approval), **I-8** (canonical
 real-path bound into the approval hash), **I-13** (hash-chained audit), **I-15/I-16** (executor never
@@ -70,6 +88,18 @@ PR3.
   escalating confirmation for oversized/high-risk), consistent with advisory-cannot-relax.
 - **Ongoing maintenance surface:** the protected-path list is static, so ecosystem-new vectors
   (`.devcontainer/`, `mise.toml`, `.husky/`, Renovate config, …) are unprotected until added.
+
+## Known strictness (accepted trade-offs)
+
+- The diff grammar accepts only the **minimal unified-diff form**. A raw `git diff` — which prepends
+  `diff --git` and `index` lines — is rejected; a proposal must submit the `---`/`+++`/`@@` core.
+  This is deliberate: it is how binary, rename, copy, and mode-change vectors are refused *by
+  construction* rather than by blocklist.
+- A blank context line must carry its leading space. A bare empty line inside a hunk is outside the
+  grammar and fails closed.
+- `repo_view` is supplied by the caller. Its answers can never *relax* a verdict — the lexical and
+  protected-path gates run regardless of what it reports — but a deliberately lying view is outside
+  the threat model, since the caller already controls the integration.
 
 ## Zero-network caveat
 
