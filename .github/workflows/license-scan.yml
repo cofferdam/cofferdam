@@ -21,8 +21,12 @@ jobs:
       - name: Verify no disallowed license markers in tracked files
         run: |
           set -euo pipefail
-          if grep -RIl --exclude-dir=.git -E "GPL-3\.0|AGPL|SSPL|proprietary" . ; then
-            echo "Disallowed license marker found." >&2
+          # This scanner necessarily contains the very markers it searches for,
+          # so it excludes itself; otherwise it always matches and always fails.
+          # -I skips binary files; --exclude-dir=.git skips git internals.
+          if grep -RIl --exclude-dir=.git --exclude=license-scan.yml \
+               -E "GPL-3\.0|AGPL|SSPL|proprietary" . ; then
+            echo "Disallowed license marker found in the file(s) listed above." >&2
             exit 1
           fi
           echo "No disallowed license markers found."
