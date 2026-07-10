@@ -45,7 +45,15 @@ Every trust-boundary test in the matrix above runs on **both** a Windows and a P
 before v0.1.0 ships — a Windows-only or POSIX-only green run is not sufficient, since path and
 symlink semantics differ between them.
 
+## What is covered so far
+
+- **PR2a:** the strict proposal parser, path normalization/containment, the protected-path matcher,
+  the read-only repo view, and the no-`ALLOWED` verdict vocabulary — all with negative-first tests
+  (schema rejection, path-traversal/containment, protected paths, symlink/non-regular targets,
+  determinism, and a no-network/no-subprocess/fail-closed suite).
+
 ## What is not yet covered
 
-This file is a skeleton until PR02 (guard) and PR03 (approval/executor/audit) land — at which
-point the coverage-target list above is backed by an actual, linked test suite.
+The guard decision engine and diff validator (PR2b) and the approval/executor/audit path (PR3) are
+not yet implemented; the corresponding coverage targets above (approval verification, the audit
+chain, the `git apply` executor) are backed by tests when those PRs land.
