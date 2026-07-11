@@ -71,7 +71,17 @@ Enforced as of PR2b:
 - **I-7 path containment** — a target path must resolve inside the whitelisted root: absolute paths,
   `..`/`.` segments, drive letters, UNC paths, alternate-data-stream colons, control characters,
   over-long/over-deep paths, and reserved device names are all refused. Separators are normalized;
-  components are NFC-normalized and compared casefolded so `.GIT`/`.Git` cannot bypass a rule.
+  components are NFC-normalized and compared casefolded so `.GIT`/`.Git` cannot bypass a rule. The
+  lexical gate (`normalize_target`) is the primary containment and runs regardless of what the repo
+  view reports; **`FilesystemRepoView` additionally enforces its own root containment as
+  defense-in-depth** — each component is validated (no `..`/absolute/drive/UNC/device/embedded-
+  separator form) before any filesystem access, an intermediate symlink/reparse component fails
+  closed, and the resolved parent must stay beneath the root, so a direct view call with hostile
+  parts cannot disclose out-of-root metadata (`path_type` → `MISSING`) or read out-of-root bytes
+  (`read_bytes` → `RepoReadError`); a *final*-component symlink is still reported as `SYMLINK` and
+  never followed. This containment is **check-then-use, not race-free**: replacing a checked
+  component with a symlink under the same trusted OS account between check and open is an accepted
+  v0.1 residual (descriptor-relative `openat`/`O_NOFOLLOW` traversal is PR4).
 - **I-9 protected paths** — a two-tier deny list: Tier 1 (VCS internals, CI/supply-chain vectors,
   install-executing manifests, Cofferdam's own config) is unconditionally blocked; Tier 2 (secrets,
   `.gitattributes`) is forced to the highest-scrutiny non-blocked state. Symlink/reparse-point

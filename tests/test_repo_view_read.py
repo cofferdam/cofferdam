@@ -84,6 +84,90 @@ class FilesystemReadBytesTests(unittest.TestCase):
         self.assertEqual(_snapshot(self.root), before)
 
 
+class ReadBytesContainmentTests(unittest.TestCase):
+    """``read_bytes`` must never return out-of-root content and never leak an
+    outside path in an error. Uses an explicit parent/{repo, outside-file}
+    layout so nothing depends on host filesystem contents."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.parent = Path(self._tmp.name)
+        self.root = self.parent / "repo"
+        self.root.mkdir()
+        self.outside_file = self.parent / "outside-file"
+        self.outside_file.write_bytes(b"OUTSIDE-SECRET")
+        self.outside_dir = self.parent / "outside-dir"
+        self.outside_dir.mkdir()
+        (self.outside_dir / "secret.txt").write_bytes(b"DEEP-SECRET")
+        (self.root / "in.txt").write_bytes(b"inside")
+        self.view = FilesystemRepoView(self.root)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _assert_escape(self, parts):
+        with self.assertRaises(RepoReadError) as ctx:
+            self.view.read_bytes(parts)
+        msg = str(ctx.exception)
+        # No outside path or content ever appears in the error text.
+        self.assertNotIn("OUTSIDE", msg)
+        self.assertNotIn("outside", msg)
+        self.assertNotIn(str(self.parent), msg)
+
+    def test_in_root_still_reads(self):
+        self.assertEqual(self.view.read_bytes(("in.txt",)), b"inside")
+
+    def test_empty_parts_root_is_error(self):
+        with self.assertRaises(RepoReadError):
+            self.view.read_bytes(())
+
+    def test_parent_escape_to_outside_file_reads_nothing(self):
+        self._assert_escape(("..", "outside-file"))
+
+    def test_deep_parent_escape_reads_nothing(self):
+        self._assert_escape(("..", "outside-dir", "secret.txt"))
+
+    def test_absolute_component_reads_nothing(self):
+        self._assert_escape((str(self.outside_file),))
+
+    def test_embedded_separator_reads_nothing(self):
+        self._assert_escape(("a/b",))
+        self._assert_escape(("a\\b",))
+
+    def test_drive_and_device_components_read_nothing(self):
+        self._assert_escape(("C:\\Windows\\x",))
+        self._assert_escape(("\\\\?\\C:\\x",))
+
+    def test_dotdot_component_reads_nothing(self):
+        self._assert_escape(("..",))
+
+    def test_outside_secret_never_returned(self):
+        # Exhaustively confirm none of the escape spellings return the secret.
+        for parts in (("..", "outside-file"),
+                      ("..", "outside-dir", "secret.txt"),
+                      (str(self.outside_file),)):
+            try:
+                data = self.view.read_bytes(parts)
+            except RepoReadError:
+                continue
+            self.assertNotIn(b"SECRET", data or b"")
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink unsupported")
+    def test_intermediate_symlink_escape_reads_nothing(self):
+        try:
+            os.symlink(self.outside_dir, self.root / "esc")
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"cannot create symlink: {exc}")
+        self._assert_escape(("esc", "secret.txt"))
+
+    def test_no_outside_pre_state_binding(self):
+        # A dry-run pre-state must fail closed on an escape, never bind outside
+        # content as a describable pre-state.
+        from cofferdam.prestate import PreStateError, read_prestate
+        with self.assertRaises(PreStateError):
+            read_prestate(self.view, ("..", "outside-file"))
+
+
 class InMemoryReadBytesTests(unittest.TestCase):
     def test_matches_contract(self):
         view = InMemoryRepoView({("a.txt",): b"hi", ("d",): DIRECTORY, ("l",): SYMLINK})
