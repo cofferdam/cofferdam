@@ -41,3 +41,25 @@ release.
   binding hash uses `TAG_BOUND = "cofferdam.binding.v1"` and proves **binding, not authorization**.
   Standard library only; no file writes, no subprocess, no network. **No approval, nonce, ledger,
   expiry, TTY, `git apply`, executor, or audit exists yet** — those are PR3b/PR3c/PR3d.
+- Approval-state layer (PR3b — **non-executing**): a durable, expiring, single-use approval ledger
+  under the repository's own `.cofferdam/` workspace, with the strict approval/consumption record
+  schemas and canonical JSONL serialization (`approval.py`), a deterministic fail-closed fold scoped
+  by `repo_root_id`, the append-only store with a cross-process advisory lock, `fstat`-after-open
+  permission/owner checks, symlink/reparse + non-directory rejection, fail-closed handling of
+  torn/malformed records (**a non-empty ledger that does not end in a complete LF-terminated record
+  invalidates the whole ledger — no automatic repair**, so a torn consumption line can never
+  resurrect a consumed approval), consumption↔approval `bound_hash` cross-checking, size caps, and a
+  write-all→fsync append protocol (`approval_store.py`), an injectable wall-clock abstraction
+  (`clock.py`), and a **read-only** `cofferdam approval-status` command that creates no state.
+  **Ledger integrity is the authorization property**: `approval_id` is a random event identifier,
+  never a bearer token, and `bound_hash` alone never authorizes. The supported public functions
+  `find_valid_approval(bound_hash, repo_view)` / `consume_approval(bound_hash, repo_view)` take **no**
+  caller-injectable clock/store/lock/path/TTL (dependency injection exists only on unexported
+  internal seams for tests and future PR3c wiring); the store itself is internal-only
+  (`_ApprovalStore`, no public append API). Single-use is regression-tested across two real OS
+  processes. PR3b writes only its own `.cofferdam/` state files. Standard library only; no repository
+  mutation, no `git apply`, no subprocess, no network, no audit. **Deliberately absent (deferred):
+  the human-mediated approval mint and TTY confirmer (PR3c1), the byte-exact executor (PR3c2), and
+  the hash-chained audit log (PR3d)** — there is no production path that *creates* an approval in this
+  release. `prestate.py` now raises an explicit error (instead of `assert`) so its content-hash
+  invariant survives `python -O`.

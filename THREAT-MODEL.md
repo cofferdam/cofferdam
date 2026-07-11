@@ -85,10 +85,22 @@ Enforced as of PR2b:
   tests that sabotage `socket`, `subprocess`, and write-mode `open` and then run the guard over a
   hostile batch).
 
-Forthcoming: **I-4/I-5/I-6** (hash-bound, single-use, re-checked approval), **I-8** (canonical
-real-path bound into the approval hash), **I-13** (hash-chained audit), **I-15/I-16** (executor never
-touches index/commits/hooks; no user- or proposal-controlled argument reaches any subprocess) — all
-PR3.
+Enforced as of PR3b (the non-executing approval-state layer):
+
+- **I-5 expiry + single-use (persistence half)** — an approval is authoritative only as a valid,
+  active, unconsumed record in the protected append-only ledger (`.cofferdam/approvals.jsonl`),
+  scoped to this clone by `repo_root_id`, with a fixed short TTL. Consumption is atomic under a
+  cross-process lock (append one consumption entry + fsync); concurrent double-use yields exactly one
+  success; a consumed or expired record is terminal. **Ledger integrity is the authorization
+  property** — `bound_hash` is binding only, and `approval_id` is a random identifier, never a bearer
+  token. A corrupt/torn ledger fails closed (no approval valid; no auto-repair). The residual: an
+  actor who can write `.cofferdam/` directly, or run arbitrary in-process Python, or roll the wall
+  clock back into a still-valid interval, is outside v0.1 guarantees — see [`SECURITY.md`](SECURITY.md).
+
+Forthcoming: **I-4** (the hash-bound approval is *created* by a human-mediated, TTY-gated mint) —
+PR3c1; **I-6/I-8 at execution** (guard re-check and canonical real-path re-bind immediately before
+apply) and **I-15/I-16** (executor never touches index/commits/hooks; no user- or proposal-controlled
+argument reaches any subprocess) — PR3c2; **I-13** (hash-chained audit) — PR3d.
 
 ## Design settled for later PRs (documentation, not yet code)
 

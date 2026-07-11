@@ -39,7 +39,9 @@ class PreState:
         if self.kind == "absent":
             return (hashing.PRESTATE_ABSENT,)
         if self.kind == "regular":
-            assert self.content_sha256 is not None
+            if self.content_sha256 is None:
+                # Explicit (not assert) so it survives `python -O`.
+                raise PreStateError("regular pre-state is missing its content hash")
             return (hashing.PRESTATE_REGULAR, self.content_sha256)
         raise PreStateError(f"unknown pre-state kind: {self.kind!r}")
 
