@@ -6,6 +6,25 @@ release.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`FilesystemRepoView` now enforces its documented root containment** (PR02a). Previously the view
+  joined caller components to the root and stat/opened the result directly, so a **direct** call with
+  hostile parts (a `..` traversal, an absolute/drive/UNC/device component that replaces the root under
+  `pathlib` join, or an intermediate symlink) could disclose out-of-root metadata via `path_type` or
+  read out-of-root bytes via `read_bytes` — while the class docstring claimed escapes were reported
+  fail-closed. (Supported proposal/guard/dry-run flows were **not** affected: `normalize_target`
+  rejects such input before any view call and `canonicalize_target` re-checks real-path containment;
+  no supported bypass existed.) The view now validates every component lexically before any filesystem
+  access, fails closed on any intermediate symlink/reparse component, and checks that the resolved
+  parent stays beneath the canonical root: an escape yields `PathType.MISSING` / `RepoReadError` with
+  no outside path in the message, while a *final*-component symlink is still reported as `SYMLINK` and
+  never followed. Containment is check-then-use (the local-account TOCTOU residual is documented; a
+  descriptor-relative `openat`/`O_NOFOLLOW` traversal is deferred to PR4). The previously
+  Windows-only-passing escape test is rewritten to be host-independent, and a full containment matrix
+  is added. Also adds a minimal Ubuntu (`python 3.12`) GitHub Actions test workflow so the suite runs
+  on POSIX in CI.
+
 ### Added
 
 - Foundation docs (PR0): `LICENSE`, `README.md`, `PROVENANCE.md`, `SAFETY-AND-RISK.md`,
