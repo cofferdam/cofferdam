@@ -107,10 +107,32 @@ Enforced as of PR3b (the non-executing approval-state layer):
   actor who can write `.cofferdam/` directly, or run arbitrary in-process Python, or roll the wall
   clock back into a still-valid interval, is outside v0.1 guarantees — see [`SECURITY.md`](SECURITY.md).
 
-Forthcoming: **I-4** (the hash-bound approval is *created* by a human-mediated, TTY-gated mint) —
-PR3c1; **I-6/I-8 at execution** (guard re-check and canonical real-path re-bind immediately before
-apply) and **I-15/I-16** (executor never touches index/commits/hooks; no user- or proposal-controlled
-argument reaches any subprocess) — PR3c2; **I-13** (hash-chained audit) — PR3d.
+Enforced as of PR3c1 (the interactive approval mint):
+
+- **I-4 human-mediated hash-bound approval creation** — an approval record is *created* only by
+  `cofferdam approve --file <proposal.json>`, which rebuilds the dry-run artifact from
+  `(Proposal, RepoView)`, displays the complete patch through one **injective, ASCII-only escape
+  grammar** (terminal-safety-screened; a literal backslash as `\\`, a TAB as `\t`, each trailing space
+  as `\x20`, non-ASCII as `\u{HEX}`, plus an explicit final-`LF` field — so no two distinct patches
+  render alike; unrenderable content is unapprovable), requires all of stdin/stdout/stderr to be
+  terminals and an exact typed `APPROVE <12-hex-prefix>` confirmation (bounded to 256 UTF-8 bytes), and
+  then — **under the ledger lock** — rebuilds the artifact a second time and appends the record only if
+  the full `bound_hash` still equals what the human saw. The display is bound-byte-faithful
+  (`patch_hash` / `bound_hash` cover the original `proposal.diff` bytes, not the rendered text), and a
+  terminal that cannot render the change or a failed durability barrier both fail closed with a bounded
+  message and no traceback — a complete-but-unflushed append is reported as *indeterminate* (an active
+  approval may exist), never as a clean failure. The `approval_id` is a random `secrets.token_hex(32)`
+  event identifier (never a bearer token); the TTL is fixed at five minutes; there is **no** public
+  mint API, **no** non-interactive path, and **no** caller-controlled clock/store/entropy/TTL/binding.
+  The TTY is an intent/anti-automation layer, **not** proof of a human (`pty.openpty()` satisfies
+  `isatty()`). The mint executes nothing and mutates no proposal target — it writes only its own
+  `.cofferdam/` state. The ledger lock serializes approval state, not repository files: an approval can
+  go stale after the mint, so PR3c2 must re-bind and re-check immediately before it consumes and
+  executes.
+
+Forthcoming: **I-6/I-8 at execution** (guard re-check and canonical real-path re-bind immediately
+before apply) and **I-15/I-16** (executor never touches index/commits/hooks; no user- or
+proposal-controlled argument reaches any subprocess) — PR3c2; **I-13** (hash-chained audit) — PR3d.
 
 ## Design settled for later PRs (documentation, not yet code)
 

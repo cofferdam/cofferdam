@@ -39,6 +39,20 @@ from typing import List, Optional
 from . import approval
 from .approval import LedgerError
 
+
+class LedgerDurabilityError(LedgerError, OSError):
+    """A ledger record was **completely written** but the durability barrier
+    (``fsync`` of the file, or of the directory on first creation) then failed.
+
+    The record may already be present and usable, yet its durability is
+    unconfirmed — this is the *indeterminate* case, distinct from a torn or
+    failed write (which fails closed: nothing usable was persisted). It
+    multiply-inherits ``OSError`` so existing ``except OSError`` handlers on the
+    write path keep treating it as an I/O failure, while a caller that wants to
+    distinguish the "written-but-not-flushed" state can catch it explicitly.
+    Cofferdam never auto-truncates or rolls back on this condition."""
+
+
 # Caps (fail-closed on read; append refuses to exceed).
 MAX_LINE_BYTES = 4096
 MAX_LEDGER_BYTES = 4 * 1024 * 1024
@@ -261,6 +275,7 @@ class _ApprovalStore:
             if not stat.S_ISREG(info.st_mode):
                 raise LedgerError("ledger is not a regular file")
         fd = os.open(self._ledger, os.O_WRONLY | os.O_APPEND | os.O_CREAT | _NOFOLLOW, 0o600)
+        wrote_complete = False
         try:
             if created and not _WINDOWS:
                 os.fchmod(fd, 0o600)
@@ -269,11 +284,31 @@ class _ApprovalStore:
             if size + len(line_bytes) > MAX_LEDGER_BYTES:
                 raise LedgerError("append would exceed the maximum ledger size")
             self._write_all(fd, line_bytes)
+            wrote_complete = True  # every byte is on the fd; only durability is left
             os.fsync(fd)  # durability barrier only after every byte is written
+        except OSError as exc:
+            # A failure *after* the full record was written is a durability
+            # ambiguity, not a torn write: the record may already be readable.
+            # Signal it distinctly so the mint does not report "nothing recorded".
+            # A failure *before* the write completed (partial/failed write, a
+            # pre-write stat/validate error) fails closed and propagates as-is.
+            if wrote_complete:
+                raise LedgerDurabilityError(
+                    "ledger record written but fsync (durability barrier) failed"
+                ) from exc
+            raise
         finally:
             os.close(fd)
         if created:
-            self._fsync_dir()
+            # The record is fsynced; the new directory entry still needs a
+            # barrier. If that barrier fails, the record may be present but its
+            # directory durability is unconfirmed — again the indeterminate case.
+            try:
+                self._fsync_dir()
+            except OSError as exc:
+                raise LedgerDurabilityError(
+                    "ledger record written but the directory fsync failed"
+                ) from exc
 
     @staticmethod
     def _write_all(fd: int, data: bytes) -> None:
@@ -299,11 +334,19 @@ class _ApprovalStore:
         if info is None:
             if not create:
                 raise LedgerError("approval state directory does not exist")
-            os.mkdir(self._dir, 0o700)
-            if not _WINDOWS:
+            try:
+                os.mkdir(self._dir, 0o700)
+                created = True
+            except FileExistsError:
+                # Lost the first-ever-creation race with a concurrent minter; the
+                # directory now exists. Fall through and re-stat + validate it
+                # below rather than trusting the path (Option B, fail-closed).
+                created = False
+            if created and not _WINDOWS:
                 os.chmod(self._dir, 0o700)  # defeat umask explicitly
-            created = True
-            info = os.lstat(self._dir)
+            info = _lstat_or_none(self._dir)
+            if info is None:
+                raise LedgerError("state directory vanished during creation")
         if _is_symlink_or_reparse(info):
             raise LedgerError("state directory is a symlink/reparse point")
         if not stat.S_ISDIR(info.st_mode):
@@ -326,16 +369,31 @@ class _ApprovalStore:
         if info is None:
             if not create:
                 raise LedgerError("approval lock file does not exist")
-            fd = os.open(self._lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o600)
             try:
-                if not _WINDOWS:
-                    os.fchmod(fd, 0o600)
-                os.write(fd, _LOCK_BYTE)
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            self._fsync_dir()
-            info = os.lstat(self._lock_path)
+                fd = os.open(
+                    self._lock_path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW,
+                    0o600,
+                )
+            except FileExistsError:
+                # Lost the first-ever-creation race with a concurrent minter; the
+                # lock file now exists. Fall through and re-stat + validate it
+                # below rather than trusting the path (Option B, fail-closed). The
+                # winner's fsync established durability; the loser's byte-range
+                # lock on the existing file is what actually serializes access.
+                fd = None
+            if fd is not None:
+                try:
+                    if not _WINDOWS:
+                        os.fchmod(fd, 0o600)
+                    os.write(fd, _LOCK_BYTE)
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                self._fsync_dir()
+            info = _lstat_or_none(self._lock_path)
+            if info is None:
+                raise LedgerError("lock file vanished during creation")
         if _is_symlink_or_reparse(info):
             raise LedgerError("lock file is a symlink/reparse point")
         if not stat.S_ISREG(info.st_mode):
