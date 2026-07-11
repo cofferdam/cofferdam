@@ -19,6 +19,7 @@ import sys
 from typing import Callable, Optional, Sequence
 
 from . import __version__
+from .approval_status_cli import approval_status_command
 
 PROGRAM = "cofferdam"
 
@@ -27,11 +28,14 @@ PROGRAM = "cofferdam"
 EXIT_OK = 0
 EXIT_USAGE = 2
 
-# Command dispatch registry: name -> handler(args) -> exit code. Empty in
-# the skeleton; this is the seam later versions extend. A handler receives
-# the arguments that follow its command name and returns an exit code.
+# Command dispatch registry: name -> handler(args) -> exit code. A handler
+# receives the arguments that follow its command name and returns an exit code.
+# Only read-only surface is wired here in v0.1 — there is deliberately no
+# approve/execute command (approval minting is PR3c1; execution is PR3c2).
 CommandHandler = Callable[[Sequence[str]], int]
-COMMANDS: dict[str, CommandHandler] = {}
+COMMANDS: dict[str, CommandHandler] = {
+    "approval-status": approval_status_command,
+}
 
 _HELP = f"""\
 usage: {PROGRAM} [--version] [-h | --help] <command> [<args>]
@@ -44,7 +48,8 @@ options:
   -h, --help   print this help to stdout and exit
 
 commands:
-  (none yet - this is the v0.1 skeleton)
+  approval-status   report whether an active approval exists for a proposal
+                    (read-only; reads --file <path> or stdin)
 """
 
 

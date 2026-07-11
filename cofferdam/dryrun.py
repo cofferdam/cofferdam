@@ -54,6 +54,12 @@ class DryRunArtifact:
     ``patch_bytes`` is the exact validated patch (the in-memory render/execute
     source). Deliberately absent: nonce, approval_id, expiry, ledger reference,
     file content, and any execution capability.
+
+    **Not authority.** This dataclass is publicly constructible; its fields are
+    a convenience, not a trust anchor. Any consumer (PR3b approval-state lookup,
+    PR3c1 mint, PR3c2 executor) MUST independently recompute and verify these
+    fields from ``(proposal, repo_view)`` via ``build_dry_run_artifact`` — a
+    directly-constructed artifact never confers authorization.
     """
 
     schema_version: int

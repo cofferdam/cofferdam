@@ -76,9 +76,41 @@ symlink semantics differ between them.
   `repo_root` argument; two roots give distinct `repo_root_id`/`bound_hash`; a non-existent root is
   rejected; production code is proven not to import the test double).
 
+- **PR3b (approval-state layer, non-executing):** strict record validation (unknown/missing keys,
+  bool-as-int, hash/`approval_id` format, risk enum, `created_at`/`expires_at` relationship, path
+  traversal/control chars, oversize) and canonical-JSON golden vectors; the deterministic fold
+  (active/expired/consumed, `repo_root_id` filtering of foreign-clone records, duplicate `approval_id`
+  and ambiguous-active fail-closed, unknown/duplicate consumption, fresh-after-expiry); time
+  boundaries (`now` before `created_at` → void, `== created_at` active, `== expires_at` expired,
+  rollback); the store's read/parse — **a non-empty ledger that does not end in a complete
+  LF-terminated record fails closed** (a torn final *approval* or *consumption* line, malformed
+  middle line, bad UTF-8, oversize line, and entry-count cap all invalidate the whole ledger, with
+  **no auto-repair**), plus the write-all/fsync protocol; the **single-use regression** that a torn
+  final consumption line can no longer permit a second consume; data integrity (a consumption whose
+  `bound_hash` does not match its referenced approval, or that references an unknown approval,
+  invalidates the ledger); repository scope (a foreign-`repo_root_id` approval + its matching
+  consumption cannot cross-authorize a local binding); path safety (non-directory `.cofferdam/`,
+  symlinked ledger, broad POSIX permissions all fail closed); **cross-process** single-use via real
+  `multiprocessing` (`spawn`) — two OS processes race to consume one approval and exactly one
+  succeeds (exercising `flock` on POSIX and `msvcrt.locking` on Windows) — plus a bounded-timeout
+  fail-closed lock test; write robustness (partial `os.write` completes via the write-all loop, a
+  zero-byte write fails closed, a write/fsync error yields no success and never silently corrupts);
+  the read-only `approval-status` CLI (exit 0/1/2, reads `--file`/stdin, **creates no state**, no
+  patch/file content in output); and a PR3b authority/no-side-effects suite proving there is **no
+  production mint symbol**, no `confirm`/`TtyConfirmer`, no forbidden import
+  (`socket`/`subprocess`/`secrets`/…), no `token_hex`/`os.system` use, no production import of the
+  test double, no `approve`/`execute` command, **the supported `find_valid_approval`/`consume_approval`
+  wrappers take only `(bound_hash, repo_view)` — no injectable clock/store/lock/path/TTL** (DI lives
+  only on unexported `_`-prefixed internal seams), the store class is internal-only (`_ApprovalStore`,
+  no public `append_approval`), no patch/file content persisted, and that the full lookup/consume
+  flow runs with `socket`/`subprocess` sabotaged and writes only under `.cofferdam/`. Symlink-
+  dependent cases skip cleanly where the platform cannot create a symlink; POSIX-permission cases
+  skip on Windows.
+
 ## What is not yet covered
 
-The approval/authorization path, the `git apply` executor, and the audit chain (PR3b/PR3c/PR3d) are
-not yet implemented; the corresponding coverage targets above (approval verification, the audit
-chain, the `git apply` executor and its fixed-argv guarantee) are backed by tests when those PRs
-land. PR3a deliberately ships **no** approval, nonce, ledger, TTY, subprocess, or mutation.
+The human-mediated approval *mint* (PR3c1), the `git apply` executor (PR3c2), and the audit chain
+(PR3d) are not yet implemented; the corresponding coverage targets above (the `git apply` executor
+and its fixed-argv guarantee, the audit chain) are backed by tests when those PRs land. PR3b
+deliberately ships **no** approval mint, no nonce, no TTY confirmer, no subprocess, and no repository
+mutation — only the durable single-use approval-state store and a read-only status command.
