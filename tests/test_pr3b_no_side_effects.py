@@ -78,10 +78,13 @@ class AuthorityBoundaryTests(unittest.TestCase):
                 defined & forbidden, set(), f"{path.name} defines a forbidden symbol"
             )
 
-    def test_no_cli_approve_or_execute_command(self):
-        self.assertNotIn("approve", cli.COMMANDS)
+    def test_no_cli_execute_or_apply_command(self):
+        # PR3c1 adds the interactive ``approve`` mint; there is still deliberately
+        # no executor (that is PR3c2).
         self.assertNotIn("execute", cli.COMMANDS)
+        self.assertNotIn("apply", cli.COMMANDS)
         self.assertIn("approval-status", cli.COMMANDS)
+        self.assertIn("approve", cli.COMMANDS)
 
     def test_supported_wrappers_have_no_di_parameters(self):
         for fn in (approval.find_valid_approval, approval.consume_approval):
@@ -113,20 +116,34 @@ class AuthorityBoundaryTests(unittest.TestCase):
 class ForbiddenScopeTests(unittest.TestCase):
     FORBIDDEN_IMPORTS = {
         "socket", "subprocess", "urllib", "http", "requests", "httpx",
-        "ssl", "asyncio", "secrets",
+        "ssl", "asyncio",
     }
+    # ``secrets`` / ``token_hex`` are permitted ONLY in the interactive approval
+    # mint (approve_cli.py, PR3c1), which is the sole entropy source for
+    # ``approval_id``. They remain forbidden everywhere else in the package.
+    ENTROPY_ALLOWED_IN = {"approve_cli.py"}
 
     def test_no_forbidden_imports_in_package(self):
         for path, src in _package_sources():
             mods = _imported_modules(ast.parse(src))
             offenders = mods & self.FORBIDDEN_IMPORTS
             self.assertEqual(offenders, set(), f"{path.name} imports {offenders}")
+            if "secrets" in mods:
+                self.assertIn(
+                    path.name, self.ENTROPY_ALLOWED_IN,
+                    f"{path.name} imports secrets outside the approval mint",
+                )
 
     def test_no_token_hex_or_system_calls(self):
         for path, src in _package_sources():
             attrs = _attribute_names(ast.parse(src))
-            for bad in ("token_hex", "system", "popen", "Popen"):
+            for bad in ("system", "popen", "Popen"):
                 self.assertNotIn(bad, attrs, f"{path.name} uses {bad}")
+            if "token_hex" in attrs:
+                self.assertIn(
+                    path.name, self.ENTROPY_ALLOWED_IN,
+                    f"{path.name} uses token_hex outside the approval mint",
+                )
 
     def test_production_does_not_import_test_double(self):
         # AST-based (not a substring scan) so docstrings that merely *mention*

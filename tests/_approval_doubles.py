@@ -56,3 +56,19 @@ def seed_approval(store, entry: dict) -> None:
     helper, not a supported mint; production ships no approval-creation path."""
     with store.lock(create=True):
         store._append_approval(entry)
+
+
+def constant_token_hex(value: str):
+    """Return a deterministic ``token_hex(nbytes) -> str`` double that always
+    yields ``value`` — for testing the PR3c1 mint's ``approval_id`` format,
+    collision handling, and entropy-failure behaviour without real randomness."""
+
+    def _token_hex(_nbytes: int) -> str:
+        return value
+
+    return _token_hex
+
+
+def failing_token_hex(_nbytes: int) -> str:
+    """A ``token_hex`` double that simulates entropy exhaustion (fail closed)."""
+    raise OSError("entropy source unavailable")

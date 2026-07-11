@@ -107,10 +107,57 @@ symlink semantics differ between them.
   dependent cases skip cleanly where the platform cannot create a symlink; POSIX-permission cases
   skip on Windows.
 
+- **PR3c1 (interactive approval mint, non-executing):** the `cofferdam approve` command end-to-end
+  with faked TTY streams — a valid approval (exact typed confirmation → one record appended and
+  fsynced, target file untouched, no full `approval_id` printed); proposal-input rejection (missing /
+  directory / oversized / invalid-UTF-8 / malformed-JSON / invalid-schema / caller-supplied
+  `bound_hash` / stdin `-` / no `--file` / unknown flags such as `--yes`/`--force`/`--repo`/
+  `--execute`), a proposal file **outside** the repository accepted, a symlinked proposal accepted,
+  and the proposal file proven **opened exactly once**; guard `BLOCKED` → exit 2 with no state
+  created; the terminal-safety screen (unit tests for CR, C0/C1, DEL, ANSI/ESC, bidi, zero-width,
+  Unicode noncharacters and surrogates rejected; combining marks permitted; NFC/NFD never applied) and
+  an end-to-end hostile-diff proof that unrenderable content is unapprovable and writes nothing; the
+  **injective escaped display** (an actual TAB vs a literal `→`, an actual TAB vs a literal `\t`, one
+  TAB vs spaces, consecutive/countable TABs, a trailing space vs none and one vs many, a literal
+  `\x20` vs a real trailing space, NFC-composed vs NFD-decomposed non-ASCII, and the explicit
+  final-`LF`-yes-vs-no header all produce **different** displays; the whole rendered display is proven
+  **pure ASCII**; and the `bound_hash` is proven to derive from the original patch bytes, not the
+  rendered text); the TTY gate (stdin/stdout/stderr each required) and one-attempt confirmation
+  (exact-phrase accepted; one-character / case / wrong-prefix / leading- and trailing-whitespace /
+  oversized / embedded-control mismatches, EOF, and `KeyboardInterrupt` all decline with exit 1 and
+  no state before confirmation); the **confirmation byte-limit** (measured in **UTF-8 bytes**, not
+  characters: exactly 256 ASCII bytes accepted, 257 rejected, and a sub-256-character but over-256-byte
+  multibyte line rejected while a within-256-byte multibyte line is accepted); the **post-confirmation
+  recompute under the lock** (a target change during confirmation changes the full `bound_hash` →
+  refused, nothing appended; a change to the proposal *file* during confirmation is ignored because the
+  immutable in-memory `Proposal` is reused); **terminal-write-and-flush safety** (a stdout
+  encoding/stream failure on the display or the prompt aborts **before** any mint with exit 2 and no
+  traceback and no `.cofferdam/`; the checked **flush before confirmation** is proven fail-closed — a
+  flush `OSError` or a closed-stream `ValueError` before confirmation gives exit 2 with `_mint` never
+  called, `stdin.readline` never called, no `.cofferdam/`, and the target unchanged; an event-ordering
+  stream proves the confirmation line is read **only after** a successful stdout flush, and a fully
+  buffered stream whose flush fails never reaches input; an stderr write **and** flush failure still
+  returns an exit code rather than raising; a **post-mint** success-message write **or flush** failure
+  returns exit 2 with the indeterminate-authority warning **while the approval exists** and no full
+  `approval_id`); the mint core (`approval_id` is 64 lowercase hex, production entropy is
+  `secrets.token_hex`, a collision and an entropy failure both fail closed with no retry,
+  active-duplicate returns exit 1 and writes nothing, expired/consumed history permits a fresh mint,
+  partial writes complete); the **fsync-durability distinction** (a complete write whose `fsync` then
+  fails raises `LedgerDurabilityError` — an `OSError` subclass — the record stays discoverable, and the
+  CLI reports **indeterminate** state pointing at `approval-status` rather than "not written"; a
+  pre-write zero-byte failure is the ordinary fail-closed `ApprovalError`, not indeterminate); **two
+  real `spawn` processes** racing the mint (exactly one succeeds) and racing **first-ever** state
+  creation from an empty repository (the `FileExistsError` reopen-and-revalidate path); and the
+  authority/import boundary (no public `create_approval`/`mint_approval`, `_mint` unexported with
+  `approve_command` its only caller and keyword-only DI, `approve_cli` imported only by `cli.py`,
+  `secrets`/`token_hex` confined to `approve_cli.py`, and the full flow running with
+  `socket`/`subprocess` sabotaged while writing only under `.cofferdam/` and mutating no target).
+  Symlink cases skip cleanly where the platform cannot create a symlink.
+
 ## What is not yet covered
 
-The human-mediated approval *mint* (PR3c1), the `git apply` executor (PR3c2), and the audit chain
-(PR3d) are not yet implemented; the corresponding coverage targets above (the `git apply` executor
-and its fixed-argv guarantee, the audit chain) are backed by tests when those PRs land. PR3b
-deliberately ships **no** approval mint, no nonce, no TTY confirmer, no subprocess, and no repository
-mutation — only the durable single-use approval-state store and a read-only status command.
+The `git apply` executor (PR3c2) and the audit chain (PR3d) are not yet implemented; the
+corresponding coverage targets above (the `git apply` executor and its fixed-argv guarantee, the
+audit chain) are backed by tests when those PRs land. PR3c1 deliberately ships **no** executor, no
+`git apply`, no subprocess, no Git invocation, and no repository mutation — only the interactive
+approval mint that appends a single-use record to the PR3b store.

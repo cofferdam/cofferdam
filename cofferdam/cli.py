@@ -20,6 +20,7 @@ from typing import Callable, Optional, Sequence
 
 from . import __version__
 from .approval_status_cli import approval_status_command
+from .approve_cli import approve_command
 
 PROGRAM = "cofferdam"
 
@@ -30,11 +31,12 @@ EXIT_USAGE = 2
 
 # Command dispatch registry: name -> handler(args) -> exit code. A handler
 # receives the arguments that follow its command name and returns an exit code.
-# Only read-only surface is wired here in v0.1 — there is deliberately no
-# approve/execute command (approval minting is PR3c1; execution is PR3c2).
+# ``approve`` (PR3c1) is the only supported authority-mint path; there is
+# deliberately still no ``execute``/``apply`` command (execution is PR3c2).
 CommandHandler = Callable[[Sequence[str]], int]
 COMMANDS: dict[str, CommandHandler] = {
     "approval-status": approval_status_command,
+    "approve": approve_command,
 }
 
 _HELP = f"""\
@@ -48,6 +50,10 @@ options:
   -h, --help   print this help to stdout and exit
 
 commands:
+  approve           show the exact bound change for a proposal and, after
+                    explicit interactive confirmation on a terminal, record a
+                    single-use 5-minute approval (requires --file <path>;
+                    never executes)
   approval-status   report whether an active approval exists for a proposal
                     (read-only; reads --file <path> or stdin)
 """

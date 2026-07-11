@@ -16,6 +16,19 @@ changes; **you** decide whether a change happens. Any model output Cofferdam eve
 renders an exact dry-run of what will change; approving it without reading it is a use error, not
 a safety property Cofferdam can substitute for. **Always verify the diff before you approve.**
 
+The approval step is the interactive `cofferdam approve --file <proposal.json>` command: it shows the
+complete patch on your terminal through one reversible, ASCII-only escape (a TAB as `\t`, each
+trailing space as `\x20`, a literal backslash as `\\`, other non-ASCII as `\u{HEX}`, and a line
+stating whether the patch ends with a final newline) so that no two different patches can look
+identical, and records a single-use, five-minute approval only after you type an exact confirmation
+phrase. Cofferdam renders those bytes faithfully — or refuses to approve content it cannot display
+safely — but it **cannot make you read them**; that judgment is yours. Approving does **not** apply
+the change (execution is a separate, later step); an approval only records that *you* authorized this
+exact change, once, for the next five minutes. If the command reports that approval state is
+**indeterminate** (a durability barrier failed after the record was written), an approval may already
+exist — check with `cofferdam approval-status --file <proposal.json>` or wait for it to expire rather
+than assuming it failed.
+
 ## AI outputs can be wrong
 
 Any AI-generated proposal — now or once model review exists — can be wrong, incomplete, or

@@ -63,3 +63,38 @@ release.
   the hash-chained audit log (PR3d)** — there is no production path that *creates* an approval in this
   release. `prestate.py` now raises an explicit error (instead of `assert`) so its content-hash
   invariant survives `python -O`.
+- Interactive human approval mint (PR3c1): the **`cofferdam approve --file <proposal.json>`** command
+  (`approve_cli.py`) — the **only supported path that creates authoritative approval state**. It
+  rebuilds the exact dry-run artifact from `(Proposal, RepoView)`, screens the target and patch for
+  terminal-unsafe characters (rejecting CR, C0/C1 controls, DEL, ANSI escapes, bidi-formatting,
+  zero-width, Unicode noncharacters, and surrogates — such proposals are unapprovable in v0.1),
+  displays the **complete patch through one reversible, injective, ASCII-only escape grammar** — a
+  literal backslash as `\\`, a TAB as `\t`, each trailing space as `\x20`, every non-ASCII code point
+  as `\u{HEX}`, and a header field stating whether the patch ends with a final `LF` — so two different
+  patches can never render identically (the bytes bound are the original `proposal.diff` UTF-8, never
+  the rendered text). It shows the full 64-hex `bound_hash` and — only when stdin, stdout, and stderr
+  are all TTYs — requires the human to type `APPROVE <first 12 hex of bound_hash>` exactly, once (the
+  confirmation line is capped at **256 UTF-8 bytes**). On success it **rebuilds the artifact a second
+  time under the ledger lock**, requires the full 64-hex `bound_hash` to match what was displayed (so a
+  repository change during confirmation fails the approval), then appends one record with a
+  `secrets.token_hex(32)` `approval_id`, `created_at` from `SystemClock`, and a fixed 300-second TTL,
+  and fsyncs it. Exit codes: `0` recorded, `1` declined/mismatch/EOF/interrupt/already-active, `2`
+  usage/non-TTY/input/guard/render/state-change/ledger error. Terminal writes go through a helper that
+  turns an encoding/stream failure into a bounded, terminal-safe error with **no traceback**: the
+  complete change and prompt must be **written and flushed** (a checked `flush` runs immediately before
+  the confirmation is read, so a fully buffered stream whose flush fails aborts **before** any mint),
+  and untrusted paths and raw exception strings are never echoed. A post-mint success-message write or
+  flush failure keeps the indeterminate-authority posture (the approval already exists). If the record is written completely but its `fsync` then
+  fails (or the record is flushed but the success message cannot be shown), the command exits `2` with
+  a bounded **"approval state is indeterminate"** warning that points at `cofferdam approval-status`,
+  rather than falsely reporting that no approval exists (`LedgerDurabilityError`, an `OSError`
+  subclass; Cofferdam never auto-truncates or rolls back). There is **no** public
+  `create_approval`/`mint_approval` Python API and **no** non-interactive path (`--yes`/`--force`/
+  `--repo`/`-`/stdin-proposal/config/env are all absent); the internal mint seam takes no
+  caller-controlled clock/store/entropy/TTL/`approval_id`/`bound_hash`. `approve` **executes nothing**:
+  no `git apply`, subprocess, Git invocation, staging, committing, or proposal-target mutation — it
+  writes only its own `.cofferdam/` state. First-ever concurrent state creation is hardened
+  (`_ensure_dir`/`_ensure_lockfile` catch and re-validate a lost `FileExistsError` race) and covered by
+  a real two-process regression, as is concurrent minting (exactly one of two racing processes
+  succeeds). **Deliberately still absent (deferred): the byte-exact executor (PR3c2) and the
+  hash-chained audit log (PR3d).**
