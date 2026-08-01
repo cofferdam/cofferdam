@@ -1,5 +1,10 @@
 # Safety and risk
 
+> **Scope note (2026-08-01):** this document describes the **Trust Core module**. Claims such
+> as "zero network" apply to that module, not to the workstation product now being built
+> (see [`DECISIONS.md`](DECISIONS.md), [`DESIGN.md`](DESIGN.md)), which is network-connected
+> by nature and documents its own posture as it lands.
+
 **Status: the points below are the binding public-safe posture as of PR0. The full data-flow
 diagram, invariant-to-mitigation mapping, and negative-first test results are added in PR03/PR04,
 once the approval/executor/audit path exists — see "Where the full risk writeup lives" below.**
@@ -61,8 +66,9 @@ narrows the ways a change can go wrong, it does not eliminate the need for human
 
 ## Data flow (v0.1)
 
-**v0.1 is zero-network: no data leaves your machine.** There is no model call, no API key, and no
-network I/O anywhere in v0.1's code path — every stage (guard, dry-run, approval, execution,
+**The Trust Core module is zero-network: no data leaves your machine through it.** (The
+workstation product built alongside it *is* networked — see the scope note above.) There is no
+model call, no API key, and no network I/O anywhere in the Trust Core code path — every stage (guard, dry-run, approval, execution,
 audit) runs locally, on your filesystem, with no telemetry. **v0.1 does not yet ship BYOK,
 provider calls, or multi-model review** — those belong to v0.2 and later, are not yet built, and
 are not a committed promise.

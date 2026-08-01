@@ -1,5 +1,13 @@
 # Threat model
 
+> **Scope note (2026-08-01):** this document covers the **Trust Core module** — the
+> deterministic approval boundary that predates the personal-AI-workstation pivot
+> ([`DECISIONS.md`](DECISIONS.md) D-2026-08-01-1/-7). Its guarantees and invariants remain
+> binding *for that module*, which is preserved off the product critical path for future
+> privileged-action use. A threat model for the workstation product (Guardian, A/B slots,
+> network surface) will be written when that code lands (Milestone M5 in
+> [`ROADMAP.md`](ROADMAP.md)).
+
 **Status: the trust-core classifier is complete (PR2), and the PR3a **binding foundation** is in
 place — read-only canonical target resolution, bounded pre-state reading, domain-separated hashing,
 and an immutable dry-run artifact. The artifact derives its patch bytes **only** from the validated

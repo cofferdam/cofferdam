@@ -1,5 +1,11 @@
 # Security
 
+> **Scope note (2026-08-01):** the promises below describe the **Trust Core module** (see
+> [`DECISIONS.md`](DECISIONS.md) D-2026-08-01-7). The workstation product being built per
+> [`ROADMAP.md`](ROADMAP.md) is network-connected (private tailnet + device token) and will
+> get its own security documentation as those components land. Vulnerability reporting below
+> applies to the whole repository.
+
 ## Reporting a vulnerability
 
 Please report suspected security issues privately rather than opening a public issue. (The exact

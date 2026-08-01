@@ -6,6 +6,15 @@ release.
 
 ## [Unreleased]
 
+### Changed
+
+- **Direction pivot (docs only, 2026-08-01):** Cofferdam is now an open-source, personal,
+  always-on AI workstation and remote computer-control system for Ubuntu Desktop, controlled
+  from phone/tablet via a Cofferdam-owned PWA, with a Guardian-supervised A/B self-update
+  loop. The Trust Core is preserved off the critical path for future privileged-action use.
+  New `DECISIONS.md`, `STATUS.md`, `ROADMAP.md`, `AGENTS.md`, `CLAUDE.md`; rewritten
+  `README.md`/`DESIGN.md`; scope notes added to the Trust Core docs. No code changes.
+
 ### Fixed
 
 - **`FilesystemRepoView` now enforces its documented root containment** (PR02a). Previously the view
