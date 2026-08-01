@@ -28,11 +28,21 @@ Trust Core module, PR0 → PR3c1:
 
 ## In progress
 
-- **M1 — remote control skeleton.** Branch `feat/m1-remote-control-skeleton`. Backend service
-  (auth, status, typed actions, screenshot/open-application/open-URL, WebSocket events), host
-  adapter layer (Linux/X11 + Windows dev implementations), PWA, JSON persistence, systemd unit,
-  Ubuntu host-setup runbook and validation checklist. **Ubuntu behavior is unvalidated until the
-  checklist is run on the real host.**
+- **M1 — remote control skeleton.** Branch `feat/m1-remote-control-skeleton` (`80df242`).
+  Backend service (auth, status, typed actions, screenshot/open-application/open-URL, WebSocket
+  events), host adapter layer (Linux/X11 + Windows dev implementations), PWA, JSON persistence,
+  systemd unit, Ubuntu host-setup runbook and validation checklist.
+
+  **Validated on Windows (development host only):** 476 tests pass; the running service returned
+  live host status, captured a real 3840×1716 PNG, launched a browser, opened a URL, streamed
+  action events over WebSocket, and rendered correctly at phone (375×812) and tablet (768×1024)
+  viewports. This proves the architecture and the typed-action path — nothing more.
+
+  **NOT validated on Ubuntu — the milestone is not complete.** Unverified: every Linux adapter
+  path (`gnome-screenshot`/`maim`/`scrot`/`import`, `xdg-open`, `xrandr`), X11-vs-Wayland
+  behaviour, snap-packaged browser binary names, the systemd user unit, `loginctl enable-linger`,
+  reboot survival, Tailscale binding, and real phone-over-tailnet access. Run
+  `docs/checklists/m1-ubuntu-validation.md` on the real host; stub-adapter results do not count.
 
 ## Planned (active roadmap — see [`ROADMAP.md`](ROADMAP.md))
 

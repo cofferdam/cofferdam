@@ -6,11 +6,48 @@
 > get its own security documentation as those components land. Vulnerability reporting below
 > applies to the whole repository.
 
+## Maturity statement — read this first
+
+**Cofferdam is early-stage software and makes no claim of production-grade security.** It is a
+personal tool under active development by a single maintainer. It has not been audited, has no
+security release process yet, and its workstation surface has not been validated on its own
+target platform (see [`STATUS.md`](STATUS.md)).
+
+Deploy it only as designed: on a **private network (Tailscale), bound to a private interface,
+behind a generated device token**, on a machine whose compromise you could tolerate. Do not
+expose it to the internet, do not put it on a shared or untrusted network, and do not rely on it
+to protect anything valuable.
+
+## Workstation security posture (M1)
+
+What the workstation service does today:
+
+- Binds to `127.0.0.1` by default; a non-loopback bind is announced on stderr so an accidental
+  public bind is visible. The intended production bind is the host's Tailscale address.
+- Requires a `Bearer` device token on every route that reveals or changes host state; the token
+  is compared with `secrets.compare_digest`, generated on first run, stored `0600` outside the
+  repository, never returned by any endpoint, and never written to logs.
+- Refuses to upgrade an unauthenticated WebSocket (closed before accept).
+- Accepts **typed actions only** — no endpoint, schema field, or adapter accepts a command,
+  argument vector, or shell string; `shell=True`/`os.system`/`os.popen` are absent and a test
+  enforces their absence. Application names come from a closed allowlist; URLs must be http(s).
+- Returns bounded structured errors rather than tracebacks.
+
+What it deliberately does **not** do yet: TLS termination of its own (Tailscale provides the
+transport boundary), token rotation or expiry, rate limiting, multi-user separation, audit
+logging of actions beyond the bounded local action list, or any OS-level sandboxing of the
+service from the desktop session it controls — by design, it *is* the desktop session's agent.
+
+Anything privileged (package installation, system configuration, destructive migrations) is out
+of scope for M1 and is the intended future home of the preserved Trust Core boundary.
+
 ## Reporting a vulnerability
 
-Please report suspected security issues privately rather than opening a public issue. (The exact
-reporting channel is finalized before v0.1.0 is public; this file will be updated with the
-specific contact method at that time.)
+Please report suspected security issues **privately** rather than opening a public issue: email
+the maintainer at the address on the GitHub profile for
+[@EfeAydinalp](https://github.com/EfeAydinalp), or use GitHub's private vulnerability reporting
+on this repository. Given the project's stage, expect best-effort, hobby-timescale responses —
+there is no SLA.
 
 ## Security promises (v0.1)
 

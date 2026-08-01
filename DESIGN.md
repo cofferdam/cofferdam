@@ -116,6 +116,12 @@ is optional acceleration behind `OpenClawRuntimeAdapter`; the contract is that s
 `NativeRuntimeAdapter` must not touch the UI, task records, update records, action schemas,
 Guardian, A/B deployment, or user-facing behavior.
 
+Browser and media automation uses a **dedicated persistent browser profile** under `profiles/`:
+the user logs in to a service manually, once, on the desktop, and the session persists in that
+profile. **Account passwords are never stored in the repository or in any config file, and are
+never sent to a model.** Profile directories are treated as secrets — gitignored, kept out of
+any backup that leaves the host, and never attached to an update record.
+
 ### Self-update loop (flagship)
 
 The first demonstrated update is deliberately a **stateless UI change** (the system-clock card):
