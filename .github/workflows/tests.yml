@@ -10,8 +10,12 @@ permissions:
   contents: read
 
 jobs:
-  ubuntu-tests:
-    name: Ubuntu / Python 3.12
+  # The Trust Core module is standard-library only. This job proves that stays
+  # true: no extras are installed, so an accidental third-party import in the
+  # Trust Core path fails here rather than passing on a developer machine that
+  # happens to have the workstation extras installed.
+  trust-core-stdlib-only:
+    name: Trust Core / stdlib only / Python 3.12
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -27,5 +31,45 @@ jobs:
       - name: Show Python version
         run: python --version
 
-      - name: Run test suite
+      - name: Run test suite without any dependencies
         run: python -m unittest discover -s tests -t . -v
+
+  # The workstation tests skip when their extras are absent, so running them
+  # without installing anything would be green-by-skipping. This job installs
+  # the extras AND asserts the workstation tests actually ran.
+  workstation:
+    name: Workstation / Python 3.12
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the workstation and dev extras
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[workstation,dev]"
+
+      - name: Run the full test suite
+        run: python -m unittest discover -s tests -t . -v
+
+      - name: Assert the workstation tests ran rather than skipped
+        run: |
+          set -euo pipefail
+          python -m unittest discover -s tests -t . -p "test_workstation*.py" -v 2>&1 | tee ws.log
+          if grep -qi "skipped" ws.log; then
+            echo "Workstation tests reported skips - the extras did not take effect." >&2
+            exit 1
+          fi
+          # A run that collected nothing would also "pass"; require real tests.
+          grep -Eq "^Ran ([1-9][0-9]+) tests" ws.log || {
+            echo "Expected the workstation suite to run many tests." >&2
+            exit 1
+          }
+          echo "Workstation tests ran."

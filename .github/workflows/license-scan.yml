@@ -31,7 +31,20 @@ jobs:
           fi
           echo "No disallowed license markers found."
 
-      # Placeholder: once dependencies exist (from the provider-adapter line onward),
-      # extend this job to scan the dependency manifest's licenses. v0.1 is
-      # stdlib-first / dependency-minimal by design (see DESIGN.md), so there is
-      # nothing to scan yet beyond this repo's own files.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Review installed dependency licenses
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip >/dev/null
+          python -m pip install -e ".[workstation,dev]" >/dev/null
+          python .github/scripts/license_report.py
+
+      # Cofferdam vendors no third-party source and distributes no bundled
+      # dependencies, so no THIRD_PARTY_NOTICES.md is required today (see the
+      # dependency policy in CONTRIBUTING.md). If that ever changes - a wheel,
+      # container, or installer that bundles dependencies - the notices file
+      # must be added in the same change and asserted here.
