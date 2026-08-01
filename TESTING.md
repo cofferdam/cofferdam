@@ -11,6 +11,21 @@
 Cofferdam's trust boundary is proven by tests, not by dogfooding alone — a passing manual dogfood
 run is a **complement** to the test suite, never a substitute for it.
 
+## A skipped test is not a passing test
+
+The workstation tests skip when the `workstation`/`dev` extras are absent, so the Trust Core
+suite still runs on a bare interpreter. That convenience creates a real failure mode:
+**green-by-skipping.** When workstation code changes, confirm the tests actually ran — check the
+skip count, or run the workstation modules directly:
+
+```sh
+python -m unittest discover -s tests -t . -p "test_workstation*.py"
+```
+
+The same rule governs host behaviour: **stub-adapter results are never platform validation.** An
+Ubuntu acceptance run requires `/api/status` to report `adapter: linux-x11` and `stub: false`
+(see `docs/checklists/m1-ubuntu-validation.md`).
+
 ## Framework
 
 The test runner is the Python standard-library `unittest` module — no third-party test

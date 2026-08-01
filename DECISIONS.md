@@ -121,6 +121,43 @@ deleted or rewritten; its frozen decisions are reclassified below, not silently 
 | Obsidian integration, voice/wake words, native mobile apps, advanced memory, multi-agent orchestration | **DEFERRED** — explicitly post-MVP by D-2026-08-01-1. |
 | Windows/macOS *host* support for the workstation product | **DEFERRED** — Ubuntu Desktop is the initial platform. (Trust Core's own platform matrix is unchanged for that module.) |
 
+## D-2026-08-01-8 — License and open development (RECORDED, ACTIVE)
+
+Cofferdam is licensed **Apache-2.0** and is developed in the open. This was already the state of
+the repository (LICENSE from the first commit, `Copyright 2026 Efe Aydınalp`); the 2026-08-01
+audit confirmed it is unambiguous and consistent across `LICENSE`, `pyproject.toml`
+(`license = { text = "Apache-2.0" }` plus the OSI classifier), GitHub's detected license, and
+the CI license scan. **No license change was made or is proposed.**
+
+Audit findings recorded as fact:
+
+- **Nothing is vendored.** No third-party source, no bundled/minified assets, no `node_modules`;
+  the PWA references zero external URLs (no CDN, fonts, or analytics).
+- **The clean-room claim holds.** A content comparison of all 83 Cofferdam source/doc files
+  against the 3381 files of the retired prototype found exactly one identical file: an **empty**
+  `tests/__init__.py` (0 bytes, no expressive content). No code from OpenClaw, vibe-council,
+  `karpathy/llm-council`, or Atticus is present.
+- **All runtime dependencies are permissive** (MIT / BSD-3-Clause / PSF-2.0). The one weak-copyleft
+  package, `certifi` (MPL-2.0), arrives only via `httpx` in the **test-only** `dev` extra, is not
+  a runtime dependency, and is not redistributed.
+- **No third-party notices need to be carried** while Cofferdam vendors nothing and distributes
+  no bundled dependencies. That changes the moment a wheel/container/installer bundles them —
+  see the dependency policy in [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+## OPEN QUESTIONS — require an explicit Efe decision
+
+- **OQ-1 — the GitHub repository `cofferdam/cofferdam` is PUBLIC, not private.** Verified
+  2026-08-01: `visibility: PUBLIC`, created 2026-07-09, Apache-2.0, 1 stargazer. Only the Trust
+  Core through PR3c1 (`8fdb69f`) has been pushed; the pivot documentation, the M1 implementation,
+  and the PR3c2 WIP executor are **local-only**. Pushing them publishes them immediately and
+  irreversibly. Private planning material (`C:\cofferdam\handbook`) is outside the repo and
+  unaffected. **Nothing has been pushed pending this decision.** Options: (a) push as-is,
+  accepting publication now; (b) make the repository private, push, and re-publish deliberately
+  later; (c) push only `main` + `feat/m1-remote-control-skeleton` and keep the unreviewed PR3c2
+  WIP local. Until this is settled, the only off-machine backup is the git bundle.
+- **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when
+  reproducible Ubuntu installs matter.
+
 ## Fable recommendations (advisory — not Efe decisions)
 
 - **R-1** (*done 2026-08-01, commit `419f90f`*): the 18 files of Trust Core executor work that

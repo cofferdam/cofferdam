@@ -46,13 +46,36 @@ current critical path. The workstation product described above is being built no
 milestone (M1) is a phone-reachable control surface on Ubuntu: live host status, screenshots,
 launching a browser, and opening a URL on the host — surviving reboot unattended.
 
+M1 is **implemented and exercised on a Windows development host** — the service, typed actions,
+authentication, live events, and the PWA all run, and a real screenshot, application launch, and
+URL open were performed through the phone-sized UI. That was implementation validation only.
+**Nothing has been validated on Ubuntu yet**: the Linux screenshot tools, `xdg-open`, display
+enumeration, the systemd unit, reboot survival, and Tailscale access are all unverified until
+`docs/checklists/m1-ubuntu-validation.md` is run on real hardware.
+
 This is a personal-first project: it must be useful to its maintainer before anything else.
 There are no plans for subscriptions, hosted plans, or enterprise features.
+
+> **Early-stage software.** Cofferdam makes **no claim of production-grade security** and no
+> claim of complete Ubuntu support. It is a personal tool under active development, meant to run
+> on a private network (Tailscale) behind a device token — never exposed to the internet. Do not
+> deploy it where its failure or compromise would matter.
+
+## What Cofferdam is not
+
+- **Not a remote-desktop protocol.** Cofferdam offers semantic, typed controls that it owns; it
+  does not implement screen streaming or input injection. An existing remote-desktop tool can sit
+  beside it as a fallback for raw screen access.
+- **Not a hosted or multi-tenant service**, and not a subscription product.
+- **Not autonomous.** A self-update reaches the active runtime only through an explicit human
+  activation step (or a policy the user deliberately chose), and rollback is always available.
 
 ## Platform
 
 The first supported host is **Ubuntu Desktop** (running continuously, logged-in graphical
-session). Windows and macOS hosts are deferred. Clients are anything with a modern browser.
+session). Windows and macOS hosts are deferred — the Windows adapter that exists is a
+development convenience, not a supported deployment target. Clients are anything with a modern
+browser.
 
 ## For coding agents
 
@@ -64,6 +87,7 @@ never bypass activation/rollback procedures.
 ## Documentation
 
 - [`DESIGN.md`](DESIGN.md) — architecture and design principles.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — development setup, safety rules, dependency policy.
 - [`ROADMAP.md`](ROADMAP.md) — milestones and open technical questions.
 - [`STATUS.md`](STATUS.md) — what is merged, uncommitted, planned, deferred, superseded.
 - [`DECISIONS.md`](DECISIONS.md) — decision record.

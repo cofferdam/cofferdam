@@ -3,11 +3,33 @@
 .cofferdam/
 *.log
 
+# Workstation runtime workspace. COFFERDAM_HOME normally lives OUTSIDE the repo
+# (~/cofferdam), but these rules are defensive: if it is ever pointed inside a
+# checkout during development, the device token, screenshots of the desktop, and
+# action history must not become committable by a stray `git add -A`.
+cofferdam-home/
+/secrets/
+/screenshots/
+/state/
+/logs/
+workstation.env
+
 # Secrets
 .env
 .env.*
 *.pem
 *.key
+*.p12
+*.pfx
+/token
+*.token
+
+# Browser profiles / cookies (a media profile holds logged-in service sessions)
+/profiles/
+*.cookies
+
+# Git bundles / archives of this repo — backups belong off-disk, not in history
+*.bundle
 
 # OS cruft
 .DS_Store
