@@ -1,0 +1,42 @@
+[Unit]
+# Cofferdam workstation — systemd **user** unit.
+#
+# A user unit (not a system unit) because the service controls the logged-in
+# graphical session: it needs DISPLAY/XAUTHORITY, the session D-Bus, and the
+# user's own browser profiles. Enable lingering so it survives logout/reboot:
+#   loginctl enable-linger $USER
+#
+# Install:  see docs/host-setup.md
+Description=Cofferdam workstation (personal AI workstation runtime)
+After=graphical-session.target network-online.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+
+# Config and secrets live outside the repo. EnvironmentFile is optional; it is
+# the supported place for COFFERDAM_BIND_HOST / COFFERDAM_BIND_PORT.
+# The device token is read from %h/cofferdam/secrets/token — do not put it here
+# unless the file is 0600.
+Environment=COFFERDAM_HOME=%h/cofferdam
+EnvironmentFile=-%h/cofferdam/workstation.env
+
+WorkingDirectory=%h/cofferdam/slots/a
+ExecStart=%h/cofferdam/slots/a/.venv/bin/python -m cofferdam.workstation
+
+Restart=on-failure
+RestartSec=3
+# Do not give up: an always-on host should keep trying after repeated failures.
+StartLimitIntervalSec=0
+
+# Logs go to the journal: journalctl --user -u cofferdam-workstation -f
+StandardOutput=journal
+StandardError=journal
+
+# Modest hardening. Deliberately NOT sandboxed away from the desktop session:
+# the whole point of this service is to control that session.
+NoNewPrivileges=yes
+PrivateTmp=no
+
+[Install]
+WantedBy=default.target

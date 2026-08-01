@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" role="img" aria-label="Cofferdam">
+  <rect width="192" height="192" rx="40" fill="#0f1720"/>
+  <path d="M40 132V60l28 12v48z" fill="#4fa3ff"/>
+  <path d="M82 144V48l28 12v72z" fill="#e7edf4"/>
+  <path d="M124 132V60l28 12v48z" fill="#4fa3ff"/>
+  <rect x="32" y="146" width="128" height="10" rx="5" fill="#46c07a"/>
+</svg>
