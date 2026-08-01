@@ -21,15 +21,45 @@ jobs:
       - name: Verify no disallowed license markers in tracked files
         run: |
           set -euo pipefail
-          # This scanner necessarily contains the very markers it searches for,
-          # so it excludes itself; otherwise it always matches and always fails.
-          # -I skips binary files; --exclude-dir=.git skips git internals.
-          if grep -RIl --exclude-dir=.git --exclude=license-scan.yml \
-               -E "GPL-3\.0|AGPL|SSPL|proprietary" . ; then
+          # Purpose: catch a disallowed license being APPLIED to code in this
+          # repository (a vendored GPL file, a source-available header), not any
+          # mention of the words.
+          #
+          # A small set of files exists precisely to *discuss* license policy —
+          # this scanner, the dependency-license tool it runs, the contribution
+          # guide's dependency policy, and the dependency inventory. They name
+          # the forbidden licenses on purpose, so matching them is a false
+          # positive, the same self-matching problem this scanner always had
+          # with itself. They are excluded **by path, explicitly** — the pattern
+          # itself is not weakened, and every other tracked file is still
+          # scanned. The substantive check on what is actually installed is the
+          # dependency-license review step below.
+          EXCLUDED='^(\.github/workflows/license-scan\.yml|\.github/scripts/license_report\.py|CONTRIBUTING\.md|docs/dependencies\.md)$'
+
+          # Scan tracked files only (matching this step's name); -I skips binaries.
+          mapfile -t FILES < <(git ls-files | grep -Ev "$EXCLUDED")
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "No files to scan - refusing to pass vacuously." >&2
+            exit 1
+          fi
+
+          if grep -IlE "GPL-3\.0|AGPL|SSPL|proprietary" "${FILES[@]}"; then
             echo "Disallowed license marker found in the file(s) listed above." >&2
             exit 1
           fi
-          echo "No disallowed license markers found."
+          echo "No disallowed license markers found in ${#FILES[@]} tracked files."
+
+          # The excluded files are not unchecked: assert they only ever mention
+          # these licenses as policy, and never carry a license grant of their own.
+          if grep -InE "^[[:space:]]*(Licensed under|License:)[[:space:]]*(GNU|GPL|AGPL|SSPL)" \
+               .github/workflows/license-scan.yml \
+               .github/scripts/license_report.py \
+               CONTRIBUTING.md \
+               docs/dependencies.md ; then
+            echo "A policy document appears to carry a disallowed license grant." >&2
+            exit 1
+          fi
+          echo "Policy documents carry no disallowed license grant."
 
       - name: Set up Python
         uses: actions/setup-python@v5

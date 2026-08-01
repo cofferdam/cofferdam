@@ -71,6 +71,24 @@ class NoArbitraryCommandTests(WorkstationTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.adapter.launched, ["firefox"])
 
+    def test_live_schemas_expose_no_command_like_field(self) -> None:
+        """Runtime counterpart of the static check in test_workstation_no_shell.
+
+        That one parses the source (so it runs without pydantic installed); this
+        one interrogates the constructed pydantic models, catching anything a
+        static read would miss — a dynamically added field, or an inherited
+        config that does not actually resolve to extra="forbid".
+        """
+        from cofferdam.workstation.actions import PARAM_SCHEMAS
+        from tests.test_workstation_no_shell import FORBIDDEN_FIELDS
+
+        self.assertTrue(PARAM_SCHEMAS)
+        for action, schema in PARAM_SCHEMAS.items():
+            with self.subTest(action=action):
+                offenders = FORBIDDEN_FIELDS & set(schema.model_fields)
+                self.assertEqual(offenders, set(), f"{action} exposes {offenders}")
+                self.assertEqual(schema.model_config.get("extra"), "forbid")
+
 
 class UrlValidationTests(WorkstationTestCase):
     def test_open_url_validates_the_scheme(self) -> None:
