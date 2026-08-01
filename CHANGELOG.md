@@ -6,6 +6,17 @@ release.
 
 ## [Unreleased]
 
+### Added
+
+- **Open-source readiness (docs only, 2026-08-01):** `CONTRIBUTING.md` (development setup,
+  worktree workflow, action/adapter proposal rules, platform-evidence expectations, review
+  depth, and the dependency policy), minimal GitHub issue templates (bug, Ubuntu validation
+  report, adapter/action proposal), and a pull-request template. A license and provenance audit
+  confirmed Apache-2.0 is unambiguous across `LICENSE`, package metadata, and CI; that nothing is
+  vendored; and that no upstream code is present — recorded as `DECISIONS.md` D-2026-08-01-8.
+  `.gitignore` hardened against runtime secrets, screenshots, browser profiles, and repository
+  bundles. `SECURITY.md` gained a maturity statement and the M1 workstation posture.
+
 ### Changed
 
 - **Direction pivot (docs only, 2026-08-01):** Cofferdam is now an open-source, personal,
