@@ -42,8 +42,9 @@ decision record, including the 2026-08-01 pivot.
 human-in-the-loop approval boundary for file changes (guard → dry-run → hash-bound approval),
 built model-free and zero-network. The Trust Core is preserved and remains valuable as a future
 high-assurance authorization layer for privileged operations, but it is **not** the product's
-current critical path. The workstation product described above is being built next; the first
-milestone is a phone-reachable status dashboard on Ubuntu.
+current critical path. The workstation product described above is being built now; the first
+milestone (M1) is a phone-reachable control surface on Ubuntu: live host status, screenshots,
+launching a browser, and opening a URL on the host — surviving reboot unattended.
 
 This is a personal-first project: it must be useful to its maintainer before anything else.
 There are no plans for subscriptions, hosted plans, or enterprise features.

@@ -97,7 +97,8 @@ Routine council/review ceremony is removed from the normal development loop.
 
 ## D-2026-08-01-7 — Trust Core status (EFE DECISION, ACTIVE)
 
-The existing Trust Core work (PR0–PR3c1 merged; PR3c2 implemented, uncommitted) is **preserved,
+The existing Trust Core work (PR0–PR3c1 merged; PR3c2 preserved as a WIP commit on its own
+branch, incomplete and unmerged — see [`STATUS.md`](STATUS.md)) is **preserved,
 not abandoned, and removed from the immediate product critical path.** It is potentially reusable
 later for privileged actions and high-assurance updates: dangerous filesystem changes, system
 configuration changes, package installation, Guardian updates, root-level operations, destructive
@@ -116,16 +117,15 @@ deleted or rewritten; its frozen decisions are reclassified below, not silently 
 | v0.2–v0.6 version lines (provider adapter, Review Room, allowlisted command executor, parity, preferences/lenses, hosted/team/mobile) as the speculative backlog | **SUPERSEDED** as a roadmap by D-2026-08-01-1. Individual capabilities may return later as workstation features; the version-line map no longer governs. |
 | Council/premium review gates per PR (handbook `06-review-gates.md`) | **SUPERSEDED** by D-2026-08-01-6. |
 | Productization gates: design partner, GitHub Sponsors at v0.1 public, domain/trademark timing tied to v0.1 launch | **DEFERRED** — monetization/productization is off the critical roadmap. Domain/TM remain open human gates with no deadline. |
-| Trust Core completion itself (PR3c2 landing, PR3d audit chain, PR4 hardening) | **DEFERRED** — see Fable recommendation R-1 below on landing PR3c2 safely. |
+| Trust Core completion itself (PR3c2 landing, PR3d audit chain, PR4 hardening) | **DEFERRED** — PR3c2 is preserved on its branch (R-1 done); finishing/reviewing/merging it is not on the critical path. |
 | Obsidian integration, voice/wake words, native mobile apps, advanced memory, multi-agent orchestration | **DEFERRED** — explicitly post-MVP by D-2026-08-01-1. |
 | Windows/macOS *host* support for the workstation product | **DEFERRED** — Ubuntu Desktop is the initial platform. (Trust Core's own platform matrix is unchanged for that module.) |
 
 ## Fable recommendations (advisory — not Efe decisions)
 
-- **R-1**: Commit the PR3c2 work to its existing branch (`pr3c2-candidate-b-execution`) as a
-  work-in-progress commit soon, without merging. 18 files of Trust Core executor work exist only
-  as uncommitted changes in a worktree; a single mistaken `git` command or disk fault could lose
-  it. Committing (not merging) preserves it under version control at zero decision cost.
+- **R-1** (*done 2026-08-01, commit `419f90f`*): the 18 files of Trust Core executor work that
+  existed only as uncommitted worktree state are now preserved as a WIP commit on
+  `pr3c2-candidate-b-execution`. Not merged, not reviewed, not continued.
 - **R-2**: Backend in Python (FastAPI); UI served by the runtime itself; WebSocket events;
   port-based A/B switching; Guardian as discovery endpoint rather than full proxy in MVP;
   X11/Xorg session first; Playwright with a persistent Chrome profile. Detailed rationale and the

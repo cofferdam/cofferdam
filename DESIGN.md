@@ -48,6 +48,14 @@ A deliberately small, boring, non-AI process. It:
   activation, detects obvious post-switch failure, and rolls back;
 - preserves logs and update records outside the slots so no runtime version can rewrite history.
 
+**Manual recovery is a design requirement, not a fallback.** Active-slot state lives in a plain,
+human-readable file (`state/active-slot.json`), and a small set of shell commands —
+`cofferdam-status`, `cofferdam-pin-slot a|b`, `cofferdam-rollback`, `cofferdam-start`,
+`cofferdam-stop` — operate the slots over local shell or Tailscale SSH with **no AI, no runtime
+UI, and no Guardian process required**. Runtime slots are ordinary systemd units, so a broken or
+absent Guardian can never make the previous runtime impossible to start by hand. See
+[`ROADMAP.md`](ROADMAP.md) M5 and `docs/recovery.md`.
+
 Guardian contains **no product intelligence** and exposes only a narrow local control protocol
 to the active runtime (request-candidate-start, report-status, request-activation — activation
 itself requires the user or an explicitly chosen low-risk policy). The active runtime cannot
@@ -69,9 +77,9 @@ Runtime code, persistent state, secrets, update records, logs, and user files ne
 
 ```
 ~/cofferdam/
-  guardian/          # Guardian code + config (not writable by workers)
+  guardian/          # Guardian code + config + bin/ recovery commands (not writable by workers)
   slots/a/  slots/b/ # runtime checkouts (git worktrees)
-  state/             # persistent app state (SQLite), shared, versioned schema
+  state/             # persistent app state + active-slot.json (plain, inspectable, hand-editable)
   secrets/           # tokens, API keys (0700; never in git, never sent to models)
   updates/           # update records (JSON, append-only, owned by Guardian)
   logs/              # guardian + per-slot logs
@@ -109,6 +117,11 @@ is optional acceleration behind `OpenClawRuntimeAdapter`; the contract is that s
 Guardian, A/B deployment, or user-facing behavior.
 
 ### Self-update loop (flagship)
+
+The first demonstrated update is deliberately a **stateless UI change** (the system-clock card):
+no schema or data migration, no Guardian modification, no secret-format change, no
+package-manager change, no destructive filesystem operation. Those categories become eligible
+only after the plain loop is demonstrated end-to-end, and each carries its own focused review.
 
 A user update request is stored as an **update record** (original prompt, acceptance criteria,
 target, candidate slot, worker, status, changed files, test evidence, health evidence,

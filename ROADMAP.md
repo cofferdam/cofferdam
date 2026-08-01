@@ -5,6 +5,23 @@ remote Claude, then the A/B self-update demonstration, then natural-language rou
 depth follows the post-pivot policy in [`DECISIONS.md`](DECISIONS.md) D-2026-08-01-6. Items
 marked **OPEN QUESTION** are unresolved; each names the experiment that settles it.
 
+## Implementation philosophy (binding)
+
+- **No council for ordinary work.** UI, adapters, media, and all M1 work need **tests plus
+  self-review** — nothing more. Do not manufacture review ceremony, and do not add a gate merely
+  because a question exists.
+- **One focused review** is appropriate for: Guardian, activation, rollback, authentication,
+  secret handling, privileged actions, and data migrations. One — not a repeating gate.
+- **Cofferdam owns its core:** the UI, action schemas, task records, update records, the
+  Guardian protocol, and A/B state. These are Cofferdam's canonical models.
+- **OpenClaw is optional and replaceable** and must never become Cofferdam's canonical internal
+  model. Nothing in the Guardian or activation path may depend on it.
+- **Ollama may classify natural-language intent** into typed actions (M7). It may never execute
+  arbitrary shell commands, and its output is always schema-validated before anything runs.
+- **Trust Core is preserved but off the immediate critical path** — see
+  [`DECISIONS.md`](DECISIONS.md) D-2026-08-01-7. Do not build on it now; do not delete it.
+- **Ship the smallest thing that a phone can actually do**, then improve it with itself.
+
 Baseline technical choices (Fable recommendations R-2, adopted here as working defaults until
 contradicted by experiment):
 
@@ -49,44 +66,68 @@ contradicted by experiment):
 
 ---
 
-## M1 — Walking skeleton: phone sees the host
+## M1 — Remote control skeleton: the first real product
 
-- **Objective:** Cofferdam runs continuously on the Ubuntu host and a phone can securely open
-  its dashboard.
-- **Visible result:** open `https://<host>` from phone/tablet on the tailnet, enter the device
-  token once, see live cards: host up, CPU/mem/disk, Cofferdam version, active slot, uptime.
-- **Minimum components:** FastAPI app; static PWA shell (installable, responsive); `/api/status`;
-  WebSocket event channel with heartbeat; token auth middleware; systemd user unit + lingering;
-  Tailscale-bound listener; `state/`/`logs/` layout from [`DESIGN.md`](DESIGN.md).
-- **Implementation notes:** Ubuntu prep is part of this milestone and is documented as a
-  runbook (`docs/host-setup.md`): install Ubuntu Desktop, auto-login to an Xorg session,
-  disable sleep/suspend, install Tailscale, `loginctl enable-linger`, clone repo, install venv,
-  enable units. Guardian does not exist yet — the runtime runs standalone on its final slot-A
-  port so M5 can slide Guardian in front without reworking the UI.
-- **Acceptance tests:** unit tests for status endpoints and auth (401 without token); manual:
-  reboot host → dashboard reachable from phone with no keyboard/monitor touched.
+**M1 is not a metrics dashboard.** It is the first genuinely useful control surface: the phone
+sees the host *and can make the host do things*.
+
+- **Objective:** Cofferdam runs continuously on the Ubuntu host, survives reboot, and a phone
+  can securely connect, watch live host status, take a screenshot, launch a browser, and open a
+  URL on the host.
+- **Success condition:** *From a phone, Efe can connect to Cofferdam, see live host status,
+  request a screenshot, and open a URL on the Ubuntu host.*
+- **Visible result:** open Cofferdam from phone/tablet on the tailnet → paste the device token
+  once → live status cards (host up, CPU/mem/disk, session type, Cofferdam version, uptime) →
+  tap **Screenshot** and see the host's screen → tap **Open Firefox** → type a URL, tap **Open**
+  and watch it appear on the host — and all of it still works after an unattended host reboot.
+- **Minimum components:**
+  - FastAPI app + uvicorn; token auth middleware; structured error envelope.
+  - Endpoints: `/healthz`, `/api/status`, `/api/actions` (typed dispatch), plus the three
+    convenience routes `/api/actions/screenshot`, `/api/actions/open-application`,
+    `/api/actions/open-url`; `/api/screenshots/{id}` (authenticated retrieval).
+  - Typed action registry + schemas (`take_screenshot`, `open_application`, `open_url`) with
+    action IDs, timestamps, and status — no free-form command field anywhere.
+  - Host adapter interface + platform implementations (Linux/X11 first, Windows dev
+    implementation, and an explicit stub for unsupported hosts).
+  - WebSocket event channel (`/ws`) with heartbeat, action-state broadcast, reconnect.
+  - Responsive PWA (phone + tablet layouts): connection status, token setup, status cards,
+    screenshot button/viewer, application launcher, URL field, result toasts, recent actions.
+  - Bounded JSON persistence: config, recent action records, last known status.
+  - systemd unit + `loginctl enable-linger`, Tailscale-bound listener, `docs/host-setup.md`.
+- **Implementation notes:** Ubuntu prep is part of this milestone (runbook: install Ubuntu
+  Desktop, auto-login to an Xorg session, disable sleep/suspend, install Tailscale, enable
+  lingering, clone, venv, enable unit). Every UI control issues a **typed action** through the
+  same executor path that Ollama will later feed (M7) — no side channels, no shell passthrough.
+  Screenshots are returned through authenticated API responses, never written under the static
+  web root. Guardian does not exist yet: the runtime runs standalone on its final slot-A port so
+  M5 can slide Guardian in front without reworking the UI.
+- **Acceptance tests:** automated — `/healthz`; auth required; invalid token rejected; status
+  schema; unknown action rejected; no shell command can be submitted; `open_url` scheme
+  validation; action results carry ID/timestamp/status; event clients receive action-state
+  updates; screenshots require authentication; adapter failures surface as bounded structured
+  errors; no committed secrets in config. Host validation — the Ubuntu checklist in
+  `docs/checklists/m1-ubuntu-validation.md`, run **without stubs**, ending in a reboot test.
 - **Dependencies:** none.
-- **Review depth:** low-risk — tests + self-review. (Device-token middleware gets one focused
-  look at M5 when activation control rides on it.)
-- **Deferred:** Guardian, A/B, any desktop control, HTTPS hardening beyond the tailnet.
+- **Review depth:** low-risk — tests + self-review, no council. (The device-token middleware
+  gets one focused look at M5, when activation control starts riding on it.)
+- **Deferred to M2+:** second-display placement, process management/kill, window control,
+  fullscreen, media/volume, YouTube search, Guardian and A/B, Wayland, HTTPS hardening beyond
+  the tailnet.
 
-## M2 — Desktop hands: apps, processes, screenshots, displays
+## M2 — Desktop hands: processes, windows, displays
 
-- **Objective:** semantic control of the Ubuntu desktop from the phone.
-- **Visible result:** from the phone: see running apps; open/close Firefox or Chromium; request
-  a screenshot (any display) and view it; open a URL on display 2.
-- **Minimum components:** typed-action schema base (`actions.py`, versioned, validated);
-  adapters: process (`psutil` + launch/terminate), desktop/window (`wmctrl`/`xdotool` wrappers),
-  display (xrandr geometry → display registry), screenshot (X11 grab, e.g. `maim`/`import`);
-  action log in `state/`.
-- **Implementation notes:** every UI button issues a typed action through the same
-  `POST /api/actions` executor path that Ollama will later feed — no side channels. Screenshots
-  are returned as authenticated API responses, never written under `web/`. Window placement =
-  match window by PID/class, move to display-2 geometry via `wmctrl -e`.
-- **Acceptance tests:** unit tests for action validation (unknown action/fields rejected);
-  integration test on the host: `open_application(firefox)` → window exists; `screenshot`
-  returns a decodable PNG per display; `open_url(display=2)` → window's geometry lies inside
-  display 2's bounds.
+- **Objective:** the rest of semantic desktop control — beyond M1's launch/screenshot/URL.
+- **Visible result:** from the phone: see running applications and relevant processes; close an
+  application; move a browser or media window to display 2; screenshot a chosen display.
+- **Minimum components:** process adapter (`psutil` list + terminate); window adapter
+  (`wmctrl`/`xdotool`: match by PID/class, move/resize, fullscreen); display registry from
+  `xrandr` geometry; per-display screenshot targeting; extended action schemas
+  (`close_application`, `move_window_to_display`, `set_fullscreen`).
+- **Implementation notes:** same typed-action path as M1. Window placement = match window by
+  PID/class, then `wmctrl -e` into the target display's geometry.
+- **Acceptance tests:** unit tests for the new action schemas; on-host integration:
+  `open_url(display=2)` → window geometry lies inside display 2's bounds; screenshot per display
+  decodes; `close_application` terminates only the matched process.
 - **Dependencies:** M1.
 - **Review depth:** low-risk.
 - **Deferred:** media/volume, browser profiles, any model involvement, Wayland.
@@ -157,7 +198,28 @@ contradicted by experiment):
   the runtime units, `/healthz` probing, `/active` discovery endpoint, activation + automatic
   rollback on failed post-switch checks, append-only `updates/` and log custody); runtime
   `/healthz` (self-checks: DB reachable, adapters import, WS alive); slot worktree layout;
-  Guardian protocol (small JSON over localhost, allowlisted verbs); PWA reconnect-on-switch.
+  Guardian protocol (small JSON over localhost, allowlisted verbs); PWA reconnect-on-switch;
+  **the manual recovery command surface** (below).
+- **Manual recovery contract (required, not optional):** every A/B operation must be doable
+  from a plain shell — locally or over Tailscale SSH — with **no AI, no runtime UI, and no
+  Guardian process required**. Ship these small scripts in `guardian/bin/` (on `PATH` via the
+  host-setup runbook):
+
+  | Command | Does |
+  |---|---|
+  | `cofferdam-status` | prints active slot, slot versions/commits, per-slot service state, Guardian state, last activation and rollback — reading files only, works with everything else down |
+  | `cofferdam-pin-slot a` / `... b` | forces the active slot to A or B and pins it, so Guardian (or an update) cannot switch it back until unpinned |
+  | `cofferdam-rollback` | switches back to the previously active slot and pins it; pure file + systemd operations, no AI, no network |
+  | `cofferdam-start` / `cofferdam-stop` | start/stop the runtime for a named slot (default: the active one) directly through systemd, bypassing Guardian |
+
+  Requirements this contract encodes: **active-slot state is a plain inspectable file** —
+  `~/cofferdam/state/active-slot.json` (`{slot, pinned, previous_slot, changed_at, reason}`),
+  human-readable and hand-editable in an emergency; Guardian *reads* it and is not its only
+  writer. A dead, broken, or removed Guardian must never make the previous runtime impossible to
+  start: the slot services are ordinary systemd units that run standalone. Recovery steps
+  (including "Guardian is down and the phone shows nothing" and "both slots fail to start") are
+  documented in `docs/recovery.md`, which must be readable and followable without Cofferdam
+  running.
 - **Implementation notes:** Guardian is deliberately dumb: fixed command set, no model calls,
   no dynamic code. Post-activation monitoring: Guardian polls `/healthz` and WS liveness for a
   soak window (e.g. 10 min); threshold failures → automatic rollback to the previous slot,
@@ -180,6 +242,14 @@ contradicted by experiment):
 ## M6 — Self-update: the clock-card demonstration
 
 - **Objective:** the full update-record loop, end-to-end, on the smallest real feature.
+- **The first demonstration is deliberately constrained.** It must be a **stateless UI change**
+  — the reference case is *"Add a system clock card to the dashboard."* The first demo must
+  **not** include: database schema migration, persistent data migration, any Guardian
+  modification, secret-format changes, package-manager/dependency changes (unless genuinely
+  unavoidable, and then called out and reviewed), or destructive filesystem operations. Those
+  categories only become eligible after the plain stateless loop has been demonstrated,
+  activated, and rolled back successfully — and each of them carries its own high-risk review
+  and (later) the Trust Core authorization path.
 - **Visible result:** from the phone: submit "Add a system clock card to the dashboard" → watch
   the update card move through implementing → testing → candidate-healthy → shows original
   request, changed files, tests run, screenshot of the candidate UI → activate → clock card

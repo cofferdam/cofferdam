@@ -66,8 +66,9 @@ narrows the ways a change can go wrong, it does not eliminate the need for human
 
 ## Data flow (v0.1)
 
-**v0.1 is zero-network: no data leaves your machine.** There is no model call, no API key, and no
-network I/O anywhere in v0.1's code path — every stage (guard, dry-run, approval, execution,
+**The Trust Core module is zero-network: no data leaves your machine through it.** (The
+workstation product built alongside it *is* networked — see the scope note above.) There is no
+model call, no API key, and no network I/O anywhere in the Trust Core code path — every stage (guard, dry-run, approval, execution,
 audit) runs locally, on your filesystem, with no telemetry. **v0.1 does not yet ship BYOK,
 provider calls, or multi-model review** — those belong to v0.2 and later, are not yet built, and
 are not a committed promise.

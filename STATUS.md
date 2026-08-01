@@ -18,26 +18,33 @@ Trust Core module, PR0 → PR3c1:
 - Durable single-use expiring approval ledger (PR3b).
 - Interactive human approval mint: `cofferdam approve` (PR3c1).
 
-## Implemented but uncommitted
+## Preserved on a branch, not merged
 
-- **PR3c2 — Candidate-B byte-exact executor.** Lives only in the worktree
-  `C:\cofferdam\worktrees\pr3c2-candidate-b-execution` (branch `pr3c2-candidate-b-execution`)
-  as 18 modified/untracked files (`executor.py`, `execute_cli.py`, `execstate.py`,
-  `postimage.py`, `platform_support.py`, tests). **Do not discard, clean, or rebase that
-  worktree.** Recommendation R-1 in [`DECISIONS.md`](DECISIONS.md): commit it to its branch as
-  WIP to get it under version control.
+- **PR3c2 — Candidate-B byte-exact executor.** Preserved as a WIP commit (`419f90f`) on branch
+  `pr3c2-candidate-b-execution`: `executor.py`, `execute_cli.py`, `execstate.py`, `postimage.py`,
+  `platform_support.py`, the authoritative `diffcheck` parser, and their tests. **Incomplete and
+  unreviewed** — not merged, not on the critical path, and not to be continued unless a task
+  explicitly scopes it. Do not rebase or rewrite that branch.
+
+## In progress
+
+- **M1 — remote control skeleton.** Branch `feat/m1-remote-control-skeleton`. Backend service
+  (auth, status, typed actions, screenshot/open-application/open-URL, WebSocket events), host
+  adapter layer (Linux/X11 + Windows dev implementations), PWA, JSON persistence, systemd unit,
+  Ubuntu host-setup runbook and validation checklist. **Ubuntu behavior is unvalidated until the
+  checklist is run on the real host.**
 
 ## Planned (active roadmap — see [`ROADMAP.md`](ROADMAP.md))
 
-- Guardian/Supervisor, Runtime A/B slots, phone/tablet PWA, typed actions, Ubuntu desktop
-  control, screenshots, display targeting, browser/media control (YouTube, Netflix profile),
-  Claude Code task adapter, update records, A/B self-update demonstration, natural-language
-  intent routing (Ollama), OpenClaw spike.
+- Guardian/Supervisor + manual recovery command surface, Runtime A/B slots, process/window/
+  display control, browser/media control (YouTube, Netflix profile), Claude Code task adapter,
+  update records, A/B self-update demonstration, natural-language intent routing (Ollama),
+  OpenClaw spike.
 
 ## Deferred (preserved, not on the critical path)
 
-- Trust Core completion: landing PR3c2, PR3d hash-chained audit log, PR4 hardening. The module
-  is preserved for future privileged-action and high-assurance-update use.
+- Trust Core completion: finishing/reviewing/merging PR3c2, PR3d hash-chained audit log, PR4
+  hardening. The module is preserved for future privileged-action and high-assurance-update use.
 - Obsidian integration, vector/advanced memory, council/multi-model review integration, voice
   and wake words, native mobile apps, generalized multi-agent orchestration.
 - Windows and macOS *host* support for the workstation product.

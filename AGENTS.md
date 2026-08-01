@@ -28,9 +28,9 @@ and [`DECISIONS.md`](DECISIONS.md) before proposing direction changes.
 7. **Trust Core module** (`cofferdam/` guard/approval/executor code): its frozen invariants
    (fail-closed, deterministic guard, advisory-cannot-relax, I-16 no user-controlled subprocess
    argv, Linux/ext4 execution, Git never in the real-write path) remain binding whenever you
-   touch it. Do not delete or rewrite Trust Core history. The worktree
-   `C:\cofferdam\worktrees\pr3c2-candidate-b-execution` contains uncommitted executor work —
-   never reset, clean, or discard it.
+   touch it. Do not delete or rewrite Trust Core history. Incomplete executor work is preserved
+   as a WIP commit on branch `pr3c2-candidate-b-execution` — do not rebase, rewrite, or merge
+   that branch, and do not continue it unless a task explicitly scopes it.
 8. **No monetization work** (subscriptions, hosted plans, pricing, enterprise/teams) — off the
    roadmap by D-2026-08-01-1.
 9. **Preserve provenance**: keep the clean-room statements ([`PROVENANCE.md`](PROVENANCE.md),
