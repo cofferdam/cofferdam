@@ -144,17 +144,29 @@ Audit findings recorded as fact:
   no bundled dependencies. That changes the moment a wheel/container/installer bundles them —
   see the dependency policy in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-## OPEN QUESTIONS — require an explicit Efe decision
+## D-2026-08-01-9 — Develop in public from now on (EFE DECISION, ACTIVE)
 
-- **OQ-1 — the GitHub repository `cofferdam/cofferdam` is PUBLIC, not private.** Verified
-  2026-08-01: `visibility: PUBLIC`, created 2026-07-09, Apache-2.0, 1 stargazer. Only the Trust
-  Core through PR3c1 (`8fdb69f`) has been pushed; the pivot documentation, the M1 implementation,
-  and the PR3c2 WIP executor are **local-only**. Pushing them publishes them immediately and
-  irreversibly. Private planning material (`C:\cofferdam\handbook`) is outside the repo and
-  unaffected. **Nothing has been pushed pending this decision.** Options: (a) push as-is,
-  accepting publication now; (b) make the repository private, push, and re-publish deliberately
-  later; (c) push only `main` + `feat/m1-remote-control-skeleton` and keep the unreviewed PR3c2
-  WIP local. Until this is settled, the only off-machine backup is the git bundle.
+The GitHub repository `cofferdam/cofferdam` is **public** (Apache-2.0). Before 2026-08-01 only
+the Trust Core through PR3c1 had been pushed; the audit surfaced that the pivot documentation,
+the M1 implementation, and the preserved PR3c2 executor were still local-only, and that pushing
+them would publish them irreversibly.
+
+**Efe decided on 2026-08-01 to push everything publicly**, accepting that this publishes:
+the strategic pivot including its open questions, an M1 implementation that is explicitly *not*
+validated on its target platform, and the unreviewed, incomplete PR3c2 work-in-progress executor.
+This is deliberate: development happens in the open, and honestly-labelled unfinished work is
+preferable to a private repository that could be lost with the machine.
+
+Consequences to keep true:
+
+- Every document must keep saying plainly what is validated, what is not, and what is
+  incomplete — the labels are what make publishing unfinished work honest.
+- Private planning material stays outside the repository and is never committed.
+- No secrets, tokens, browser profiles, screenshots, hostnames, or Tailscale addresses in any
+  tracked file. This is now a publication guarantee, not a tidiness preference.
+
+## OPEN QUESTIONS
+
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when
   reproducible Ubuntu installs matter.
 
