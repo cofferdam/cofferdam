@@ -1,5 +1,11 @@
 # Testing
 
+> **Scope note (2026-08-01):** this strategy was written for the **Trust Core module** and
+> remains binding for it (including its Linux/macOS/Windows/WSL matrix). The workstation
+> product targets Ubuntu Desktop only for now; its per-milestone acceptance tests are defined
+> in [`ROADMAP.md`](ROADMAP.md) and may add dependencies (e.g. Playwright) outside the Trust
+> Core's stdlib-only rule.
+
 ## Strategy
 
 Cofferdam's trust boundary is proven by tests, not by dogfooding alone — a passing manual dogfood

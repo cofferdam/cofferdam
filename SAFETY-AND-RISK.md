@@ -1,5 +1,10 @@
 # Safety and risk
 
+> **Scope note (2026-08-01):** this document describes the **Trust Core module**. Claims such
+> as "zero network" apply to that module, not to the workstation product now being built
+> (see [`DECISIONS.md`](DECISIONS.md), [`DESIGN.md`](DESIGN.md)), which is network-connected
+> by nature and documents its own posture as it lands.
+
 **Status: the points below are the binding public-safe posture as of PR0. The full data-flow
 diagram, invariant-to-mitigation mapping, and negative-first test results are added in PR03/PR04,
 once the approval/executor/audit path exists — see "Where the full risk writeup lives" below.**
