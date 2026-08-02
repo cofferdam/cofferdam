@@ -54,6 +54,15 @@ _SCREENSHOT_TOOLS = (
     ("import", lambda exe, out: [exe, "-window", "root", out]),
 )
 
+# These tools grab the X11 root window directly. Under a Wayland session that
+# root window is XWayland's empty placeholder, not the compositor's real
+# framebuffer — the capture "succeeds" (exit 0, non-empty file) but is solid
+# black. Confirmed on a real GNOME/Wayland host (M1 Ubuntu validation):
+# ``scrot`` returned a 0-byte-variance black PNG rather than failing. Treat
+# them as unavailable under Wayland so the adapter fails closed instead of
+# reporting a false success.
+_X11_ROOT_CAPTURE_TOOLS = frozenset({"scrot", "maim", "import"})
+
 
 class LinuxX11Adapter(HostAdapter):
     name = "linux-x11"
@@ -119,7 +128,10 @@ class LinuxX11Adapter(HostAdapter):
     # -- capabilities --------------------------------------------------------
 
     def _screenshot_tool(self):
+        wayland = os.environ.get("XDG_SESSION_TYPE") == "wayland"
         for executable, build_argv in _SCREENSHOT_TOOLS:
+            if wayland and executable in _X11_ROOT_CAPTURE_TOOLS:
+                continue
             found = first_available((executable,))
             if found:
                 return found, build_argv, executable
@@ -128,6 +140,12 @@ class LinuxX11Adapter(HostAdapter):
     def take_screenshot(self) -> Screenshot:
         selected = self._screenshot_tool()
         if selected is None:
+            if os.environ.get("XDG_SESSION_TYPE") == "wayland":
+                raise AdapterUnsupported(
+                    "no Wayland-safe screenshot tool found",
+                    "scrot/maim/import capture a black frame under Wayland; install gnome-screenshot "
+                    "or log in with 'Ubuntu on Xorg'",
+                )
             raise AdapterUnsupported(
                 "no screenshot tool found",
                 "install one of: gnome-screenshot, maim, scrot, spectacle, imagemagick",

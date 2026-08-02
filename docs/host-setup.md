@@ -136,9 +136,27 @@ well-audited dependencies outside the Trust Core path.
 
 ## Troubleshooting
 
+**Real-run finding (M1 Ubuntu validation, GNOME Wayland session, Ubuntu
+26.04):** `scrot`/`maim`/`import` grab the X11 root window, and under Wayland
+that window is XWayland's empty placeholder — the capture tool exits 0 and
+writes a non-empty PNG, but the image is solid black. The adapter now detects
+`XDG_SESSION_TYPE=wayland` and refuses to offer these three tools as a
+screenshot capability, failing closed (`adapter_unsupported`) instead of
+serving a black image as if it were real. Neither of the two Wayland-native
+alternatives worked unattended in this environment either:
+`org.gnome.Shell.Screenshot.Screenshot` over D-Bus returns
+`AccessDenied: Screenshot is not allowed` for a non-portal caller, and
+`org.freedesktop.portal.Screenshot.Screenshot` (even with `interactive:
+false`) never emits a `Response` signal — the request hangs indefinitely, and
+the only log trace is a benign `Failed to associate portal window with
+parent window` warning from `xdg-desktop-portal-gnome`. Installing
+`gnome-screenshot` (not present by default here) is untested but is the
+adapter's preferred tool and the most likely path to a working non-interactive
+capture; that install was not validated in this run.
+
 | Symptom | Likely cause |
 |---|---|
-| Screenshot fails with `adapter_unsupported` | no capture tool installed (step 2), or a Wayland session (step 0) |
+| Screenshot fails with `adapter_unsupported` | no capture tool installed (step 2), a Wayland session with only `scrot`/`maim`/`import` on PATH (they are rejected under Wayland — see above), or a Wayland session with no capture tool at all |
 | `open_application` says "not installed" | the browser is a snap with a different binary name — check `which firefox` |
 | Phone cannot reach the host | wrong `COFFERDAM_BIND_HOST`, phone not on the tailnet, or `tailscale status` shows the host offline |
 | Service dead after reboot | `loginctl enable-linger` not run, or automatic login disabled |
