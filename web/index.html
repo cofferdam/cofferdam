@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1720">
+<title>Cofferdam</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header class="bar">
+  <h1>Cofferdam</h1>
+  <div class="conn" id="conn"><span class="dot" id="dot"></span><span id="connText">connecting…</span></div>
+</header>
+
+<main>
+  <section class="panel" id="setup" hidden>
+    <h2>Connect</h2>
+    <p class="muted">Paste the device token printed by the service on first start. It is stored only on this device.</p>
+    <div class="row">
+      <input type="password" id="tokenInput" placeholder="device token" autocomplete="off" spellcheck="false">
+      <button id="saveToken" class="primary">Save</button>
+    </div>
+    <p class="error" id="setupError" hidden></p>
+  </section>
+
+  <div id="app" hidden>
+    <div class="banner warn" id="stubBanner" hidden>
+      Stub adapter active — no real host is being controlled.
+    </div>
+
+    <section class="panel">
+      <h2>Host</h2>
+      <div class="cards" id="statusCards"></div>
+      <ul class="notes" id="hostNotes"></ul>
+    </section>
+
+    <section class="panel">
+      <h2>Control</h2>
+      <div class="controls">
+        <button id="btnScreenshot">Screenshot</button>
+        <div class="row">
+          <select id="appSelect" aria-label="application"></select>
+          <button id="btnOpenApp">Open app</button>
+        </div>
+        <form class="row" id="urlForm">
+          <input type="url" id="urlInput" placeholder="https://example.com" inputmode="url" autocomplete="off">
+          <button type="submit" id="btnOpenUrl">Open URL</button>
+        </form>
+      </div>
+    </section>
+
+    <section class="panel" id="shotPanel" hidden>
+      <h2>Screenshot</h2>
+      <img id="shotImage" alt="host screenshot">
+    </section>
+
+    <section class="panel">
+      <h2>Recent actions</h2>
+      <ul class="actions" id="actionList"></ul>
+    </section>
+
+    <section class="panel">
+      <button id="forgetToken" class="ghost">Forget token on this device</button>
+    </section>
+  </div>
+</main>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<script src="/app.js"></script>
+</body>
+</html>

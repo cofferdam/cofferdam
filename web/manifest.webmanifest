@@ -1,0 +1,19 @@
+{
+  "name": "Cofferdam workstation",
+  "short_name": "Cofferdam",
+  "description": "Control your always-on Ubuntu workstation from a phone or tablet.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0f1720",
+  "theme_color": "#0f1720",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
