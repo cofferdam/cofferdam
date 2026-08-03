@@ -1,25 +1,36 @@
 # Ubuntu host setup (M1)
 
 How to turn an Ubuntu Desktop machine into the always-on Cofferdam host and
-reach it from a phone. **None of this has been executed on a real Ubuntu host
-yet** — it is the plan to follow during the M1 validation run
+reach it from a phone. Executed against a real Ubuntu 26.04 GNOME/Wayland host
+during the M1 validation run
 ([`checklists/m1-ubuntu-validation.md`](checklists/m1-ubuntu-validation.md)).
-Correct this file with whatever the real run teaches.
+Correct this file with whatever further real runs teach.
 
-## 0. Choose the session type — X11, not Wayland
+## 0. Session type — Wayland is supported
 
-At the Ubuntu login screen, click the gear icon and pick **"Ubuntu on Xorg"**.
+Ubuntu's default GNOME **Wayland** session works for opening applications and
+URLs. No login-screen change is needed.
 
-Under GNOME's Wayland session, cross-application screenshots and window control
-are restricted by design, which breaks screenshots now and window placement in
-M2. The service reports `session_type` in `/api/status`, and the UI shows a
-warning when it sees `wayland`, so a mistake here is visible rather than silent.
+What Wayland does restrict is **screen capture**: the compositor does not hand
+an unattended background service a frame. Cofferdam reports this rather than
+guessing — `/api/status` carries `session_type` and a `capabilities` map, and
+the phone UI disables any control the host cannot currently perform. Screenshot
+support under Wayland needs a capture tool that talks to the compositor; the
+validation run did not find a working unattended path (see Troubleshooting), so
+treat screenshots as unavailable on Wayland unless you have verified otherwise
+on your own host.
 
-Confirm:
+Confirm what you are running:
 
 ```bash
-echo $XDG_SESSION_TYPE   # expect: x11
+echo $XDG_SESSION_TYPE
 ```
+
+**Graphical actions require a logged-in desktop session.** The service is
+started by lingering (step 7) and its API stays reachable from the phone even
+before anyone logs in — but until a graphical session exists it reports
+`open_application` and `open_url` as unavailable and refuses them, instead of
+accepting a request that would go nowhere.
 
 ## 1. Keep the host awake
 
@@ -154,9 +165,29 @@ parent window` warning from `xdg-desktop-portal-gnome`. Installing
 adapter's preferred tool and the most likely path to a working non-interactive
 capture; that install was not validated in this run.
 
+**Real-run finding (M1 Ubuntu validation, GNOME Wayland session, Ubuntu
+26.04): applications reported "succeeded" but never opened.** The service runs
+with `NoNewPrivileges=yes`, which drops file capabilities across `execve` for
+every process it forks. Ubuntu's Firefox is a snap, and `snap-confine` needs
+permitted capabilities (`cap_sys_admin`, `cap_dac_override`, …) to set
+confinement up, so launching it as a child of the service failed at once with
+`snap-confine is packaged without necessary permissions`. The old adapter
+returned the PID without waiting, so the failure was invisible and the action
+was recorded as succeeded. `xdg-open` hid it a second way: it exits 0 after
+delegating whether or not the browser ever starts.
+
+The adapter now hands each application to the **systemd user manager** as a
+transient unit (`systemd-run --user`), which is not under `NoNewPrivileges`, and
+confirms the launch — the process is still alive after a settle window, or an
+existing instance of the same browser is visible — before reporting success.
+Applications also get their own cgroup, so restarting Cofferdam no longer kills
+the browser it opened. The service's hardening is unchanged.
+
 | Symptom | Likely cause |
 |---|---|
 | Screenshot fails with `adapter_unsupported` | no capture tool installed (step 2), a Wayland session with only `scrot`/`maim`/`import` on PATH (they are rejected under Wayland — see above), or a Wayland session with no capture tool at all |
+| `open_application` / `open_url` fail with `adapter_unsupported` and "no active graphical session" | nobody is logged in at the desktop yet — the service came up through lingering. Log in; the capability returns on the next status refresh |
+| `open_application` reports "exited immediately instead of starting" | the application really did fail to start — read the detail; `journalctl --user -u 'cofferdam-app-*'` has the unit's own output |
 | `open_application` says "not installed" | the browser is a snap with a different binary name — check `which firefox` |
 | Phone cannot reach the host | wrong `COFFERDAM_BIND_HOST`, phone not on the tailnet, or `tailscale status` shows the host offline |
 | Service dead after reboot | `loginctl enable-linger` not run, or automatic login disabled |

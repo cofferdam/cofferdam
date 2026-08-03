@@ -126,7 +126,15 @@ def run_fixed(argv: Sequence[str], *, timeout: int = SUBPROCESS_TIMEOUT_SECONDS)
 
 
 def spawn_fixed(argv: Sequence[str]) -> int:
-    """Start a detached, adapter-constructed argv and return its PID."""
+    """Start a detached, adapter-constructed argv and return its PID.
+
+    **This returns as soon as the fork succeeds and is not evidence that the
+    program kept running.** A process that dies milliseconds later still yields
+    a PID here. Any adapter reporting a graphical action as succeeded must
+    confirm the outcome separately — see
+    :mod:`~cofferdam.workstation.adapters.linux_session`, which replaced this
+    helper on Linux after it produced exactly that false success on Ubuntu.
+    """
     try:
         process = subprocess.Popen(  # noqa: S603 - fixed argv, shell is never used
             list(argv),

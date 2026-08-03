@@ -15,7 +15,7 @@ this milestone, and they feed the M2 window/display work.
 |---|---|---|---|
 | 1 | Install repository dependencies (`docs/host-setup.md` §2, §4) | `pip install -e ".[workstation]"` succeeds | |
 | 2 | Install and authenticate Tailscale; note `tailscale ip -4` | host appears in the tailnet; phone can ping it | |
-| 3 | Identify the session type: `echo $XDG_SESSION_TYPE` | `x11` (if `wayland`, log out and pick "Ubuntu on Xorg") | |
+| 3 | Identify the session type: `echo $XDG_SESSION_TYPE` | `x11` or `wayland` — both are supported for opening applications and URLs; record which one, since screen capture depends on it | |
 | 4 | Confirm the graphical session stays available after logout/idle | session persists; `loginctl` shows it active | |
 | 5 | Confirm the host does not sleep (leave idle 30+ min, then reconnect) | still reachable from the phone | |
 | 6 | Start Cofferdam manually (`python -m cofferdam.workstation`) | starts; token printed on first run only | |

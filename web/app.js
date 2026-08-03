@@ -114,10 +114,17 @@
       ? apps.map(function (name) { return '<option value="' + escapeHtml(name) + '">' + escapeHtml(name) + "</option>"; }).join("")
       : '<option value="">no applications detected</option>';
     if (previous && apps.indexOf(previous) !== -1) { select.value = previous; }
-    el("btnOpenApp").disabled = apps.length === 0;
 
+    // Every control mirrors a capability the host reports right now. A host
+    // with no logged-in desktop session reports them all false, so the phone
+    // never offers a button that cannot do anything.
     var capabilities = host.capabilities || {};
+    var canOpenApp = apps.length > 0 && capabilities.open_application !== false;
+    el("btnOpenApp").disabled = !canOpenApp;
+    select.disabled = !canOpenApp;
     el("btnScreenshot").disabled = capabilities.screenshot === false;
+    el("btnOpenUrl").disabled = capabilities.open_url === false;
+    el("urlInput").disabled = capabilities.open_url === false;
   }
 
   var recent = [];
