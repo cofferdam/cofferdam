@@ -11,6 +11,10 @@ Description=Cofferdam workstation (personal AI workstation runtime)
 After=graphical-session.target network-online.target
 Wants=graphical-session.target
 
+# Do not give up: an always-on host should keep trying after repeated failures.
+# (This belongs in [Unit]; systemd ignores it under [Service] with a warning.)
+StartLimitIntervalSec=0
+
 [Service]
 Type=simple
 
@@ -26,8 +30,6 @@ ExecStart=%h/cofferdam/slots/a/.venv/bin/python -m cofferdam.workstation
 
 Restart=on-failure
 RestartSec=3
-# Do not give up: an always-on host should keep trying after repeated failures.
-StartLimitIntervalSec=0
 
 # Logs go to the journal: journalctl --user -u cofferdam-workstation -f
 StandardOutput=journal
@@ -35,6 +37,18 @@ StandardError=journal
 
 # Modest hardening. Deliberately NOT sandboxed away from the desktop session:
 # the whole point of this service is to control that session.
+#
+# NoNewPrivileges=yes is kept on purpose, and it is why graphical applications
+# are NOT started as children of this service. The flag drops file capabilities
+# across execve for every descendant, and Ubuntu's Firefox is a snap whose
+# snap-confine needs permitted capabilities (cap_sys_admin, cap_dac_override, …)
+# to set confinement up — as a child it fails instantly with
+# "snap-confine is packaged without necessary permissions". The adapter instead
+# asks the systemd *user manager* to start each application as its own transient
+# unit: the manager is not under this flag, the application gets its own cgroup
+# (so restarting Cofferdam no longer kills the user's browser), and it inherits
+# the manager's current session environment. See
+# cofferdam/workstation/adapters/linux_session.py.
 NoNewPrivileges=yes
 PrivateTmp=no
 

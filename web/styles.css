@@ -82,7 +82,9 @@ input:focus, select:focus, button:focus-visible { outline: 2px solid var(--accen
 
 button { cursor: pointer; background: #1d2a38; }
 button:hover:not(:disabled) { border-color: var(--accent); }
-button:disabled { opacity: .5; cursor: progress; }
+/* Disabled means "this host cannot do it right now", not "busy" — so the
+   cursor must not suggest work is in progress. */
+button:disabled, select:disabled, input:disabled { opacity: .5; cursor: not-allowed; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #05121f; font-weight: 600; }
 button.ghost { background: transparent; color: var(--muted); }
 

@@ -28,6 +28,37 @@ release.
 
 ### Fixed
 
+- **Graphical actions were reported as succeeded while nothing opened** (M1 Ubuntu validation,
+  GNOME/Wayland, Ubuntu 26.04). `open_application` and `open_url` returned `succeeded` with a PID,
+  but no window ever appeared. Two independent defects combined. First, the service runs with
+  `NoNewPrivileges=yes`, which drops file capabilities across `execve` for every process it forks;
+  Ubuntu's Firefox is a snap whose `snap-confine` needs permitted capabilities, so every launch died
+  instantly with `snap-confine is packaged without necessary permissions`. Second, the adapter
+  spawned the child and returned its PID without ever waiting, so that failure was invisible —
+  and `xdg-open` hid it a second way, exiting 0 after delegating whether or not a browser ever
+  started. The adapter now hands each application to the **systemd user manager** as a transient
+  unit (`systemd-run --user`), which is not subject to the service's `NoNewPrivileges`, gives the
+  application its own cgroup (restarting Cofferdam no longer kills the user's browser), and lets it
+  inherit the manager's *current* session environment — so a service started by lingering before
+  graphical login still launches into the session created later. Every launch is now confirmed
+  before it is reported: the process must survive a settle window, or an existing instance of the
+  same application must be visible; otherwise the action fails closed with a structured error.
+  `open_url` launches an allowlisted browser directly instead of `xdg-open`, because `xdg-open`
+  yields no verifiable outcome. The service's hardening is unchanged, and the fixed-argv boundary
+  is unchanged (no caller text ever becomes a command).
+- **Status now reports what this host can currently do.** `/api/status` capabilities
+  (`screenshot`, `open_application`, `open_url`) are gated on a live check that an active
+  graphical session exists — `graphical-session.target` plus a compositor/X socket that really
+  exists — rather than on the service's own start-time environment, which is stale or empty on a
+  lingering host. `session_type` comes from the same live source. GUI actions fail closed with
+  `adapter_unsupported` when there is no session, and the PWA disables every control whose
+  capability is false.
+- **Corrected the Wayland guidance in the UI and docs.** The status note told users to "log in
+  with 'Ubuntu on Xorg' for full support" — misleading, since Wayland runs application and URL
+  launches correctly and no Xorg path was validated for screen capture. The note now states only
+  what was observed: screen capture is unavailable in this session, launching is unaffected. The
+  host runbook and the M1 checklist no longer instruct an Xorg login. Also moved
+  `StartLimitIntervalSec` into `[Unit]`, where systemd actually reads it.
 - **`FilesystemRepoView` now enforces its documented root containment** (PR02a). Previously the view
   joined caller components to the root and stat/opened the result directly, so a **direct** call with
   hostile parts (a `..` traversal, an absolute/drive/UNC/device component that replaces the root under
