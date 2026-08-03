@@ -25,10 +25,24 @@ this milestone, and they feed the M2 window/display work.
 | 10 | Request a screenshot | real desktop image appears on the phone within a few seconds | |
 | 11 | Open Firefox (or Chromium) | browser window appears on the host | |
 | 12 | Open a supplied URL | the URL loads on the host | |
-| 13 | Reboot Ubuntu (`sudo reboot`) — do not touch keyboard/monitor afterwards | host comes back and auto-logs-in | |
-| 14 | Confirm Cofferdam starts automatically | `systemctl --user status cofferdam-workstation` active; no manual start | |
-| 15 | Repeat steps 9–12 from the phone after the reboot | status, screenshot, open app, open URL all work | |
+Steps 13–15 are the **open release gate** — see the note under the table.
+
+| 13 | Reboot Ubuntu (`sudo reboot`) — do not touch keyboard/monitor afterwards | host comes back; if automatic login is enabled it reaches the desktop by itself, otherwise it stops at the login screen — record which | |
+| 14 | Confirm Cofferdam starts automatically | `systemctl --user is-active cofferdam-workstation` reports `active` with no manual start; `ss -tlnp \| grep 7101` shows the Tailscale address; the journal shows no `cannot assign requested address` restart loop | |
+| 15 | From the phone, before logging in at the desktop | status loads and authenticates; `open_application`/`open_url` report **false** and fail closed with `adapter_unsupported`; then log in at the desktop and confirm both flip to **true** and work | |
 | 16 | Record all failures and platform-specific constraints | written into `docs/host-setup.md` | |
+
+> **Gate status: OPEN — steps 13–15 have not been run.** Steps 1–12 passed on 2026-08-03
+> (Ubuntu 26.04, GNOME/Wayland) inside a single continuously logged-in session. The reboot is
+> deferred at the user's request because the workstation is in active use — deferred, not waived.
+> Until steps 13–15 are observed, M1 must not be described as reboot-validated or complete. See
+> the open-gate entries in [`../../STATUS.md`](../../STATUS.md) and
+> [`../../ROADMAP.md`](../../ROADMAP.md).
+>
+> Known factor for step 13: automatic login is **not** currently enabled on this host
+> (`/etc/gdm3/custom.conf` has no `AutomaticLoginEnable`), so the expected result is an API that
+> returns on its own with GUI capabilities correctly reporting unavailable until someone logs in.
+> That expectation is untested.
 
 ## Additional checks worth doing while you are there
 
@@ -44,7 +58,8 @@ this milestone, and they feed the M2 window/display work.
 ## Sign-off
 
 M1 is complete when steps 1–16 pass on the real host **and** the observed
-behaviour is written back into `docs/host-setup.md`.
+behaviour is written back into `docs/host-setup.md`. Steps 1–12 and 16 are done; **steps 13–15
+are outstanding**, so this sign-off is not yet valid.
 
 - Date run:
 - Ubuntu version:

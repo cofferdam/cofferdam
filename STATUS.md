@@ -28,21 +28,50 @@ Trust Core module, PR0 → PR3c1:
 
 ## In progress
 
-- **M1 — remote control skeleton.** Branch `feat/m1-remote-control-skeleton` (`80df242`).
-  Backend service (auth, status, typed actions, screenshot/open-application/open-URL, WebSocket
-  events), host adapter layer (Linux/X11 + Windows dev implementations), PWA, JSON persistence,
-  systemd unit, Ubuntu host-setup runbook and validation checklist.
+- **M1 — remote control skeleton.** Merged to `main` (PR #6, PR #7, PR #8). Backend service
+  (auth, status, typed actions, screenshot/open-application/open-URL, WebSocket events), host
+  adapter layer (Linux + Windows dev implementations), PWA, JSON persistence, systemd user unit,
+  Ubuntu host-setup runbook and validation checklist.
 
   **Validated on Windows (development host only):** 476 tests pass; the running service returned
   live host status, captured a real 3840×1716 PNG, launched a browser, opened a URL, streamed
   action events over WebSocket, and rendered correctly at phone (375×812) and tablet (768×1024)
   viewports. This proves the architecture and the typed-action path — nothing more.
 
-  **NOT validated on Ubuntu — the milestone is not complete.** Unverified: every Linux adapter
-  path (`gnome-screenshot`/`maim`/`scrot`/`import`, `xdg-open`, `xrandr`), X11-vs-Wayland
-  behaviour, snap-packaged browser binary names, the systemd user unit, `loginctl enable-linger`,
-  reboot survival, Tailscale binding, and real phone-over-tailnet access. Run
-  `docs/checklists/m1-ubuntu-validation.md` on the real host; stub-adapter results do not count.
+  **Validated on the real Ubuntu host — in the current logged-in session only** (2026-08-03,
+  Ubuntu 26.04, GNOME/Wayland): 506 tests pass; the systemd user service runs and is `enabled`;
+  the listener is bound only to the Tailscale address; `/healthz` returns 200; `/api/status`
+  rejects an unauthenticated request with 401 and serves an authenticated one with 200; the phone
+  reaches the host over the tailnet and authenticates; `open_application` and `open_url` launch a
+  real snap-packaged Firefox and fetch a real URL, each confirmed by evidence rather than a
+  launcher exit code (PR #8); the Wayland session is reported honestly with `screenshot: false`
+  and GUI capabilities gated on a live graphical-session check.
+
+### OPEN RELEASE GATE — M1 post-reboot auto-start is NOT validated
+
+**M1 must not be described as fully validated, reboot-validated, or complete while this gate is
+open.** Everything recorded above was observed in a single continuously logged-in session. The
+host has not been rebooted since the service was installed, so the following remain **unverified
+by observation**:
+
+- the systemd user service starting automatically after a cold boot, through lingering, with no
+  human logging in first;
+- `tailscaled` coming up before the service needs its address (the service previously died in a
+  restart loop with `cannot assign requested address` when the Tailscale address was absent);
+- the listener re-binding to the Tailscale address unattended;
+- phone-over-tailnet access working after an unattended reboot;
+- graphical-session detection reporting `open_application`/`open_url` as **false** before login
+  and **true** once a desktop session exists — the linger-before-login path is covered by tests,
+  not yet by a real boot.
+
+Known factor: automatic login is **not** enabled on this host (`/etc/gdm3/custom.conf` has no
+`AutomaticLoginEnable`), so after a reboot the API is expected to return while GUI capabilities
+correctly report unavailable until someone logs in at the desktop. That expectation is untested.
+
+**How to close it:** reboot the host without logging in, run the reboot section of
+`docs/checklists/m1-ubuntu-validation.md`, then record the observed result here and in
+[`ROADMAP.md`](ROADMAP.md). The reboot is deferred at the user's request because the workstation
+is in active use; it is not blocked or waived.
 
 ## Planned (active roadmap — see [`ROADMAP.md`](ROADMAP.md))
 
