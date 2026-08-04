@@ -110,6 +110,19 @@ def _strip_comments(text: str) -> str:
     return "\n".join(lines)
 
 
+def _fenced_code(text: str) -> List[str]:
+    """Lines inside ``` fenced blocks — the parts of a document you can run."""
+    lines: List[str] = []
+    inside = False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            inside = not inside
+            continue
+        if inside:
+            lines.append(line)
+    return lines
+
+
 def _directives(text: str) -> List[tuple]:
     """(key, value) for every real directive line, comments removed."""
     found = []
@@ -305,23 +318,30 @@ class ProcessTerminationTests(unittest.TestCase):
             yield path, path.read_text(encoding="utf-8")
 
     def test_no_prohibited_lifecycle_command_is_shipped(self) -> None:
+        """None of these may appear as something a reader or machine would run.
+
+        Documentation is held to a different standard than code, on purpose:
+        ``docs/SERVICE_LIFECYCLE.md`` and ``SECURITY.md`` have to *name* these
+        commands in order to forbid them. What they must never do is present one
+        in a fenced code block, which is the form a reader copies and runs. So
+        prose is allowed and runnable blocks are not.
+        """
         for path, text in self._shipped_text():
-            body = _strip_comments(text) if path.suffix == ".service" else text
+            if path.suffix == ".md":
+                body = "\n".join(_fenced_code(text))
+            elif path.suffix == ".service":
+                body = _strip_comments(text)
+            else:
+                body = text
             for command in PROHIBITED_COMMANDS:
-                with self.subTest(path=path.name, command=command):
-                    # Docs may name a command only to forbid it; require that the
-                    # line says so.
-                    for line in body.splitlines():
-                        if command not in line:
-                            continue
-                        lowered = line.lower()
-                        forbidding = any(
-                            word in lowered
-                            for word in ("never", "not ", "no ", "must", "forbid", "prohibit", "#")
-                        )
-                        self.assertTrue(
-                            forbidding,
-                            f"{path.name} uses {command!r}: {line.strip()!r}",
+                for line in body.splitlines():
+                    if command not in line:
+                        continue
+                    with self.subTest(path=path.name, command=command):
+                        self.fail(
+                            f"{path.name} presents {command!r} as a command to run: "
+                            f"{line.strip()!r}. Cofferdam follows the GNOME session "
+                            "lifecycle; it never drives it."
                         )
 
     def test_no_broad_process_killer_is_shipped(self) -> None:
