@@ -44,11 +44,29 @@
           <select id="appSelect" aria-label="application"></select>
           <button id="btnOpenApp">Open app</button>
         </div>
-        <form class="row" id="urlForm">
-          <input type="url" id="urlInput" placeholder="https://example.com" inputmode="url" autocomplete="off">
-          <button type="submit" id="btnOpenUrl">Open URL</button>
+        <form class="url-form" id="urlForm">
+          <label class="field">
+            <span class="field-label">Browser profile</span>
+            <select id="profileSelect" aria-label="browser profile"></select>
+          </label>
+          <div class="row">
+            <input type="url" id="urlInput" placeholder="https://example.com" inputmode="url" autocomplete="off">
+            <button type="submit" id="btnOpenUrl">Open URL</button>
+          </div>
+          <p class="muted hint" id="profileHint"></p>
         </form>
       </div>
+    </section>
+
+    <section class="panel" id="registryPanel">
+      <h2>Machine registries</h2>
+      <p class="muted">
+        What this machine knows about: its devices, named displays, applications, browser
+        profiles, and placeholders for agents and routes.
+        <strong>Read-only in this build</strong> — edit the JSON files under
+        <code>$COFFERDAM_HOME/config/registries/</code> and reload.
+      </p>
+      <div id="registrySections"><p class="muted">Loading…</p></div>
     </section>
 
     <section class="panel" id="shotPanel" hidden>

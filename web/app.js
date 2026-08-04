@@ -108,6 +108,11 @@
     }).join("");
 
     var apps = data.applications || [];
+    // Which applications this host can launch right now decides which browser
+    // profiles are offerable, so the registry view is re-rendered with it.
+    availableApplications = apps;
+    if (registriesLoaded) { renderRegistries(); }
+
     var select = el("appSelect");
     var previous = select.value;
     select.innerHTML = apps.length
@@ -125,6 +130,236 @@
     el("btnScreenshot").disabled = capabilities.screenshot === false;
     el("btnOpenUrl").disabled = capabilities.open_url === false;
     el("urlInput").disabled = capabilities.open_url === false;
+    renderProfileSelect();
+  }
+
+  /* -------------------------------------------------------------- registries
+   *
+   * Everything below is READ-ONLY on purpose. M2A has no registry write API, so
+   * the UI must not grow an edit form that would have nowhere to send itself.
+   * Two states are called out explicitly rather than left to inference:
+   * agent profiles are placeholders with no execution behind them, and
+   * conversation routes are templates that route nothing. A card that merely
+   * looked inert would still imply the feature exists.
+   */
+
+  var REGISTRIES = [
+    { name: "devices", title: "Devices", note: "Descriptive only. No addresses, credentials, or power control." },
+    { name: "displays", title: "Displays", note: "Named panels. M2A does not move windows." },
+    { name: "applications", title: "Applications", note: "Allowlisted applications, selected by adapter key." },
+    { name: "browser_profiles", title: "Browser profiles", note: "Which browser opens a URL, and which domains it may open." },
+    { name: "agent_profiles", title: "Agent profiles", note: "Placeholders. No agent execution exists in this build." },
+    { name: "conversation_routes", title: "Conversation routes", note: "Templates only. Nothing is routed in this build." }
+  ];
+
+  var registryData = {};
+  var registriesLoaded = false;
+  var availableApplications = [];
+
+  function badge(text, kind) {
+    return '<span class="badge' + (kind ? " " + kind : "") + '">' + escapeHtml(text) + "</span>";
+  }
+
+  function aliasLine(item) {
+    return (item.aliases && item.aliases.length)
+      ? "also called: " + item.aliases.map(escapeHtml).join(", ")
+      : "";
+  }
+
+  function applicationById(id) {
+    var registry = registryData.applications;
+    if (!registry || registry.status !== "ok") { return null; }
+    var found = registry.items.filter(function (item) { return item.id === id; });
+    return found.length === 1 ? found[0] : null;
+  }
+
+  function applicationIsAvailable(application) {
+    return !!application && availableApplications.indexOf(application.adapter_key) !== -1;
+  }
+
+  /* Plain text — callers that build HTML escape it themselves. */
+  function policyText(policy) {
+    if (!policy) { return ""; }
+    if (policy.mode === "allow-all") { return "any http(s) site"; }
+    return "only " + (policy.domains || []).join(", ") + " (and their subdomains)";
+  }
+
+  function describeItem(name, item) {
+    var parts = [];
+    var badges = [];
+
+    if (!item.enabled) { badges.push(badge("disabled")); }
+
+    if (name === "devices") {
+      parts.push(escapeHtml(item.kind) + " · " + escapeHtml(item.platform));
+      if (item.notes) { parts.push(escapeHtml(item.notes)); }
+    } else if (name === "displays") {
+      parts.push("on " + escapeHtml(item.device_id));
+      if (item.match && item.match.connector_hint) {
+        parts.push("connector hint " + escapeHtml(item.match.connector_hint));
+      }
+    } else if (name === "applications") {
+      parts.push("adapter " + escapeHtml(item.adapter_key));
+      badges.push(availableApplications.indexOf(item.adapter_key) !== -1
+        ? badge("available", "ok")
+        : badge("not available here", "warn"));
+    } else if (name === "browser_profiles") {
+      var application = applicationById(item.application_id);
+      parts.push("uses " + escapeHtml(application ? application.name : item.application_id));
+      parts.push("allows " + escapeHtml(policyText(item.domain_policy)));
+      if (item.preferred_display_id) {
+        parts.push("prefers " + escapeHtml(item.preferred_display_id) + " (metadata only — no window is moved)");
+      }
+      if (item.default_for_url) { badges.push(badge("default for URLs", "ok")); }
+      if (item.enabled && !applicationIsAvailable(application)) {
+        badges.push(badge("browser unavailable", "warn"));
+      }
+    } else if (name === "agent_profiles") {
+      parts.push("adapter kind " + escapeHtml(item.adapter_kind));
+      badges.push(badge("not implemented", "warn"));
+    } else if (name === "conversation_routes") {
+      parts.push("from " + escapeHtml(item.source_kind) + " → " + escapeHtml(item.target_agent_profile_id));
+      parts.push("return: " + escapeHtml(item.return_mode));
+      badges.push(badge("template only", "warn"));
+    }
+
+    var alias = aliasLine(item);
+    if (alias) { parts.push(alias); }
+
+    return '<li class="reg-item' + (item.enabled ? "" : " off") + '">' +
+      '<div class="title"><strong>' + escapeHtml(item.name) + "</strong>" +
+      '<span class="id">' + escapeHtml(item.id) + "</span>" + badges.join("") + "</div>" +
+      '<div class="meta">' + parts.join(" · ") + "</div></li>";
+  }
+
+  function renderRegistrySection(descriptor) {
+    var entry = registryData[descriptor.name];
+    var body;
+
+    if (!entry) {
+      body = '<p class="reg-note">Loading…</p>';
+    } else if (entry.status === "unreachable") {
+      body = '<p class="reg-note">Could not be loaded from the service.</p>';
+    } else if (entry.status === "error") {
+      // The service already reduced the failure to a safe, bounded sentence;
+      // show it verbatim so the file can actually be fixed.
+      body = '<p class="reg-note">' + escapeHtml(entry.error || "This registry's configuration is invalid.") + "</p>";
+    } else if (!entry.items.length) {
+      body = '<p class="reg-note">Nothing configured yet.</p>';
+    } else {
+      body = '<ul class="reg-list">' +
+        entry.items.map(function (item) { return describeItem(descriptor.name, item); }).join("") +
+        "</ul>";
+    }
+
+    var status = !entry ? badge("loading")
+      : entry.status === "ok" ? badge(entry.items.length + " item" + (entry.items.length === 1 ? "" : "s"))
+      : badge("invalid", "err");
+
+    return '<div class="reg"><div class="reg-head"><h3>' + escapeHtml(descriptor.title) + "</h3>" +
+      status + '</div><p class="reg-note">' + escapeHtml(descriptor.note) + "</p>" + body + "</div>";
+  }
+
+  function renderRegistries() {
+    el("registrySections").innerHTML = REGISTRIES.map(renderRegistrySection).join("");
+    renderProfileSelect();
+  }
+
+  function loadRegistries() {
+    return api("/api/registries").then(function (response) {
+      var summaries = (response.payload && response.payload.registries) || [];
+      var pending = summaries.map(function (summary) {
+        if (summary.status !== "ok") {
+          registryData[summary.name] = {
+            status: "error",
+            items: [],
+            error: summary.error ? summary.error.message : null
+          };
+          return Promise.resolve();
+        }
+        return api("/api/registries/" + summary.name).then(function (detail) {
+          registryData[summary.name] = {
+            status: detail.ok ? "ok" : "error",
+            items: (detail.payload && detail.payload.items) || [],
+            error: detail.ok ? null : "This registry could not be read."
+          };
+        }).catch(function () {
+          registryData[summary.name] = { status: "unreachable", items: [], error: null };
+        });
+      });
+      return Promise.all(pending);
+    }).then(function () {
+      registriesLoaded = true;
+      renderRegistries();
+    }).catch(function (error) {
+      if (error.message === "unauthorized") { return; }
+      REGISTRIES.forEach(function (descriptor) {
+        if (!registryData[descriptor.name]) {
+          registryData[descriptor.name] = { status: "unreachable", items: [], error: null };
+        }
+      });
+      registriesLoaded = true;
+      renderRegistries();
+    });
+  }
+
+  /* Profile picker for Open URL. Only enabled profiles are offered, and one
+     whose browser is missing is shown but not selectable — hiding it would
+     make a configured profile look like it had never existed. */
+  function enabledProfiles() {
+    var registry = registryData.browser_profiles;
+    if (!registry || registry.status !== "ok") { return []; }
+    return registry.items.filter(function (item) { return item.enabled; });
+  }
+
+  function renderProfileSelect() {
+    var select = el("profileSelect");
+    var profiles = enabledProfiles();
+    var previous = select.value;
+
+    var defaults = profiles.filter(function (item) { return item.default_for_url; });
+    var defaultLabel = defaults.length === 1
+      ? "Default — " + defaults[0].name
+      : "Default browser";
+
+    var options = ['<option value="">' + escapeHtml(defaultLabel) + "</option>"];
+    profiles.forEach(function (profile) {
+      var application = applicationById(profile.application_id);
+      var usable = applicationIsAvailable(application);
+      options.push('<option value="' + escapeHtml(profile.id) + '"' + (usable ? "" : " disabled") + ">" +
+        escapeHtml(profile.name) + (usable ? "" : " — unavailable") + "</option>");
+    });
+    select.innerHTML = options.join("");
+    if (previous && profiles.some(function (p) { return p.id === previous; })) { select.value = previous; }
+
+    select.disabled = profiles.length === 0;
+    renderProfileHint();
+  }
+
+  function selectedProfile() {
+    var id = el("profileSelect").value;
+    if (!id) { return null; }
+    var matches = enabledProfiles().filter(function (item) { return item.id === id; });
+    return matches.length === 1 ? matches[0] : null;
+  }
+
+  function renderProfileHint() {
+    var profile = selectedProfile();
+    var hint = el("profileHint");
+    if (!profile) {
+      var defaults = enabledProfiles().filter(function (item) { return item.default_for_url; });
+      hint.textContent = defaults.length === 1
+        ? "Uses “" + defaults[0].name + "”, this machine's default for URLs."
+        : registriesLoaded && enabledProfiles().length === 0
+          ? "No browser profiles configured — the host's usual browser is used."
+          : "Uses the host's usual browser.";
+      return;
+    }
+    var text = "Allows " + policyText(profile.domain_policy) + ".";
+    if (profile.preferred_display_id) {
+      text += " Prefers " + profile.preferred_display_id + " (metadata only — M2A does not move windows).";
+    }
+    hint.textContent = text;
   }
 
   var recent = [];
@@ -222,6 +457,12 @@
     localStorage.removeItem(TOKEN_KEY);
     token = null;
     if (socket) { socket.close(); socket = null; }
+    // Drop the machine's registry contents with the token: they describe the
+    // user's devices and displays and should not survive a sign-out.
+    registryData = {};
+    registriesLoaded = false;
+    availableApplications = [];
+    el("registrySections").innerHTML = '<p class="muted">Loading…</p>';
     el("app").hidden = true;
     el("setup").hidden = false;
     setConn("down", "not connected");
@@ -245,6 +486,9 @@
       recent = (response.payload && response.payload.actions) || [];
       renderActions();
       connect();
+      // Registries are not needed to show the host, so they load after it and
+      // a failure here never blocks the rest of the UI.
+      loadRegistries();
     });
   }
 
@@ -293,11 +537,18 @@
     runAction("/api/actions/open-application", { application: application }, el("btnOpenApp"));
   });
 
+  el("profileSelect").addEventListener("change", renderProfileHint);
+
   el("urlForm").addEventListener("submit", function (event) {
     event.preventDefault();
     var url = el("urlInput").value.trim();
     if (!url) { return; }
-    runAction("/api/actions/open-url", { url: url }, el("btnOpenUrl"));
+    // Omitted entirely when no profile is picked, so the request stays byte-for
+    // byte the pre-M2A one and takes the service's default/legacy path.
+    var body = { url: url };
+    var profileId = el("profileSelect").value;
+    if (profileId) { body.browser_profile_id = profileId; }
+    runAction("/api/actions/open-url", body, el("btnOpenUrl"));
   });
 
   el("forgetToken").addEventListener("click", function () { forgetToken(null); });
