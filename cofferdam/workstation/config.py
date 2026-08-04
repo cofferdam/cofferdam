@@ -4,10 +4,19 @@ Layout under ``COFFERDAM_HOME`` (default ``~/cofferdam``) — mirrors the split 
 ``DESIGN.md`` so the Guardian/A-B milestones can slot in without moving data::
 
     <home>/config.json            optional overrides (no secrets)
+    <home>/config/registries/     versioned semantic registries (M2A, no secrets)
     <home>/secrets/token          the device token (0600, never in git)
     <home>/state/actions.json     bounded recent-action records
     <home>/screenshots/<id>.png   bounded screenshot artifacts
     <home>/logs/                  runtime logs
+
+``config.json`` holds *runtime* knobs (bind address, limits). ``config/registries/``
+holds *semantic machine configuration* — which devices, displays, applications,
+browser profiles, agent profiles and route templates this machine knows about.
+Those are validated JSON documents rather than environment variables because
+they carry structure, stable IDs, and cross-references that an env var cannot
+express or validate. They are machine-specific and never live in the Git
+repository; committed placeholders live under ``examples/registries/``.
 
 Precedence: environment variable > ``config.json`` > built-in default.
 
@@ -53,6 +62,24 @@ class Config:
         return self.home / "secrets"
 
     @property
+    def config_dir(self) -> Path:
+        return self.home / "config"
+
+    @property
+    def registries_dir(self) -> Path:
+        return self.config_dir / "registries"
+
+    def registry_path(self, registry_name: str) -> Path:
+        """Path of one registry file.
+
+        ``registry_name`` is only ever one of the code-owned names in
+        :data:`cofferdam.workstation.registries.REGISTRY_NAMES`; callers resolve
+        it against that tuple before asking, so no request text becomes a path
+        component.
+        """
+        return self.registries_dir / f"{registry_name}.json"
+
+    @property
     def state_dir(self) -> Path:
         return self.home / "state"
 
@@ -73,7 +100,14 @@ class Config:
         return self.state_dir / "actions.json"
 
     def ensure_dirs(self) -> None:
-        for path in (self.home, self.secrets_dir, self.state_dir, self.screenshots_dir, self.logs_dir):
+        for path in (
+            self.home,
+            self.secrets_dir,
+            self.state_dir,
+            self.screenshots_dir,
+            self.logs_dir,
+            self.registries_dir,
+        ):
             path.mkdir(parents=True, exist_ok=True)
         _restrict(self.secrets_dir, directory=True)
 

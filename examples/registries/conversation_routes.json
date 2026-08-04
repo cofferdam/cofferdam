@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "chatgpt-to-cofferdam-claude",
+      "name": "ChatGPT → Cofferdam Claude",
+      "aliases": ["bu chati cofferdam claude'a yolla"],
+      "enabled": true,
+      "source_kind": "opera-extension",
+      "target_agent_profile_id": "claude-code-cofferdam",
+      "return_mode": "prepare-then-confirm"
+    },
+    {
+      "id": "manual-paste-to-claude",
+      "name": "Manual paste → Cofferdam Claude",
+      "aliases": ["elle yapıştır"],
+      "enabled": true,
+      "source_kind": "manual",
+      "target_agent_profile_id": "claude-code-cofferdam",
+      "return_mode": "manual-copy"
+    }
+  ]
+}

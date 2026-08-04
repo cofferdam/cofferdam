@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "ubuntu-workstation",
+      "name": "Ubuntu workstation",
+      "aliases": ["bilgisayar", "ana bilgisayar"],
+      "enabled": true,
+      "kind": "workstation",
+      "platform": "linux",
+      "notes": null
+    },
+    {
+      "id": "guardian-pi",
+      "name": "Guardian Pi",
+      "aliases": ["pi", "guardian node"],
+      "enabled": false,
+      "kind": "raspberry-pi",
+      "platform": "linux",
+      "notes": "Placeholder. M2A stores no address, credential, or power-control configuration."
+    }
+  ]
+}

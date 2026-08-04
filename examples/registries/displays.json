@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "large-monitor",
+      "device_id": "ubuntu-workstation",
+      "name": "Büyük monitör",
+      "aliases": ["büyük ekran", "ana monitör"],
+      "enabled": true,
+      "match": {
+        "connector_hint": "DP-1",
+        "manufacturer": null,
+        "model": null,
+        "serial": null,
+        "edid_sha256": null
+      }
+    },
+    {
+      "id": "laptop-panel",
+      "device_id": "ubuntu-workstation",
+      "name": "Laptop panel",
+      "aliases": ["küçük ekran"],
+      "enabled": true,
+      "match": {
+        "connector_hint": "eDP-1",
+        "manufacturer": null,
+        "model": null,
+        "serial": null,
+        "edid_sha256": null
+      }
+    }
+  ]
+}

@@ -14,6 +14,13 @@ cofferdam-home/
 /logs/
 workstation.env
 
+# Semantic machine registries (M2A). These live in $COFFERDAM_HOME/config/registries/
+# and describe this specific machine's devices, displays, applications, browser
+# profiles, agent profiles, and route templates. They are personal configuration,
+# not product source. Committed placeholders live in examples/registries/ instead.
+/config/registries/
+config/registries/*.json
+
 # Secrets
 .env
 .env.*

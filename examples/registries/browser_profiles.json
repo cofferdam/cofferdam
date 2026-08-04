@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "personal-opera",
+      "name": "Kişisel Opera",
+      "aliases": ["kişisel tarayıcı", "ana tarayıcı"],
+      "enabled": true,
+      "application_id": "opera",
+      "default_for_url": true,
+      "preferred_display_id": "large-monitor",
+      "launch_mode": "default-instance",
+      "domain_policy": {
+        "mode": "allow-all",
+        "domains": []
+      }
+    },
+    {
+      "id": "fallback-firefox",
+      "name": "Yedek Firefox",
+      "aliases": ["yedek tarayıcı"],
+      "enabled": true,
+      "application_id": "firefox",
+      "default_for_url": false,
+      "preferred_display_id": null,
+      "launch_mode": "default-instance",
+      "domain_policy": {
+        "mode": "allow-list",
+        "domains": ["example.com", "wikipedia.org"]
+      }
+    }
+  ]
+}

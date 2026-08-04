@@ -185,5 +185,98 @@ class NoCommittedSecretTests(unittest.TestCase):
         self.assertEqual(forbidden, [], f"secret-like files are tracked: {forbidden}")
 
 
+class RegistryBoundaryTests(unittest.TestCase):
+    """(M2A) Machine registries stay out of Git; example registries stay clean.
+
+    The registries describe a specific person's machines, displays and browser
+    habits. Committing one would publish that, and this repository develops in
+    public (``DECISIONS.md`` D-2026-08-01-9). The committed placeholders exist
+    precisely so nobody is tempted to commit a real one.
+    """
+
+    EXAMPLES = REPO_ROOT / "examples" / "registries"
+    REGISTRY_FILES = (
+        "devices.json",
+        "displays.json",
+        "applications.json",
+        "browser_profiles.json",
+        "agent_profiles.json",
+        "conversation_routes.json",
+    )
+
+    def _tracked(self):
+        import subprocess
+
+        try:
+            completed = subprocess.run(
+                ["git", "ls-files"],
+                cwd=str(REPO_ROOT),
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover
+            raise unittest.SkipTest(f"git unavailable: {exc}")
+        if completed.returncode != 0:  # pragma: no cover
+            raise unittest.SkipTest("not a git checkout")
+        return completed.stdout.decode("utf-8", "replace").splitlines()
+
+    def test_machine_registries_are_gitignored(self) -> None:
+        ignored = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("config/registries/", ignored)
+
+    def test_no_machine_registry_is_tracked(self) -> None:
+        offenders = [
+            name
+            for name in self._tracked()
+            if "config/registries/" in name.replace("\\", "/")
+        ]
+        self.assertEqual(offenders, [], f"machine registries are tracked: {offenders}")
+
+    def test_the_example_registries_are_tracked(self) -> None:
+        tracked = {name.replace("\\", "/") for name in self._tracked()}
+        for name in self.REGISTRY_FILES:
+            with self.subTest(example=name):
+                self.assertIn(f"examples/registries/{name}", tracked)
+
+    def test_example_registries_carry_no_private_material(self) -> None:
+        """(12, extended) The placeholders must stay placeholders."""
+        import socket
+
+        hostname = socket.gethostname().lower()
+        markers = ["token", "secret", "password", "cookie", "-----begin", "/home/", "@"]
+        if len(hostname) > 3:
+            markers.append(hostname)
+        for path in sorted(self.EXAMPLES.glob("*.json")):
+            text = path.read_text(encoding="utf-8").lower()
+            for marker in markers:
+                with self.subTest(example=path.name, marker=marker):
+                    self.assertNotIn(marker, text)
+
+    def test_registry_schemas_declare_no_command_like_field(self) -> None:
+        """No schema in the registry package annotates a command-like field."""
+        registry_root = PACKAGE_ROOT / "registries"
+        self.assertTrue(registry_root.is_dir())
+        offenders = []
+        for path in sorted(registry_root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                found = FORBIDDEN_FIELDS & _annotated_fields(node)
+                if found:
+                    offenders.append(f"{path.name}:{node.name} {sorted(found)}")
+        self.assertEqual(offenders, [], f"registry model exposes command-like field(s): {offenders}")
+
+    def test_the_registry_package_uses_no_subprocess_and_no_shell(self) -> None:
+        registry_root = PACKAGE_ROOT / "registries"
+        for path in sorted(registry_root.rglob("*.py")):
+            source = path.read_text(encoding="utf-8")
+            with self.subTest(module=path.name):
+                self.assertNotIn("subprocess", source)
+                self.assertNotIn("os.system", source)
+                self.assertNotIn("os.popen", source)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
