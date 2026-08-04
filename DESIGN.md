@@ -39,6 +39,34 @@ phone/tablet (PWA over Tailscale)
   files · Ollama (intent) · OpenClaw (optional accel)
 ```
 
+### Session lifecycle boundary (binding)
+
+Cofferdam runs as a systemd **user** service and reaches the desktop through the systemd **user
+manager**, never by owning the desktop itself.
+
+**Cofferdam observes and follows the graphical session. It never creates, fakes, starts, stops,
+restarts, terminates, or owns one.** This is a hard boundary, not a style preference: violating
+it once already left the host unable to complete a graphical login at all (`DECISIONS.md`
+D-2026-08-04-1).
+
+What follows from it:
+
+- The service is **headless**. It starts at boot through lingering, survives logout, and never
+  declares a dependency on `graphical-session.target` — `Wants=` is an *activation request*, not
+  a wait, so naming it from a pre-login unit activates it with nothing behind it.
+- "Is there a desktop?" is answered by a **read-only query at request time** — never from the
+  service's own start-time environment (which under lingering predates the session entirely), and
+  never from the presence of lingering.
+- Applications are launched as **transient units of the user manager**, not as children of the
+  service. The manager holds the real session environment — GNOME imports
+  `DISPLAY`/`WAYLAND_DISPLAY`/`XAUTHORITY` into it at login — and each application lands in its
+  own cgroup, so restarting Cofferdam never kills the user's browser.
+- Before a session exists, GUI capabilities are reported **false** and GUI actions are refused.
+  Nothing is ever reported as succeeded, and no fake session is created.
+
+Full lifecycle, migration, rollback, and TTY recovery:
+[`docs/SERVICE_LIFECYCLE.md`](docs/SERVICE_LIFECYCLE.md).
+
 ### Guardian / Supervisor
 
 A deliberately small, boring, non-AI process. It:

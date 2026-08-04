@@ -113,6 +113,49 @@ logic; the gate stays open and unaffected, and no M2A document may describe M1 a
   profiles are placeholders (`execution_status: not-implemented`) and conversation routes are
   templates; the PWA labels both as such and offers no control that would suggest otherwise.
 
+- **M1.1 — service lifecycle correction.** Branch
+  `fix/workstation-service-login-lifecycle`. Fixes a **login-blocking regression**: the M1 unit's
+  `Wants=graphical-session.target`, combined with `WantedBy=default.target` and lingering,
+  activated the graphical target at boot with nothing behind it, so GNOME refused every
+  subsequent login ("A graphical session is already running!") and bounced back to GDM. Root
+  cause verified in the journal across four failing boots against one working control boot.
+  Also fixes an unbounded restart storm when the Tailscale bind address is not up yet at boot.
+
+  Adds `docs/SERVICE_LIFECYCLE.md`, a transactional migration installer, an uninstaller that
+  doubles as rollback and TTY recovery, and `tests/test_service_unit_lifecycle.py` — structural
+  guards so this class of mistake cannot return silently. Recorded as `DECISIONS.md`
+  D-2026-08-04-1 and D-2026-08-04-2.
+
+  **Validated on the real Ubuntu host (2026-08-04).** 547 automated tests pass on both CI paths,
+  and the required manual gates were observed: logout/login, **two consecutive reboots**,
+  pre-login API access with graphical capabilities reported false and actions refused, post-login
+  capability recovery with a real browser launch, daemon-restart isolation (GNOME and both open
+  browsers survived), and the bounded bind wait firing in production at boot with `NRestarts=0`.
+  The failure signature `A graphical session is already running!` occurred 2–3 times per boot on
+  the three boots with the old unit and **zero times across all three boots with the corrected
+  unit**. See the validation record in [`docs/SERVICE_LIFECYCLE.md`](docs/SERVICE_LIFECYCLE.md).
+
+  Still open: a full Tailscale-outage test end-to-end (only the wait logic is verified, in
+  isolation).
+
+- **M1.2 — screenshot capability accuracy.** Branch `fix/screenshot-capability-accuracy`.
+  Found during M1.1 boot-`0` validation: after login, a daemon started at boot advertised
+  `screenshot: true` on a Wayland host because `scrot` was on `PATH`. The Wayland guard read
+  `XDG_SESSION_TYPE` from the **daemon's own** environment, which under lingering is empty, so
+  the guard silently did not apply. The action itself failed closed
+  (`scrot: Can't open X display`, a bounded `adapter_failed`, no black image, no false success),
+  making this an advertisement-accuracy defect rather than a capture defect.
+
+  Capability is now derived from the verified graphical session — the same live source that
+  already gates GUI actions — and never from the daemon's environment. Recorded as
+  `DECISIONS.md` D-2026-08-05-1. **No Wayland screenshot backend was added**: Wayland capture
+  remains unavailable on this host, and the flag now reports that truthfully.
+
+  Not yet validated on the live host. The isolated patch and its tests are complete (563
+  automated tests pass on both CI paths); live validation is a separate decision, because the
+  running service is deliberately still on the M1.1 validation runtime — see
+  [`docs/SERVICE_LIFECYCLE.md`](docs/SERVICE_LIFECYCLE.md).
+
 ## Planned (active roadmap — see [`ROADMAP.md`](ROADMAP.md))
 
 - Guardian/Supervisor + manual recovery command surface, Runtime A/B slots, process/window/

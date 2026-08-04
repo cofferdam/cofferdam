@@ -135,6 +135,61 @@ _SCREENSHOT_TOOLS = (
 # reporting a false success.
 _X11_ROOT_CAPTURE_TOOLS = frozenset({"scrot", "maim", "import"})
 
+# Variables that describe *which display a program should draw on or read from*.
+# They belong to the graphical session, so they are taken from the verified
+# session's own environment block and never from this process's. A boot-started
+# service has none of them; one restarted mid-session has whichever set was
+# current when it started, which may since have been replaced.
+_SESSION_DISPLAY_KEYS = (
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XAUTHORITY",
+    "XDG_RUNTIME_DIR",
+    "XDG_SESSION_TYPE",
+    "XDG_CURRENT_DESKTOP",
+    "DBUS_SESSION_BUS_ADDRESS",
+)
+
+
+def _session_display(session: GraphicalSession) -> Optional[str]:
+    """Which display protocol a program handed to *this* session would meet.
+
+    ``"wayland"`` and ``"x11"`` are answers about the session, not about this
+    process. ``None`` means the session published no display endpoint at all,
+    in which case nothing graphical can be offered honestly.
+
+    A session that publishes ``WAYLAND_DISPLAY`` counts as Wayland even if it
+    did not publish ``XDG_SESSION_TYPE``: the X11 root-capture tools would
+    return a black frame there, and guessing "x11" from a missing variable is
+    how a false capability gets advertised.
+    """
+    environment = session.environment or {}
+    if environment.get("WAYLAND_DISPLAY") or session.session_type == "wayland":
+        return "wayland"
+    if environment.get("DISPLAY"):
+        return "x11"
+    return None
+
+
+def _capture_environment(session: GraphicalSession) -> dict:
+    """Environment for a capture subprocess: our PATH, the session's display.
+
+    ``PATH``/``HOME`` and the rest of our own environment are ordinary process
+    setup and are kept. Every variable that names a *display* is replaced by the
+    verified session's value, and dropped entirely when the session does not
+    publish it — otherwise a ``DISPLAY`` inherited from a session that has since
+    ended would send the capture at a dead X server.
+    """
+    environment = dict(os.environ)
+    session_environment = session.environment or {}
+    for key in _SESSION_DISPLAY_KEYS:
+        value = session_environment.get(key)
+        if value:
+            environment[key] = value
+        else:
+            environment.pop(key, None)
+    return environment
+
 
 def _desktop_entry_present(names: Sequence[str]) -> bool:
     """Is one of these bounded desktop-entry basenames installed?
@@ -180,7 +235,7 @@ class LinuxX11Adapter(HostAdapter):
         session = detect_graphical_session()
         session_type = session.session_type
 
-        screenshot_tool = self._screenshot_tool()
+        screenshot_tool = self._screenshot_tool(session)
         browser = self._browser_key()
         capabilities = {
             "screenshot": session.available and screenshot_tool is not None,
@@ -221,7 +276,7 @@ class LinuxX11Adapter(HostAdapter):
             return notes
 
         if not capabilities["screenshot"]:
-            if session.session_type == "wayland":
+            if _session_display(session) == "wayland":
                 notes.append(
                     "Screen capture is unavailable in this Wayland session: no capture tool "
                     "that works under Wayland is installed. Opening applications and URLs is "
@@ -296,10 +351,25 @@ class LinuxX11Adapter(HostAdapter):
 
     # -- capabilities --------------------------------------------------------
 
-    def _screenshot_tool(self):
-        wayland = os.environ.get("XDG_SESSION_TYPE") == "wayland"
+    def _screenshot_tool(self, session: GraphicalSession):
+        """The capture tool expected to work *in this session*, or ``None``.
+
+        Presence on PATH is not the question. The question is whether a tool we
+        have can reach the display of the session that exists right now, so the
+        answer is derived entirely from ``session`` — never from
+        :data:`os.environ`. Reading our own environment here was the M1.2
+        defect: a service started at boot by lingering has no
+        ``XDG_SESSION_TYPE``, so the Wayland guard below silently did not apply
+        and ``scrot`` was offered on a Wayland host, where it fails with
+        "Can't open X display".
+        """
+        if not session.available:
+            return None
+        display = _session_display(session)
+        if display is None:
+            return None
         for executable, build_argv in _SCREENSHOT_TOOLS:
-            if wayland and executable in _X11_ROOT_CAPTURE_TOOLS:
+            if display == "wayland" and executable in _X11_ROOT_CAPTURE_TOOLS:
                 continue
             found = first_available((executable,))
             if found:
@@ -307,14 +377,20 @@ class LinuxX11Adapter(HostAdapter):
         return None
 
     def take_screenshot(self) -> Screenshot:
-        self._require_session()
-        selected = self._screenshot_tool()
+        session = self._require_session()
+        selected = self._screenshot_tool(session)
         if selected is None:
-            if os.environ.get("XDG_SESSION_TYPE") == "wayland":
+            display = _session_display(session)
+            if display == "wayland":
                 raise AdapterUnsupported(
                     "no Wayland-safe screenshot tool found",
                     "scrot/maim/import capture a black frame under Wayland; no capture tool that "
                     "works under Wayland is installed",
+                )
+            if display is None:
+                raise AdapterUnsupported(
+                    "no screenshot tool found",
+                    "the graphical session publishes no display endpoint to capture from",
                 )
             raise AdapterUnsupported(
                 "no screenshot tool found",
@@ -326,7 +402,10 @@ class LinuxX11Adapter(HostAdapter):
         os.close(handle)
         tmp_path = Path(tmp_name)
         try:
-            completed = run_fixed(build_argv(executable, str(tmp_path)))
+            completed = run_fixed(
+                build_argv(executable, str(tmp_path)),
+                env=_capture_environment(session),
+            )
             if completed.returncode != 0:
                 raise AdapterError(
                     f"screenshot tool failed ({tool_name})",
@@ -347,7 +426,7 @@ class LinuxX11Adapter(HostAdapter):
     def open_application(self, application: str) -> ApplicationLaunch:
         if application not in APPLICATION_KEYS:
             raise AdapterUnsupported(f"application not allowlisted: {application}")
-        self._require_session()
+        session = self._require_session()
         executable = first_available(_APPLICATION_COMMANDS[application])
         if not executable:
             raise AdapterUnsupported(f"application not installed: {application}")
@@ -355,6 +434,7 @@ class LinuxX11Adapter(HostAdapter):
             [executable],
             description="Cofferdam: open " + application,
             accept_exit_status=_DELEGATION_EXIT_STATUS.get(application, ()),
+            expect_session=session.session_id,
         )
         pid = self._confirm(application, launch)
         return ApplicationLaunch(application=application, pid=pid, detail=Path(executable).name)
@@ -374,7 +454,7 @@ class LinuxX11Adapter(HostAdapter):
         which opens a new tab in the user's session — this never starts a second,
         isolated browser and never touches a profile directory.
         """
-        self._require_session()
+        session = self._require_session()
         if application is None:
             application = self._browser_key()
             if application is None:
@@ -394,6 +474,7 @@ class LinuxX11Adapter(HostAdapter):
             [executable, url],
             description="Cofferdam: open URL",
             accept_exit_status=_DELEGATION_EXIT_STATUS.get(application, ()),
+            expect_session=session.session_id,
         )
         pid = self._confirm(application, launch)
         return ApplicationLaunch(application=application, pid=pid, detail=Path(executable).name)

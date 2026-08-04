@@ -21,7 +21,7 @@ import abc
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass, field
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Mapping, Optional, Sequence
 
 from ..errors import AdapterError
 
@@ -113,12 +113,22 @@ class HostAdapter(abc.ABC):
 # ---------------------------------------------------------------------------
 
 
-def run_fixed(argv: Sequence[str], *, timeout: int = SUBPROCESS_TIMEOUT_SECONDS) -> subprocess.CompletedProcess:
+def run_fixed(
+    argv: Sequence[str],
+    *,
+    timeout: int = SUBPROCESS_TIMEOUT_SECONDS,
+    env: Optional[Mapping[str, str]] = None,
+) -> subprocess.CompletedProcess:
     """Run a fully adapter-constructed argv, capturing output, never via a shell.
 
     ``argv`` must be built by the adapter from constants plus, at most, values
     the service itself validated (a URL scheme-checked to http/https, a path the
     service generated). Nothing here interpolates caller text into a string.
+
+    ``env``, when given, replaces the child's environment wholesale. It exists
+    so an adapter can hand a program the *verified graphical session's* display
+    variables instead of this service's own frozen ones; it is built by the
+    adapter, never from caller-supplied text.
     """
     try:
         return subprocess.run(  # noqa: S603 - fixed argv, shell is never used
@@ -126,6 +136,7 @@ def run_fixed(argv: Sequence[str], *, timeout: int = SUBPROCESS_TIMEOUT_SECONDS)
             capture_output=True,
             timeout=timeout,
             check=False,
+            env=None if env is None else dict(env),
         )
     except FileNotFoundError as exc:
         raise AdapterError(f"required program not found: {argv[0]}", exc) from exc

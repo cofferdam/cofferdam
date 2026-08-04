@@ -25,13 +25,28 @@ from cofferdam.workstation.adapters.linux_session import GraphicalSession, Sessi
 from cofferdam.workstation.adapters.linux_x11 import LinuxX11Adapter
 from cofferdam.workstation.errors import AdapterError, AdapterUnsupported
 
-WAYLAND_SESSION = GraphicalSession(available=True, session_type="wayland")
-X11_SESSION = GraphicalSession(available=True, session_type="x11")
+WAYLAND_SESSION = GraphicalSession(
+    available=True,
+    session_type="wayland",
+    session_id="wayland-generation-1",
+    environment={"XDG_SESSION_TYPE": "wayland", "WAYLAND_DISPLAY": "wayland-0"},
+)
+X11_SESSION = GraphicalSession(
+    available=True,
+    session_type="x11",
+    session_id="x11-generation-1",
+    environment={"XDG_SESSION_TYPE": "x11", "DISPLAY": ":0"},
+)
 NO_SESSION = GraphicalSession(
     available=False,
     session_type=None,
     reason="no graphical session is active on this host yet",
 )
+
+# A service started at boot by lingering: its own environment predates every
+# session, so it names no display at all. Patched over ``os.environ`` to make
+# "the daemon's environment is not authoritative" testable rather than asserted.
+LINGERING_DAEMON_ENVIRONMENT = {"PATH": "/usr/bin:/bin", "HOME": "/home/tester"}
 
 
 def _adapter() -> LinuxX11Adapter:
@@ -61,7 +76,7 @@ class WaylandScreenshotSafetyTests(unittest.TestCase):
         with patch.dict("os.environ", {"XDG_SESSION_TYPE": "wayland"}, clear=False), patch.object(
             linux_x11, "first_available", _only("scrot")
         ), _session(WAYLAND_SESSION):
-            self.assertIsNone(adapter._screenshot_tool())
+            self.assertIsNone(adapter._screenshot_tool(WAYLAND_SESSION))
             self.assertFalse(adapter.host_status().capabilities["screenshot"])
             with self.assertRaises(AdapterUnsupported) as ctx:
                 adapter.take_screenshot()
@@ -73,7 +88,7 @@ class WaylandScreenshotSafetyTests(unittest.TestCase):
         with patch.dict("os.environ", {"XDG_SESSION_TYPE": "wayland"}, clear=False), patch.object(
             linux_x11, "first_available", _only("gnome-screenshot")
         ):
-            selected = adapter._screenshot_tool()
+            selected = adapter._screenshot_tool(WAYLAND_SESSION)
             self.assertIsNotNone(selected)
             self.assertEqual(selected[2], "gnome-screenshot")
 
@@ -83,7 +98,7 @@ class WaylandScreenshotSafetyTests(unittest.TestCase):
         with patch.dict("os.environ", {"XDG_SESSION_TYPE": "x11"}, clear=False), patch.object(
             linux_x11, "first_available", _only("scrot")
         ), _session(X11_SESSION):
-            selected = adapter._screenshot_tool()
+            selected = adapter._screenshot_tool(X11_SESSION)
             self.assertIsNotNone(selected)
             self.assertEqual(selected[2], "scrot")
             self.assertTrue(adapter.host_status().capabilities["screenshot"])
@@ -144,6 +159,232 @@ class CapabilityReportingTests(unittest.TestCase):
         self.assertIn("Screen capture is unavailable", notes)
         self.assertIn("Wayland", notes)
         self.assertIn("unaffected", notes)
+
+
+class ScreenshotCapabilityAccuracyTests(unittest.TestCase):
+    """M1.2: the screenshot flag must describe the *session*, not our PATH.
+
+    Observed on the real Ubuntu GNOME/Wayland host: a daemon started at boot by
+    lingering reported ``screenshot: true`` because ``scrot`` was installed, and
+    the action then failed with ``scrot: Can't open X display``. It failed
+    closed — no black image, no false success — so this was an
+    advertisement-accuracy defect, and these tests pin the corrected rule.
+
+    Every test here patches ``os.environ`` to the lingering daemon's variable-free
+    environment, so any implementation that consults it instead of the verified
+    session fails rather than passes by coincidence.
+    """
+
+    def _lingering(self):
+        return patch.dict("os.environ", LINGERING_DAEMON_ENVIRONMENT, clear=True)
+
+    def test_boot_started_daemon_does_not_advertise_scrot_in_a_wayland_session(self) -> None:
+        """The exact reported defect: empty daemon env, Wayland session, scrot."""
+        adapter = _adapter()
+        with self._lingering(), patch.object(
+            linux_x11, "first_available", _only("scrot")
+        ), _session(WAYLAND_SESSION):
+            status = adapter.host_status()
+        self.assertFalse(status.capabilities["screenshot"])
+
+    def test_wayland_session_with_x11_only_tool_is_false(self) -> None:
+        adapter = _adapter()
+        with self._lingering(), patch.object(
+            linux_x11, "first_available", _only("scrot", "maim", "import")
+        ), _session(WAYLAND_SESSION):
+            self.assertFalse(adapter.host_status().capabilities["screenshot"])
+
+    def test_x11_session_with_scrot_may_be_true(self) -> None:
+        """The supported existing path still advertises, from session state."""
+        adapter = _adapter()
+        with self._lingering(), patch.object(
+            linux_x11, "first_available", _only("scrot")
+        ), _session(X11_SESSION):
+            self.assertTrue(adapter.host_status().capabilities["screenshot"])
+
+    def test_no_verified_session_is_false_even_with_every_tool_installed(self) -> None:
+        adapter = _adapter()
+        with self._lingering(), patch.object(
+            linux_x11, "first_available", _only("gnome-screenshot", "scrot", "maim")
+        ), _session(NO_SESSION):
+            self.assertFalse(adapter.host_status().capabilities["screenshot"])
+
+    def test_tool_presence_alone_cannot_make_the_capability_true(self) -> None:
+        """Same PATH, three different sessions, three different answers."""
+        adapter = _adapter()
+        answers = {}
+        for name, session in (
+            ("none", NO_SESSION),
+            ("wayland", WAYLAND_SESSION),
+            ("x11", X11_SESSION),
+        ):
+            with self._lingering(), patch.object(
+                linux_x11, "first_available", _only("scrot")
+            ), _session(session):
+                answers[name] = adapter.host_status().capabilities["screenshot"]
+        self.assertEqual(answers, {"none": False, "wayland": False, "x11": True})
+
+    def test_a_session_publishing_wayland_display_is_wayland_even_without_session_type(
+        self,
+    ) -> None:
+        """A missing XDG_SESSION_TYPE must not be read as 'probably X11'."""
+        adapter = _adapter()
+        untyped_wayland = GraphicalSession(
+            available=True,
+            session_type=None,
+            session_id="g1",
+            environment={"WAYLAND_DISPLAY": "wayland-0"},
+        )
+        with self._lingering(), patch.object(
+            linux_x11, "first_available", _only("scrot")
+        ), _session(untyped_wayland):
+            self.assertFalse(adapter.host_status().capabilities["screenshot"])
+
+    def test_session_publishing_no_display_endpoint_is_false(self) -> None:
+        adapter = _adapter()
+        no_display = GraphicalSession(
+            available=True, session_type=None, session_id="g1", environment={}
+        )
+        with self._lingering(), patch.object(
+            linux_x11, "first_available", _only("scrot")
+        ), _session(no_display):
+            self.assertFalse(adapter.host_status().capabilities["screenshot"])
+
+    def test_stale_daemon_display_is_not_used_for_the_capture(self) -> None:
+        """A DISPLAY left over from an ended session must not be handed on."""
+        stale = dict(LINGERING_DAEMON_ENVIRONMENT, DISPLAY=":99", WAYLAND_DISPLAY="wayland-9")
+        with patch.dict("os.environ", stale, clear=True):
+            environment = linux_x11._capture_environment(X11_SESSION)
+        self.assertEqual(environment["DISPLAY"], ":0")
+        self.assertNotIn("WAYLAND_DISPLAY", environment)
+        self.assertEqual(environment["PATH"], "/usr/bin:/bin")
+
+    def test_capture_runs_with_the_sessions_display_not_ours(self) -> None:
+        adapter = _adapter()
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen["env"] = kwargs.get("env") or {}
+            raise AdapterError("stop here")
+
+        with self._lingering(), patch.object(
+            linux_x11, "first_available", _only("scrot")
+        ), patch.object(linux_x11, "run_fixed", fake_run), _session(X11_SESSION):
+            with self.assertRaises(AdapterError):
+                adapter.take_screenshot()
+        self.assertEqual(seen["env"].get("DISPLAY"), ":0")
+
+    def test_capability_is_recalculated_after_logout_and_a_new_session(self) -> None:
+        """Nothing is cached from an earlier login."""
+        adapter = _adapter()
+        sequence = [X11_SESSION, NO_SESSION, WAYLAND_SESSION]
+        seen = []
+        for session in sequence:
+            with self._lingering(), patch.object(
+                linux_x11, "first_available", _only("scrot")
+            ), _session(session):
+                seen.append(adapter.host_status().capabilities["screenshot"])
+        self.assertEqual(seen, [True, False, False])
+
+    def test_replaced_session_identity_does_not_carry_capability_forward(self) -> None:
+        """A new generation of the same type is judged on its own environment."""
+        adapter = _adapter()
+        replaced = GraphicalSession(
+            available=True,
+            session_type="wayland",
+            session_id="wayland-generation-2",
+            environment={"XDG_SESSION_TYPE": "wayland", "WAYLAND_DISPLAY": "wayland-1"},
+        )
+        with self._lingering(), patch.object(
+            linux_x11, "first_available", _only("scrot")
+        ), _session(X11_SESSION):
+            self.assertTrue(adapter.host_status().capabilities["screenshot"])
+        with self._lingering(), patch.object(
+            linux_x11, "first_available", _only("scrot")
+        ), _session(replaced):
+            self.assertFalse(adapter.host_status().capabilities["screenshot"])
+
+
+class ScreenshotFailsClosedTests(unittest.TestCase):
+    """The action must stay refused whenever the capability is not offered."""
+
+    def _lingering(self):
+        return patch.dict("os.environ", LINGERING_DAEMON_ENVIRONMENT, clear=True)
+
+    def test_direct_request_while_unavailable_fails_closed_with_no_image(self) -> None:
+        """A caller bypassing the disabled button gets a typed refusal."""
+        adapter = _adapter()
+        ran = []
+
+        with self._lingering(), patch.object(
+            linux_x11, "first_available", _only("scrot")
+        ), patch.object(linux_x11, "run_fixed", lambda *a, **k: ran.append(a)), _session(
+            WAYLAND_SESSION
+        ):
+            self.assertFalse(adapter.host_status().capabilities["screenshot"])
+            with self.assertRaises(AdapterUnsupported) as ctx:
+                adapter.take_screenshot()
+
+        self.assertIn("Wayland", ctx.exception.message)
+        self.assertEqual(ran, [], "no capture process may be started when unavailable")
+
+    def test_refusal_is_deterministic_across_repeated_requests(self) -> None:
+        adapter = _adapter()
+        for _ in range(3):
+            with self._lingering(), patch.object(
+                linux_x11, "first_available", _only("scrot")
+            ), _session(WAYLAND_SESSION):
+                with self.assertRaises(AdapterUnsupported):
+                    adapter.take_screenshot()
+
+    def test_session_without_a_display_endpoint_names_that_reason(self) -> None:
+        adapter = _adapter()
+        no_display = GraphicalSession(
+            available=True, session_type=None, session_id="g1", environment={}
+        )
+        with self._lingering(), patch.object(
+            linux_x11, "first_available", _only("scrot")
+        ), _session(no_display):
+            with self.assertRaises(AdapterUnsupported) as ctx:
+                adapter.take_screenshot()
+        self.assertIn("display endpoint", ctx.exception.detail or "")
+
+    def test_a_failing_capture_tool_is_still_a_bounded_adapter_error(self) -> None:
+        """Preserved behaviour: the real host's scrot failure stays typed."""
+        adapter = _adapter()
+
+        class _Completed:
+            returncode = 1
+            stdout = b""
+            stderr = b"scrot: Can't open X display. It *is* running, yeah?"
+
+        with self._lingering(), patch.object(
+            linux_x11, "first_available", _only("scrot")
+        ), patch.object(linux_x11, "run_fixed", lambda *a, **k: _Completed()), _session(
+            X11_SESSION
+        ):
+            with self.assertRaises(AdapterError) as ctx:
+                adapter.take_screenshot()
+        self.assertIn("screenshot tool failed", ctx.exception.message)
+        self.assertNotIsInstance(ctx.exception, AdapterUnsupported)
+
+    def test_an_empty_capture_file_is_never_reported_as_success(self) -> None:
+        """Preserved behaviour: a 0-byte PNG is a failure, not a screenshot."""
+        adapter = _adapter()
+
+        class _Completed:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        with self._lingering(), patch.object(
+            linux_x11, "first_available", _only("scrot")
+        ), patch.object(linux_x11, "run_fixed", lambda *a, **k: _Completed()), _session(
+            X11_SESSION
+        ):
+            with self.assertRaises(AdapterError) as ctx:
+                adapter.take_screenshot()
+        self.assertIn("no image", ctx.exception.message)
 
 
 class SessionGatingTests(unittest.TestCase):

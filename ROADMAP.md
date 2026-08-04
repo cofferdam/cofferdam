@@ -171,6 +171,24 @@ sees the host *and can make the host do things*.
   extensions, agent execution, Claude Code session execution, message sending, natural-language
   action planning, desktop application scaffolding, registry write APIs, and any reboot behaviour
   change.
+## M1.1 — Service lifecycle correction (unplanned; forced by a regression)
+
+- **Objective:** make enabling Cofferdam safe for the host's graphical login. The M1 unit left
+  Ubuntu unable to log in at all.
+- **Binding constraint (D-2026-08-04-1):** Cofferdam observes and follows the graphical session;
+  it never creates, fakes, starts, stops, restarts, terminates, or owns it. A unit that can start
+  before login must never name `graphical-session.target` in an activating directive — `Wants=`
+  is an activation request, not a wait. Lingering is never evidence that a session exists.
+- **Visible result:** the host boots, the API is reachable from the phone before anyone logs in
+  with GUI capabilities reported `false`, graphical login succeeds normally, and capabilities
+  become true only once a real session exists.
+- **Acceptance:** `docs/checklists/m1-ubuntu-validation.md` steps L1–L10, including **two**
+  reboots — one successful login is explicitly not sufficient.
+- **Architecture note (D-2026-08-04-2):** a daemon/session-agent split was evaluated and
+  deferred. Cofferdam delegates every application launch to the systemd user manager, which is
+  what actually holds the session, so a single always-on unit never has to pretend it has one.
+  Revisit if Cofferdam ever needs to hold live session-scoped resources itself.
+- **Dependencies:** none. Blocks completion of M1's Ubuntu validation.
 
 ## M2 — Desktop hands: processes, windows, displays
 

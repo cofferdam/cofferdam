@@ -1,19 +1,61 @@
 [Unit]
 # Cofferdam workstation — systemd **user** unit.
 #
-# A user unit (not a system unit) because the service controls the logged-in
-# graphical session: it needs DISPLAY/XAUTHORITY, the session D-Bus, and the
-# user's own browser profiles. Enable lingering so it survives logout/reboot:
-#   loginctl enable-linger $USER
+# This is a HEADLESS daemon. It owns the private HTTP API, authentication,
+# action records, and policy. It starts at boot through lingering and survives
+# logout, so it must stay boot-safe: it declares NO relationship of any kind to
+# graphical-session.target.
 #
-# Install:  see docs/host-setup.md
+# Why that matters — the M1.1 login-loop regression
+# -------------------------------------------------
+# This unit used to carry:
+#
+#     After=graphical-session.target
+#     Wants=graphical-session.target
+#
+# together with WantedBy=default.target and `loginctl enable-linger`. Those
+# three facts combine into a graphical login loop:
+#
+#   1. Lingering makes systemd start user@<uid>.service at boot, before anyone
+#      logs in. That manager immediately queues default.target.
+#   2. default.target pulled in this service, and `Wants=` pulled in
+#      graphical-session.target with it — so the target went ACTIVE at boot,
+#      with no compositor and no session behind it.
+#   3. When the user then logged in, gnome-session found the target it is
+#      itself supposed to activate already active, refused with
+#      "A graphical session is already running!", and quit. GDM took the screen
+#      back. Every login attempt looped the same way.
+#
+# `Wants=` is not a wait — it is an activation request. A unit that may start
+# before login must never name graphical-session.target in Wants=, Requires=,
+# BindsTo=, PartOf=, Upholds=, or Requisite=.
+#
+# The daemon does not need the target as a dependency anyway. It asks
+# `systemctl --user is-active graphical-session.target` at request time — a
+# read-only query that activates nothing — and reports GUI capabilities as
+# false until a real session answers. See
+# cofferdam/workstation/adapters/linux_session.py and docs/SERVICE_LIFECYCLE.md.
 Description=Cofferdam workstation (personal AI workstation runtime)
-After=graphical-session.target network-online.target
-Wants=graphical-session.target
 
-# Do not give up: an always-on host should keep trying after repeated failures.
-# (This belongs in [Unit]; systemd ignores it under [Service] with a warning.)
-StartLimitIntervalSec=0
+# Deliberately no ordering against network targets: network-online.target is a
+# *system* unit, and naming it from a user unit is a silent no-op that would
+# only look like protection. Tailscale may not have an address yet when this
+# starts, so the service waits for its own bind address on a bounded timer and
+# exits cleanly if it never appears. See COFFERDAM_BIND_WAIT_SECONDS in
+# cofferdam/workstation/__main__.py.
+
+# Bounded restart policy. The previous unit set StartLimitIntervalSec=0, which
+# disables the rate limiter entirely: a permanent failure (for example a bind
+# address that never appears) then respawned every 3s, forever. Ten attempts in
+# five minutes rides out a slow boot but still gives up when the failure is
+# real, instead of burning the machine down.
+#
+# These two keys belong in [Unit]. systemd ignores them under [Service] and
+# only says so as a warning, which is how a rate limit can look configured
+# while doing nothing:
+#   Unknown key 'StartLimitIntervalSec' in section [Service], ignoring.
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -21,22 +63,24 @@ Type=simple
 # Config and secrets live outside the repo. EnvironmentFile is optional; it is
 # the supported place for COFFERDAM_BIND_HOST / COFFERDAM_BIND_PORT.
 # The device token is read from %h/cofferdam/secrets/token — do not put it here
-# unless the file is 0600.
+# unless the file is 0600. No secret may ever be written into this unit.
 Environment=COFFERDAM_HOME=%h/cofferdam
 EnvironmentFile=-%h/cofferdam/workstation.env
 
 WorkingDirectory=%h/cofferdam/slots/a
 ExecStart=%h/cofferdam/slots/a/.venv/bin/python -m cofferdam.workstation
 
+# The rate limit these two work with lives in [Unit] above, where systemd
+# actually reads it.
 Restart=on-failure
-RestartSec=3
+RestartSec=5
 
 # Logs go to the journal: journalctl --user -u cofferdam-workstation -f
 StandardOutput=journal
 StandardError=journal
 
-# Modest hardening. Deliberately NOT sandboxed away from the desktop session:
-# the whole point of this service is to control that session.
+# Modest hardening. Deliberately NOT sandboxed away from the user manager that
+# owns it: the adapter has to be able to talk to that manager.
 #
 # NoNewPrivileges=yes is kept on purpose, and it is why graphical applications
 # are NOT started as children of this service. The flag drops file capabilities
@@ -45,12 +89,16 @@ StandardError=journal
 # to set confinement up — as a child it fails instantly with
 # "snap-confine is packaged without necessary permissions". The adapter instead
 # asks the systemd *user manager* to start each application as its own transient
-# unit: the manager is not under this flag, the application gets its own cgroup
-# (so restarting Cofferdam no longer kills the user's browser), and it inherits
-# the manager's current session environment. See
+# unit: the manager is not under this flag, it holds the real session's live
+# environment (GNOME imports DISPLAY/WAYLAND_DISPLAY/XAUTHORITY into it at
+# login), and the application gets its own cgroup — so restarting Cofferdam does
+# not kill the user's browser. See
 # cofferdam/workstation/adapters/linux_session.py.
 NoNewPrivileges=yes
 PrivateTmp=no
 
 [Install]
+# Headless daemon: default.target only. That is the correct target for a
+# component which must be reachable before login, and it is safe *because*
+# nothing in this unit pulls the graphical session in behind it.
 WantedBy=default.target

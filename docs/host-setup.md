@@ -34,8 +34,9 @@ accepting a request that would go nowhere.
 
 ## 1. Keep the host awake
 
-An always-on host must not suspend, and the graphical session must stay logged
-in (the service needs it to control the desktop).
+An always-on host must not suspend. The API itself does **not** need a logged-in
+desktop — it stays reachable before login and reports GUI capabilities as false
+until a real session exists — but graphical actions do.
 
 ```bash
 sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
@@ -43,8 +44,12 @@ gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'no
 gsettings set org.gnome.desktop.session idle-delay 0
 ```
 
-Enable automatic login (Settings → Users → Automatic Login) so the graphical
-session comes back by itself after a reboot.
+**Optional:** automatic login (Settings → Users → Automatic Login) brings the
+graphical session back by itself after a reboot, so GUI actions become available
+without anyone touching the machine. It is genuinely optional — the API and all
+non-graphical functionality work without it — and it is a real security
+trade-off, since anyone with physical access lands in your session. Cofferdam
+never enables it for you.
 
 ## 2. Install dependencies
 
@@ -109,15 +114,37 @@ The token is never returned by any endpoint and never written to the journal.
 
 ## 7. Install the service
 
-```bash
-mkdir -p ~/.config/systemd/user
-cp ~/cofferdam/slots/a/deploy/cofferdam-workstation.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now cofferdam-workstation
-loginctl enable-linger $USER     # survive logout/reboot
+Use the installer — it is idempotent, backs up anything it replaces, and
+refuses to enable a unit that would break graphical login:
 
+```bash
+~/cofferdam/slots/a/deploy/install-workstation-service.sh --dry-run
+```
+
+```bash
+~/cofferdam/slots/a/deploy/install-workstation-service.sh
+```
+
+```bash
+loginctl enable-linger $USER     # reachable before login; survives logout/reboot
+```
+
+```bash
 systemctl --user status cofferdam-workstation
 journalctl --user -u cofferdam-workstation -f
+```
+
+> **Upgrading from the M1 unit?** Run the installer — it migrates you. The M1
+> unit declared `Wants=graphical-session.target`, which under lingering
+> activated that target at boot and made GNOME refuse every subsequent login
+> ("A graphical session is already running!"). See
+> [`SERVICE_LIFECYCLE.md`](SERVICE_LIFECYCLE.md) for the full analysis, the
+> rollback, and TTY recovery.
+
+To remove it again (this is also the rollback):
+
+```bash
+~/cofferdam/slots/a/deploy/uninstall-workstation-service.sh
 ```
 
 ## 8. Connect from the phone
@@ -150,10 +177,12 @@ well-audited dependencies outside the Trust Core path.
 **Real-run finding (M1 Ubuntu validation, GNOME Wayland session, Ubuntu
 26.04):** `scrot`/`maim`/`import` grab the X11 root window, and under Wayland
 that window is XWayland's empty placeholder — the capture tool exits 0 and
-writes a non-empty PNG, but the image is solid black. The adapter now detects
-`XDG_SESSION_TYPE=wayland` and refuses to offer these three tools as a
-screenshot capability, failing closed (`adapter_unsupported`) instead of
-serving a black image as if it were real. Neither of the two Wayland-native
+writes a non-empty PNG, but the image is solid black. The adapter refuses to
+offer these three tools as a screenshot capability under Wayland, failing
+closed (`adapter_unsupported`) instead of serving a black image as if it were
+real. Which session type applies is read from the **verified graphical
+session's** own environment, never from the daemon's — see the M1.2 finding
+below for why that distinction is load-bearing. Neither of the two Wayland-native
 alternatives worked unattended in this environment either:
 `org.gnome.Shell.Screenshot.Screenshot` over D-Bus returns
 `AccessDenied: Screenshot is not allowed` for a non-portal caller, and
@@ -164,6 +193,21 @@ parent window` warning from `xdg-desktop-portal-gnome`. Installing
 `gnome-screenshot` (not present by default here) is untested but is the
 adapter's preferred tool and the most likely path to a working non-interactive
 capture; that install was not validated in this run.
+
+**Real-run finding (M1.2, 2026-08-04, same host): `screenshot: true` was
+advertised in a Wayland session.** The guard above was correct but was asked
+the wrong question. It read `XDG_SESSION_TYPE` from the **daemon's own**
+environment, and a daemon started at boot by lingering has no such variable —
+GNOME populates the user *manager* at login, not an already-running process. So
+the Wayland check silently did not apply, `scrot` was offered because it exists
+on `PATH`, and the phone showed an enabled Screenshot button. Requesting one
+failed with `scrot: Can't open X display`: a bounded `adapter_failed`, no black
+image and no false success, so this was an advertisement-accuracy defect rather
+than a capture-correctness one. Capability is now derived from the verified
+session returned by `detect_graphical_session()` — the same live source that
+already decided whether GUI actions are possible at all — and a capture runs
+with that session's display variables rather than the daemon's. Wayland screen
+capture itself is still unavailable here; the flag now says so truthfully.
 
 **Real-run finding (M1 Ubuntu validation, GNOME Wayland session, Ubuntu
 26.04): applications reported "succeeded" but never opened.** The service runs
@@ -190,5 +234,8 @@ the browser it opened. The service's hardening is unchanged.
 | `open_application` reports "exited immediately instead of starting" | the application really did fail to start — read the detail; `journalctl --user -u 'cofferdam-app-*'` has the unit's own output |
 | `open_application` says "not installed" | the browser is a snap with a different binary name — check `which firefox` |
 | Phone cannot reach the host | wrong `COFFERDAM_BIND_HOST`, phone not on the tailnet, or `tailscale status` shows the host offline |
-| Service dead after reboot | `loginctl enable-linger` not run, or automatic login disabled |
+| Service dead after reboot | `loginctl enable-linger` not run |
 | `/api/status` reports `"stub": true` | `COFFERDAM_ADAPTER=stub` is set — remove it; the run is not valid otherwise |
+| Screenshot button enabled, then the action fails `scrot: Can't open X display` | the M1.2 over-advertisement, fixed on 2026-08-05. If it reappears, the daemon is deciding session type from its own environment again rather than from `detect_graphical_session()` |
+| **Login loops back to GDM after the password is accepted** | a unit is pulling `graphical-session.target` in before login. Recover from a TTY (Ctrl+Alt+F3): `systemctl --user disable --now cofferdam-workstation.service`. This is the M1 regression — see [`SERVICE_LIFECYCLE.md`](SERVICE_LIFECYCLE.md). Do **not** delete `~/.config`, `~/.local`, `~/.cache`, or reset dconf |
+| Service exits and stops after ~10 tries at boot | its bind address never appeared. `tailscale status`; check `COFFERDAM_BIND_HOST`; raise `COFFERDAM_BIND_WAIT_SECONDS` if the tailnet is slow to come up |
