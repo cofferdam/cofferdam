@@ -12,7 +12,7 @@ from __future__ import annotations
 import socket
 import struct
 import zlib
-from typing import List, Optional
+from typing import List, Optional, Sequence, Tuple
 
 from ..errors import AdapterUnsupported
 from .base import APPLICATION_KEYS, ApplicationLaunch, HostAdapter, HostStatus, Screenshot
@@ -43,11 +43,21 @@ class StubAdapter(HostAdapter):
     name = "stub"
     stub = True
 
-    def __init__(self, config, *, fail: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        config,
+        *,
+        fail: Optional[str] = None,
+        missing_applications: Optional[Sequence[str]] = None,
+    ) -> None:
         super().__init__(config)
         self._fail = fail
+        # Lets a test model "this browser is not installed here" without
+        # touching the real host's PATH.
+        self.missing_applications: Tuple[str, ...] = tuple(missing_applications or ())
         self.launched: List[str] = []
         self.opened_urls: List[str] = []
+        self.opened_with: List[Optional[str]] = []
 
     def host_status(self) -> HostStatus:
         return HostStatus(
@@ -77,11 +87,24 @@ class StubAdapter(HostAdapter):
             raise AdapterUnsupported(f"application not allowlisted: {application}")
         if self._fail == "open_application":
             raise AdapterUnsupported("stub failure: open_application")
+        if application in self.missing_applications:
+            raise AdapterUnsupported(f"application not installed: {application}")
         self.launched.append(application)
         return ApplicationLaunch(application=application, pid=4242, detail="stub")
 
-    def open_url(self, url: str) -> ApplicationLaunch:
+    def open_url(self, url: str, application: Optional[str] = None) -> ApplicationLaunch:
         if self._fail == "open_url":
             raise AdapterUnsupported("stub failure: open_url")
+        if application is not None and application not in APPLICATION_KEYS:
+            raise AdapterUnsupported(f"application not allowlisted: {application}")
+        if application is not None and application in self.missing_applications:
+            raise AdapterUnsupported(f"application not installed: {application}")
         self.opened_urls.append(url)
-        return ApplicationLaunch(application="default-browser", pid=4243, detail="stub")
+        self.opened_with.append(application)
+        return ApplicationLaunch(
+            application=application or "default-browser", pid=4243, detail="stub"
+        )
+
+    def available_applications(self) -> List[str]:
+        """Everything allowlisted, minus whatever a test declared missing."""
+        return [key for key in APPLICATION_KEYS if key not in self.missing_applications]

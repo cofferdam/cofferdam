@@ -43,7 +43,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple  # noqa: F401 - Tuple used in signatures
 
 from ..errors import AdapterError
 from .base import run_fixed
@@ -246,6 +246,7 @@ def launch_in_session(
     *,
     description: str,
     settle_seconds: float = LAUNCH_SETTLE_SECONDS,
+    accept_exit_status: Sequence[int] = (),
 ) -> SessionLaunch:
     """Start ``argv`` as a transient unit of the user manager and watch it.
 
@@ -253,6 +254,12 @@ def launch_in_session(
     most, a value the service already validated (an http/https URL). It is
     passed as separate argument vector elements, never as a string, and never
     through a shell.
+
+    ``accept_exit_status`` lists the *specific* non-zero exit codes this caller
+    knows how to interpret — see ``_DELEGATION_EXIT_STATUS`` in
+    :mod:`~cofferdam.workstation.adapters.linux_x11`. Anything outside it is
+    still a failure, and an accepted code still yields ``state="exited"``, which
+    on its own is **not** success: the caller must corroborate it.
 
     Raises :class:`AdapterError` if the launch could not be handed over, or if
     the process died during the settle window.
@@ -280,10 +287,12 @@ def launch_in_session(
             or ("systemd-run exited " + str(completed.returncode)),
         )
 
-    return _observe(unit, settle_seconds)
+    return _observe(unit, settle_seconds, tuple(accept_exit_status))
 
 
-def _observe(unit: str, settle_seconds: float) -> SessionLaunch:
+def _observe(
+    unit: str, settle_seconds: float, accept_exit_status: Tuple[int, ...] = ()
+) -> SessionLaunch:
     """Watch a transient unit for the whole settle window before judging it.
 
     Returning as soon as the unit looks active would reintroduce the original
@@ -297,16 +306,23 @@ def _observe(unit: str, settle_seconds: float) -> SessionLaunch:
         properties = _show_unit(unit)
         active_state = properties.get("ActiveState", "")
         exit_status = _to_int(properties.get("ExecMainStatus"))
+        expected_exit = exit_status is not None and exit_status in accept_exit_status
 
+        # systemd marks any non-zero exit as ``failed``, so a launcher that
+        # deliberately exits non-zero after handing its request to a running
+        # instance lands here too. Only the exact codes the caller declared are
+        # let through, and they are reported as ``exited`` — still unproven.
         if active_state == "failed":
             _reset_failed(unit + ".service")
+            if expected_exit:
+                return SessionLaunch(unit=unit, pid=None, state="exited", exit_status=exit_status)
             raise AdapterError(
                 "the application exited immediately instead of starting",
                 _failure_detail(properties),
             )
 
         if active_state in ("inactive", "deactivating"):
-            if exit_status not in (0, None):
+            if exit_status not in (0, None) and not expected_exit:
                 _reset_failed(unit + ".service")
                 raise AdapterError(
                     "the application exited immediately instead of starting",

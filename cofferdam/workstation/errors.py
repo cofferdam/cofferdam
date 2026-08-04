@@ -24,6 +24,11 @@ CODE_ADAPTER_FAILED = "adapter_failed"
 CODE_ADAPTER_UNSUPPORTED = "adapter_unsupported"
 CODE_NOT_FOUND = "not_found"
 CODE_INTERNAL = "internal_error"
+# M2A: the registry/browser-profile boundary.
+CODE_CONFIGURATION_INVALID = "configuration_invalid"
+CODE_BROWSER_PROFILE_INVALID = "browser_profile_invalid"
+CODE_DOMAIN_NOT_ALLOWED = "domain_not_allowed"
+CODE_APPLICATION_UNAVAILABLE = "application_unavailable"
 
 
 def bounded_detail(value: Any) -> Optional[str]:
@@ -76,3 +81,45 @@ class AdapterUnsupported(AdapterError):
     """The requested capability does not exist on this host/platform."""
 
     code = CODE_ADAPTER_UNSUPPORTED
+
+
+# ---------------------------------------------------------------------------
+# M2A: refusals at the registry / browser-profile boundary
+#
+# These are :class:`AdapterError` subclasses so that a refused action is
+# recorded as a *failed action* with an accurate code, rather than surfacing as
+# an unexplained internal error. Each one is a deliberate fail-closed outcome:
+# none of them ever degrades into "try something else instead".
+# ---------------------------------------------------------------------------
+
+
+class ConfigurationInvalid(AdapterError):
+    """Local registry configuration is unusable, so the action cannot proceed.
+
+    Absent registries are valid and empty; only a file that exists and is wrong
+    reaches this. Continuing would mean acting with an unknown policy.
+    """
+
+    code = CODE_CONFIGURATION_INVALID
+
+
+class BrowserProfileInvalid(AdapterError):
+    """The requested browser profile does not exist, or is disabled.
+
+    Never falls back to another profile: an explicit request for a profile is a
+    statement about *which* browser context may see the URL.
+    """
+
+    code = CODE_BROWSER_PROFILE_INVALID
+
+
+class DomainNotAllowed(AdapterError):
+    """The selected profile's domain policy does not permit this host."""
+
+    code = CODE_DOMAIN_NOT_ALLOWED
+
+
+class ApplicationUnavailable(AdapterError):
+    """The application a profile selects is not installed on this host."""
+
+    code = CODE_APPLICATION_UNAVAILABLE

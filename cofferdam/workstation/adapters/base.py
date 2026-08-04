@@ -27,7 +27,11 @@ from ..errors import AdapterError
 
 # Logical application keys. Callers may only ever send one of these strings;
 # the mapping to a real executable is the adapter's private business.
-APPLICATION_KEYS: tuple = ("firefox", "chromium", "google-chrome")
+#
+# ``opera`` joined the list in M2A because the browser-profile registry can
+# select it. It is appended rather than inserted so the legacy "first installed
+# browser wins" URL path keeps choosing exactly what it chose before.
+APPLICATION_KEYS: tuple = ("firefox", "chromium", "google-chrome", "opera")
 
 SUBPROCESS_TIMEOUT_SECONDS = 20
 
@@ -90,8 +94,14 @@ class HostAdapter(abc.ABC):
         """Launch an allowlisted application by logical key."""
 
     @abc.abstractmethod
-    def open_url(self, url: str) -> ApplicationLaunch:
-        """Open a validated http(s) URL in the host's browser."""
+    def open_url(self, url: str, application: Optional[str] = None) -> ApplicationLaunch:
+        """Open a validated http(s) URL in a browser.
+
+        ``application`` is either ``None`` — meaning "this host's usual
+        browser", the pre-M2A behaviour — or one of :data:`APPLICATION_KEYS`,
+        already resolved from a browser profile by the service. It is a logical
+        key, never a program name: the adapter still owns the mapping.
+        """
 
     def available_applications(self) -> List[str]:
         """Subset of :data:`APPLICATION_KEYS` this host can actually launch."""
