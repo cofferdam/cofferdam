@@ -13,6 +13,8 @@ route                                        auth  purpose
 ``POST /api/actions/open-application``       yes   convenience: open_application
 ``POST /api/actions/open-url``               yes   convenience: open_url
 ``GET  /api/screenshots/{action_id}``        yes   PNG artifact
+``GET  /api/registries``                     yes   registry load/validation status
+``GET  /api/registries/{registry_name}``     yes   one validated registry
 ``WS   /ws``                                 yes   live events
 ``GET  /`` and static assets                 no    the PWA shell itself
 ===========================================  ====  =============================
@@ -20,7 +22,16 @@ route                                        auth  purpose
 ``/healthz`` is intentionally unauthenticated and intentionally empty of host
 detail: it exists so systemd and (later) Guardian can probe liveness without a
 token. The PWA shell is public because the token is entered *into* it; every
-route that reveals or changes host state requires the token.
+route that reveals or changes host state requires the token — the registries
+included, since they describe the user's machine and household.
+
+**The registry routes are read-only, and that is a deliberate boundary rather
+than an unfinished feature.** M2A ships no ``POST``/``PUT``/``PATCH``/
+``DELETE`` for registries: nothing reachable over the network can create or
+change the configuration that decides which applications exist and which
+domains a browser profile may open. Editing is a text editor and a service
+that re-reads the file. Bringing write access inside the API is its own
+milestone, with its own review.
 """
 
 from __future__ import annotations
@@ -51,12 +62,14 @@ from .actions import (
 from .adapters import select_adapter
 from .config import Config, load_config, load_or_create_token
 from .errors import (
+    CODE_CONFIGURATION_INVALID,
     CODE_INTERNAL,
     CODE_NOT_FOUND,
     CODE_UNAUTHORIZED,
     ApiError,
 )
 from .events import STATUS_REFRESH_SECONDS, TOKEN_SUBPROTOCOL, EventHub
+from .registries import REGISTRY_NAMES, SUPPORTED_VERSION, load_registries
 from .store import ActionStore, screenshot_path
 
 WEB_ROOT = Path(__file__).resolve().parents[2] / "web"
@@ -156,7 +169,10 @@ def create_app(
         return {
             "service": {
                 "api_version": WORKSTATION_API_VERSION,
-                "milestone": "M1",
+                # The milestone this build implements. It says nothing about
+                # validation: M1's post-reboot gate is tracked in STATUS.md and
+                # is still open.
+                "milestone": "M2A",
                 "actions": list(ACTION_NAMES),
                 "event_clients": hub.client_count,
             },
@@ -210,6 +226,47 @@ def create_app(
         if not path.is_file():
             raise ApiError(code=CODE_NOT_FOUND, message="screenshot not found", status_code=404)
         return FileResponse(path, media_type="image/png")
+
+    # -- registries (read-only) ----------------------------------------------
+
+    @app.get("/api/registries", dependencies=[Depends(require_token)])
+    async def list_registries() -> Dict[str, Any]:
+        """Per-registry load and validation status. Never a filesystem path.
+
+        A machine with no registry files reports six empty, valid version-1
+        registries — "not configured" is a normal state, not an error.
+        """
+        registries = await run_in_threadpool(load_registries, config)
+        return {
+            "supported_version": SUPPORTED_VERSION,
+            "registries": registries.summary(),
+        }
+
+    @app.get("/api/registries/{registry_name}", dependencies=[Depends(require_token)])
+    async def get_registry(registry_name: str) -> Dict[str, Any]:
+        if registry_name not in REGISTRY_NAMES:
+            # The requested name is not echoed back: it is arbitrary request
+            # text, and a 404 does not need to repeat it to be useful.
+            raise ApiError(
+                code=CODE_NOT_FOUND,
+                message="unknown registry",
+                status_code=404,
+                detail="known registries: " + ", ".join(REGISTRY_NAMES),
+            )
+        registries = await run_in_threadpool(load_registries, config)
+        load = registries.load(registry_name)
+        if not load.ok:
+            # ``describe()`` is assembled from a code-owned vocabulary plus a
+            # structural location — no file content, no path, no exception text.
+            raise ApiError(
+                code=CODE_CONFIGURATION_INVALID,
+                message="this registry's local configuration is invalid",
+                status_code=500,
+                detail=load.error.describe() if load.error else None,
+            )
+        payload = load.registry.to_dict()
+        payload["source"] = load.registry.source
+        return payload
 
     # -- live events ---------------------------------------------------------
 
