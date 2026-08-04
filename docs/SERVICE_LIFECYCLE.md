@@ -496,12 +496,40 @@ It overrides `ExecStart` and `WorkingDirectory` and nothing else — `COFFERDAM_
 `EnvironmentFile`, the device token, and the state directory are all inherited
 unchanged, so no secret is copied and no state is duplicated.
 
-Remove it once this branch is merged and `slots/a` carries the code:
+#### When it may be removed
+
+**Merging this branch is not sufficient on its own.** The drop-in is what keeps
+the live service on code that contains the lifecycle fix. Removing it returns
+`ExecStart` to `~/cofferdam/slots/a`, which currently holds the paused PR #9 /
+M2A branch and does **not** contain the merged lifecycle fixes — so removing it
+today would put the login-blocking regression back on the live runtime.
+
+The drop-in, the validation worktree, its branch, and its virtualenv may be
+removed only when **all** of the following are true:
+
+1. The replacement live runtime checkout contains the merged lifecycle fix
+   commit, or byte-identical equivalent code.
+2. The replacement runtime has passed focused tests and live service checks.
+3. `ExecStart` and `WorkingDirectory` have been deliberately changed to that
+   replacement runtime.
+4. The service has restarted successfully.
+5. The effective unit still has no `graphical-session.target` coupling.
+6. Login/reboot safety is not being weakened.
+7. An exact rollback path has been recorded.
+
+Until every one of those holds, leave the drop-in in place. Once they do, the
+removal is:
 
 ```bash
 rm -rf ~/.config/systemd/user/cofferdam-workstation.service.d
 systemctl --user daemon-reload
 systemctl --user restart cofferdam-workstation.service
+```
+
+Then re-check condition 5 against systemd, not against the file:
+
+```bash
+systemctl --user show cofferdam-workstation.service -p Wants -p After -p ExecStart -p WorkingDirectory
 ```
 
 > Note: this branch is M1-based, so its browser allowlist is
