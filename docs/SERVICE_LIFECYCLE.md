@@ -398,12 +398,88 @@ logout/login does not prove it is gone.
 | 7 | Daemon restart → GNOME survives, browsers survive | **passed** — gnome-shell PID unchanged; Opera and Firefox both survived |
 | 8 | Browser launch after login → real window, no false success | **passed** — Firefox 0→1 process, real PID, transient unit active |
 | 9 | Bind wait bounded; instant when the address exists | **passed** — 3.00s on an unassigned address, 0.000s on the live one |
-| 10 | **First reboot** → boots normally, login succeeds, daemon auto-starts | **pending — needs reboot** |
-| 11 | **Second reboot** → same, no loop recurrence | **pending — needs reboot** |
-| 12 | **API before login** → reachable, GUI capabilities false | **pending — needs reboot** |
-| 13 | Full Tailscale outage → bounded degraded state end-to-end | pending — only the wait logic is verified in isolation |
+| 10 | **First reboot** → boots normally, login succeeds, daemon auto-starts | **passed** — boot `-1`, 2026-08-04 |
+| 11 | **Second reboot** → same, no loop recurrence | **passed** — boot `0`, 2026-08-04 |
+| 12 | **API before login** → reachable, GUI capabilities false, actions refused | **passed** — panel reachable, GUI reported unavailable, buttons disabled |
+| 13 | Post-login capability recovery | **passed** — capabilities returned; real Firefox launch, PID 11414 |
+| 14 | Bind wait exercised **in production** at boot | **passed** — see below |
+| 15 | Full Tailscale outage → bounded degraded state end-to-end | pending — only the wait logic is verified, in isolation |
+
+**The login-loop regression did not reproduce across the full validation
+sequence.** Counting the failure signature per boot:
+
+| Boots | Unit state | `A graphical session is already running!` |
+|---|---|---|
+| `-6`, `-5`, `-4` | old unit enabled | 2, 3, 2 |
+| `-3` | disabled (control) | 0 |
+| `-2`, `-1`, `0` | **corrected unit enabled** | **0, 0, 0** |
+
+And the boot-time ordering is now inverted relative to the regression. On boot
+`0`, the lingering manager `systemd[2443]` started Cofferdam **without** reaching
+the graphical target, and reached it only *after* the real login:
+
+```
+19:02:50  systemd[2443]: pam_unix(systemd-user:session): session opened   ← lingering
+19:02:50  systemd[2443]: Started cofferdam-workstation.service            ← no graphical target
+19:03:10  gdm-password][5032]: pam_unix(gdm-password:session): session opened  ← real login
+19:03:11  systemd[2443]: Reached target graphical-session.target          ← after login, by GNOME
+```
+
+Compare the failing boot, where the same manager reached the target 23s *before*
+any login. This is the exact inversion the fix was meant to produce.
+
+### The bind wait fired in production
+
+Boot `0` is direct evidence, not a simulation — `tailscaled` had no address when
+the daemon started, and the wait absorbed it:
+
+```
+19:02:50  [cofferdam] binding to 100.116.199.35 — ensure this is a private ... interface
+19:02:50  [cofferdam] 100.116.199.35 is not assigned to any interface yet — waiting up to 120s
+19:02:53  INFO:     Uvicorn running on http://100.116.199.35:7101
+```
+
+`NRestarts=0`. Under the old unit this was an exit and a 3s respawn loop.
 
 Reboot, logout, and visual confirmation are **not** performed automatically.
+
+### Known issue — screenshot capability is over-advertised after login
+
+Found during boot-`0` validation, and **not** a false success.
+
+This does not affect the pre-login contract: before login the graphical target
+is inactive, so *every* GUI capability is correctly `false`. The problem appears
+**after** login, on a daemon that was started at boot.
+
+`linux_x11._screenshot_tool()` decides whether to reject the X11-root capture
+tools by reading **its own** `os.environ["XDG_SESSION_TYPE"]`. A daemon started
+at boot under lingering has an empty environment — GNOME populates the *user
+manager*, not this already-running process — so once a session exists the
+Wayland guard is skipped, `scrot` is offered, and `/api/status` reports
+`screenshot: true` on a Wayland host where it cannot work.
+
+Requesting one then **fails closed**, verified live:
+
+```
+status: failed
+error : adapter_failed — "screenshot tool failed (scrot)"
+detail: "scrot: Can't open X display. It *is* running, yeah? [NULL]"
+```
+
+So the "never report success" invariant holds, and no black frame is returned.
+The defect is that the phone offers a control that will fail, which contradicts
+the capability contract.
+
+It is the same family as the login loop — trusting the daemon's frozen
+environment instead of the live session — and
+`linux_session.detect_graphical_session()` already does it correctly via
+`user_manager_environment()`. The fix is to read the session type from the same
+live source. Deliberately **not** bundled into this change, which is scoped to
+the login-lifecycle regression.
+
+Note this is why the same host reported `screenshot: false` earlier in
+validation: that instance had been restarted *after* login and so inherited
+`XDG_SESSION_TYPE=wayland`.
 
 ### Validation runtime (temporary)
 

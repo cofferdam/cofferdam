@@ -44,16 +44,16 @@ enough. Background: [`../SERVICE_LIFECYCLE.md`](../SERVICE_LIFECYCLE.md).
 
 | # | Step | Expected | Result |
 |---|---|---|---|
-| L1 | With the service **disabled**, log in | login succeeds | |
-| L2 | Install via `deploy/install-workstation-service.sh`, then log out and back in | first login succeeds; **no** return to GDM | |
-| L3 | `systemctl --user list-dependencies --reverse graphical-session.target` | **no** Cofferdam unit appears | |
-| L4 | Log out | daemon still active; GUI capabilities `false`; GNOME logs out normally and is **not** terminated by Cofferdam | |
-| L5 | Log in again | capabilities return; `open_url` works; no stale session values | |
-| L6 | Reboot **twice**, logging in each time | boots normally both times; no loop; daemon auto-starts | |
-| L7 | Before logging in after a reboot, check `/api/status` from the phone | reachable; `screenshot`/`open_application`/`open_url` all `false`; GUI actions rejected, never reported as succeeded | |
-| L8 | `systemctl --user restart cofferdam-workstation` while a browser is open | GNOME survives; the **browser stays open** (it has its own cgroup) | |
-| L9 | `sudo tailscale down`, wait, then `sudo tailscale up` | bounded degraded state; no restart storm in `journalctl --user -u cofferdam-workstation`; no GNOME interaction; recovers | |
-| L10 | Check the boot journal for `A graphical session is already running!` | **absent** | |
+| L1 | With the service **disabled**, log in | login succeeds | **passed** |
+| L2 | Install via `deploy/install-workstation-service.sh`, then log out and back in | first login succeeds; **no** return to GDM | **passed** |
+| L3 | `systemctl --user list-dependencies --reverse graphical-session.target` | **no** Cofferdam unit appears | **passed** |
+| L4 | Log out | daemon still active; GUI capabilities `false`; GNOME logs out normally and is **not** terminated by Cofferdam | **passed** |
+| L5 | Log in again | capabilities return; `open_url` works; no stale session values | **passed** |
+| L6 | Reboot **twice**, logging in each time | boots normally both times; no loop; daemon auto-starts | **passed** (two reboots) |
+| L7 | Before logging in after a reboot, check `/api/status` from the phone | reachable; `screenshot`/`open_application`/`open_url` all `false`; GUI actions rejected, never reported as succeeded | **passed** |
+| L8 | `systemctl --user restart cofferdam-workstation` while a browser is open | GNOME survives; the **browser stays open** (it has its own cgroup) | **passed** (Opera+Firefox survived) |
+| L9 | `sudo tailscale down`, wait, then `sudo tailscale up` | bounded degraded state; no restart storm in `journalctl --user -u cofferdam-workstation`; no GNOME interaction; recovers | partial — wait logic only |
+| L10 | Check the boot journal for `A graphical session is already running!` | **absent** | **passed** (0 occurrences) |
 
 ## Additional checks worth doing while you are there
 

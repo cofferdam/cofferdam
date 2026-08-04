@@ -57,9 +57,18 @@ Trust Core module, PR0 → PR3c1:
   guards so this class of mistake cannot return silently. Recorded as `DECISIONS.md`
   D-2026-08-04-1 and D-2026-08-04-2.
 
-  **The regression is not yet confirmed fixed.** Static validation and 546 automated tests pass,
-  but the real reboot and login checks (`docs/checklists/m1-ubuntu-validation.md` steps L1–L10)
-  require physical logout/reboot and have **not** been performed.
+  **Validated on the real Ubuntu host (2026-08-04).** 547 automated tests pass on both CI paths,
+  and the required manual gates were observed: logout/login, **two consecutive reboots**,
+  pre-login API access with graphical capabilities reported false and actions refused, post-login
+  capability recovery with a real browser launch, daemon-restart isolation (GNOME and both open
+  browsers survived), and the bounded bind wait firing in production at boot with `NRestarts=0`.
+  The failure signature `A graphical session is already running!` occurred 2–3 times per boot on
+  the three boots with the old unit and **zero times across all three boots with the corrected
+  unit**. See the validation record in [`docs/SERVICE_LIFECYCLE.md`](docs/SERVICE_LIFECYCLE.md).
+
+  Still open: a full Tailscale-outage test end-to-end (only the wait logic is verified, in
+  isolation), and a known issue where screenshot capability is over-advertised before login —
+  it fails closed rather than reporting false success, and is recorded but not fixed here.
 
 ## Planned (active roadmap — see [`ROADMAP.md`](ROADMAP.md))
 
