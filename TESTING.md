@@ -175,6 +175,29 @@ symlink semantics differ between them.
   `socket`/`subprocess` sabotaged while writing only under `.cofferdam/` and mutating no target).
   Symlink cases skip cleanly where the platform cannot create a symlink.
 
+- **M1.1 (service lifecycle, structural):** `tests/test_service_unit_lifecycle.py` asserts against
+  the shipped unit files and source tree rather than runtime behaviour, because the login-loop
+  regression was a *declaration* bug that no runtime test would have caught. It fails if a shipped
+  unit names `graphical-session.target` in an activating directive
+  (`Wants`/`Requires`/`Requisite`/`BindsTo`/`PartOf`/`Upholds`/`WantedBy`/`RequiredBy`), if an
+  always-on unit merely orders against it, if a session-scoped unit is `WantedBy=default.target`,
+  if anything shipped starts/stops/restarts/isolates that target, or if the session adapter uses
+  anything but a read-only query. It also fails on: a unit pinning
+  `DISPLAY`/`WAYLAND_DISPLAY`/`XAUTHORITY`, or an entry point requiring them; an unbounded or
+  sub-1s restart policy; any occurrence of `systemctl --user exit`,
+  `loginctl terminate-user`/`terminate-session`, `gnome-session-quit`, broad `pkill`/`killall`, or
+  direct process signalling (`os.kill`, `SIGKILL`, `.terminate()`); a secret or wildcard bind in a
+  unit or script; and an installer/uninstaller that touches a user configuration tree, dconf, GNOME
+  settings, or automatic login. Comment lines are stripped before matching, so a unit may
+  *document* the forbidden directives at length without tripping its own guard — and the
+  wildcard-bind check parses real string literals with `ast`, so prose forbidding a wildcard is not
+  mistaken for one. Alongside it, `tests/test_workstation_bind_wait.py` pins that waiting for the
+  private bind address is **bounded** and never widens the bind, and `tests/test_linux_session.py`
+  pins session identity: detection reports the current session generation, a stale post-logout
+  environment is not trusted even when the compositor socket still exists, and a launch is refused
+  if the session ended or changed. All of these are standard-library only, so they run on the
+  stdlib-only CI path too.
+
 ## What is not yet covered
 
 The `git apply` executor (PR3c2) and the audit chain (PR3d) are not yet implemented; the

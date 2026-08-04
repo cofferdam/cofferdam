@@ -6,7 +6,46 @@ release.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Ubuntu graphical login loop caused by the workstation service (2026-08-04).** Enabling
+  `cofferdam-workstation.service` made GNOME unable to complete a login: the password was
+  accepted, the desktop began to load, and the session died back to GDM — every time. The unit
+  declared `Wants=graphical-session.target` while being `WantedBy=default.target` on a host with
+  `loginctl enable-linger`. Lingering starts the user manager at boot; `default.target` pulled
+  the service in; and `Wants=` **activated** `graphical-session.target` with no compositor behind
+  it. gnome-session then found the target it is itself supposed to activate already active,
+  refused with "A graphical session is already running!", and quit. Confirmed against the journal
+  across four failing boots versus one working control boot. The unit no longer references
+  `graphical-session.target` in any form; session detection was already a read-only query and
+  stays one. Recorded as `DECISIONS.md` D-2026-08-04-1. Full analysis, migration, rollback, and
+  TTY recovery in [`docs/SERVICE_LIFECYCLE.md`](docs/SERVICE_LIFECYCLE.md).
+- **Restart storm when the Tailscale address was not up yet (2026-08-04).** The daemon binds
+  directly to its private address, which frequently does not exist yet when lingering starts it
+  at boot; the bind failed, the process exited, and `StartLimitIntervalSec=0` disabled the rate
+  limiter, so it respawned every 3s indefinitely. It now waits for the address, bounded by
+  `COFFERDAM_BIND_WAIT_SECONDS` (default 120), then exits cleanly. The unit's restart policy is
+  bounded (10 attempts / 5 minutes). The service still never falls back to a wildcard bind.
+
 ### Added
+
+- **Service lifecycle documentation and enforcement (2026-08-04):**
+  [`docs/SERVICE_LIFECYCLE.md`](docs/SERVICE_LIFECYCLE.md) separates directly observed facts from
+  supported interpretation and unproven assumptions, and documents daemon behaviour before,
+  during, and after login, at logout, and across repeated logins.
+  `deploy/install-workstation-service.sh` performs a transactional, idempotent migration
+  (inventory → back up Cofferdam-owned files → disable the old enablement path → install →
+  verify → enable) and refuses to enable a unit that names `graphical-session.target`.
+  `deploy/uninstall-workstation-service.sh` is the rollback and TTY-recovery path; it resolves
+  every symlink before unlinking, so it can only ever remove its own.
+  `tests/test_service_unit_lifecycle.py` fails if any unit pulls, starts, or stops the graphical
+  target; if a prohibited session-termination command or a broad `pkill`/`killall` appears; if a
+  restart policy is unbounded; if a unit embeds a secret or a wildcard bind; or if an installer
+  touches unrelated user configuration.
+- **Session identity carried from detection through to launch (2026-08-04):** GUI actions record
+  the graphical session generation they were authorised against, and are refused if the session
+  ended or changed before the application starts — so a request can never be delivered into a
+  different session after a logout/login.
 
 - **Open-source readiness (docs only, 2026-08-01):** `CONTRIBUTING.md` (development setup,
   worktree workflow, action/adapter proposal rules, platform-evidence expectations, review

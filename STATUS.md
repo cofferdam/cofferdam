@@ -44,6 +44,32 @@ Trust Core module, PR0 → PR3c1:
   reboot survival, Tailscale binding, and real phone-over-tailnet access. Run
   `docs/checklists/m1-ubuntu-validation.md` on the real host; stub-adapter results do not count.
 
+- **M1.1 — service lifecycle correction.** Branch
+  `fix/workstation-service-login-lifecycle`. Fixes a **login-blocking regression**: the M1 unit's
+  `Wants=graphical-session.target`, combined with `WantedBy=default.target` and lingering,
+  activated the graphical target at boot with nothing behind it, so GNOME refused every
+  subsequent login ("A graphical session is already running!") and bounced back to GDM. Root
+  cause verified in the journal across four failing boots against one working control boot.
+  Also fixes an unbounded restart storm when the Tailscale bind address is not up yet at boot.
+
+  Adds `docs/SERVICE_LIFECYCLE.md`, a transactional migration installer, an uninstaller that
+  doubles as rollback and TTY recovery, and `tests/test_service_unit_lifecycle.py` — structural
+  guards so this class of mistake cannot return silently. Recorded as `DECISIONS.md`
+  D-2026-08-04-1 and D-2026-08-04-2.
+
+  **Validated on the real Ubuntu host (2026-08-04).** 547 automated tests pass on both CI paths,
+  and the required manual gates were observed: logout/login, **two consecutive reboots**,
+  pre-login API access with graphical capabilities reported false and actions refused, post-login
+  capability recovery with a real browser launch, daemon-restart isolation (GNOME and both open
+  browsers survived), and the bounded bind wait firing in production at boot with `NRestarts=0`.
+  The failure signature `A graphical session is already running!` occurred 2–3 times per boot on
+  the three boots with the old unit and **zero times across all three boots with the corrected
+  unit**. See the validation record in [`docs/SERVICE_LIFECYCLE.md`](docs/SERVICE_LIFECYCLE.md).
+
+  Still open: a full Tailscale-outage test end-to-end (only the wait logic is verified, in
+  isolation), and a known issue where screenshot capability is over-advertised before login —
+  it fails closed rather than reporting false success, and is recorded but not fixed here.
+
 ## Planned (active roadmap — see [`ROADMAP.md`](ROADMAP.md))
 
 - Guardian/Supervisor + manual recovery command surface, Runtime A/B slots, process/window/

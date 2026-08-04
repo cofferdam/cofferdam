@@ -53,13 +53,28 @@ def _show(active_state: str, sub_state: str = "", exit_status: str = "", pid: st
 
 
 class _FakeSystemd:
-    """Scripts the three control commands the module issues."""
+    """Scripts the control commands the module issues.
 
-    def __init__(self, *, target: str = "active", environment: str = "", show=()):
+    ``target_generation`` stands in for systemd's
+    ``ActiveEnterTimestampMonotonic``: the marker that changes when the
+    graphical session is torn down and a new one starts. Tests mutate it to
+    simulate a logout/login happening mid-request.
+    """
+
+    def __init__(
+        self,
+        *,
+        target: str = "active",
+        environment: str = "",
+        show=(),
+        target_generation: str = "111222333",
+    ):
         self.target = target
         self.environment = environment
         self.show_sequence = list(show)
+        self.target_generation = target_generation
         self.launched = None
+        self.target_queries = 0
 
     def __call__(self, argv, timeout=None):
         argv = list(argv)
@@ -68,8 +83,18 @@ class _FakeSystemd:
             return _completed()
         if "show-environment" in argv:
             return _completed(self.environment)
-        if "is-active" in argv:
-            return _completed(self.target, returncode=0 if self.target == "active" else 3)
+        if "show" in argv and "graphical-session.target" in argv:
+            # Read-only state query. The module must never ask systemd to
+            # *start* this target — see the login-loop regression.
+            self.target_queries += 1
+            for forbidden in ("start", "stop", "restart", "isolate"):
+                self.assert_not_in(forbidden, argv)
+            return _completed(
+                "ActiveState="
+                + self.target
+                + "\nActiveEnterTimestampMonotonic="
+                + (self.target_generation if self.target == "active" else "0")
+            )
         if "show" in argv:
             if not self.show_sequence:
                 raise AssertionError("ran out of scripted 'systemctl show' results")
@@ -80,6 +105,11 @@ class _FakeSystemd:
         if "reset-failed" in argv:
             return _completed()
         raise AssertionError("unexpected command: " + " ".join(argv))
+
+    @staticmethod
+    def assert_not_in(word, argv) -> None:
+        if word in argv:
+            raise AssertionError("module tried to " + word + " the graphical session target")
 
 
 class GraphicalSessionDetectionTests(unittest.TestCase):
@@ -230,6 +260,118 @@ class VerifiedLaunchTests(unittest.TestCase):
             with self.assertRaises(AdapterError) as ctx:
                 launch_in_session(["/usr/bin/firefox"], description="test")
         self.assertIn("Failed to connect to bus", ctx.exception.detail or "")
+
+
+class SessionIdentityTests(unittest.TestCase):
+    """A GUI action must land in the session it was authorised against.
+
+    The daemon is long-lived and survives logout, so "a graphical session is
+    active" is not enough on its own: the session that is active when the
+    application is finally launched has to be the *same* one that was checked
+    when the request was accepted.
+    """
+
+    def setUp(self) -> None:
+        patcher = patch.object(linux_session, "LAUNCH_POLL_SECONDS", 0.01)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _live_session(self, runtime_dir: str, generation: str) -> _FakeSystemd:
+        (Path(runtime_dir) / "wayland-0").write_text("", encoding="utf-8")
+        return _FakeSystemd(
+            target="active",
+            target_generation=generation,
+            environment=(
+                "XDG_SESSION_TYPE=wayland\nWAYLAND_DISPLAY=wayland-0\nXDG_RUNTIME_DIR=" + runtime_dir
+            ),
+            show=[_show("active", "running", "0", "4242")],
+        )
+
+    def test_detection_reports_the_current_session_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as runtime_dir:
+            fake = self._live_session(runtime_dir, "555000")
+            with patch.object(linux_session, "run_fixed", fake):
+                session = detect_graphical_session()
+        self.assertTrue(session.available)
+        self.assertEqual(session.session_id, "555000")
+
+    def test_an_inactive_target_reports_no_session_id(self) -> None:
+        fake = _FakeSystemd(target="inactive", environment="XDG_SESSION_TYPE=wayland")
+        with patch.object(linux_session, "run_fixed", fake):
+            session = detect_graphical_session()
+        self.assertFalse(session.available)
+        self.assertIsNone(session.session_id)
+
+    def test_stale_session_env_after_logout_is_not_trusted(self) -> None:
+        """The manager keeps DISPLAY/WAYLAND_DISPLAY after logout under linger.
+
+        The socket may even still exist. The target being inactive is what
+        decides, so capabilities go false rather than a launch going nowhere.
+        """
+        with tempfile.TemporaryDirectory() as runtime_dir:
+            (Path(runtime_dir) / "wayland-0").write_text("", encoding="utf-8")
+            fake = _FakeSystemd(
+                target="inactive",
+                environment=(
+                    "XDG_SESSION_TYPE=wayland\n"
+                    "WAYLAND_DISPLAY=wayland-0\n"
+                    "XDG_RUNTIME_DIR=" + runtime_dir
+                ),
+            )
+            with patch.object(linux_session, "run_fixed", fake):
+                session = detect_graphical_session()
+        self.assertFalse(session.available)
+        self.assertIsNone(session.session_id)
+
+    def test_launch_into_the_same_session_is_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as runtime_dir:
+            fake = self._live_session(runtime_dir, "555000")
+            with patch.object(linux_session, "run_fixed", fake):
+                launch = launch_in_session(
+                    ["/usr/bin/firefox"],
+                    description="test",
+                    settle_seconds=0.05,
+                    expect_session="555000",
+                )
+        self.assertEqual(launch.state, "running")
+
+    def test_launch_is_refused_when_the_session_changed(self) -> None:
+        """Logout + login between accepting the request and launching it."""
+        with tempfile.TemporaryDirectory() as runtime_dir:
+            fake = self._live_session(runtime_dir, "999999")
+            with patch.object(linux_session, "run_fixed", fake):
+                with self.assertRaises(AdapterError) as ctx:
+                    launch_in_session(
+                        ["/usr/bin/firefox"],
+                        description="test",
+                        settle_seconds=0.05,
+                        expect_session="555000",
+                    )
+        self.assertIn("session changed", ctx.exception.message)
+        self.assertIsNone(fake.launched, "nothing may be launched into a different session")
+
+    def test_launch_is_refused_when_the_session_ended(self) -> None:
+        fake = _FakeSystemd(target="inactive")
+        with patch.object(linux_session, "run_fixed", fake):
+            with self.assertRaises(AdapterError) as ctx:
+                launch_in_session(
+                    ["/usr/bin/firefox"],
+                    description="test",
+                    settle_seconds=0.05,
+                    expect_session="555000",
+                )
+        self.assertIn("session ended", ctx.exception.message)
+        self.assertIsNone(fake.launched)
+
+    def test_detection_never_asks_systemd_to_start_the_target(self) -> None:
+        """The regression guard, at runtime: detection activates nothing."""
+        with tempfile.TemporaryDirectory() as runtime_dir:
+            fake = self._live_session(runtime_dir, "555000")
+            with patch.object(linux_session, "run_fixed", fake):
+                detect_graphical_session()
+        # _FakeSystemd asserts internally that no start/stop/restart/isolate verb
+        # reaches the target; this pins that the query happened at all.
+        self.assertEqual(fake.target_queries, 1)
 
 
 if __name__ == "__main__":  # pragma: no cover

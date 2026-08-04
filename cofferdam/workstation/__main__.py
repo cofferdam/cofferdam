@@ -8,17 +8,47 @@ service says so explicitly on stderr so an accidental public bind is visible.
 The device token is printed **once, to stderr, only when it was just
 generated**, so the maintainer can copy it into the phone. It is never printed
 on subsequent starts and never written to logs.
+
+Waiting for the bind address — an M1.1 finding
+---------------------------------------------
+The daemon starts at boot through lingering, and ``tailscaled`` often has no
+address assigned yet at that moment. Binding straight to the configured
+Tailscale IP then failed with ``EADDRNOTAVAIL`` and the process exited, which
+under the old unit's ``Restart=on-failure`` plus ``StartLimitIntervalSec=0``
+meant a respawn every three seconds, forever.
+
+The fix is a *bounded* wait: poll until the address becomes assignable, up to
+``COFFERDAM_BIND_WAIT_SECONDS`` (default 120), then give up cleanly with a
+diagnostic. Falling back to a wildcard bind would turn a private service into a
+public one, so it is never done. Together with the unit's ``StartLimitBurst``,
+a permanently missing address now produces a bounded degraded state instead of
+a restart storm.
 """
 
 from __future__ import annotations
 
 import argparse
+import errno
 import ipaddress
+import os
+import socket as socket_module
 import sys
+import time
 from typing import Optional, Sequence
 
 from .config import load_config, load_or_create_token
-from .service import create_app
+
+# ``create_app`` is imported inside main() rather than here: it pulls in
+# FastAPI, and keeping this module importable with the standard library alone
+# lets the boot-safety logic below (bind waiting, loopback detection) be tested
+# on the stdlib-only CI path, where a missing extra would otherwise be an
+# import error rather than a test result.
+
+# How long to wait for a configured non-loopback address (e.g. Tailscale) to be
+# assigned to a local interface before giving up.
+ENV_BIND_WAIT = "COFFERDAM_BIND_WAIT_SECONDS"
+DEFAULT_BIND_WAIT_SECONDS = 120.0
+BIND_POLL_SECONDS = 2.0
 
 
 def _is_loopback(host: str) -> bool:
@@ -26,6 +56,69 @@ def _is_loopback(host: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return host in ("localhost", "")
+
+
+def _address_assignable(host: str) -> bool:
+    """True if ``host`` is an address this machine can currently bind to.
+
+    Binds to port 0 and closes immediately: that answers "does the interface
+    carrying this address exist yet" without reserving the real port or racing
+    the server about to take it.
+    """
+    for family in (socket_module.AF_INET, socket_module.AF_INET6):
+        try:
+            info = socket_module.getaddrinfo(host, 0, family, socket_module.SOCK_STREAM)
+        except socket_module.gaierror:
+            continue
+        for *_, sockaddr in info:
+            probe = socket_module.socket(family, socket_module.SOCK_STREAM)
+            try:
+                probe.bind(sockaddr)
+                return True
+            except OSError as exc:
+                # EADDRNOTAVAIL is the "interface is not up yet" case worth
+                # waiting on. Anything else (EACCES, EADDRINUSE) is a real
+                # condition that waiting will not resolve, so stop waiting and
+                # let the bind itself report it.
+                if exc.errno != errno.EADDRNOTAVAIL:
+                    return True
+            finally:
+                probe.close()
+    return False
+
+
+def _bind_wait_seconds() -> float:
+    raw = os.environ.get(ENV_BIND_WAIT)
+    if raw is None:
+        return DEFAULT_BIND_WAIT_SECONDS
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return DEFAULT_BIND_WAIT_SECONDS
+
+
+def wait_for_bind_address(host: str, timeout: float, *, poll: float = BIND_POLL_SECONDS) -> bool:
+    """Block until ``host`` is assignable, or ``timeout`` elapses.
+
+    Returns True if the address became available. Never falls back to another
+    address: a private service that cannot reach its private interface has to
+    stay down rather than move to a public one.
+    """
+    if _address_assignable(host):
+        return True
+    deadline = time.monotonic() + timeout
+    print(
+        f"[cofferdam] {host} is not assigned to any interface yet — waiting up to "
+        f"{timeout:.0f}s for it (is tailscaled still coming up?).",
+        file=sys.stderr,
+    )
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(poll, remaining))
+        if _address_assignable(host):
+            return True
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -60,11 +153,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "(e.g. Tailscale) interface, not a public one.",
             file=sys.stderr,
         )
+        # Started at boot through lingering, this can easily be running before
+        # tailscaled has an address. Wait, bounded, rather than failing into a
+        # restart loop.
+        if not wait_for_bind_address(config.bind_host, _bind_wait_seconds()):
+            print(
+                f"[cofferdam] {config.bind_host} never became available. Not starting: "
+                "the service binds only to its configured private address and will not "
+                "fall back to a public one. Check `tailscale status` and "
+                "COFFERDAM_BIND_HOST, then start the service again.",
+                file=sys.stderr,
+            )
+            return 4
 
     try:
         import uvicorn
+
+        from .service import create_app
     except ImportError:  # pragma: no cover
-        print("[cofferdam] uvicorn is not installed: pip install -e '.[workstation]'", file=sys.stderr)
+        print(
+            "[cofferdam] the workstation extras are not installed: "
+            "pip install -e '.[workstation]'",
+            file=sys.stderr,
+        )
         return 2
 
     app = create_app(config=config, token=token)
