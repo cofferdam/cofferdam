@@ -183,7 +183,7 @@ class FalseSuccessPreventionTests(unittest.TestCase):
         adapter = _adapter()
         launch = SessionLaunch(unit="u", pid=321, state="running", exit_status=None)
         with patch.object(linux_x11, "first_available", _only("firefox")), patch.object(
-            linux_x11, "launch_in_session", lambda argv, description: launch
+            linux_x11, "launch_in_session", lambda argv, description, **kwargs: launch
         ), _session(WAYLAND_SESSION):
             result = adapter.open_application("firefox")
         self.assertEqual(result.pid, 321)
@@ -194,7 +194,7 @@ class FalseSuccessPreventionTests(unittest.TestCase):
         adapter = _adapter()
         launch = SessionLaunch(unit="u", pid=None, state="exited", exit_status=0)
         with patch.object(linux_x11, "first_available", _only("firefox")), patch.object(
-            linux_x11, "launch_in_session", lambda argv, description: launch
+            linux_x11, "launch_in_session", lambda argv, description, **kwargs: launch
         ), patch.object(linux_x11, "process_running", lambda names: False), _session(
             WAYLAND_SESSION
         ):
@@ -207,7 +207,7 @@ class FalseSuccessPreventionTests(unittest.TestCase):
         adapter = _adapter()
         launch = SessionLaunch(unit="u", pid=None, state="exited", exit_status=0)
         with patch.object(linux_x11, "first_available", _only("firefox")), patch.object(
-            linux_x11, "launch_in_session", lambda argv, description: launch
+            linux_x11, "launch_in_session", lambda argv, description, **kwargs: launch
         ), patch.object(linux_x11, "process_running", lambda names: True), _session(
             WAYLAND_SESSION
         ):
@@ -222,7 +222,7 @@ class OpenUrlTests(unittest.TestCase):
         adapter = _adapter()
         seen = {}
 
-        def capture(argv, description):
+        def capture(argv, description, **kwargs):
             seen["argv"] = list(argv)
             return SessionLaunch(unit="u", pid=99, state="running", exit_status=None)
 

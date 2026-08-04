@@ -262,11 +262,15 @@ class LinuxX11Adapter(HostAdapter):
     def open_application(self, application: str) -> ApplicationLaunch:
         if application not in APPLICATION_KEYS:
             raise AdapterUnsupported(f"application not allowlisted: {application}")
-        self._require_session()
+        session = self._require_session()
         executable = first_available(_APPLICATION_COMMANDS[application])
         if not executable:
             raise AdapterUnsupported(f"application not installed: {application}")
-        launch = launch_in_session([executable], description="Cofferdam: open " + application)
+        launch = launch_in_session(
+            [executable],
+            description="Cofferdam: open " + application,
+            expect_session=session.session_id,
+        )
         pid = self._confirm(application, launch)
         return ApplicationLaunch(application=application, pid=pid, detail=Path(executable).name)
 
@@ -279,7 +283,7 @@ class LinuxX11Adapter(HostAdapter):
         failure. Launching an allowlisted browser directly is verifiable, and
         keeps the same fixed-argv boundary.
         """
-        self._require_session()
+        session = self._require_session()
         application = self._browser_key()
         if application is None:
             raise AdapterUnsupported(
@@ -289,7 +293,11 @@ class LinuxX11Adapter(HostAdapter):
         executable = first_available(_APPLICATION_COMMANDS[application])
         # ``url`` has already been scheme-validated (http/https) by the action
         # schema; it is passed as one argv element, never through a shell.
-        launch = launch_in_session([executable, url], description="Cofferdam: open URL")
+        launch = launch_in_session(
+            [executable, url],
+            description="Cofferdam: open URL",
+            expect_session=session.session_id,
+        )
         pid = self._confirm(application, launch)
         return ApplicationLaunch(application=application, pid=pid, detail=Path(executable).name)
 
