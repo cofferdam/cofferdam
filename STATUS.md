@@ -44,6 +44,23 @@ Trust Core module, PR0 → PR3c1:
   reboot survival, Tailscale binding, and real phone-over-tailnet access. Run
   `docs/checklists/m1-ubuntu-validation.md` on the real host; stub-adapter results do not count.
 
+- **M1.1 — service lifecycle correction.** Branch
+  `fix/workstation-service-login-lifecycle`. Fixes a **login-blocking regression**: the M1 unit's
+  `Wants=graphical-session.target`, combined with `WantedBy=default.target` and lingering,
+  activated the graphical target at boot with nothing behind it, so GNOME refused every
+  subsequent login ("A graphical session is already running!") and bounced back to GDM. Root
+  cause verified in the journal across four failing boots against one working control boot.
+  Also fixes an unbounded restart storm when the Tailscale bind address is not up yet at boot.
+
+  Adds `docs/SERVICE_LIFECYCLE.md`, a transactional migration installer, an uninstaller that
+  doubles as rollback and TTY recovery, and `tests/test_service_unit_lifecycle.py` — structural
+  guards so this class of mistake cannot return silently. Recorded as `DECISIONS.md`
+  D-2026-08-04-1 and D-2026-08-04-2.
+
+  **The regression is not yet confirmed fixed.** Static validation and 546 automated tests pass,
+  but the real reboot and login checks (`docs/checklists/m1-ubuntu-validation.md` steps L1–L10)
+  require physical logout/reboot and have **not** been performed.
+
 ## Planned (active roadmap — see [`ROADMAP.md`](ROADMAP.md))
 
 - Guardian/Supervisor + manual recovery command surface, Runtime A/B slots, process/window/

@@ -32,6 +32,20 @@ What the workstation service does today:
   argument vector, or shell string; `shell=True`/`os.system`/`os.popen` are absent and a test
   enforces their absence. Application names come from a closed allowlist; URLs must be http(s).
 - Returns bounded structured errors rather than tracebacks.
+- **Never takes over the desktop's own lifecycle.** The service observes and follows
+  `graphical-session.target` through read-only queries; it never activates, starts, stops,
+  restarts, or terminates it, and it never terminates a login session, the user manager, or
+  GNOME. It cannot: no shipped unit, script, or source may name that target in an activating
+  directive, and `systemctl --user exit`, `loginctl terminate-user`/`terminate-session`,
+  `gnome-session-quit`, broad `pkill`/`killall`, and direct process signalling are all absent
+  and structurally tested for. This is an **availability** property, and it was learned the hard
+  way: the M1 unit's `Wants=graphical-session.target` left the host unable to complete a
+  graphical login at all (`DECISIONS.md` D-2026-08-04-1,
+  [`docs/SERVICE_LIFECYCLE.md`](docs/SERVICE_LIFECYCLE.md)).
+- **Never widens its own bind.** If the configured private address is unavailable, the service
+  waits for it on a bounded timer and then exits — it does not fall back to a wildcard, and no
+  code path can. Restarts are rate-limited, so a permanent failure cannot become a respawn storm.
+- Unit files carry no secrets; the device token is read at runtime from a `0600` file.
 
 What it deliberately does **not** do yet: TLS termination of its own (Tailscale provides the
 transport boundary), token rotation or expiry, rate limiting, multi-user separation, audit

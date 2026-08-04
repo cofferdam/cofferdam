@@ -144,6 +144,51 @@ Audit findings recorded as fact:
   no bundled dependencies. That changes the moment a wheel/container/installer bundles them —
   see the dependency policy in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
+## D-2026-08-04-1 — Cofferdam never owns the graphical-session lifecycle (RECORDED, ACTIVE)
+
+Forced by a real regression: the M1 workstation unit made Ubuntu unable to complete a graphical
+login. It declared `Wants=graphical-session.target` while being `WantedBy=default.target`, on a
+host with lingering enabled. Lingering starts the user manager at boot, `default.target` pulled
+the service in, and `Wants=` activated `graphical-session.target` with nothing behind it — so
+GNOME refused every subsequent login with "A graphical session is already running!" and bounced
+back to GDM. Verified in the journal across four failing boots against one working control boot.
+
+The binding rule:
+
+- Cofferdam **observes and follows** a real graphical session. It never creates, fakes, starts,
+  stops, restarts, terminates, or owns one.
+- A unit that can start before login must never name `graphical-session.target` in `Wants=`,
+  `Requires=`, `Requisite=`, `BindsTo=`, `PartOf=`, or `Upholds=`. `Wants=` is an activation
+  request, not a wait.
+- Session detection is a **read-only** query (`systemctl --user is-active` / `show`).
+- Lingering is never treated as evidence that a graphical session exists.
+- No Cofferdam code, unit, script, or recovery command may invoke `systemctl --user exit`,
+  `loginctl terminate-user`/`terminate-session`, `gnome-session-quit`, or a broad
+  `pkill`/`killall`. Process lifetime belongs to the systemd user manager, which owns each
+  transient unit's cgroup.
+
+Enforced structurally by `tests/test_service_unit_lifecycle.py`, not by convention.
+
+Full analysis, migration, rollback, and TTY recovery:
+[`docs/SERVICE_LIFECYCLE.md`](docs/SERVICE_LIFECYCLE.md).
+
+## D-2026-08-04-2 — One service, not a daemon/agent split (RECORDED, ACTIVE)
+
+A split into `cofferdam-daemon.service` plus a session-scoped
+`cofferdam-session-agent.service` was evaluated while fixing D-2026-08-04-1, and **deferred**.
+
+Rationale: Cofferdam does not launch graphical applications itself. It asks the systemd **user
+manager** to start each one as a transient unit, and that manager is what actually holds the real
+session environment (GNOME imports `DISPLAY`/`WAYLAND_DISPLAY`/`XAUTHORITY` into it at login).
+A single always-on unit therefore never has to pretend a lingering process has a graphical
+session — it asks, truthfully, every time. The split would not have prevented the regression,
+which was a dependency-directive bug rather than a component-boundary bug, and it adds an
+authenticated local IPC surface, a registration protocol, and capability-state synchronisation
+for no behaviour the current design does not already deliver.
+
+**Revisit if** Cofferdam ever needs to hold live session-scoped resources itself — a compositor
+connection, a portal handle, or a persistent browser-automation channel. Not before.
+
 ## D-2026-08-01-9 — Develop in public from now on (EFE DECISION, ACTIVE)
 
 The GitHub repository `cofferdam/cofferdam` is **public** (Apache-2.0). Before 2026-08-01 only
