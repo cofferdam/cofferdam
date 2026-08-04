@@ -380,23 +380,54 @@ python -m unittest tests.test_service_unit_lifecycle -v
 
 ---
 
-## Pending validation
+## Validation record
 
-The root cause is verified and the corrected unit passes static validation, but
-**the regression must not be called fixed until the reboot and login checks
-below have actually been observed.**
+The root cause is verified and the logout/login cycle has been observed, but
+**the regression must not be called fixed until the reboot checks below have
+actually been observed.** A login loop is a boot-time failure; a successful
+logout/login does not prove it is gone.
 
 | # | Check | Status |
 |---|---|---|
-| 1 | Unsafe unit disabled → login succeeds | **passed** (observed, boot `0`) |
-| 2 | Corrected unit enabled → first login succeeds, no return to GDM | pending — needs logout/login |
-| 3 | Logout → daemon healthy, GUI capabilities false, GNOME logout normal | pending |
-| 4 | Login again → capabilities return, no stale session values | pending |
-| 5 | First reboot → boots normally, login succeeds, daemon auto-starts | pending — needs reboot |
-| 6 | Second reboot → same, no loop recurrence | pending — needs reboot |
-| 7 | Daemon crash/restart → GNOME and browsers survive | pending |
-| 8 | Tailscale unavailable → bounded degraded state, no storm | pending |
-| 9 | Browser launch after login → real window, no false success | pending |
-| 10 | API before login → reachable, GUI capabilities false | pending — needs reboot |
+| 1 | Unsafe unit disabled → login succeeds | **passed** — observed, boot `0` |
+| 2 | Corrected unit enabled → login succeeds, no return to GDM | **passed** — 2026-08-04 |
+| 3 | Logout → daemon healthy, GNOME logout normal, not terminated by Cofferdam | **passed** — 2026-08-04 |
+| 4 | Login again → capabilities return, no stale session values | **passed** — fresh session id `46292380` |
+| 5 | Cofferdam absent from `graphical-session.target` reverse deps | **passed** — verified after login |
+| 6 | Effective unit: `Wants=`/`PartOf=`/`BindsTo=` empty, no graphical target in `After=` | **passed** — read from systemd, not the file |
+| 7 | Daemon restart → GNOME survives, browsers survive | **passed** — gnome-shell PID unchanged; Opera and Firefox both survived |
+| 8 | Browser launch after login → real window, no false success | **passed** — Firefox 0→1 process, real PID, transient unit active |
+| 9 | Bind wait bounded; instant when the address exists | **passed** — 3.00s on an unassigned address, 0.000s on the live one |
+| 10 | **First reboot** → boots normally, login succeeds, daemon auto-starts | **pending — needs reboot** |
+| 11 | **Second reboot** → same, no loop recurrence | **pending — needs reboot** |
+| 12 | **API before login** → reachable, GUI capabilities false | **pending — needs reboot** |
+| 13 | Full Tailscale outage → bounded degraded state end-to-end | pending — only the wait logic is verified in isolation |
 
 Reboot, logout, and visual confirmation are **not** performed automatically.
+
+### Validation runtime (temporary)
+
+The installed unit's `ExecStart` points at `~/cofferdam/slots/a`, which on this
+host holds a *different, paused* branch. To validate this branch's Python
+against a live session without disturbing that checkout, a systemd **drop-in**
+redirects the runtime path only:
+
+```
+~/.config/systemd/user/cofferdam-workstation.service.d/10-pr10-validation-runtime.conf
+```
+
+It overrides `ExecStart` and `WorkingDirectory` and nothing else — `COFFERDAM_HOME`,
+`EnvironmentFile`, the device token, and the state directory are all inherited
+unchanged, so no secret is copied and no state is duplicated.
+
+Remove it once this branch is merged and `slots/a` carries the code:
+
+```bash
+rm -rf ~/.config/systemd/user/cofferdam-workstation.service.d
+systemctl --user daemon-reload
+systemctl --user restart cofferdam-workstation.service
+```
+
+> Note: this branch is M1-based, so its browser allowlist is
+> firefox/chromium/google-chrome. Opera support belongs to the separate M2A
+> work and is deliberately not present here.
