@@ -279,7 +279,8 @@ class RestartPolicyTests(unittest.TestCase):
 
     def test_restart_rate_is_limited(self) -> None:
         for unit in _unit_files():
-            directives = dict(_directives(unit.read_text(encoding="utf-8")))
+            text = unit.read_text(encoding="utf-8")
+            directives = dict(_directives(text))
             if directives.get("Restart", "no") in ("no", "never"):
                 continue
             with self.subTest(unit=unit.name):
@@ -306,6 +307,27 @@ class RestartPolicyTests(unittest.TestCase):
                     1.0,
                     f"{unit.name} sets RestartSec={delay}: too tight to be safe.",
                 )
+
+    def test_start_limit_directives_are_in_the_unit_section(self) -> None:
+        """A rate limit in the wrong section is silently ignored.
+
+        systemd reads ``StartLimitIntervalSec``/``StartLimitBurst`` from
+        ``[Unit]``. Put them under ``[Service]`` and it logs
+        "Unknown key ... ignoring" and carries on with no rate limit at all —
+        so the unit looks protected while the restart storm it was meant to
+        stop is still possible. Caught exactly that way on a real host.
+        """
+        for unit in _unit_files():
+            sections = _sections(unit.read_text(encoding="utf-8"))
+            service_keys = {key for key, _ in sections.get("Service", [])}
+            with self.subTest(unit=unit.name):
+                for key in ("StartLimitIntervalSec", "StartLimitBurst"):
+                    self.assertNotIn(
+                        key,
+                        service_keys,
+                        f"{unit.name} puts {key} under [Service], where systemd ignores "
+                        "it. It belongs in [Unit].",
+                    )
 
 
 class ProcessTerminationTests(unittest.TestCase):

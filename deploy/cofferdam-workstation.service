@@ -44,6 +44,19 @@ Description=Cofferdam workstation (personal AI workstation runtime)
 # exits cleanly if it never appears. See COFFERDAM_BIND_WAIT_SECONDS in
 # cofferdam/workstation/__main__.py.
 
+# Bounded restart policy. The previous unit set StartLimitIntervalSec=0, which
+# disables the rate limiter entirely: a permanent failure (for example a bind
+# address that never appears) then respawned every 3s, forever. Ten attempts in
+# five minutes rides out a slow boot but still gives up when the failure is
+# real, instead of burning the machine down.
+#
+# These two keys belong in [Unit]. systemd ignores them under [Service] and
+# only says so as a warning, which is how a rate limit can look configured
+# while doing nothing:
+#   Unknown key 'StartLimitIntervalSec' in section [Service], ignoring.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
 [Service]
 Type=simple
 
@@ -57,15 +70,10 @@ EnvironmentFile=-%h/cofferdam/workstation.env
 WorkingDirectory=%h/cofferdam/slots/a
 ExecStart=%h/cofferdam/slots/a/.venv/bin/python -m cofferdam.workstation
 
-# Bounded restart policy. The previous unit set StartLimitIntervalSec=0, which
-# disables the rate limiter entirely: a permanent failure (for example a bind
-# address that never appears) then respawned every 3s, forever. Ten attempts in
-# five minutes rides out a slow boot but still gives up when the failure is
-# real, instead of burning the machine down.
+# The rate limit these two work with lives in [Unit] above, where systemd
+# actually reads it.
 Restart=on-failure
 RestartSec=5
-StartLimitIntervalSec=300
-StartLimitBurst=10
 
 # Logs go to the journal: journalctl --user -u cofferdam-workstation -f
 StandardOutput=journal
