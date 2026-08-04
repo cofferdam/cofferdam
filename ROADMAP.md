@@ -126,9 +126,58 @@ sees the host *and can make the host do things*.
   fullscreen, media/volume, YouTube search, Guardian and A/B, Wayland, HTTPS hardening beyond
   the tailnet.
 
+## M2A — Control plane foundation: registries, IDs, aliases, browser profiles
+
+- **Objective:** give the product a vocabulary. Before Cofferdam can move a window to "büyük
+  monitör", open a URL in "kişisel tarayıcı", or hand a conversation to "cofferdam claude", those
+  names have to exist somewhere validated, stable, and free of secrets. M2A is that layer and
+  nothing more.
+- **Visible result:** from the phone: read-only cards listing this machine's devices, named
+  displays, applications, browser profiles, agent-profile placeholders, and conversation-route
+  templates — with honest loading, empty, invalid and unavailable states — plus a browser-profile
+  selector on Open URL that actually changes which browser opens the page.
+- **Minimum components:**
+  - Six versioned JSON registries under `$COFFERDAM_HOME/config/registries/`, never in Git;
+    committed placeholders in `examples/registries/`.
+  - Strict typed models, readers, cross-registry reference validation, normalized alias indexes,
+    lookup by stable ID and by alias, an atomic writer utility, safe empty defaults, and bounded
+    structured errors suitable for API responses.
+  - `GET /api/registries` and `GET /api/registries/{registry_name}` — authenticated, **read-only**.
+  - `open_url` gains an optional `browser_profile_id`; domain policy enforced before launch;
+    bounded Opera detection; unchanged legacy behaviour for URL-only requests.
+  - PWA: read-only registry sections, browser-profile selector, no fake Start/Send/Run/Route.
+  - Architecture documents: `docs/CONTROL_PLANE.md`, `docs/DEVICE_REGISTRY.md`,
+    `docs/APPLICATION_PROFILES.md`, `docs/AGENT_ROUTING.md`, `docs/DESKTOP_APP.md`.
+- **Implementation notes:** registries are declarative — a registry selects among capabilities the
+  code already has and can never introduce one. No executable path, argv, command string, shell
+  fragment, desktop-file path, environment override, credential, cookie, or live tab/conversation
+  ID is representable in any schema. Alias matching folds Unicode case plus a Turkish
+  dotted/dotless-I tailoring; ambiguity is a validation failure, never a guess. Launching still
+  goes through the M1 verified Wayland graphical-session launcher.
+- **Acceptance tests:** empty/missing/malformed registries; unknown schema version; unknown and
+  forbidden fields; duplicate IDs and duplicate normalized aliases; Turkish normalization;
+  ambiguous alias rejection; cross-registry dangling references; invalid EDID hash; atomic
+  persistence including a failed write preserving the original; browser-profile default
+  uniqueness; disabled profiles; domain allow-all, allow-list exact host, subdomain, and
+  `badexample.com` boundary rejection; bounded Opera candidate detection and unavailable result;
+  explicit and invalid `browser_profile_id`; backward-compatible URL-only `open_url`;
+  authenticated/unauthenticated/unknown registry endpoints and error redaction; agent profiles
+  remaining placeholders; routes remaining templates; local registries staying untracked.
+- **Dependencies:** M1 (code merged; its reboot gate is orthogonal and stays open).
+- **Review depth:** low-risk — tests + self-review. (The domain-policy boundary is the one part
+  worth a second look when profile editing arrives.)
+- **Explicitly not in M2A:** Raspberry Pi control, Wake-on-LAN or physical power actions, window
+  movement or display placement, browser DOM access, ChatGPT/Claude web automation, browser
+  extensions, agent execution, Claude Code session execution, message sending, natural-language
+  action planning, desktop application scaffolding, registry write APIs, and any reboot behaviour
+  change.
+
 ## M2 — Desktop hands: processes, windows, displays
 
 - **Objective:** the rest of semantic desktop control — beyond M1's launch/screenshot/URL.
+- **Now builds on M2A:** the display registry supplies the stable IDs and human aliases that
+  `move_window_to_display` and per-display screenshots target, so "büyük monitör" resolves to
+  `large-monitor` rather than to a positional index that changes when a cable moves.
 - **Visible result:** from the phone: see running applications and relevant processes; close an
   application; move a browser or media window to display 2; screenshot a chosen display.
 - **Minimum components:** process adapter (`psutil` list + terminate); window adapter

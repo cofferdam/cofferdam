@@ -1,7 +1,7 @@
 # Status
 
-Accurate as of **2026-08-01** (the personal-AI-workstation pivot, [`DECISIONS.md`](DECISIONS.md)
-D-2026-08-01-1). Update this file when a category changes, not on every commit.
+Accurate as of **2026-08-04** (M2A control plane foundation, [`DECISIONS.md`](DECISIONS.md)
+D-2026-08-04-1). Update this file when a category changes, not on every commit.
 
 ## Merged (on `main`)
 
@@ -72,6 +72,46 @@ correctly report unavailable until someone logs in at the desktop. That expectat
 `docs/checklists/m1-ubuntu-validation.md`, then record the observed result here and in
 [`ROADMAP.md`](ROADMAP.md). The reboot is deferred at the user's request because the workstation
 is in active use; it is not blocked or waived.
+
+**M2A does not change this gate.** It alters no boot behaviour, no systemd unit, and no bind
+logic; the gate stays open and unaffected, and no M2A document may describe M1 as validated.
+
+### M2A — control plane foundation
+
+- **M2A — control plane foundation.** On branch `feat/m2-control-plane-foundation`, not merged.
+  Six versioned registries (devices, displays, applications, browser profiles, agent profiles,
+  conversation routes) under `$COFFERDAM_HOME/config/registries/` with strict typed models,
+  cross-registry reference validation, normalized Unicode/Turkish alias indexes, an atomic writer
+  utility, and bounded structured errors; authenticated **read-only** `GET /api/registries` and
+  `GET /api/registries/{registry_name}`; `open_url` extended with an optional `browser_profile_id`
+  and domain-policy enforcement; bounded Opera detection; read-only registry sections and a
+  browser-profile selector in the PWA; architecture documents and the desktop-companion ADR.
+
+  **Validated on the real Ubuntu host** (2026-08-04, Ubuntu 26.04, GNOME/Wayland): 663 tests
+  pass; the systemd user service runs the M2A build and is still bound only to the Tailscale
+  address; `/api/registries` returns 401 unauthenticated and serves all six registries
+  authenticated from `~/cofferdam/config/registries/`; `/api/status` reports
+  `applications: ["firefox", "opera"]` — Opera detected live through the bounded code-owned
+  candidates (`/snap/bin/opera`, snap 133); an unknown `browser_profile_id` fails closed with
+  `browser_profile_invalid` and launches nothing; a malformed one is rejected with 422 before
+  execution; and `open_url` with `browser_profile_id: "personal-opera"` on `https://example.com`
+  returned `succeeded` with `selection: "explicit-profile"`, `application: "opera"`.
+
+  Evidence that the URL reached the browser: Opera printed *"Opening in existing browser
+  session."* and exited 24 (`CHROME_RESULT_CODE_NORMAL_EXIT_PROCESS_NOTIFIED`), and the
+  pre-existing Opera main process was still the same PID afterwards — the request went to the
+  session already in use, and no second browser was started and no window was closed. Visual
+  confirmation of the tab itself is the user's to make: screen capture is unavailable on this
+  Wayland session (`screenshot: false`), and reading Opera's profile directory is out of bounds.
+
+  This validation found and fixed a real defect: a URL handed to an already-running Opera was
+  being reported as a failed action (see the CHANGELOG entry on Opera's delegation exit code).
+
+  **What M2A is not:** no Raspberry Pi control, Wake-on-LAN or power actions, window movement,
+  browser DOM access, web automation, browser extension, agent execution, message sending,
+  natural-language planning, desktop application scaffolding, or registry write API. Agent
+  profiles are placeholders (`execution_status: not-implemented`) and conversation routes are
+  templates; the PWA labels both as such and offers no control that would suggest otherwise.
 
 ## Planned (active roadmap — see [`ROADMAP.md`](ROADMAP.md))
 

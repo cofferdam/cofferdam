@@ -8,6 +8,43 @@ release.
 
 ### Added
 
+- **M2A — control plane foundation (2026-08-04).** Cofferdam gains a vocabulary for the machines,
+  displays, applications, browser profiles, agents, and routes it is allowed to talk about.
+  - **Six versioned JSON registries** under `$COFFERDAM_HOME/config/registries/` — `devices`,
+    `displays`, `applications`, `browser_profiles`, `agent_profiles`, `conversation_routes` —
+    with strict typed models, cross-registry reference validation, stable ASCII kebab-case IDs,
+    normalized Unicode alias indexes, safe empty defaults, an atomic writer utility, and bounded
+    structured errors. Machine registries are never committed; committed placeholders live in
+    `examples/registries/`. Standard-library only: no database, no YAML, no new dependency.
+  - **Alias resolution** folds Unicode case, trims and collapses whitespace, and folds Turkish
+    dotted and dotless I together, so "MONİTÖR"/"monitör" and "IŞIK"/"ışık" match. Duplicate
+    normalized names or aliases inside one registry are a validation failure, and the resolver
+    returns no match rather than choosing between candidates.
+  - **Read-only registry API:** `GET /api/registries` (per-registry version, counts, load status)
+    and `GET /api/registries/{registry_name}`, behind the same device token as every other
+    state-revealing route. There is no `POST`/`PUT`/`PATCH`/`DELETE` registry endpoint in M2A.
+  - **`open_url` gained an optional `browser_profile_id`.** An explicit profile selects its
+    application and never falls back to another; domain policy is enforced before launch; an
+    unavailable browser reports `application_unavailable`. With no profile given, the single
+    enabled `default_for_url` profile is used when its browser is available, otherwise the
+    pre-M2A legacy launch is preserved exactly. A URL-only request on a machine with no
+    registries behaves exactly as it did before.
+  - **Opera** joined the code-owned application allowlist, detected through bounded executable
+    names (`opera`, `opera-stable`) and desktop-entry basenames. No executable path, argv,
+    command, desktop-file path, profile directory, or credential is representable in any schema.
+  - **PWA:** read-only cards for all six registries with loading/empty/invalid/unavailable
+    states, agent profiles labelled "not implemented", conversation routes labelled "template
+    only", and a browser-profile selector on Open URL. No Start/Send/Run/Route control exists.
+  - **Docs:** `docs/CONTROL_PLANE.md`, `docs/DEVICE_REGISTRY.md`, `docs/APPLICATION_PROFILES.md`,
+    `docs/AGENT_ROUTING.md`, and `docs/DESKTOP_APP.md` (an ADR comparing an installed PWA, a
+    Tauri 2 thin shell, and Electron — recommending a thin Tauri companion, with no scaffolding
+    added in M2A). Decisions recorded as `DECISIONS.md` D-2026-08-04-1..3.
+
+  M2A implements no Raspberry Pi control, Wake-on-LAN or power action, window movement, browser
+  DOM access, web automation, browser extension, agent execution, message sending,
+  natural-language planning, or desktop application scaffolding — and changes no reboot
+  behaviour. **M1's post-reboot validation gate remains open.**
+
 - **Open-source readiness (docs only, 2026-08-01):** `CONTRIBUTING.md` (development setup,
   worktree workflow, action/adapter proposal rules, platform-evidence expectations, review
   depth, and the dependency policy), minimal GitHub issue templates (bug, Ubuntu validation
@@ -28,6 +65,16 @@ release.
 
 ### Fixed
 
+- **Opening a URL in an already-running Opera was reported as a failure** (M2A Ubuntu
+  validation, snap-packaged Opera 133). Launching `opera <url>` while Opera is running prints
+  "Opening in existing browser session.", opens the tab, and exits **24** — Chromium's
+  `CHROME_RESULT_CODE_NORMAL_EXIT_PROCESS_NOTIFIED`. systemd marks any non-zero exit as `failed`,
+  so the adapter called a tab that had visibly opened "the application exited immediately instead
+  of starting". The launcher now accepts a **per-application list of specific** delegation exit
+  codes (`{"opera": (24,)}`), and such an exit is still reported as `exited` — never as running.
+  The M1 rule is unchanged and still enforced: an exit code alone is never evidence, so the launch
+  only succeeds when a live instance of the same application can also be seen. Every other exit
+  status, and every other application, still fails closed.
 - **Graphical actions were reported as succeeded while nothing opened** (M1 Ubuntu validation,
   GNOME/Wayland, Ubuntu 26.04). `open_application` and `open_url` returned `succeeded` with a PID,
   but no window ever appeared. Two independent defects combined. First, the service runs with
