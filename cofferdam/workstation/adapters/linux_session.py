@@ -41,9 +41,9 @@ from __future__ import annotations
 import os
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, Mapping, Optional, Sequence, Tuple
 
 from ..errors import AdapterError
 from .base import run_fixed
@@ -83,12 +83,19 @@ class GraphicalSession:
     that follows the next login. Carrying it from detection through to launch is
     what stops a queued or in-flight GUI action from being delivered into a
     different session than the one it was authorised against.
+
+    ``environment`` is the user manager's live environment block as it was read
+    during this detection — the session's own answer for DISPLAY,
+    WAYLAND_DISPLAY, XAUTHORITY and friends. Adapters must take those values
+    from here rather than from :data:`os.environ`, which for a service started
+    by lingering was frozen before any session existed.
     """
 
     available: bool
     session_type: Optional[str] = None
     reason: Optional[str] = None
     session_id: Optional[str] = None
+    environment: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -236,13 +243,24 @@ def detect_graphical_session() -> GraphicalSession:
             available=False,
             session_type=session_type,
             reason="no graphical session is active on this host yet",
+            environment=environment,
         )
 
     reachable, reason = _display_endpoint(environment)
     if not reachable:
-        return GraphicalSession(available=False, session_type=session_type, reason=reason)
+        return GraphicalSession(
+            available=False,
+            session_type=session_type,
+            reason=reason,
+            environment=environment,
+        )
 
-    return GraphicalSession(available=True, session_type=session_type, session_id=session_id)
+    return GraphicalSession(
+        available=True,
+        session_type=session_type,
+        session_id=session_id,
+        environment=environment,
+    )
 
 
 # ---------------------------------------------------------------------------
