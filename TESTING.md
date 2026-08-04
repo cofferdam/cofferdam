@@ -198,6 +198,21 @@ symlink semantics differ between them.
   if the session ended or changed. All of these are standard-library only, so they run on the
   stdlib-only CI path too.
 
+- **M1.2 (capability accuracy):** `tests/test_linux_x11_adapter.py` pins that a reported
+  capability describes the **live session** rather than this process. Every capability test runs
+  with `os.environ` patched down to a boot-started daemon's variable-free environment, so an
+  implementation that consults its own environment — the M1.2 defect, which advertised
+  `screenshot: true` on a Wayland host because `scrot` existed — fails instead of passing by
+  coincidence. Covered: a Wayland session with only X11-root tools is `false`; an X11 session
+  with `scrot` may be `true`; no verified session is `false` even with every tool installed; the
+  same `PATH` yields different answers for different sessions, so tool presence alone cannot make
+  a capability true; a session publishing `WAYLAND_DISPLAY` is treated as Wayland even without
+  `XDG_SESSION_TYPE`; a stale inherited `DISPLAY` is dropped rather than handed to a capture; and
+  capability is recomputed per request across logout and session replacement. The fail-closed
+  rules are pinned alongside them: an unavailable capability refuses with a typed
+  `adapter_unsupported` **and starts no capture process**, a non-zero tool exit stays a bounded
+  `adapter_failed`, and a zero-byte capture is a failure rather than a screenshot.
+
 ## What is not yet covered
 
 The `git apply` executor (PR3c2) and the audit chain (PR3d) are not yet implemented; the

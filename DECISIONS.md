@@ -189,6 +189,43 @@ for no behaviour the current design does not already deliver.
 **Revisit if** Cofferdam ever needs to hold live session-scoped resources itself — a compositor
 connection, a portal handle, or a persistent browser-automation channel. Not before.
 
+## D-2026-08-05-1 — A capability describes the live session, never our own process (RECORDED, ACTIVE)
+
+Forced by a second real finding on the same host. After login, `/api/status` reported
+`screenshot: true` in a GNOME **Wayland** session because `scrot` was installed. The guard that
+rejects X11 root-capture tools under Wayland read `XDG_SESSION_TYPE` from the **daemon's own**
+environment; a daemon started at boot by lingering has none, because GNOME populates the user
+*manager* at login and not an already-running process. The guard therefore never fired, and the
+phone offered a Screenshot button whose action could only fail — `scrot: Can't open X display`.
+
+The action itself failed closed, so no black frame and no false success were ever produced. The
+defect was the *advertisement*, and it is the same root confusion as D-2026-08-04-1: treating a
+process's frozen startup state as if it described the live session.
+
+The binding rule:
+
+- A capability answers "can this action work **in the session that exists right now**", not
+  "is a binary present" and not "what did our environment look like when we started".
+- Graphical state — session presence, session type, display endpoint, `DISPLAY`/
+  `WAYLAND_DISPLAY`/`XAUTHORITY` — is read from the verified session (systemd user manager),
+  which is what `detect_graphical_session()` already queries live on every call.
+- `os.environ` remains fine for ordinary process setup (`PATH`, `HOME`). It is never evidence
+  about the graphical session, and a display variable inherited from an ended session is
+  dropped rather than passed to a child.
+- Absence of a variable is not evidence of the opposite value: a session publishing
+  `WAYLAND_DISPLAY` is Wayland even when `XDG_SESSION_TYPE` is missing. Guessing the permissive
+  answer from missing data is precisely what produced the false capability.
+- Capabilities are recomputed per request. Nothing is cached across a logout.
+- A truthful `false` beats speculative support: no backend is added merely to make a flag true.
+
+Enforced by `tests/test_linux_x11_adapter.py`, whose capability tests run with the daemon
+environment emptied, so an implementation that consults `os.environ` fails rather than passes by
+coincidence.
+
+Wayland screen capture itself remains unavailable on this host; this decision changes what is
+claimed, not what is supported. Detail in
+[`docs/SERVICE_LIFECYCLE.md`](docs/SERVICE_LIFECYCLE.md).
+
 ## D-2026-08-01-9 — Develop in public from now on (EFE DECISION, ACTIVE)
 
 The GitHub repository `cofferdam/cofferdam` is **public** (Apache-2.0). Before 2026-08-01 only
