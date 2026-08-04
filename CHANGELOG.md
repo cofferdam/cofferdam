@@ -8,6 +8,21 @@ release.
 
 ### Fixed
 
+- **Screenshot capability was over-advertised in a Wayland session (2026-08-05).** After login,
+  a daemon started at boot by lingering reported `screenshot: true` on a GNOME Wayland host
+  because `scrot` was on `PATH`, and the phone enabled a Screenshot button whose action could
+  only fail (`scrot: Can't open X display`). The guard that rejects X11 root-capture tools under
+  Wayland was reading `XDG_SESSION_TYPE` from the **service's own** environment, which under
+  lingering is empty — GNOME populates the user *manager* at login, not an already-running
+  process — so the guard silently never applied. The action failed closed throughout (bounded
+  `adapter_failed`, no black image, no false success), so this was an advertisement-accuracy
+  defect, not a capture-correctness one. Capability is now derived from the verified graphical
+  session returned by `detect_graphical_session()`, which also carries the session's live
+  environment; a capture runs with that session's display variables, and a stale
+  `DISPLAY`/`WAYLAND_DISPLAY` inherited from an ended session is dropped rather than passed on.
+  A session publishing `WAYLAND_DISPLAY` counts as Wayland even without `XDG_SESSION_TYPE`.
+  **No Wayland screenshot backend was added** — Wayland capture remains unavailable on this
+  host and the flag now says so truthfully. Recorded as `DECISIONS.md` D-2026-08-05-1.
 - **Ubuntu graphical login loop caused by the workstation service (2026-08-04).** Enabling
   `cofferdam-workstation.service` made GNOME unable to complete a login: the password was
   accepted, the desktop began to load, and the session died back to GDM — every time. The unit

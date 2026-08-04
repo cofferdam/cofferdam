@@ -443,7 +443,7 @@ the daemon started, and the wait absorbed it:
 
 Reboot, logout, and visual confirmation are **not** performed automatically.
 
-### Known issue — screenshot capability is over-advertised after login
+### Screenshot capability was over-advertised after login — fixed 2026-08-05
 
 Found during boot-`0` validation, and **not** a false success.
 
@@ -473,13 +473,42 @@ the capability contract.
 It is the same family as the login loop — trusting the daemon's frozen
 environment instead of the live session — and
 `linux_session.detect_graphical_session()` already does it correctly via
-`user_manager_environment()`. The fix is to read the session type from the same
-live source. Deliberately **not** bundled into this change, which is scoped to
-the login-lifecycle regression.
+`user_manager_environment()`. It was deliberately **not** bundled into the
+lifecycle change, which was scoped to the login regression.
 
 Note this is why the same host reported `screenshot: false` earlier in
 validation: that instance had been restarted *after* login and so inherited
-`XDG_SESSION_TYPE=wayland`.
+`XDG_SESSION_TYPE=wayland`. The flag tracked *when the daemon happened to
+start*, which is exactly what a capability must never depend on.
+
+#### The correction
+
+`GraphicalSession` now carries the user manager's live `environment` block
+alongside `available`, `session_type`, and `session_id`, so one detection
+answers both "is there a session" and "what does that session publish".
+`_screenshot_tool()` takes that session and reads nothing from `os.environ`;
+capability is:
+
+> a screenshot adapter is advertised only when a graphical session is verified
+> present **and** that session publishes a display endpoint **and** a tool we
+> have is expected to work against *that* endpoint.
+
+A session publishing `WAYLAND_DISPLAY` counts as Wayland even if it did not
+publish `XDG_SESSION_TYPE` — inferring "probably X11" from a missing variable is
+how the original false capability arose. The capture subprocess is given the
+session's display variables, and any stale `DISPLAY`/`WAYLAND_DISPLAY` the
+daemon inherited is dropped rather than passed on, so a value left over from an
+ended session cannot aim a capture at a dead server.
+
+Fail-closed behaviour is unchanged and now pinned by tests: an unavailable
+capability refuses with a typed `adapter_unsupported` and starts no capture
+process, a non-zero tool exit stays a bounded `adapter_failed`, and a zero-byte
+capture is still a failure rather than a screenshot.
+
+**Wayland screen capture remains unavailable on this host.** Nothing here adds a
+Wayland backend; it makes the `false` truthful. `gnome-screenshot` is still the
+adapter's preferred tool and is still uninstalled and unvalidated here.
+Recorded as `DECISIONS.md` D-2026-08-05-1.
 
 ### Validation runtime (temporary)
 
