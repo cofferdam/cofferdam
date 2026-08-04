@@ -1,0 +1,503 @@
+"""Structural guards on the service lifecycle (the M1.1 login-loop regression).
+
+Background — what actually happened
+-----------------------------------
+``deploy/cofferdam-workstation.service`` carried ``Wants=graphical-session.target``
+while also being ``WantedBy=default.target``, on a host with
+``loginctl enable-linger`` set. Lingering starts ``user@<uid>.service`` at boot,
+that manager runs ``default.target``, ``default.target`` pulled Cofferdam in,
+and Cofferdam's ``Wants=`` pulled in ``graphical-session.target`` — activating
+it at boot with no compositor behind it. gnome-session then refused to start
+the session it was supposed to own ("A graphical session is already running!")
+and quit, so every graphical login bounced straight back to GDM.
+
+``Wants=`` is an activation request, not a wait. These tests make that class of
+mistake impossible to reintroduce silently, by asserting against the shipped
+unit files and the source tree rather than against runtime behaviour.
+
+Everything here is standard-library only, so it runs on the stdlib-only CI path.
+"""
+
+from __future__ import annotations
+
+import ast
+import re
+import unittest
+from pathlib import Path
+from typing import Dict, List
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEPLOY_ROOT = REPO_ROOT / "deploy"
+PACKAGE_ROOT = REPO_ROOT / "cofferdam"
+DOCS_ROOT = REPO_ROOT / "docs"
+
+GRAPHICAL_TARGET = "graphical-session.target"
+
+# Directives that ACTIVATE or bind a unit's fate to another unit. Naming the
+# graphical target in any of these from an always-on unit is the regression.
+ACTIVATING_DIRECTIVES = (
+    "Wants",
+    "Requires",
+    "Requisite",
+    "BindsTo",
+    "PartOf",
+    "Upholds",
+    "WantedBy",
+    "RequiredBy",
+    "UpheldBy",
+)
+
+# Ordering-only directives are safe in principle, but on a unit that may start
+# before login they are still wrong: nothing orders against a target that is not
+# in the transaction, so it only creates a false impression of protection.
+ORDERING_DIRECTIVES = ("After", "Before")
+
+# Environment a headless daemon must never require to start.
+GRAPHICAL_ENV_VARS = ("DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY")
+
+# Commands that would let Cofferdam take the GNOME/GDM lifecycle away from the
+# desktop. None of these may appear anywhere we ship.
+PROHIBITED_COMMANDS = (
+    "systemctl --user exit",
+    "systemctl --user stop graphical-session.target",
+    "systemctl --user restart graphical-session.target",
+    "systemctl --user start graphical-session.target",
+    "systemctl --user isolate",
+    "loginctl terminate-user",
+    "loginctl terminate-session",
+    "loginctl kill-user",
+    "loginctl kill-session",
+    "gnome-session-quit",
+)
+
+# Broad process killers: they cannot distinguish a Cofferdam-owned process from
+# the user's own browser or shell, so they are banned outright.
+BROAD_KILLERS = ("pkill", "killall")
+
+SECRET_PATTERNS = (
+    re.compile(r"(?i)\btoken\s*=\s*[A-Za-z0-9_\-]{12,}"),
+    re.compile(r"(?i)\b(password|passwd|secret|api[_-]?key)\s*=\s*\S{8,}"),
+)
+
+WILDCARD_BINDS = ("0.0.0.0", "::", "*:")
+
+
+def _unit_files() -> List[Path]:
+    return sorted(DEPLOY_ROOT.glob("*.service"))
+
+
+def _shipped_scripts() -> List[Path]:
+    return sorted(DEPLOY_ROOT.glob("*.sh"))
+
+
+def _python_sources() -> List[Path]:
+    return sorted(PACKAGE_ROOT.rglob("*.py"))
+
+
+def _strip_comments(text: str) -> str:
+    """Unit-file directives only — systemd treats ``#``/``;`` lines as comments.
+
+    This matters: the corrected unit *documents* the forbidden directives at
+    length so the next maintainer understands why they are absent. Those
+    explanations must not be mistaken for the directives themselves.
+    """
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#") or stripped.startswith(";"):
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _directives(text: str) -> List[tuple]:
+    """(key, value) for every real directive line, comments removed."""
+    found = []
+    for line in _strip_comments(text).splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            found.append((key.strip(), value.strip()))
+    return found
+
+
+def _sections(text: str) -> Dict[str, List[tuple]]:
+    """Directives grouped by ``[Section]``."""
+    sections: Dict[str, List[tuple]] = {}
+    current = ""
+    for line in _strip_comments(text).splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            current = stripped[1:-1]
+            sections.setdefault(current, [])
+            continue
+        key, separator, value = line.partition("=")
+        if separator:
+            sections.setdefault(current, []).append((key.strip(), value.strip()))
+    return sections
+
+
+class UnitFilePresenceTests(unittest.TestCase):
+    def test_the_workstation_unit_is_shipped(self) -> None:
+        """Guard against the whole suite silently passing on an empty glob."""
+        names = {path.name for path in _unit_files()}
+        self.assertIn("cofferdam-workstation.service", names)
+
+
+class GraphicalTargetCouplingTests(unittest.TestCase):
+    """The regression itself: no shipped unit may pull the graphical target."""
+
+    def test_no_unit_activates_the_graphical_target(self) -> None:
+        for unit in _unit_files():
+            with self.subTest(unit=unit.name):
+                for key, value in _directives(unit.read_text(encoding="utf-8")):
+                    if key in ACTIVATING_DIRECTIVES and GRAPHICAL_TARGET in value:
+                        self.fail(
+                            f"{unit.name} declares {key}={value}. "
+                            f"{key}= puts {GRAPHICAL_TARGET} into the start transaction, "
+                            "which activates it with no session behind it when the unit "
+                            "starts at boot under lingering. That is the login loop."
+                        )
+
+    def test_an_always_on_unit_does_not_order_against_the_graphical_target(self) -> None:
+        """A unit reachable from default.target must not even order against it."""
+        for unit in _unit_files():
+            text = unit.read_text(encoding="utf-8")
+            sections = _sections(text)
+            install = sections.get("Install", [])
+            always_on = any(
+                key == "WantedBy" and "default.target" in value for key, value in install
+            )
+            if not always_on:
+                continue
+            with self.subTest(unit=unit.name):
+                for key, value in _directives(text):
+                    if key in ORDERING_DIRECTIVES and GRAPHICAL_TARGET in value:
+                        self.fail(
+                            f"{unit.name} is WantedBy=default.target but declares "
+                            f"{key}={value}. An always-on unit cannot order against a "
+                            "target that is not in its transaction; detect the session "
+                            "at request time instead."
+                        )
+
+    def test_a_graphical_unit_is_never_wanted_by_default_target(self) -> None:
+        """If a session-scoped unit is ever added, it must not be always-on."""
+        for unit in _unit_files():
+            text = unit.read_text(encoding="utf-8")
+            sections = _sections(text)
+            session_scoped = any(
+                key in ("PartOf", "WantedBy", "BindsTo") and GRAPHICAL_TARGET in value
+                for key, value in _directives(text)
+            )
+            if not session_scoped:
+                continue
+            with self.subTest(unit=unit.name):
+                for key, value in sections.get("Install", []):
+                    if key == "WantedBy" and "default.target" in value:
+                        self.fail(
+                            f"{unit.name} is tied to {GRAPHICAL_TARGET} but is also "
+                            "WantedBy=default.target. A graphical component must not be "
+                            "a pre-login always-on unit."
+                        )
+
+    def test_nothing_shipped_starts_or_stops_the_graphical_target(self) -> None:
+        pattern = re.compile(
+            r"systemctl[^\n;|&]*\b(start|stop|restart|isolate|reload-or-restart)\b[^\n;|&]*"
+            + re.escape(GRAPHICAL_TARGET)
+        )
+        for path in _unit_files() + _shipped_scripts() + _python_sources():
+            with self.subTest(path=path.name):
+                self.assertIsNone(
+                    pattern.search(path.read_text(encoding="utf-8")),
+                    f"{path.name} tries to drive {GRAPHICAL_TARGET}. Cofferdam follows "
+                    "that target; GNOME owns it.",
+                )
+
+    def test_the_adapter_queries_the_target_read_only(self) -> None:
+        """Detection must use is-active/show — never a command that activates."""
+        source = (PACKAGE_ROOT / "workstation" / "adapters" / "linux_session.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertRegex(
+            source,
+            r'"(is-active|show)"',
+            "the session adapter must query the graphical target read-only",
+        )
+        for verb in ("start", "isolate", "stop", "restart"):
+            self.assertNotIn(
+                f'SYSTEMCTL, "--user", "{verb}"',
+                source,
+                f"the session adapter must never {verb} a target or unit it does not own",
+            )
+
+
+class HeadlessDaemonTests(unittest.TestCase):
+    """The daemon must be able to start with no desktop at all."""
+
+    def test_no_unit_requires_graphical_environment(self) -> None:
+        for unit in _unit_files():
+            with self.subTest(unit=unit.name):
+                for key, value in _directives(unit.read_text(encoding="utf-8")):
+                    if key not in ("Environment", "EnvironmentFile"):
+                        continue
+                    for variable in GRAPHICAL_ENV_VARS:
+                        self.assertNotIn(
+                            variable + "=",
+                            value,
+                            f"{unit.name} pins {variable} in the unit. A daemon that "
+                            "starts before login would freeze a value that is either "
+                            "absent or belongs to a session that has since ended; the "
+                            "adapter reads the user manager's live environment instead.",
+                        )
+
+    def test_the_daemon_does_not_read_graphical_env_to_decide_it_can_start(self) -> None:
+        """Entry point must not gate startup on desktop variables."""
+        source = (PACKAGE_ROOT / "workstation" / "__main__.py").read_text(encoding="utf-8")
+        for variable in GRAPHICAL_ENV_VARS:
+            self.assertNotIn(
+                variable,
+                source,
+                f"the entry point references {variable}; the headless daemon must start "
+                "without any graphical session.",
+            )
+
+
+class RestartPolicyTests(unittest.TestCase):
+    """A permanent failure must not become an unbounded respawn storm."""
+
+    def test_restart_rate_is_limited(self) -> None:
+        for unit in _unit_files():
+            directives = dict(_directives(unit.read_text(encoding="utf-8")))
+            if directives.get("Restart", "no") in ("no", "never"):
+                continue
+            with self.subTest(unit=unit.name):
+                interval = directives.get("StartLimitIntervalSec")
+                self.assertIsNotNone(
+                    interval,
+                    f"{unit.name} restarts but sets no StartLimitIntervalSec.",
+                )
+                self.assertNotIn(
+                    interval,
+                    ("0", "0s", "infinity"),
+                    f"{unit.name} sets StartLimitIntervalSec={interval}, which disables "
+                    "the rate limiter entirely — a permanent failure then respawns "
+                    "forever.",
+                )
+                self.assertIn(
+                    "StartLimitBurst",
+                    directives,
+                    f"{unit.name} restarts but sets no StartLimitBurst.",
+                )
+                delay = directives.get("RestartSec", "0")
+                self.assertGreaterEqual(
+                    float(re.sub(r"[^0-9.]", "", delay) or 0),
+                    1.0,
+                    f"{unit.name} sets RestartSec={delay}: too tight to be safe.",
+                )
+
+
+class ProcessTerminationTests(unittest.TestCase):
+    """Cofferdam may never terminate a session, a manager, or a broad match."""
+
+    def _shipped_text(self):
+        for path in _unit_files() + _shipped_scripts() + _python_sources() + sorted(
+            DOCS_ROOT.rglob("*.md")
+        ):
+            yield path, path.read_text(encoding="utf-8")
+
+    def test_no_prohibited_lifecycle_command_is_shipped(self) -> None:
+        for path, text in self._shipped_text():
+            body = _strip_comments(text) if path.suffix == ".service" else text
+            for command in PROHIBITED_COMMANDS:
+                with self.subTest(path=path.name, command=command):
+                    # Docs may name a command only to forbid it; require that the
+                    # line says so.
+                    for line in body.splitlines():
+                        if command not in line:
+                            continue
+                        lowered = line.lower()
+                        forbidding = any(
+                            word in lowered
+                            for word in ("never", "not ", "no ", "must", "forbid", "prohibit", "#")
+                        )
+                        self.assertTrue(
+                            forbidding,
+                            f"{path.name} uses {command!r}: {line.strip()!r}",
+                        )
+
+    def test_no_broad_process_killer_is_shipped(self) -> None:
+        for path, text in self._shipped_text():
+            if path.suffix == ".md":
+                continue
+            body = _strip_comments(text) if path.suffix == ".service" else text
+            for killer in BROAD_KILLERS:
+                for line in body.splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith("#"):
+                        continue
+                    if re.search(r"\b" + killer + r"\b", stripped):
+                        self.fail(
+                            f"{path.name} uses {killer}: {stripped!r}. It matches by name "
+                            "and cannot tell a Cofferdam process from the user's own."
+                        )
+
+    def test_source_never_signals_a_process_it_did_not_verify(self) -> None:
+        for path in _python_sources():
+            text = path.read_text(encoding="utf-8")
+            with self.subTest(path=path.name):
+                for forbidden in ("os.kill(", "SIGKILL", "process.terminate(", "proc.kill("):
+                    self.assertNotIn(
+                        forbidden,
+                        text,
+                        f"{path.name} signals a process directly. Application lifetime "
+                        "belongs to the systemd user manager, which owns each transient "
+                        "unit's cgroup.",
+                    )
+
+
+class BindingTests(unittest.TestCase):
+    """The listener stays on a private address; no wildcard fallback exists."""
+
+    def test_no_wildcard_bind_is_configured(self) -> None:
+        paths = _unit_files() + _shipped_scripts() + [DEPLOY_ROOT / "workstation.env.example"]
+        for path in paths:
+            if not path.is_file():
+                continue
+            body = _strip_comments(path.read_text(encoding="utf-8"))
+            with self.subTest(path=path.name):
+                for wildcard in WILDCARD_BINDS:
+                    for line in body.splitlines():
+                        if "BIND_HOST" in line and wildcard in line and not line.strip().startswith("#"):
+                            self.fail(f"{path.name} configures a wildcard bind: {line.strip()!r}")
+
+    def test_the_entry_point_never_falls_back_to_a_wildcard(self) -> None:
+        """No wildcard address may appear as a *value* anywhere in the daemon.
+
+        Checked against real string literals rather than raw text: the module
+        docstring explains why a wildcard is never used, and prose that forbids
+        something must not be mistaken for doing it.
+        """
+        wildcards = {"0.0.0.0", "::", "*"}
+        for path in _python_sources():
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            docstrings = {
+                id(node.body[0].value)
+                for node in ast.walk(tree)
+                if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.body
+                and isinstance(node.body[0], ast.Expr)
+                and isinstance(node.body[0].value, ast.Constant)
+                and isinstance(node.body[0].value.value, str)
+            }
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                    continue
+                if id(node) in docstrings:
+                    continue
+                with self.subTest(path=path.name, line=node.lineno):
+                    self.assertNotIn(
+                        node.value,
+                        wildcards,
+                        f"{path.name}:{node.lineno} contains the wildcard address "
+                        f"{node.value!r}. The service binds only to its configured "
+                        "private address and must never fall back to a public one.",
+                    )
+
+    def test_a_missing_bind_address_is_waited_for_and_then_given_up_on(self) -> None:
+        source = (PACKAGE_ROOT / "workstation" / "__main__.py").read_text(encoding="utf-8")
+        self.assertIn("wait_for_bind_address", source)
+        self.assertIn("DEFAULT_BIND_WAIT_SECONDS", source)
+
+
+class SecretsInUnitsTests(unittest.TestCase):
+    def test_no_unit_or_script_embeds_a_secret(self) -> None:
+        for path in _unit_files() + _shipped_scripts():
+            body = _strip_comments(path.read_text(encoding="utf-8"))
+            with self.subTest(path=path.name):
+                for pattern in SECRET_PATTERNS:
+                    self.assertIsNone(
+                        pattern.search(body),
+                        f"{path.name} looks like it embeds a secret. The device token is "
+                        "read from a 0600 file at runtime.",
+                    )
+
+
+class InstallerSafetyTests(unittest.TestCase):
+    """Installer and uninstaller may only ever touch Cofferdam-owned paths."""
+
+    SENSITIVE_TARGETS = (
+        "~/.config",
+        "$HOME/.config",
+        "~/.local",
+        "$HOME/.local",
+        "~/.cache",
+        "$HOME/.cache",
+        "dconf",
+    )
+
+    def test_scripts_are_shipped(self) -> None:
+        names = {path.name for path in _shipped_scripts()}
+        self.assertIn("install-workstation-service.sh", names)
+        self.assertIn("uninstall-workstation-service.sh", names)
+
+    def test_no_script_removes_a_user_configuration_tree(self) -> None:
+        """No rm/mv may target a config tree — only our own unit and symlinks."""
+        destructive = re.compile(r"\b(rm|rmdir|mv|shred|find)\b[^\n]*")
+        for path in _shipped_scripts():
+            for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue
+                match = destructive.search(stripped)
+                if not match:
+                    continue
+                fragment = match.group(0)
+                with self.subTest(path=path.name, line=line_number):
+                    for target in self.SENSITIVE_TARGETS:
+                        if target in fragment:
+                            # Allowed only when it is clearly scoped to our unit
+                            # directory AND names our unit.
+                            self.assertIn(
+                                "cofferdam",
+                                fragment.lower(),
+                                f"{path.name}:{line_number} removes {target} without "
+                                f"scoping to a Cofferdam-owned path: {fragment!r}",
+                            )
+
+    def test_uninstaller_resolves_symlinks_before_removing_them(self) -> None:
+        """A name match alone is not enough to justify unlinking."""
+        text = (DEPLOY_ROOT / "uninstall-workstation-service.sh").read_text(encoding="utf-8")
+        self.assertIn("readlink", text)
+        self.assertIn("UNIT_NAME", text)
+
+    def test_no_script_resets_dconf_or_gnome_settings(self) -> None:
+        for path in _shipped_scripts():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue
+                with self.subTest(path=path.name):
+                    for command in ("dconf ", "gsettings ", "gnome-extensions "):
+                        self.assertNotIn(
+                            command,
+                            stripped,
+                            f"{path.name} changes desktop settings: {stripped!r}",
+                        )
+
+    def test_no_script_enables_automatic_login(self) -> None:
+        for path in _shipped_scripts():
+            text = path.read_text(encoding="utf-8").lower()
+            for marker in ("automaticlogin", "autologin"):
+                for line in text.splitlines():
+                    if marker in line and not line.strip().startswith("#"):
+                        self.fail(f"{path.name} touches automatic login: {line.strip()!r}")
+
+    def test_installer_refuses_a_unit_that_names_the_graphical_target(self) -> None:
+        """The migration validates before enabling, not after."""
+        text = (DEPLOY_ROOT / "install-workstation-service.sh").read_text(encoding="utf-8")
+        self.assertIn(GRAPHICAL_TARGET, text)
+        self.assertIn("systemd-analyze", text)
+        self.assertIn("Refusing to enable", text)
+
+
+if __name__ == "__main__":
+    unittest.main()
