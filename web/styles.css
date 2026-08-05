@@ -332,3 +332,63 @@ button.danger { color: var(--err); }
   .media-search { flex-direction: column; }
   .media-search button { width: 100%; }
 }
+
+/* Audio (M2C). The overflow rule that governs the whole file applies with a
+   twist here: a device description like "Raptor Lake-P/U/H cAVS Speaker" is a
+   long unbroken-ish token from the hardware, not text anyone chose, so every
+   name node wraps anywhere and every flex child may shrink. */
+.audio-current { display: grid; gap: 2px; min-width: 0; }
+.audio-current-label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+.audio-current-name { font-size: 18px; font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
+.audio-current-sub { font-size: 13px; overflow-wrap: anywhere; }
+
+/* The slider must be able to shrink inside the panel grid; without `min-width:
+   0` a range input keeps its intrinsic width and pushes the row sideways on a
+   narrow phone. */
+.audio-volume { display: flex; align-items: center; gap: 10px; margin-top: 12px; min-width: 0; }
+.audio-volume-label { color: var(--muted); font-size: 13px; flex: 0 0 auto; }
+.audio-volume input[type="range"] { flex: 1 1 auto; min-width: 0; height: 36px; accent-color: var(--accent, #4aa3ff); }
+.audio-volume-value { flex: 0 0 auto; font-variant-numeric: tabular-nums; min-width: 3.5ch; text-align: right; }
+
+.audio-actions { display: flex; align-items: center; gap: 10px; margin-top: 12px; flex-wrap: wrap; min-width: 0; }
+.audio-actions button { min-height: 40px; }
+.audio-badge {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+  background: #16222e; border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px;
+  color: var(--muted); white-space: nowrap;
+}
+
+.audio-pending { font-size: 12px; margin: 6px 0 0; }
+.audio-error { color: var(--err); font-size: 13px; margin: 10px 0 0; overflow-wrap: anywhere; }
+.audio-note { font-size: 13px; margin: 10px 0 0; overflow-wrap: anywhere; }
+.audio-note.ok { color: var(--ok, #5fd08a); }
+.audio-note.warn { color: var(--warn); }
+/* An unreadable state is styled as information, not as an error: the host not
+   having an audio server is a fact about the host, not a fault in the request. */
+.audio-unavailable { color: var(--muted); font-size: 13px; margin: 8px 0 0; overflow-wrap: anywhere; }
+
+.audio-fold { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px; }
+.audio-fold > summary { cursor: pointer; font-size: 14px; }
+.audio-switch-note { font-size: 12px; margin: 8px 0; }
+.audio-output-list, .audio-stream-list { display: grid; gap: 8px; margin-top: 8px; }
+.audio-output, .audio-stream {
+  background: #0c141c; border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px; display: grid; gap: 4px; min-width: 0;
+}
+.audio-output-name, .audio-stream-name {
+  font-size: 14px; font-weight: 600; overflow-wrap: anywhere; min-width: 0;
+}
+.audio-output-sub, .audio-stream-sub { font-size: 12px; overflow-wrap: anywhere; }
+.audio-select { margin-top: 6px; min-height: 40px; }
+.audio-notes { margin: 10px 0 0; padding-left: 18px; color: var(--warn); font-size: 12px; }
+.audio-notes li { overflow-wrap: anywhere; }
+.audio-notes:empty { display: none; }
+
+@media (max-width: 420px) {
+  /* The label above the track rather than beside it: on a narrow screen the
+     slider needs the whole width to be usable with a thumb. */
+  .audio-volume { flex-wrap: wrap; }
+  .audio-volume input[type="range"] { flex: 1 1 100%; order: 3; }
+  .audio-volume-value { margin-left: auto; }
+  .audio-select { width: 100%; }
+}

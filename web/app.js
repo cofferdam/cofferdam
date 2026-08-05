@@ -1124,6 +1124,10 @@
     // machine's displays and running applications. It goes with the token, and
     // its polling stops so a signed-out device makes no further requests.
     if (global.CofferdamLive) { global.CofferdamLive.stop(); }
+    // Audio state is host state: which speakers this machine has and how loud
+    // they are. It goes with the token, and its polling stops so a signed-out
+    // device makes no further requests.
+    if (global.CofferdamAudio) { global.CofferdamAudio.stop(); }
     el("registrySections").innerHTML = '<p class="muted">Loading…</p>';
     el("app").hidden = true;
     el("setup").hidden = false;
@@ -1174,6 +1178,13 @@
       if (global.CofferdamLive) {
         global.CofferdamLive.mount({ api: api, escapeHtml: escapeHtml, el: el })
           .catch(function () { /* live.js renders its own failure state */ });
+      }
+      // Same for audio: a host whose audio server cannot be read still has a
+      // fully working control panel above, and audio.js renders that state
+      // itself rather than throwing into this chain.
+      if (global.CofferdamAudio) {
+        global.CofferdamAudio.mount({ api: api, escapeHtml: escapeHtml, el: el })
+          .catch(function () { /* audio.js renders its own failure state */ });
       }
     });
   }
