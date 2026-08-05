@@ -1,17 +1,19 @@
 # M2D — Spotify playback: live validation checklist
 
-The validation runtime for `feat/spotify-playback-oauth` (PR #18) is **staged and
-not applied**. Nothing in this document has been run against the live service.
+The validation runtime for `feat/spotify-playback-oauth` (PR #18) is **applied**:
+the `90-spotify-playback-validation` drop-in is in place and the service runs from
+this clone. Round 1 was run from the phone on 2026-08-05 and found three
+reliability defects; round 2, after the M2D.1 fixes, is outstanding.
 
-Two reasons it is not automated. Authorizing Spotify means signing into a real
-account in a real browser, and pressing play changes what is coming out of the
-speakers next to the person reading this. Both are the user's to do.
+Two reasons the steps are not automated. Authorizing Spotify means signing into a
+real account in a real browser, and pressing play changes what is coming out of
+the speakers next to the person reading this. Both are the user's to do.
 
 ---
 
 ## Pre-state, recorded 2026-08-05 23:02 +03
 
-The runtime this rolls back to, captured before anything was staged.
+The runtime this rolls back to, captured before the `90` drop-in was applied.
 
 ```
 ActiveState        active
@@ -39,7 +41,7 @@ fa800e8d9daeed853e384bfddf87e9b3db521ce4cfece8461e500285681274d4  40-pr13-runtim
 ```
 spotify.client_id configured        yes
 spotify.client_secret configured    yes   (present, and unused by this feature — PKCE needs no secret)
-spotify_user_oauth.json present     no    (nothing authorized yet, which is the expected starting state)
+spotify_user_oauth.json present     yes   (round 1 authorized a real account; mode 0600)
 secrets directory mode              0700
 127.0.0.1:8888                      free
 redirect URI the code will use      http://127.0.0.1:8888/callback
@@ -49,11 +51,27 @@ scopes requested                    user-read-playback-state user-read-currently
 
 No value from `media_providers.json` was read into any output, log, or message.
 
+## Round 2 (M2D.1) — what the first validation found
+
+The first run happened on 2026-08-05 from the phone. Steps 1–7 passed;
+authorization completed in Opera, the panel connected without showing a token,
+and catalogue search, queue, next, previous and switching tracks all worked.
+**Three reliability defects were found**, diagnosed and fixed — see
+[`../SPOTIFY_PLAYBACK.md`](../SPOTIFY_PLAYBACK.md#what-real-validation-changed-m2d1):
+
+1. Play now with Spotify closed reported "no active device" and stopped.
+2. The volume displayed one operation behind (50 → 80 → 70 showed 50 → 80).
+3. The first Play now often did not start the chosen track; repeating it, or
+   using Open in Spotify first, eventually worked.
+
+The steps below must be re-run in full. Steps 19–24 are new and cover the fixes
+directly.
+
 ## Gates, all met before staging
 
 - [x] Implementation complete
-- [x] Full suite green — 1,570 tests, workstation path
-- [x] Stdlib-only path green — 1,570 tests, 269 skipped
+- [x] Full suite green — 1,641 tests, workstation path
+- [x] Stdlib-only path green — 1,641 tests, 271 skipped
 - [x] CI green on PR #18 — Trust Core stdlib-only, Workstation, license-scan
 - [x] Runtime dependencies installed in the clone's venv (`fastapi`, `uvicorn`, `psutil` import; `create_app` imports)
 - [x] Callback binding verified as loopback-only, and the redirect URI matches what Spotify must have registered
@@ -77,7 +95,7 @@ a first authorization is refused. See
 
 ---
 
-## Apply
+## Apply (already done for round 1)
 
 Copies the staged drop-in into place. It overrides `ExecStart` and
 `WorkingDirectory` only; `COFFERDAM_HOME`, the device token, the live registries
@@ -90,6 +108,15 @@ cp ~/cofferdam/clones/spotify-playback-oauth/deploy/validation/90-spotify-playba
 systemctl --user daemon-reload && \
 systemctl --user restart cofferdam-workstation.service && \
 systemctl --user show cofferdam-workstation.service -p ActiveState -p MainPID -p NRestarts -p WorkingDirectory
+```
+
+## Pick up new code on the same runtime
+
+The drop-in points at this working tree, so a restart is all a code change needs.
+No drop-in is touched.
+
+```bash
+systemctl --user restart cofferdam-workstation.service && systemctl --user show cofferdam-workstation.service -p ActiveState -p MainPID -p NRestarts -p WorkingDirectory
 ```
 
 ## Roll back
@@ -146,6 +173,21 @@ a real account, so each is the user's to run.
 16. Confirm no claim was made about the computer's audio output changing.
 17. Confirm Spotify and YouTube result selection still open correctly.
 18. Confirm no duplicate actions and no horizontal overflow on the phone.
+
+**The M2D.1 fixes** — each one is a defect the first run found
+
+19. **Fully close Spotify.** Search for a track and press **Play now** once.
+    Confirm Spotify opens by itself, that the panel names the steps (*Opening
+    Spotify… / Waiting for Spotify device… / Starting selected track…*), and that
+    the exact track you chose begins **without a second tap**.
+20. Set the Spotify volume to **50**, then **80**, then **70**. Confirm the phone
+    ends on a verified **70** and never sits one value behind.
+21. Search for another track and press **Play now** once. Confirm it replaces the
+    current track immediately, with no Open in Spotify first.
+22. Queue a different track. Confirm it does **not** interrupt what is playing,
+    then press **next** and confirm the queued track is what arrives.
+23. Re-check pause/resume, previous/next and mute/unmute.
+24. Confirm the **Audio** panel's volume is still an independent control.
 
 Nothing here should be run automatically. Until every step above has a real
 result recorded against it, M2D is **not validated** and must not be described

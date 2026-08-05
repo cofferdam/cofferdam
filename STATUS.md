@@ -429,10 +429,47 @@ logic; the gate stays open and unaffected, and no M2A document may describe M1 a
   about the world, and it would have sent someone to switch on a speaker when what they needed was
   to authorize an account. The connection is now checked before any device is resolved.
 
-  **Not validated on the real host yet.** The `90-spotify-playback-validation` drop-in is not
-  applied, and the live service still runs the M2C build under the unchanged `80` drop-in. Until a
-  real authorization and a real playback run have happened from the phone, M2D must not be
-  described as validated.
+  **Partially validated on the real host** (2026-08-05, from the phone against a real Premium
+  account). Authorization completed in Opera on the workstation; the PWA connected without showing a
+  token; catalogue search, queue, next, previous and switching between tracks all worked. **Three
+  reliability defects were found**, and M2D.1 below fixes them. The end-to-end run has not been
+  repeated since, so M2D is **not** yet fully validated.
+
+### M2D.1 — cold start, eventual consistency, and response ordering
+
+- **Fixing what the phone found.** Same branch, same PR. Three failures, one habit: looking once and
+  believing it.
+
+  **Play now with Spotify closed now opens Spotify.** One launch through the existing allowlisted
+  application launcher — no shell, no constructed command line, no web page as a substitute — then a
+  bounded wait for the Connect device, then the requested track. Spotify open-but-idle used to be
+  refused identically; that device is now activated first with the documented transfer operation.
+  Recovery is scoped to Play now: launching Spotify because somebody queued a track would be a
+  surprise, so queueing is unchanged.
+
+  **Every observation is now bounded confirmation rather than one read.** Spotify's player endpoints
+  are eventually consistent, and the immediate re-read was reporting successes as failures — "set to
+  80% but the device reports 50%" while the speaker was already at 80. Fixed attempt counts, fixed
+  intervals, and a truthful give-up; playback is re-read, never re-sent.
+
+  **The PWA drops stale responses.** A poll issued before a write could land after it and repaint the
+  old value, which is why 50 → 80 showed 50. Every state-producing request carries a monotonic
+  generation, in-flight reads are aborted when a write starts, and periodic polling pauses until the
+  write is confirmed. A cheap `GET /api/spotify/activity` — no provider call — carries the phase the
+  panel shows meanwhile.
+
+  **Where several devices are eligible and none is active, Cofferdam asks.** Picking the first of
+  three speakers would start music in a room nobody named.
+
+  1,641 tests pass on both CI paths (1,570 before this fix), including three new mutation checks —
+  removal of stale-response protection, reporting a requested volume instead of an observed one, and
+  unbounded device polling. Writing them found one further defect and fixed it: the confirmation loop
+  and the stale-mute-record cleanup collided, because a lagging read of the old non-zero volume looks
+  exactly like the user turning it back up in the Spotify app, so the level to restore was dropped
+  mid-mute and the following unmute refused.
+
+  **Not re-validated on the real host yet.** The `90-spotify-playback-validation` drop-in is still not
+  applied, and the live service still runs the M2C build under the unchanged `80` drop-in.
 
   **Not in this milestone:** seek, context playback, reading the Spotify queue, persisting a device
   preference, the YouTube dedicated player, and the Opera Companion.

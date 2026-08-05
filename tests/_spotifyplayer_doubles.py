@@ -123,6 +123,26 @@ class FakeSpotify:
 
         self.calls: List[Dict[str, Any]] = []
         self.queued_uris: List[str] = []
+
+        # -- eventual consistency, which is the whole reason M2D.1 exists ----
+        #
+        # Spotify's player endpoints do not serve a write back immediately, and
+        # real validation on the phone hit that on every volume change and on
+        # the first Play now. These two counters model it: after a write, the
+        # relevant read endpoint keeps describing the *previous* world for this
+        # many reads before catching up.
+        self.lag_device_reads = 0
+        self.lag_playback_reads = 0
+        self._pending_volume: Optional[Any] = None
+        self._pending_item: Optional[Dict[str, Any]] = None
+        self._device_reads_left = 0
+        self._playback_reads_left = 0
+
+        # A desktop application that takes this many device reads to register
+        # with Spotify Connect after being launched. ``None`` devices until then.
+        self.devices_after_launch: Optional[List[Dict[str, Any]]] = None
+        self.launch_delay_reads = 0
+        self._launch_reads_left = 0
         # path -> (status, payload). Forces one endpoint to fail without
         # disturbing any other, which is how the refusal states are exercised.
         self.failures: Dict[str, Any] = {}
@@ -149,6 +169,41 @@ class FakeSpotify:
     def fail(self, path: str, status: int, payload: Any = None) -> "FakeSpotify":
         self.failures[path] = (status, payload)
         return self
+
+    def launched(self) -> None:
+        """Called by the fake adapter: Spotify is starting, devices to follow."""
+        if self.devices_after_launch is None:
+            self.devices_after_launch = [device()]
+        self._launch_reads_left = self.launch_delay_reads
+        if self.launch_delay_reads == 0:
+            # An application that registers instantly. Unrealistic, and the
+            # simplest baseline to write the "it did recover" assertion against.
+            self.devices = list(self.devices_after_launch)
+
+    def _settle_devices(self) -> None:
+        """Advance the devices endpoint one read towards the truth."""
+        if self._launch_reads_left > 0:
+            self._launch_reads_left -= 1
+            if self._launch_reads_left == 0 and self.devices_after_launch is not None:
+                self.devices = list(self.devices_after_launch)
+        if self._pending_volume is not None:
+            if self._device_reads_left > 0:
+                self._device_reads_left -= 1
+            else:
+                target, value = self._pending_volume
+                target["volume_percent"] = value
+                self._pending_volume = None
+
+    def _settle_playback(self) -> None:
+        if self._pending_item is None:
+            return
+        if self._playback_reads_left > 0:
+            self._playback_reads_left -= 1
+        else:
+            self.item = self._pending_item
+            self.is_playing = True
+            self.playback_available = True
+            self._pending_item = None
 
     def _maybe_fail(self, path: str) -> Optional[Response]:
         if path not in self.failures:
@@ -185,8 +240,10 @@ class FakeSpotify:
         if path == "/v1/me":
             return json_response(200, {"display_name": "Test Listener", "id": "testlistener"})
         if path == "/v1/me/player/devices":
+            self._settle_devices()
             return json_response(200, {"devices": list(self.devices)})
         if path == "/v1/me/player" and method == "GET":
+            self._settle_playback()
             return self._playback()
         if path == "/v1/me/player" and method == "PUT":
             return self._transfer(body)
@@ -254,7 +311,14 @@ class FakeSpotify:
         payload = json.loads((body or b"{}").decode("utf-8"))
         uris = payload.get("uris") or []
         if uris:
-            self.item = track_item(str(uris[0]).rsplit(":", 1)[-1])
+            started = track_item(str(uris[0]).rsplit(":", 1)[-1])
+            if self.lag_playback_reads:
+                # Accepted, and the state endpoint keeps describing the previous
+                # track for a few reads. Exactly what the phone hit.
+                self._pending_item = started
+                self._playback_reads_left = self.lag_playback_reads
+                return empty_response(204)
+            self.item = started
             self.progress_ms = 0
         self.is_playing = True
         self.playback_available = True
@@ -273,7 +337,15 @@ class FakeSpotify:
             return empty_response(204)
         target = self.by_id((query or {}).get("device_id")) or self.active()
         if target is not None:
-            target["volume_percent"] = int((query or {})["volume_percent"])
+            value = int((query or {})["volume_percent"])
+            if self.lag_device_reads:
+                # Accepted, and the devices endpoint keeps reporting the old
+                # level for a few reads. This is the 50 → 80 → "device says 50"
+                # failure, reproduced.
+                self._pending_volume = (target, value)
+                self._device_reads_left = self.lag_device_reads
+            else:
+                target["volume_percent"] = value
         return empty_response(204)
 
     def _transfer(self, body) -> Response:
@@ -288,6 +360,30 @@ class FakeSpotify:
     def _queue(self, query) -> Response:
         self.queued_uris.append((query or {}).get("uri"))
         return empty_response(204)
+
+
+class FakeApplicationAdapter:
+    """The allowlisted application launcher, as far as playback can see it.
+
+    Records what was launched, and optionally tells the fake Spotify that a
+    desktop client is now starting — which is how the cold-start tests model a
+    device that appears a few seconds *after* the launch rather than instantly.
+    """
+
+    def __init__(self, spotify: Optional[FakeSpotify] = None, fail: bool = False) -> None:
+        self.launches: List[str] = []
+        self._spotify = spotify
+        self._fail = fail
+
+    def open_application(self, application: str):
+        self.launches.append(application)
+        if self._fail:
+            from cofferdam.workstation.errors import AdapterUnsupported
+
+            raise AdapterUnsupported("application not installed: " + application)
+        if self._spotify is not None:
+            self._spotify.launched()
+        return object()
 
 
 def write_user_tokens(config, *, scopes: str = GRANTED_SCOPES, refresh: str = FAKE_REFRESH_TOKEN):
@@ -306,8 +402,30 @@ def write_user_tokens(config, *, scopes: str = GRANTED_SCOPES, refresh: str = FA
     return store
 
 
+def instant_recovery(service, adapter, *, appearance_attempts: int = 5,
+                     activation_attempts: int = 3):
+    """A :class:`DeviceRecovery` whose bounded waits take no wall time.
+
+    The windows are still *bounded* — the count is what the tests assert on —
+    but the interval is zero, so a twenty-second cold start runs in a
+    millisecond. A test that actually slept would be measuring ``time.sleep``.
+    """
+    from cofferdam.workstation.spotifyplayer.coldstart import DeviceRecovery, SpotifyLauncher
+    from cofferdam.workstation.spotifyplayer.confirm import ConfirmWindow
+
+    return DeviceRecovery(
+        service,
+        SpotifyLauncher(adapter),
+        sleeper=lambda seconds: None,
+        appearance_window=ConfirmWindow(attempts=appearance_attempts, interval_seconds=0.0),
+        activation_window=ConfirmWindow(attempts=activation_attempts, interval_seconds=0.0),
+    )
+
+
 __all__ = [
     "ALL_FAKE_OAUTH_SECRETS",
+    "FakeApplicationAdapter",
+    "instant_recovery",
     "FAKE_ACCESS_TOKEN",
     "FAKE_AUTHORIZATION_CODE",
     "FAKE_REFRESH_TOKEN",

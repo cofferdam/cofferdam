@@ -16,7 +16,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from .config import Config
 
@@ -149,7 +149,9 @@ class ActionStore:
             }
         )
 
-    def record_spotify_event(self, operation: str, result: str) -> None:
+    def record_spotify_event(
+        self, operation: str, result: str, correlation_id: Optional[str] = None
+    ) -> None:
         """Audit one Spotify playback action — applied, refused, or failed.
 
         Narrower than any other audit in this file, because playback *is*
@@ -163,6 +165,13 @@ class ActionStore:
         id; not the volume. "A track was skipped at 21:04 and it worked" is
         enough to audit the write path, and it is the most that can be recorded
         without describing someone's evening.
+
+        ``correlation_id`` (M2D.1) is the one addition, and it is safe precisely
+        because it is meaningless on its own: random hex minted per operation,
+        carrying nothing about the account or the track. It exists so a slow
+        cold-start recovery can be lined up with the phase log it produced, which
+        is what made diagnosing "Play now did nothing the first time" possible
+        without recording what was played.
         """
         self.add(
             {
@@ -172,7 +181,7 @@ class ActionStore:
                 "started_at": _utc_now(),
                 "finished_at": _utc_now(),
                 "params": {},
-                "result": {"outcome": result},
+                "result": {"outcome": result, "correlation_id": correlation_id},
                 "error": None if result == "ok" else {"code": result},
                 "stub": False,
             }

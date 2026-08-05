@@ -24,6 +24,12 @@
  *   4. **Nothing is logged.** There is no `console` call in this file. What is
  *      playing is a fact about somebody's evening, and a browser console is a
  *      surface neither of us controls.
+ *   5. **An older answer never wins.** Every request that can produce state
+ *      carries a monotonic generation, and a response older than the newest one
+ *      already applied is dropped. Real validation found the failure this
+ *      prevents: setting 50 → 80 left the phone showing 50, because a poll
+ *      issued *before* the write resolved *after* it and painted the old value
+ *      over the newly verified one. Ordering by arrival is ordering by luck.
  */
 (function (global) {
   "use strict";
@@ -49,17 +55,40 @@
      the button twice. */
   var ACTION_TIMEOUT_MS = 12000;
 
+  /* Cold-start recovery can take twenty seconds. While a write is in flight the
+     panel polls this instead of the state route — it costs the server one
+     in-memory read and Spotify nothing at all, so watching a slow operation
+     cannot make the rate limit that operation is already fighting any worse. */
+  var ACTIVITY_POLL_MS = 700;
+
+  /* Long enough for a full cold start — launch, device appearance, transfer,
+     play, confirm — plus slack. Shorter than this and the bound would fire on a
+     recovery that was about to succeed. */
+  var RECOVERY_TIMEOUT_MS = 45000;
+
   var snapshot = null;
   var loadError = null;
   var timer = null;
   var timerInterval = null;
   var pending = null;       /* which control is busy: a string key, or null */
   var pendingTimer = null;
-  var actionError = null;   /* {message, detail} from the server, verbatim */
+  var actionError = null;   /* {message, detail, code} from the server, verbatim */
   var actionNote = null;    /* the observed outcome of the last action */
   var draftVolume = null;   /* slider position while dragging; never truth */
   var selectedDevice = null;/* the device handle chosen in the picker */
   var stopped = false;
+
+  /* Response ordering. `refreshGeneration` is stamped on a request when it is
+     issued; `appliedGeneration` is the newest one whose payload has been
+     adopted. A response arriving with an older stamp is discarded — it is a
+     description of a world that has since moved. */
+  var refreshGeneration = 0;
+  var appliedGeneration = 0;
+  var inflightRefresh = null;   /* AbortController for a state refresh, if any */
+
+  var activity = null;          /* the server's current phase, while a write runs */
+  var activityTimer = null;
+  var lastPlayAttempt = null;   /* what Retry would retry, after a recovery failure */
 
   function esc(value) { return deps.escapeHtml(value); }
 
@@ -311,7 +340,12 @@
           'aria-label="Spotify player volume percent" ' +
           'aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + esc(String(shown)) + '" ' +
           (busy ? "disabled " : "") + ">" +
-        '<output class="sp-volume-value" for="spotifyVolume">' + esc(String(shown)) + "%</output>" +
+        '<output class="sp-volume-value" for="spotifyVolume">' +
+          /* While a volume write is being confirmed the number beside the slider
+             would otherwise be the *previous* level presented as current. It is
+             not current, and nothing yet knows what is. */
+          (pending === "volume" ? esc("Applying…") : esc(String(shown)) + "%") +
+        "</output>" +
       "</div>"
     ];
     if (draftVolume !== null && draftVolume !== volume) {
@@ -396,11 +430,35 @@
       "</details>";
   }
 
+  /* Refusals that a second attempt can genuinely fix, because the thing that
+     was missing may have arrived since — Spotify finished starting, a speaker
+     woke up, the track loaded. Anything else gets no Retry button, because
+     offering one for a Premium requirement would be offering a lie. */
+  var RETRYABLE = {
+    spotify_no_device_after_launch: true,
+    spotify_launch_failed: true,
+    spotify_playback_not_observed: true,
+    spotify_no_active_device: true,
+    spotify_device_unknown: true
+  };
+
+  function renderPendingBanner() {
+    if (pending === null) { return ""; }
+    /* The server's own phase, when it has published one. Not a script: each
+       phase is written by the code that is about to do that thing, so this is a
+       log of what is happening rather than a guess at what might be. */
+    var label = (activity && activity.label) ? activity.label : "Applying…";
+    return '<p class="sp-pending-banner">' + esc(label) + "</p>";
+  }
+
   function renderFeedback() {
     var blocks = [];
     if (actionError) {
       blocks.push('<p class="sp-error">' + esc(actionError.message) +
         (actionError.detail ? ' <span class="muted">' + esc(actionError.detail) + "</span>" : "") +
+        (RETRYABLE[actionError.code] && lastPlayAttempt
+          ? ' <button id="spotifyRetry" class="sp-retry">Retry</button>'
+          : "") +
         "</p>");
     }
     if (actionNote) {
@@ -440,6 +498,7 @@
     } else {
       html = renderConnectedHeader() +
         renderNowPlaying() +
+        renderPendingBanner() +
         (activeDevice() ? renderTransport() + renderVolume() : renderNoDevice()) +
         renderFeedback() +
         renderDevices();
@@ -457,28 +516,76 @@
 
   /* ---------------------------------------------------------------- loading */
 
+  /* Take a generation for a request that will produce state. Monotonic, so the
+     stamp orders requests by when they were *issued* — which is the order the
+     server saw them in, and the only order that means anything. */
+  function nextGeneration() {
+    refreshGeneration += 1;
+    return refreshGeneration;
+  }
+
+  /* Adopt a snapshot, unless something newer has already been applied. */
+  function adopt(payload, generation) {
+    if (generation < appliedGeneration) { return false; }
+    appliedGeneration = generation;
+    snapshot = payload;
+    loadError = null;
+    /* A device handle is good for this session only, so a selection that no
+       longer resolves is dropped rather than sent back. */
+    if (selectedDevice) {
+      var stillThere = devices().some(function (device) {
+        return device.resource_id === selectedDevice;
+      });
+      if (!stillThere) { selectedDevice = null; }
+    }
+    return true;
+  }
+
+  function abortInflightRefresh() {
+    if (inflightRefresh) {
+      try { inflightRefresh.abort(); } catch (error) { /* already settled */ }
+      inflightRefresh = null;
+    }
+  }
+
+  function newAbortController() {
+    /* Optional: the generation guard is what actually makes ordering correct,
+       and aborting is the optimisation that stops a doomed response being
+       downloaded at all. Where AbortController does not exist the guard alone
+       still holds. */
+    if (typeof global.AbortController !== "function") { return null; }
+    try { return new global.AbortController(); } catch (error) { return null; }
+  }
+
   function load(force) {
-    return deps.api("/api/spotify/playback" + (force ? "?refresh=true" : ""))
+    var generation = nextGeneration();
+    abortInflightRefresh();
+    var controller = newAbortController();
+    inflightRefresh = controller;
+    var options = controller ? { signal: controller.signal } : undefined;
+
+    return deps.api("/api/spotify/playback" + (force ? "?refresh=true" : ""), options)
       .then(function (response) {
+        if (inflightRefresh === controller) { inflightRefresh = null; }
+        /* Dropped in silence: a stale read is not an error, it is simply no
+           longer news, and reporting it would be noise on a working panel. */
+        if (generation < appliedGeneration) { return; }
         if (!response.ok) {
+          appliedGeneration = generation;
           loadError = "Cofferdam could not read your Spotify player state.";
           snapshot = null;
         } else {
-          loadError = null;
-          snapshot = response.payload;
-          /* A device handle is good for this session only, so a selection that
-             no longer resolves is dropped rather than sent back. */
-          if (selectedDevice) {
-            var stillThere = devices().some(function (device) {
-              return device.resource_id === selectedDevice;
-            });
-            if (!stillThere) { selectedDevice = null; }
-          }
+          adopt(response.payload, generation);
         }
         render();
         reschedule();
       }).catch(function (error) {
+        if (inflightRefresh === controller) { inflightRefresh = null; }
         if (error && error.message === "unauthorized") { return; }
+        /* An aborted request is one this code cancelled on purpose. It is not a
+           reachability problem and must not be rendered as one. */
+        if (error && (error.name === "AbortError" || error.aborted)) { return; }
+        if (generation < appliedGeneration) { return; }
         loadError = "Cofferdam could not reach the workstation to read your Spotify player.";
         snapshot = null;
         render();
@@ -487,30 +594,63 @@
 
   /* ---------------------------------------------------------------- actions */
 
-  function beginPending(key) {
+  function beginPending(key, timeoutMs) {
     if (pending !== null) { return false; }   /* rule 2: one action at a time */
     pending = key;
     actionError = null;
     actionNote = null;
+    activity = null;
+    /* Periodic state polling stops for the duration of the write. A snapshot
+       landing mid-confirmation would redraw the panel underneath the user's
+       finger, and — before the generation guard existed — could overwrite the
+       verified result the write is about to return. Both are now prevented, and
+       stopping is still right: the poll would be spending an account's rate
+       limit on a picture the action is about to supersede. */
+    abortInflightRefresh();
+    stopPolling();
+    startActivityWatch();
     if (pendingTimer) { global.clearTimeout(pendingTimer); }
     pendingTimer = global.setTimeout(function () {
       if (pending !== null) {
-        pending = null;
-        pendingTimer = null;
+        endPending();
         actionError = {
           message: "That did not finish in time, so Cofferdam cannot say whether it worked.",
           detail: "Refresh to see what Spotify is actually doing before trying again."
         };
         render();
       }
-    }, ACTION_TIMEOUT_MS);
+    }, timeoutMs || ACTION_TIMEOUT_MS);
     render();
     return true;
   }
 
   function endPending() {
     pending = null;
+    activity = null;
     if (pendingTimer) { global.clearTimeout(pendingTimer); pendingTimer = null; }
+    stopActivityWatch();
+    /* Normal polling resumes only once nothing is being confirmed. */
+    reschedule();
+  }
+
+  /* ------------------------------------------------------- activity watch */
+
+  function startActivityWatch() {
+    stopActivityWatch();
+    activityTimer = global.setInterval(function () {
+      if (pending === null) { stopActivityWatch(); return; }
+      deps.api("/api/spotify/activity").then(function (response) {
+        if (pending === null || !response.ok) { return; }
+        var payload = response.payload || {};
+        if (payload.active === false && !payload.label) { return; }
+        activity = payload;
+        render();
+      }).catch(function () { /* the phase is a nicety; never a failure */ });
+    }, ACTIVITY_POLL_MS);
+  }
+
+  function stopActivityWatch() {
+    if (activityTimer) { global.clearInterval(activityTimer); activityTimer = null; }
   }
 
   function describeOutcome(result) {
@@ -532,8 +672,11 @@
     };
   }
 
-  function send(key, path, options) {
-    if (!beginPending(key)) { return Promise.resolve(null); }
+  function send(key, path, options, timeoutMs) {
+    if (!beginPending(key, timeoutMs)) { return Promise.resolve(null); }
+    /* Stamped now, after any earlier poll was issued and aborted, so this
+       write's verified result is newer than anything already in the air. */
+    var generation = nextGeneration();
     return deps.api(path, options).then(function (response) {
       endPending();
       if (!response.ok) {
@@ -546,12 +689,16 @@
       actionError = null;
       actionNote = describeOutcome(response.payload);
       var payload = response.payload;
-      /* The action response already carries a fresh snapshot the server took
-         after acting, so this adopts it rather than making a second call
-         against a rate-limited account. */
+      /* The server acted, re-read Spotify on a bounded schedule, and returned
+         what it *observed*. That snapshot is the freshest verified state that
+         exists, so it is adopted directly rather than spending another call on
+         a rate-limited account — and under the newest generation, so a poll
+         issued earlier can no longer paint the old value back over it. */
       if (payload && payload.playback) {
-        snapshot = Object.assign({}, payload.playback, { authorization: authorization() });
-        loadError = null;
+        adopt(
+          Object.assign({}, payload.playback, { authorization: authorization() }),
+          generation
+        );
       }
       render();
       reschedule();
@@ -671,7 +818,15 @@
     }
     var path = "/api/media/searches/" + encodeURIComponent(searchId) +
       "/results/" + encodeURIComponent(resultId) + "/spotify/" + verb;
-    return send("result-" + verb, path, { body: {} }).then(function (payload) {
+    /* Remembered so a recovery that failed can offer Retry rather than making
+       the user find the same card again. Only the two opaque handles the server
+       issued — the same pair the request itself carries. */
+    if (verb === "play") { lastPlayAttempt = { searchId: searchId, resultId: resultId }; }
+    /* Play now may have to open Spotify and wait for its device, so it gets the
+       longer bound. Using the ordinary one here would fire a "did not finish in
+       time" while a perfectly good cold start was still running. */
+    var bound = verb === "play" ? RECOVERY_TIMEOUT_MS : ACTION_TIMEOUT_MS;
+    return send("result-" + verb, path, { body: {} }, bound).then(function (payload) {
       if (payload) {
         return { ok: true, code: null, message: payload.message, outcome: payload.outcome };
       }
@@ -702,19 +857,25 @@
   }
 
   function wanted() {
-    if (stopped) { return null; }
+    /* No periodic state polling while a write is being confirmed. The activity
+       watch covers that window, and it costs the provider nothing. */
+    if (stopped || pending !== null) { return null; }
     return authorizing() ? AUTH_POLL_MS : POLL_MS;
+  }
+
+  function stopPolling() {
+    if (timer) { global.clearInterval(timer); timer = null; }
+    timerInterval = null;
   }
 
   function reschedule() {
     var interval = wanted();
+    if (interval === null) { stopPolling(); return; }
     if (interval === timerInterval && timer) { return; }
-    if (timer) { global.clearInterval(timer); timer = null; }
+    stopPolling();
     timerInterval = interval;
-    if (interval === null) { return; }
     timer = global.setInterval(function () {
-      /* Never poll over an action in flight: a snapshot landing mid-request
-         would redraw the panel underneath the user's finger. */
+      /* Belt and braces with `wanted()`: an action can begin between ticks. */
       if (pending === null && visible()) { load(false); }
     }, interval);
   }
@@ -740,6 +901,11 @@
           case "spotifyPrevious": transport("previous"); return;
           case "spotifyMute": toggleMute(); return;
           case "spotifyTransfer": transfer(); return;
+          case "spotifyRetry":
+            if (lastPlayAttempt) {
+              playResult(lastPlayAttempt.searchId, lastPlayAttempt.resultId);
+            }
+            return;
           default: return;
         }
       });
@@ -776,9 +942,13 @@
 
   function stop() {
     stopped = true;
-    if (timer) { global.clearInterval(timer); timer = null; }
-    timerInterval = null;
-    endPending();
+    stopPolling();
+    stopActivityWatch();
+    abortInflightRefresh();
+    pending = null;
+    if (pendingTimer) { global.clearTimeout(pendingTimer); pendingTimer = null; }
+    activity = null;
+    lastPlayAttempt = null;
     /* What is playing, which account it is, and which speakers someone owns all
        go with the token. A signed-out device keeps none of it and makes no
        further requests. */

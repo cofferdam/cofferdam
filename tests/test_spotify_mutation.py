@@ -52,8 +52,10 @@ from ._spotifyplayer_doubles import (
     FAKE_REFRESH_TOKEN,
     OTHER_TRACK_ID,
     TRACK_ID,
+    FakeApplicationAdapter,
     FakeSpotify,
     device,
+    instant_recovery,
     track_item,
     write_user_tokens,
 )
@@ -80,7 +82,13 @@ class MutationTestCase(unittest.TestCase):
             cache_seconds=0.0,
         )
         self.sessions = SearchSessionStore()
-        self.actions = SpotifyActionExecutor(self.service, self.sessions)
+        self.adapter = FakeApplicationAdapter(self.spotify)
+        self.actions = SpotifyActionExecutor(
+            self.service,
+            self.sessions,
+            recovery=instant_recovery(self.service, self.adapter),
+            sleeper=lambda seconds: None,
+        )
 
     def session(self, *, provider_id="spotify", item_type="track", item_id=TRACK_ID):
         result = MediaResult(
@@ -392,11 +400,115 @@ class ObservationGuardTests(MutationTestCase):
         )
 
     def test_the_suite_notices_if_a_volume_change_stops_being_verified(self) -> None:
+        """The observed number must be read, never echoed from the request."""
         self.spotify.ignore_writes = True
+
+        # Unmutated: never `applied`, and `observed` is what the device says.
         result = self.actions.set_volume(25)
-        self.assertEqual(result["outcome"], OUTCOME_NOT_APPLIED)
+        self.assertNotEqual(result["outcome"], OUTCOME_APPLIED)
         self.assertEqual(result["requested"]["volume_percent"], 25)
         self.assertNotEqual(result["observed"]["volume_percent"], 25)
+        self.assertFalse(result["observed"]["confirmed"])
+
+        # Mutated: report the requested value as the observed one — the single
+        # most tempting shortcut in this whole file, and the one that would make
+        # every volume test pass while the speaker did nothing.
+        class EchoingExecutor(SpotifyActionExecutor):
+            def set_volume(self, volume_percent, device_resource_id=None):
+                before = self._fresh()
+                target = self._service.target_device(before, device_resource_id)
+                self._service.client.set_volume(
+                    self._tokens(), int(volume_percent), target.provider_device_id
+                )
+                after = self._reobserve()
+                return self._result(
+                    "spotify_set_volume", OUTCOME_APPLIED,
+                    {"volume_percent": int(volume_percent)},
+                    {"volume_percent": int(volume_percent)},
+                    f"Spotify volume is now {int(volume_percent)}%", after,
+                )
+
+        echoed = EchoingExecutor(self.service, self.sessions).set_volume(25)
+        self.assertEqual(
+            echoed["observed"]["volume_percent"],
+            echoed["requested"]["volume_percent"],
+            "echoing the request should look like success — the real path must not",
+        )
+
+    def test_the_suite_notices_if_confirmation_polling_is_removed(self) -> None:
+        """One read is not enough, and this is what proves it.
+
+        Spotify's devices endpoint is eventually consistent. The single
+        immediate read this replaced reported "set to 80% but the device reports
+        50%" while the speaker was already at 80 — a real failure, on a real
+        phone, on every volume change.
+        """
+        self.spotify.lag_device_reads = 2
+
+        # Unmutated: re-read on a bounded schedule, and it confirms.
+        result = self.actions.set_volume(80)
+        self.assertEqual(result["outcome"], OUTCOME_APPLIED)
+        self.assertEqual(result["observed"]["volume_percent"], 80)
+
+        # Mutated: a confirmation window of exactly one attempt, which is the
+        # pre-M2D.1 behaviour spelled out.
+        from cofferdam.workstation.spotifyplayer.confirm import ConfirmWindow
+
+        with patch(
+            "cofferdam.workstation.spotifyplayer.actions.VOLUME_CONFIRM",
+            ConfirmWindow(attempts=1, interval_seconds=0.0),
+        ):
+            self.spotify.lag_device_reads = 2
+            once = self.actions.set_volume(30)
+        self.assertNotEqual(
+            once["outcome"],
+            OUTCOME_APPLIED,
+            "reading once should fail to confirm a lagging write — which is the bug",
+        )
+        self.assertEqual(once["observed"]["volume_percent"], 80)
+
+    def test_the_suite_notices_if_device_polling_becomes_unbounded(self) -> None:
+        """Every wait is a fixed attempt count, not a condition.
+
+        Spotify rate-limits over a rolling thirty-second window, so a loop that
+        kept trying would turn one slow device into a burst of requests against
+        an account that is already struggling.
+        """
+        import inspect
+
+        from cofferdam.workstation.spotifyplayer import coldstart, confirm
+
+        source = inspect.getsource(confirm.confirm)
+        self.assertIn("range(", source)
+        self.assertNotIn("while ", source)
+        self.assertNotIn("while ", inspect.getsource(coldstart.DeviceRecovery))
+
+        for window in (
+            confirm.VOLUME_CONFIRM,
+            confirm.PLAYBACK_CONFIRM,
+            confirm.TRANSPORT_CONFIRM,
+            confirm.ACTIVATION_CONFIRM,
+            confirm.DEVICE_APPEARANCE,
+        ):
+            with self.subTest(window=window):
+                self.assertGreater(window.attempts, 0)
+                self.assertLessEqual(window.attempts, 30)
+                self.assertLessEqual(window.timeout_seconds, 60)
+
+        # Mutated: a window with a huge attempt count still terminates, which is
+        # the property that makes "bounded" meaningful rather than lucky.
+        reads = []
+
+        def never_matches(_value: object) -> bool:
+            return False
+
+        confirm.confirm(
+            lambda: reads.append(1),
+            never_matches,
+            confirm.ConfirmWindow(attempts=7, interval_seconds=0.0),
+            lambda seconds: None,
+        )
+        self.assertEqual(len(reads), 7)
 
 
 class UnmuteRestoreGuardTests(MutationTestCase):

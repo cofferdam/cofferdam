@@ -47,7 +47,7 @@ http://127.0.0.1:8888/callback
 controlling playback are both Premium-only. A free account can search the
 catalogue and open Spotify; it cannot drive the player.
 
-**A new app is in development mode, with a five-user allowlist.** That allowlist
+**A new app is in development mode, with a small user allowlist.** That allowlist
 applies to *user* tokens, which is exactly what this feature mints — so the
 Spotify account that completes the authorization **must be added to the app's
 allowed users** or Spotify will refuse. See
@@ -97,6 +97,94 @@ saying *"I have your request"*, not *"the speaker changed"* — and the
 documentation warns that "the order of execution is not guaranteed when you use
 this API with other Player API endpoints". Everything in the next section follows
 from those two sentences.
+
+---
+
+## What real validation changed (M2D.1)
+
+The first version of this feature was validated from a phone against a real
+Premium account on 2026-08-05. Queue, next, previous and switching tracks all
+worked. Three things did not, and all three had the same shape: the code looked
+**once** and believed what it saw.
+
+**Spotify closed meant "no device", full stop.** Pressing Play now with the
+desktop application shut reported *"Spotify has no active device"* and gave up —
+a true statement about the device list and a useless one about the product, since
+Cofferdam can open Spotify itself. It now does: one launch through the same
+allowlisted application launcher the Media panel uses, then a bounded wait for the
+Connect device to register, then the track you asked for.
+
+**Spotify open but idle also meant "no device".** The device was there with
+`is_active` false, and that was refused too — which is exactly why *Open in
+Spotify, then Play now* worked as a workaround. The workaround was the diagnosis.
+An idle device is now made active first, using the documented transfer operation,
+before the track starts.
+
+**A single immediate read denied changes that had happened.** Spotify's player
+endpoints are eventually consistent, so the read taken microseconds after a write
+frequently still described the world before it. Setting the volume to 80%
+reported *"set to 80% but the device reports 50%"*; the first Play now reported
+*"playing something other than the track you chose"*. Both were wrong, and both
+were wrong in the direction of denying a success. Every observation is now taken
+on a bounded confirmation schedule — an immediate first read, then a fixed number
+of further reads, then a truthful give-up.
+
+There was a fourth, in the phone rather than the server: a state poll issued
+*before* a write could resolve *after* it and repaint the old value over the newly
+verified one. Every request that produces state now carries a monotonic
+generation, and a response older than the newest one already applied is discarded.
+
+None of this is a retry loop. Every wait is a fixed attempt count times a fixed
+interval, Spotify is launched at most once per recovery, and playback is never
+re-sent as a way of making it work — it is re-*read*.
+
+### What you see while it happens
+
+Cold-start recovery can take twenty seconds, so the panel names the step it is
+on rather than spinning:
+
+```
+Opening Spotify…
+Waiting for Spotify device…
+Switching Spotify to that device…
+Starting selected track…
+Checking Spotify actually started it…
+```
+
+Each of those is written by the code that is about to do that thing, so the
+sequence is a log rather than a script. If recovery stops at *Waiting for Spotify
+device…*, that is where it stopped. The phone reads them from
+`GET /api/spotify/activity`, which touches neither Spotify nor the filesystem —
+watching a slow operation cannot make the rate limit it is already fighting any
+worse.
+
+If recovery fails, the panel says why and offers **Retry**, which sends exactly
+one more attempt. Retry is offered only for refusals a second attempt could
+genuinely fix — a device that had not appeared yet, a launch that did not take.
+It is never offered for a Premium requirement, because retrying cannot fix a
+subscription.
+
+### When Cofferdam asks instead of choosing
+
+If several Spotify devices are available and **none** of them is active, Play now
+**asks which one** rather than picking. Choosing the first of three speakers
+because it sorts first would start music in a room nobody named, and a device
+list contains no evidence about which room somebody is standing in. One eligible
+device is unambiguous and is used; an already-active device wins outright.
+
+Restricted devices are not candidates for anything, including for being the
+single unambiguous one.
+
+### What recovery deliberately does not do
+
+* It does not run a shell or build a command line — `open_application("spotify")`
+  is a logical key on the existing allowlisted, fixed-argv path.
+* It does not open a search page as a substitute for launching the player, and
+  would not report that as recovery if it did.
+* It does not extend to **Add to queue**. Launching Spotify because somebody
+  queued a track would be a surprise; queueing behaves exactly as it did.
+* It does not match devices by name. A device that appears after a launch is not
+  trusted because it is called "Workstation".
 
 ---
 
@@ -415,6 +503,7 @@ authorization code, or a redirect URI.
 | Method | Path | Body |
 |---|---|---|
 | `GET` | `/api/spotify/playback` | — (`?refresh=true` to bypass the short cache) |
+| `GET` | `/api/spotify/activity` | — (the current operation's phase; no provider call) |
 | `POST` | `/api/spotify/authorize` | `{}` |
 | `DELETE` | `/api/spotify/authorize` | — |
 | `POST` | `/api/spotify/disconnect` | `{}` |
@@ -451,6 +540,10 @@ and is unreachable from the tailnet.
 `spotify_rate_limited`, `spotify_provider_rejected`,
 `spotify_provider_unavailable`.
 
+Added by cold-start recovery (M2D.1): `spotify_no_device_after_launch`,
+`spotify_device_ambiguous`, `spotify_launch_failed`,
+`spotify_playback_not_observed`.
+
 Volume is refused, never clamped: `-1`, `101`, `12.5`, `NaN` and `"50"` are all
 rejected rather than silently turned into something you did not ask for.
 
@@ -460,8 +553,12 @@ rejected rather than silently turned into something you did not ask for.
 
 ### "Spotify has no active device"
 
-Spotify needs somewhere to send audio, and right now there is nowhere. This is
-an ordinary situation, not a fault.
+Spotify needs somewhere to send audio, and right now there is nowhere.
+
+Since M2D.1 you should rarely see this from **Play now** — that path opens the
+desktop application for you. It still appears for pause, resume, next, previous,
+volume and mute, which act on something already playing and have nothing to act
+on. It is an ordinary situation, not a fault.
 
 Open Spotify anywhere — the desktop app on this workstation, your phone, a
 speaker, the web player — and *play something for a moment*. That registers it as
@@ -470,6 +567,19 @@ list and choose **Move playback here**.
 
 A device that has been idle for a long time can disappear from the list; opening
 Spotify on it brings it back.
+
+### "Spotify was opened but no playback device appeared"
+
+Cofferdam launched the desktop application and waited, and Spotify never
+registered a Connect device. Check the workstation: Spotify may still be starting
+on a cold cache, or it may be sitting on a sign-in screen. Press **Retry** once it
+is up.
+
+### "Several Spotify devices are available and none is active"
+
+Cofferdam will not choose between them. Pick one in the **Spotify Connect
+devices** list and press **Move playback here**, then Play now — or press Play now
+after selecting the device in the picker.
 
 ### The authorization page opened but nothing happened
 

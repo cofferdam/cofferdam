@@ -59,6 +59,43 @@ release.
   including by the callback listener whose default access log would have contained the authorization
   code. No listening history is kept, and the panel makes no browser console call.
 
+### Fixed
+
+- **M2D.1 — press Play once, with Spotify closed, and get the track you picked.** Real validation
+  from the phone found three failures. All of them came from the same habit: looking **once** and
+  believing what was seen.
+
+  **Spotify closed no longer means "no device".** Play now opens the installed desktop application
+  through the same allowlisted launcher the Media panel uses — no shell, no command line built here,
+  and never a web page opened as a substitute — then waits a bounded time for the Connect device to
+  register and starts the track you asked for. Spotify open *but idle* also used to be refused; that
+  device is now made active first with the documented transfer operation, which is why "Open in
+  Spotify, then Play now" was a working workaround and is no longer needed.
+
+  **A single immediate read was denying changes that had happened.** Spotify's player endpoints are
+  eventually consistent, so the read taken microseconds after a write frequently still described the
+  world before it: setting 80% reported *"set to 80% but the device reports 50%"*, and the first Play
+  now reported *"playing something other than the track you chose"*. Every observation now uses a
+  bounded confirmation schedule — an immediate first read, then a fixed number of further reads, then
+  a truthful give-up. Playback is re-*read*, never re-sent.
+
+  **An older answer can no longer win.** In the phone, a state poll issued *before* a write could
+  resolve *after* it and repaint the old value over the newly verified one — which is why 50 → 80 left
+  the slider showing 50. Every request that produces state now carries a monotonic generation, older
+  responses are discarded, in-flight reads are cancelled when a write begins, and periodic polling
+  pauses until the write is confirmed.
+
+  **Nothing loops.** One launch attempt per recovery, one transfer attempt, fixed attempt counts on
+  every wait, and a bounded overall timeout. When recovery cannot finish, the panel says which step it
+  reached and offers Retry — once, and only for refusals a second attempt could genuinely fix.
+
+  **And it says what it is doing.** Cold start can take twenty seconds, so the panel shows *Opening
+  Spotify… / Waiting for Spotify device… / Starting selected track…*, read from a route that touches
+  neither Spotify nor the filesystem. Each phase is written by the code about to do that thing, so the
+  sequence is a log rather than a script. Where several devices are available and none is active,
+  Cofferdam **asks** instead of picking: choosing the first of three speakers would start music in a
+  room nobody named.
+
 - **M2C — turn the volume down from your phone, and be told the truth about it.** Cofferdam could
   open Spotify and pick the exact track; it could not change how loud the room was. This adds
   reading and safely controlling the workstation's real PipeWire/WirePlumber audio: the current

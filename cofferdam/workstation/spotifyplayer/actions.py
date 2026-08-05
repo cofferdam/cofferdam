@@ -10,6 +10,22 @@ with ``requested`` and ``observed`` as separate keys — the same shape the audi
 milestone uses, for the same reason. An action whose effect cannot be seen is
 ``partially_applied`` with an explanation, never a success.
 
+Once was not enough
+-------------------
+Real validation on the phone found that reading **once** was the bug. Setting the
+volume to 80% reported *"set to 80% but the device reports 50%"*, and the first
+Play now reported *"playing something other than the track you chose"* — both
+while Spotify was doing exactly what it had been asked. Spotify's player
+endpoints are eventually consistent, so the read that happens microseconds after
+a write frequently still describes the world before it, and the honest-looking
+report was wrong in the user's favour's opposite direction: it denied a success
+that had happened.
+
+So every observation here now goes through :mod:`.confirm` — the same immediate
+first read, followed by a **bounded** number of further reads, and then a truthful
+give-up. Nothing loops, and nothing reports the requested value as though it were
+observed.
+
 Where verification is genuinely impossible
 ------------------------------------------
 Two operations cannot be fully verified, and both say so rather than pretending:
@@ -26,18 +42,33 @@ Two operations cannot be fully verified, and both say so rather than pretending:
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Mapping, Optional, Tuple
+import time
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from ..mediasearch.spotify import PROVIDER_ID as SPOTIFY_PROVIDER_ID
 from ..mediasearch.spotify import build_uri
+from .coldstart import DeviceRecovery
+from .confirm import (
+    PLAYBACK_CONFIRM,
+    TRANSPORT_CONFIRM,
+    VOLUME_CONFIRM,
+    ConfirmWindow,
+    confirm,
+)
 from .errors import (
     CODE_INVALID_VOLUME,
     CODE_RESULT_NOT_PLAYABLE,
     CODE_UNMUTE_UNKNOWN,
-    NoActiveDevice,
     SpotifyPlayerError,
 )
 from .models import PlaybackSnapshot, SpotifyDevice
+from .progress import (
+    PHASE_CONFIRMING_VOLUME,
+    PHASE_STARTING,
+    PHASE_VERIFYING,
+    ActivityRecorder,
+    OperationProgress,
+)
 from .service import SpotifyPlayerService
 
 # -- outcomes ----------------------------------------------------------------
@@ -95,11 +126,38 @@ def clean_volume_percent(raw: Any) -> int:
 class SpotifyActionExecutor:
     """The typed actions, each verified against a re-read of playback state."""
 
-    def __init__(self, service: SpotifyPlayerService, sessions=None) -> None:
+    def __init__(
+        self,
+        service: SpotifyPlayerService,
+        sessions=None,
+        recovery: Optional[DeviceRecovery] = None,
+        activity: Optional[ActivityRecorder] = None,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> None:
         self._service = service
         self._sessions = sessions
+        # Absent on a host with no launcher wired: recovery is then simply not
+        # offered, and the old truthful "no active device" stands.
+        self._recovery = recovery
+        self._activity = activity or ActivityRecorder()
+        self._sleeper = sleeper
+
+    @property
+    def activity(self) -> ActivityRecorder:
+        return self._activity
 
     # -- helpers -----------------------------------------------------------
+
+    def _begin(self, operation: str) -> OperationProgress:
+        """Start a correlated operation and publish it as the current activity.
+
+        The correlation id is random hex with nothing of the account in it, which
+        is what makes it the only part of a playback operation that is safe to
+        carry into an audit record.
+        """
+        progress = OperationProgress(operation=operation)
+        self._activity.begin(progress, operation)
+        return progress
 
     def _fresh(self) -> PlaybackSnapshot:
         """The pre-action observation, or the refusal that explains why not.
@@ -117,8 +175,19 @@ class SpotifyActionExecutor:
         self._service.invalidate()
         return self._service.snapshot(refresh=True)
 
+    def _confirm_snapshot(
+        self, matches: Callable[[PlaybackSnapshot], bool], window: ConfirmWindow
+    ) -> Tuple[PlaybackSnapshot, bool]:
+        """Re-read until the snapshot agrees, or until the window is spent.
+
+        Every caller uses the snapshot this returns as the response's observed
+        state, matched or not — so a confirmation that timed out reports the last
+        thing actually seen rather than the thing that was asked for.
+        """
+        return confirm(self._reobserve, matches, window, self._sleeper)
+
     def _tokens(self):
-        return self._service._authorized_tokens()
+        return self._service.authorized_tokens()
 
     def _result(
         self,
@@ -128,8 +197,9 @@ class SpotifyActionExecutor:
         observed: Optional[Mapping[str, Any]],
         message: str,
         snapshot: PlaybackSnapshot,
+        progress: Optional[OperationProgress] = None,
     ) -> Dict[str, Any]:
-        return {
+        payload = {
             "operation": operation,
             "outcome": outcome,
             "requested": dict(requested),
@@ -138,6 +208,11 @@ class SpotifyActionExecutor:
             "observed_at": snapshot.observed_at,
             "playback": snapshot.to_dict(),
         }
+        if progress is not None:
+            self._activity.finish(progress)
+            payload["correlation_id"] = progress.correlation_id
+            payload["progress"] = progress.to_dict()["steps"]
+        return payload
 
     # -- transport ---------------------------------------------------------
 
@@ -147,7 +222,13 @@ class SpotifyActionExecutor:
         tokens = self._tokens()
 
         self._service.client.pause(tokens, device.provider_device_id)
-        after = self._reobserve()
+        # Bounded confirmation rather than one immediate read: the state endpoint
+        # can still describe the moment before the write. "Nothing playing" also
+        # satisfies a pause, so it ends the wait too.
+        after, _matched = self._confirm_snapshot(
+            lambda snapshot: not snapshot.is_playing or not snapshot.playback_available,
+            TRANSPORT_CONFIRM,
+        )
 
         if not after.playback_available:
             # Spotify answers 204 when nothing is playing; after a pause that is
@@ -170,7 +251,9 @@ class SpotifyActionExecutor:
         tokens = self._tokens()
 
         self._service.client.resume(tokens, device.provider_device_id)
-        after = self._reobserve()
+        after, _matched = self._confirm_snapshot(
+            lambda snapshot: snapshot.is_playing, TRANSPORT_CONFIRM
+        )
 
         if not after.playback_available:
             return self._result(
@@ -201,7 +284,19 @@ class SpotifyActionExecutor:
             self._service.client.next_track(tokens, device.provider_device_id)
         else:
             self._service.client.previous_track(tokens, device.provider_device_id)
-        after = self._reobserve()
+
+        # A skip is confirmed by the item *changing*. When it legitimately does
+        # not — "previous" inside the first seconds restarts the current track —
+        # the window is spent and the honest partial result below is reported,
+        # which is the same answer the single read used to give, only after
+        # having actually looked more than once.
+        after, _matched = self._confirm_snapshot(
+            lambda snapshot: (
+                (snapshot.now_playing.track_id if snapshot.now_playing else None)
+                != previous_track
+            ),
+            TRANSPORT_CONFIRM,
+        )
 
         current = after.now_playing.track_id if after.now_playing else None
         observed = {
@@ -234,13 +329,25 @@ class SpotifyActionExecutor:
 
     def set_volume(self, volume_percent: Any, device_resource_id: object = None) -> Dict[str, Any]:
         percent = clean_volume_percent(volume_percent)
+        progress = self._begin("spotify_set_volume")
         before = self._fresh()
         device = self._service.target_device(before, device_resource_id)
         self._require_volume(device)
         tokens = self._tokens()
 
         self._service.client.set_volume(tokens, percent, device.provider_device_id)
-        after = self._reobserve()
+
+        # The defect this replaced: one immediate read of the devices endpoint,
+        # which is eventually consistent, so 50 → 80 reported "set to 80% but the
+        # device reports 50%" while the speaker was already at 80. The volume is
+        # now re-read on a bounded schedule until the device agrees.
+        progress.enter(PHASE_CONFIRMING_VOLUME)
+
+        def at_target(snapshot: PlaybackSnapshot) -> bool:
+            seen = snapshot.device_by_resource_id(device.resource_id)
+            return bool(seen and seen.volume_percent == percent)
+
+        after, matched = self._confirm_snapshot(at_target, VOLUME_CONFIRM)
 
         observed_device = after.device_by_resource_id(device.resource_id)
         observed_volume = observed_device.volume_percent if observed_device else None
@@ -250,22 +357,25 @@ class SpotifyActionExecutor:
         if percent > 0:
             self._service.mute_state.forget(device.resource_id)
 
-        if observed_volume is None:
+        if matched:
+            outcome, message = OUTCOME_APPLIED, f"Spotify volume is now {observed_volume}%"
+        elif observed_volume is None:
             outcome, message = (
                 OUTCOME_PARTIAL,
                 "Spotify accepted the volume but did not report it back, so the change is not "
                 "confirmed",
             )
-        elif observed_volume == percent:
-            outcome, message = OUTCOME_APPLIED, f"Spotify volume is now {observed_volume}%"
         else:
+            # Still not the requested level after the whole window. Reported as
+            # what was actually seen — never as the number that was asked for.
             outcome, message = (
-                OUTCOME_NOT_APPLIED,
-                f"Spotify volume was set to {percent}% but the device reports {observed_volume}%",
+                OUTCOME_PARTIAL,
+                f"Spotify accepted {percent}% but still reports {observed_volume}% after "
+                f"{int(VOLUME_CONFIRM.timeout_seconds)}s — refresh to see where it settled",
             )
         return self._result(
             "spotify_set_volume", outcome, {"volume_percent": percent},
-            {"volume_percent": observed_volume}, message, after,
+            {"volume_percent": observed_volume, "confirmed": matched}, message, after, progress,
         )
 
     def set_muted(self, muted: Any, device_resource_id: object = None) -> Dict[str, Any]:
@@ -277,14 +387,17 @@ class SpotifyActionExecutor:
         if not isinstance(muted, bool):
             raise SpotifyPlayerError(CODE_INVALID_VOLUME, "muted must be true or false")
 
+        progress = self._begin("spotify_set_mute")
         before = self._fresh()
         device = self._service.target_device(before, device_resource_id)
         self._require_volume(device)
         tokens = self._tokens()
 
+        restore_level = None
         if muted:
             current = device.volume_percent
             if current is not None and current > 0:
+                restore_level = current
                 self._service.mute_state.remember(device.resource_id, current)
             target = 0
         else:
@@ -302,37 +415,59 @@ class SpotifyActionExecutor:
             target = restore
 
         self._service.client.set_volume(tokens, target, device.provider_device_id)
-        after = self._reobserve()
+
+        # Same bounded confirmation as an ordinary volume change, because it is
+        # one: mute *is* a volume write, and it lags in exactly the same way.
+        def at_target(snapshot: PlaybackSnapshot) -> bool:
+            seen = snapshot.device_by_resource_id(device.resource_id)
+            return bool(seen and seen.volume_percent == target)
+
+        after, matched = self._confirm_snapshot(at_target, VOLUME_CONFIRM)
+
+        if muted and matched and restore_level is not None:
+            # Confirmation polling and the stale-record cleanup collided here,
+            # and the collision only appears when the provider lags. Each read in
+            # the window builds a snapshot, and a snapshot that still shows the
+            # *old* non-zero volume looks exactly like "the user turned it back
+            # up in the Spotify app" — so the level to restore was dropped
+            # mid-mute, and the following unmute refused as though Cofferdam had
+            # never muted anything. Re-recording after the mute is confirmed is
+            # idempotent and repairs that. The cleanup itself is still right for
+            # ordinary reads; it just cannot tell a lagging read from a real one.
+            self._service.mute_state.remember(device.resource_id, restore_level)
+            after = self._reobserve()
+        if not muted and matched:
+            self._service.mute_state.forget(device.resource_id)
 
         observed_device = after.device_by_resource_id(device.resource_id)
         observed_volume = observed_device.volume_percent if observed_device else None
-        if not muted and observed_volume == target:
-            self._service.mute_state.forget(device.resource_id)
 
         observed = {
             "volume_percent": observed_volume,
             "muted_by_cofferdam": after.muted_by_cofferdam,
+            "confirmed": matched,
         }
-        if observed_volume is None:
-            outcome, message = (
-                OUTCOME_PARTIAL,
-                "Spotify accepted the change but did not report the volume back",
-            )
-        elif observed_volume == target:
+        if matched:
             outcome = OUTCOME_APPLIED
             message = (
                 "Spotify is muted — Cofferdam set its volume to zero"
                 if muted
                 else f"Spotify volume restored to {observed_volume}%"
             )
+        elif observed_volume is None:
+            outcome, message = (
+                OUTCOME_PARTIAL,
+                "Spotify accepted the change but did not report the volume back",
+            )
         else:
             outcome, message = (
-                OUTCOME_NOT_APPLIED,
-                f"the device reports {observed_volume}% rather than {target}%",
+                OUTCOME_PARTIAL,
+                f"Spotify accepted the change but still reports {observed_volume}% rather than "
+                f"{target}% — refresh to see where it settled",
             )
         return self._result(
             "spotify_set_mute", outcome, {"muted": muted, "volume_percent": target},
-            observed, message, after,
+            observed, message, after, progress,
         )
 
     def _require_volume(self, device: SpotifyDevice) -> None:
@@ -414,25 +549,64 @@ class SpotifyActionExecutor:
     def play_search_result(
         self, search_id: object, result_id: object, device_resource_id: object = None
     ) -> Dict[str, Any]:
+        """Play one verified track, opening Spotify first if it has to.
+
+        The full sequence, and every step of it earned by a real failure on the
+        phone: resolve the private session result, read devices, launch Spotify
+        if there is nowhere to play, wait for its device to register, transfer to
+        that device if it is present but idle, send exact-track playback, then
+        **poll** for confirmation rather than reading once.
+
+        The two defects this replaces were separate and both looked like "Play
+        now does not work the first time". With Spotify open but idle the device
+        existed and was inactive, and the old code refused outright — which is
+        why "Open in Spotify, then Play now" was a working workaround. And even
+        when playback did start, a single immediate read often still described
+        the previous track, so a successful play was reported as *"playing
+        something other than the track you chose"*.
+        """
         uri, result = self._resolve_track(search_id, result_id)
         expected_track_id = uri.rsplit(":", 1)[-1]
 
+        progress = self._begin("spotify_play_search_result")
         before = self._fresh()
-        device = self._service.target_device(before, device_resource_id)
-        tokens = self._tokens()
 
+        if self._recovery is not None:
+            device, before = self._recovery.resolve(before, device_resource_id, progress)
+            # A device that is present but not the one Spotify is on will accept
+            # `play?device_id=` in principle, but validation showed the first
+            # play against a cold device is the one that goes missing. Making it
+            # active first is the documented operation for exactly this, and it
+            # is one bounded attempt.
+            if not device.is_active:
+                device, before = self._recovery.activate(device, progress)
+        else:  # pragma: no cover - only when no launcher is wired
+            device = self._service.target_device(before, device_resource_id)
+
+        tokens = self._tokens()
+        progress.enter(PHASE_STARTING)
         self._service.client.play_uris(tokens, [uri], device.provider_device_id)
-        after = self._reobserve()
+
+        progress.enter(PHASE_VERIFYING)
+        after, matched = self._confirm_snapshot(
+            lambda snapshot: bool(
+                snapshot.now_playing
+                and snapshot.now_playing.track_id == expected_track_id
+                and snapshot.is_playing
+            ),
+            PLAYBACK_CONFIRM,
+        )
 
         observed_id = after.now_playing.track_id if after.now_playing else None
         observed = {
             "track_id": observed_id,
             "title": after.now_playing.title if after.now_playing else None,
             "is_playing": after.is_playing,
+            "confirmed": matched,
         }
         requested = {"result_id": getattr(result, "result_id", None), "track_id": expected_track_id}
 
-        if observed_id == expected_track_id and after.is_playing:
+        if matched:
             outcome, message = OUTCOME_APPLIED, "Spotify is playing the track you chose"
         elif observed_id == expected_track_id:
             outcome = OUTCOME_PARTIAL
@@ -440,15 +614,17 @@ class SpotifyActionExecutor:
         elif observed_id is None:
             outcome = OUTCOME_PARTIAL
             message = (
-                "Spotify accepted the request but has not reported a track yet — it can take a "
-                "moment to start"
+                "Spotify accepted the request but never reported a track — check Spotify on the "
+                "workstation, or try again"
             )
         else:
-            # The strongest check available: the item now playing is not the one
-            # that was asked for. Never reported as success.
+            # The strongest check available, now made after looking more than
+            # once: the item playing is not the one that was asked for.
             outcome = OUTCOME_NOT_APPLIED
-            message = "Spotify is playing something other than the track you chose"
-        return self._result("spotify_play_search_result", outcome, requested, observed, message, after)
+            message = "Spotify is playing something other than the track you chose — try again"
+        return self._result(
+            "spotify_play_search_result", outcome, requested, observed, message, after, progress
+        )
 
     def queue_search_result(
         self, search_id: object, result_id: object, device_resource_id: object = None

@@ -59,8 +59,10 @@ from ._spotifyplayer_doubles import (
     FAKE_REFRESH_TOKEN,
     OTHER_TRACK_ID,
     TRACK_ID,
+    FakeApplicationAdapter,
     FakeSpotify,
     device,
+    instant_recovery,
     track_item,
     write_user_tokens,
 )
@@ -90,7 +92,15 @@ class PlaybackTestCase(unittest.TestCase):
             cache_seconds=0.0,
         )
         self.sessions = SearchSessionStore()
-        self.actions = SpotifyActionExecutor(self.service, self.sessions)
+        # Cold-start recovery, with bounded-but-instant waits: the attempt counts
+        # are real and asserted on, only the sleeping is removed.
+        self.adapter = FakeApplicationAdapter(self.spotify)
+        self.actions = SpotifyActionExecutor(
+            self.service,
+            self.sessions,
+            recovery=instant_recovery(self.service, self.adapter),
+            sleeper=lambda seconds: None,
+        )
 
     # -- helpers -----------------------------------------------------------
 
@@ -305,12 +315,40 @@ class NoActiveDeviceTests(PlaybackTestCase):
             self.actions.pause()
         self.assertEqual(raised.exception.code, CODE_NO_ACTIVE_DEVICE)
 
-    def test_playing_a_result_does_not_claim_playback_started(self) -> None:
+    def test_playing_a_result_adopts_the_one_idle_device_rather_than_refusing(self) -> None:
+        """M2D.1 changed this deliberately, and real validation is why.
+
+        A single eligible device that is merely *inactive* used to be refused
+        with "no active device" — which is why "Open in Spotify, then Play now"
+        was a working workaround, and the workaround was the diagnosis. There is
+        no ambiguity here about where to play: there is one device, and the user
+        pressed a button naming a track.
+        """
+        session = self.search_session()
+        result = self.actions.play_search_result(session.search_id, "mres-one")
+        self.assertEqual(result["outcome"], OUTCOME_APPLIED)
+        self.assertEqual(result["observed"]["track_id"], TRACK_ID)
+        # Recovery, not a launch: Spotify was already running.
+        self.assertEqual(self.adapter.launches, [])
+        # And it was made active first, which is the documented operation.
+        transfers = [
+            call for call in self.spotify.calls
+            if call["path"] == "/v1/me/player" and call["method"] == "PUT"
+        ]
+        self.assertEqual(len(transfers), 1)
+
+    def test_queueing_still_refuses_when_there_is_nowhere_playing(self) -> None:
+        """Recovery is scoped to Play now. Queueing is unchanged.
+
+        Launching Spotify because somebody added a track to a queue would be a
+        surprise; the milestone asks only that Play now recover.
+        """
         session = self.search_session()
         with self.assertRaises(SpotifyPlayerError) as raised:
-            self.actions.play_search_result(session.search_id, "mres-one")
+            self.actions.queue_search_result(session.search_id, "mres-one")
         self.assertEqual(raised.exception.code, CODE_NO_ACTIVE_DEVICE)
         self.assertEqual(self.spotify.queued_uris, [])
+        self.assertEqual(self.adapter.launches, [])
 
     def test_transport_capabilities_are_reported_false(self) -> None:
         capabilities = self.service.snapshot(refresh=True).to_dict()["capabilities"]
@@ -463,11 +501,46 @@ class VolumeTests(PlaybackTestCase):
         self.assertEqual(raised.exception.code, CODE_VOLUME_UNSUPPORTED)
 
     def test_a_volume_change_spotify_ignored_is_not_reported_as_applied(self) -> None:
+        """Never `applied`, and the observed number is the one actually seen.
+
+        After the confirmation window this is `partially_applied` rather than
+        `not_applied`: Spotify accepted the write, and "it never took effect" is
+        a stronger claim than a bounded wait can support. What must never happen
+        — and is what this really guards — is the requested value being echoed
+        back as though it had been observed.
+        """
         self.spotify.ignore_writes = True
         result = self.actions.set_volume(25)
-        self.assertEqual(result["outcome"], OUTCOME_NOT_APPLIED)
+        self.assertNotEqual(result["outcome"], OUTCOME_APPLIED)
+        self.assertEqual(result["outcome"], OUTCOME_PARTIAL)
         self.assertEqual(result["requested"]["volume_percent"], 25)
         self.assertEqual(result["observed"]["volume_percent"], 60)
+        self.assertFalse(result["observed"]["confirmed"])
+        self.assertIn("60%", result["message"])
+
+    def test_an_ignored_volume_change_is_re_read_the_whole_window(self) -> None:
+        """The bounded window is spent before giving up, not skipped."""
+        from cofferdam.workstation.spotifyplayer.confirm import VOLUME_CONFIRM
+
+        self.spotify.ignore_writes = True
+        self.spotify.calls.clear()
+        self.actions.set_volume(25)
+        reads = [c for c in self.spotify.calls if c["path"] == "/v1/me/player/devices"]
+        # One pre-action read, then one per confirmation attempt.
+        self.assertGreaterEqual(len(reads), VOLUME_CONFIRM.attempts)
+
+    def test_a_volume_that_settles_after_a_lagging_read_is_applied(self) -> None:
+        """The defect real validation found: 50 → 80 reported "device says 50".
+
+        Spotify's devices endpoint is eventually consistent, so the read taken
+        microseconds after the write still described the previous level. One read
+        was the bug; the fix is to look again, a bounded number of times.
+        """
+        self.spotify.lag_device_reads = 2
+        result = self.actions.set_volume(80)
+        self.assertEqual(result["outcome"], OUTCOME_APPLIED)
+        self.assertEqual(result["observed"]["volume_percent"], 80)
+        self.assertTrue(result["observed"]["confirmed"])
 
     def test_the_volume_reaches_the_provider_as_a_query_value(self) -> None:
         self.actions.set_volume(25)

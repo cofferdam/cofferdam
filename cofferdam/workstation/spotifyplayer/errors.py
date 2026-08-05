@@ -68,6 +68,20 @@ CODE_PROVIDER_UNAVAILABLE = "spotify_provider_unavailable"
 CODE_AUTHORIZATION_FAILED = "spotify_authorization_failed"
 CODE_OBSERVATION_FAILED = "spotify_observation_failed"
 
+# -- cold-start recovery (M2D.1) --------------------------------------------
+#
+# Added after real validation on the phone. Pressing Play now with the Spotify
+# desktop application closed reported "no active device" and stopped, which is
+# accurate about the device list and useless as a product: Cofferdam can launch
+# Spotify itself through the same allowlisted launcher the Media panel uses.
+# These are the states that recovery can end in, and each is a different thing
+# for a person to do next.
+
+CODE_NO_DEVICE_AFTER_LAUNCH = "spotify_no_device_after_launch"
+CODE_DEVICE_AMBIGUOUS = "spotify_device_ambiguous"
+CODE_LAUNCH_FAILED = "spotify_launch_failed"
+CODE_PLAYBACK_NOT_OBSERVED = "spotify_playback_not_observed"
+
 
 class SpotifyPlayerError(Exception):
     """A refusal a person should see, with a stable code to branch on.
@@ -183,6 +197,65 @@ class ProviderRejected(SpotifyPlayerError):
         )
 
 
+class NoDeviceAfterLaunch(SpotifyPlayerError):
+    """Spotify was launched and no Connect device appeared in time.
+
+    Distinct from :class:`NoActiveDevice` because the user has already been
+    spared the manual step: Cofferdam did open the application, and it still did
+    not register. Telling them to "open Spotify" now would be advice they can
+    see is wrong.
+    """
+
+    def __init__(self, seconds: int) -> None:
+        super().__init__(
+            CODE_NO_DEVICE_AFTER_LAUNCH,
+            "Spotify was opened but no playback device appeared",
+            f"Cofferdam waited {seconds}s. Spotify may still be starting, or it may need you to "
+            "sign in on the workstation — check it there and try again",
+        )
+
+
+class DeviceAmbiguous(SpotifyPlayerError):
+    """Several devices could be the target and none of them is playing.
+
+    Deliberately a refusal rather than a choice. Picking the first of three
+    speakers because it sorts first would start music in a room nobody named.
+    """
+
+    def __init__(self, names) -> None:
+        listed = ", ".join(name or "an unnamed device" for name in names)
+        super().__init__(
+            CODE_DEVICE_AMBIGUOUS,
+            "several Spotify devices are available and none is active",
+            "choose which one to play on: " + listed,
+        )
+
+
+class LaunchFailed(SpotifyPlayerError):
+    def __init__(self, detail: Optional[str] = None) -> None:
+        super().__init__(
+            CODE_LAUNCH_FAILED,
+            "Cofferdam could not open Spotify on the workstation",
+            detail or "open Spotify there yourself, then try again",
+        )
+
+
+class PlaybackNotObserved(SpotifyPlayerError):
+    """Spotify accepted the request and the effect was never seen.
+
+    Not a success and not a flat failure: the request did land, so the honest
+    report is that Cofferdam could not confirm it — with a retry that is the
+    user's to press.
+    """
+
+    def __init__(self, detail: Optional[str] = None) -> None:
+        super().__init__(
+            CODE_PLAYBACK_NOT_OBSERVED,
+            "Spotify accepted the request but Cofferdam could not confirm it",
+            detail or "check Spotify, or try again",
+        )
+
+
 class ProviderUnavailable(SpotifyPlayerError):
     def __init__(self, detail: Optional[str] = None) -> None:
         super().__init__(
@@ -194,6 +267,14 @@ class ProviderUnavailable(SpotifyPlayerError):
 
 __all__ = [
     "CODE_AUTHORIZATION_FAILED",
+    "CODE_DEVICE_AMBIGUOUS",
+    "CODE_LAUNCH_FAILED",
+    "CODE_NO_DEVICE_AFTER_LAUNCH",
+    "CODE_PLAYBACK_NOT_OBSERVED",
+    "DeviceAmbiguous",
+    "LaunchFailed",
+    "NoDeviceAfterLaunch",
+    "PlaybackNotObserved",
     "CODE_DEVICE_RESTRICTED",
     "CODE_DEVICE_UNKNOWN",
     "CODE_INVALID_VOLUME",

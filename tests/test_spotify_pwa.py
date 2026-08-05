@@ -516,3 +516,119 @@ class StructuralTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class ResponseOrderingTests(unittest.TestCase):
+    """M2D.1 (11–14): an older answer never wins.
+
+    The failure these lock down happened on a real phone. Setting 50 → 80 left
+    the slider showing 50, because a poll issued *before* the write resolved
+    *after* it and painted the old value over the newly verified one. Ordering by
+    arrival is ordering by luck.
+    """
+
+    def test_a_stale_poll_cannot_overwrite_a_newer_volume_result(self) -> None:
+        """(11) The exact race, made deterministic."""
+        result = player("stale-poll-loses-to-newer-write")
+        self.assertEqual(result["afterWrite"], "80")
+        self.assertEqual(
+            result["afterStalePoll"], "80",
+            "a poll issued before the write must not repaint the old level",
+        )
+
+    def test_a_stale_poll_cannot_overwrite_a_newer_current_track(self) -> None:
+        """(12) The same protection, on the thing a user is actually reading."""
+        result = player("stale-poll-cannot-replace-current-track")
+        self.assertTrue(result["afterWriteHasNewTrack"])
+        self.assertTrue(result["afterStaleHasNewTrack"])
+        self.assertFalse(result["afterStaleHasOldTrack"])
+
+    def test_rapid_volume_changes_end_on_the_last_verified_value(self) -> None:
+        """(13) 50 → 80 → 70 finishes displaying a verified 70."""
+        result = player("rapid-volume-sequence")
+        self.assertEqual(
+            [write["volume_percent"] for write in result["writes"]], [50, 80, 70]
+        )
+        self.assertEqual(result["shown"], "70")
+
+    def test_background_polling_pauses_while_a_write_is_confirmed(self) -> None:
+        """(14) And the activity watch covers the gap, at no provider cost."""
+        result = player("polling-pauses-during-write")
+        self.assertEqual(
+            result["stateReadsDuring"], result["stateReadsBefore"],
+            "no state poll may run while a write is being confirmed",
+        )
+        self.assertGreater(result["activityCalls"], 0)
+        self.assertGreater(
+            result["stateReadsAfter"], result["stateReadsDuring"],
+            "polling must resume once the write has resolved",
+        )
+
+    def test_the_generation_guard_exists_and_is_not_decorative(self) -> None:
+        code = spotify_code()
+        self.assertIn("appliedGeneration", code)
+        self.assertIn("refreshGeneration", code)
+        # The comparison itself, which is the whole mechanism.
+        self.assertIn("generation < appliedGeneration", code)
+
+    def test_in_flight_refreshes_are_cancelled_when_a_write_begins(self) -> None:
+        code = spotify_code()
+        self.assertIn("AbortController", code)
+        self.assertIn("abortInflightRefresh", code)
+
+
+class ColdStartUxTests(unittest.TestCase):
+    """M2D.1: the phone says which step it is on, and offers a real retry."""
+
+    def test_the_panel_names_each_recovery_phase_as_it_happens(self) -> None:
+        result = player("cold-start-phases")
+        self.assertTrue(result["sawLaunching"], "Opening Spotify… was never shown")
+        self.assertTrue(result["sawWaiting"], "Waiting for Spotify device… was never shown")
+        self.assertTrue(result["sawStarting"], "Starting selected track… was never shown")
+
+    def test_a_failed_recovery_shows_the_reason_and_a_retry(self) -> None:
+        result = player("recovery-failure-offers-retry")
+        self.assertIn("no playback device appeared", result["failedHtml"])
+        self.assertIn('id="spotifyRetry"', result["failedHtml"])
+
+    def test_retry_sends_exactly_one_more_attempt(self) -> None:
+        """Never a loop: Retry is a button a person presses, once."""
+        result = player("recovery-failure-offers-retry")
+        self.assertEqual(result["attempts"], 2)
+        self.assertEqual(result["playCalls"], 2)
+
+    def test_a_pending_write_shows_applying_rather_than_the_old_value(self) -> None:
+        result = player("polling-pauses-during-write")
+        self.assertIn("sp-pending-banner", result["pendingHtml"])
+
+    def test_the_volume_readout_says_applying_while_unconfirmed(self) -> None:
+        code = spotify_code()
+        self.assertIn('pending === "volume"', code)
+        self.assertIn("Applying…", code)
+
+    def test_a_retry_is_offered_only_where_retrying_could_help(self) -> None:
+        """Offering Retry for a Premium requirement would be offering a lie."""
+        code = spotify_code()
+        match = re.search(r"var RETRYABLE = \{(.*?)\};", code, re.S)
+        self.assertIsNotNone(match)
+        retryable = set(re.findall(r"(\w+):", match.group(1)))
+        self.assertIn("spotify_no_device_after_launch", retryable)
+        self.assertIn("spotify_launch_failed", retryable)
+        for never in ("spotify_premium_required", "spotify_not_connected",
+                      "spotify_missing_scopes", "spotify_device_restricted"):
+            self.assertNotIn(never, retryable)
+
+    def test_play_now_gets_a_longer_bound_than_an_ordinary_action(self) -> None:
+        """A cold start takes twenty seconds; the old bound would have fired."""
+        code = spotify_code()
+        recovery = int(re.search(r"var RECOVERY_TIMEOUT_MS = (\d+);", code).group(1))
+        ordinary = int(re.search(r"var ACTION_TIMEOUT_MS = (\d+);", code).group(1))
+        self.assertGreater(recovery, ordinary)
+        self.assertLessEqual(recovery, 60000, "and it is still bounded")
+
+    def test_the_activity_watch_is_cheap_and_stops(self) -> None:
+        code = spotify_code()
+        self.assertIn("/api/spotify/activity", code)
+        self.assertIn("stopActivityWatch", code)
+        interval = int(re.search(r"var ACTIVITY_POLL_MS = (\d+);", code).group(1))
+        self.assertGreaterEqual(interval, 300)

@@ -121,10 +121,15 @@ from .audio.actions import REJECT_UNKNOWN_RESOURCE as REJECT_AUDIO_UNKNOWN_RESOU
 from .audio.models import AUDIO_RESOURCE_KINDS
 from .browser_selection import PRODUCT_DEFAULT_BROWSER
 from .spotifyplayer import AuthorizationRunner, SpotifyActionExecutor, SpotifyPlayerService
+from .spotifyplayer.coldstart import DeviceRecovery, SpotifyLauncher
 from .spotifyplayer.errors import (
+    CODE_DEVICE_AMBIGUOUS,
     CODE_DEVICE_RESTRICTED,
     CODE_DEVICE_UNKNOWN,
     CODE_INVALID_VOLUME,
+    CODE_LAUNCH_FAILED,
+    CODE_NO_DEVICE_AFTER_LAUNCH,
+    CODE_PLAYBACK_NOT_OBSERVED,
     CODE_MISSING_SCOPES,
     CODE_NOT_CONNECTED,
     CODE_NO_ACTIVE_DEVICE,
@@ -234,6 +239,13 @@ _SPOTIFY_STATUS = {
     CODE_MISSING_SCOPES: 409,
     CODE_PREMIUM_REQUIRED: 402,
     CODE_NO_ACTIVE_DEVICE: 409,
+    # M2D.1 cold-start recovery. 409 throughout: every one of these is "the
+    # world is not in a state where this can happen yet", which a client fixes
+    # by choosing something or trying again — not a malformed request.
+    CODE_NO_DEVICE_AFTER_LAUNCH: 409,
+    CODE_DEVICE_AMBIGUOUS: 409,
+    CODE_LAUNCH_FAILED: 409,
+    CODE_PLAYBACK_NOT_OBSERVED: 409,
     CODE_DEVICE_UNKNOWN: 404,
     CODE_DEVICE_RESTRICTED: 409,
     CODE_VOLUME_UNSUPPORTED: 409,
@@ -303,7 +315,14 @@ def create_app(
     # authorization path — and the *existing* search sessions as the sole
     # authority for what a "track" is. No second catalogue search exists.
     spotify = spotify or SpotifyPlayerService(config, media_search.credentials)
-    spotify_actions = SpotifyActionExecutor(spotify, media_search.sessions)
+    # Cold-start recovery (M2D.1). The launcher is the *existing* allowlisted
+    # application path — the same one the Media panel's "Open" button uses — so
+    # playback gains no new way to start a process and constructs no command of
+    # its own. Recovery is what makes "press Play with Spotify closed" work.
+    spotify_recovery = DeviceRecovery(spotify, SpotifyLauncher(adapter))
+    spotify_actions = SpotifyActionExecutor(
+        spotify, media_search.sessions, recovery=spotify_recovery
+    )
     spotify_authorize = AuthorizationRunner(spotify, adapter)
 
     executor = ActionExecutor(
@@ -341,6 +360,7 @@ def create_app(
     app.state.spotify = spotify
     app.state.spotify_actions = spotify_actions
     app.state.spotify_authorize = spotify_authorize
+    app.state.spotify_recovery = spotify_recovery
     overlays = DisplayOverlayStore(config, inventory)
     app.state.display_overlays = overlays
 
@@ -1049,7 +1069,11 @@ def create_app(
                 detail=rejection.detail,
             )
         outcome = result.get("outcome")
-        store.record_spotify_event(name, "ok" if outcome in ("applied", "accepted_by_provider") else str(outcome))
+        store.record_spotify_event(
+            name,
+            "ok" if outcome in ("applied", "accepted_by_provider") else str(outcome),
+            correlation_id=result.get("correlation_id"),
+        )
         return result
 
     @app.get("/api/spotify/playback", dependencies=[Depends(require_token)])
@@ -1063,6 +1087,23 @@ def create_app(
         payload = snapshot.to_dict()
         payload["authorization"] = spotify_authorize.status()
         return payload
+
+    @app.get("/api/spotify/activity", dependencies=[Depends(require_token)])
+    async def spotify_activity() -> Dict[str, Any]:
+        """What a long Spotify operation is doing right now. No provider call.
+
+        Cold-start recovery can take twenty seconds — open Spotify, wait for its
+        device, transfer to it, start the track, confirm it started — and a phone
+        showing a spinner for that long is indistinguishable from a phone that has
+        hung. This is what the PWA polls meanwhile.
+
+        Deliberately free: it reads one in-memory record and touches neither
+        Spotify nor the filesystem, so watching a slow operation cannot make the
+        rate limit that operation is already fighting any worse. It carries a
+        phase from a closed vocabulary, a correlation id, and an elapsed time —
+        no track, no device, no account.
+        """
+        return spotify_actions.activity.snapshot()
 
     @app.post("/api/spotify/authorize", dependencies=[Depends(require_token)])
     async def spotify_start_authorization(request: Request) -> Dict[str, Any]:

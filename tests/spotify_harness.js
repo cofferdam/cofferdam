@@ -120,6 +120,21 @@ function escapeHtml(value) {
 
 const documentStub = { hidden: false };
 
+/* Enough of AbortController for spotify.js: a signal object, an `aborted` flag,
+   and a listener the scripted server can honour. The generation guard is what
+   makes ordering correct; aborting is the optimisation on top of it, and both
+   are exercised. */
+const aborted = [];
+function AbortControllerStub() {
+  const self = this;
+  this.signal = { aborted: false, id: aborted.length };
+  aborted.push(this.signal);
+  this.abort = function () {
+    self.signal.aborted = true;
+    if (self.signal.onabort) { self.signal.onabort(); }
+  };
+}
+
 function fire(type, target) {
   const panel = el("spotifyPanel");
   (panel.listeners[type] || []).forEach((fn) => fn({ target }));
@@ -249,6 +264,8 @@ function actionPayload(operation, outcome, message, snapshot, extra) {
   return Object.assign({
     operation: operation,
     outcome: outcome,
+    correlation_id: "spop-000000000000",
+    progress: [],
     requested: {},
     observed: {},
     message: message,
@@ -267,6 +284,7 @@ function run() {
       error: (...a) => record.consoleOutput.push(a.join(" "))
     },
     document: documentStub,
+    AbortController: AbortControllerStub,
     setTimeout: setTimeoutStub,
     clearTimeout: clearTimerStub,
     setInterval: setIntervalStub,
@@ -660,6 +678,295 @@ function run() {
   }
 
   /* -- polling ------------------------------------------------------------ */
+
+  /* -- response ordering (M2D.1) ------------------------------------------
+   *
+   * The failure this reproduces happened on a real phone: 50 → 80 left the
+   * slider showing 50, because a poll issued *before* the write resolved
+   * *after* it and painted the old value over the newly verified one. The
+   * scripted server here holds the mount poll open until the test releases it,
+   * which is that race made deterministic. */
+
+  if (scenario === "stale-poll-loses-to-newer-write") {
+    let heldPoll = null;
+    let released = false;
+    const api = function (pathname, options) {
+      const settings = options || {};
+      const method = settings.method || (settings.body !== undefined ? "POST" : "GET");
+      record.requests.push({ method, path: pathname, body: settings.body || null });
+      if (pathname.indexOf("/activity") !== -1) {
+        return Promise.resolve({ ok: true, status: 200, payload: { active: false } });
+      }
+      if (method === "GET") {
+        if (!released && !heldPoll) {
+          /* The first poll never settles until the test says so. */
+          return new Promise(function (resolve) {
+            heldPoll = function () { resolve({ ok: true, status: 200, payload: playbackPayload({ devices: [Object.assign({}, DEVICE_LAPTOP, { volume_percent: 50 }), DEVICE_SPEAKER] }) }); };
+          });
+        }
+        return Promise.resolve({ ok: true, status: 200, payload: playbackPayload() });
+      }
+      const devices = [Object.assign({}, DEVICE_LAPTOP, { volume_percent: 80 }), DEVICE_SPEAKER];
+      const next = playbackPayload({ devices });
+      return Promise.resolve({ ok: true, status: 200, payload: actionPayload(
+        "spotify_set_volume", "applied", "Spotify volume is now 80%", next,
+        { observed: { volume_percent: 80, confirmed: true } }) });
+    };
+    spotify.mount({ api, el, escapeHtml });
+    return drain(40).then(function () {
+      fire("change", slider(80));
+      return drain(40).then(function () {
+        const afterWrite = (html().match(/value="(\d+)"/) || [])[1];
+        released = true;
+        if (heldPoll) { heldPoll(); }        /* the old poll finally lands */
+        return drain(60).then(function () {
+          return { afterWrite, afterStalePoll: (html().match(/value="(\d+)"/) || [])[1] };
+        });
+      });
+    });
+  }
+
+  if (scenario === "stale-poll-cannot-replace-current-track") {
+    let heldPoll = null;
+    let released = false;
+    const OLD_TRACK = Object.assign({}, NOW_PLAYING, {
+      track_id: "0000000000000000000000", title: "The Previous Track"
+    });
+    const api = function (pathname, options) {
+      const settings = options || {};
+      const method = settings.method || (settings.body !== undefined ? "POST" : "GET");
+      record.requests.push({ method, path: pathname, body: settings.body || null });
+      if (pathname.indexOf("/activity") !== -1) {
+        return Promise.resolve({ ok: true, status: 200, payload: { active: false } });
+      }
+      if (method === "GET") {
+        if (!released && !heldPoll) {
+          return new Promise(function (resolve) {
+            heldPoll = function () {
+              resolve({ ok: true, status: 200,
+                        payload: playbackPayload({ now_playing: OLD_TRACK }) });
+            };
+          });
+        }
+        return Promise.resolve({ ok: true, status: 200, payload: playbackPayload() });
+      }
+      const next = playbackPayload({ now_playing: NOW_PLAYING });
+      return Promise.resolve({ ok: true, status: 200, payload: actionPayload(
+        "spotify_play_search_result", "applied", "Spotify is playing the track you chose", next) });
+    };
+    spotify.mount({ api, el, escapeHtml });
+    return drain(40).then(function () {
+      return spotify.playResult("msrch-1", "mres-9").then(function () {
+        const afterWrite = html();
+        released = true;
+        if (heldPoll) { heldPoll(); }
+        return drain(60).then(function () {
+          return {
+            afterWriteHasNewTrack: afterWrite.indexOf("Gönül Dağı") !== -1,
+            afterStaleHasNewTrack: html().indexOf("Gönül Dağı") !== -1,
+            afterStaleHasOldTrack: html().indexOf("The Previous Track") !== -1
+          };
+        });
+      });
+    });
+  }
+
+  if (scenario === "rapid-volume-sequence") {
+    /* 50 → 80 → 70, the exact sequence from validation, each one verified by
+       the server. The panel must end on 70. */
+    let level = 60;
+    const api = function (pathname, options) {
+      const settings = options || {};
+      const method = settings.method || (settings.body !== undefined ? "POST" : "GET");
+      record.requests.push({ method, path: pathname, body: settings.body || null });
+      if (pathname.indexOf("/activity") !== -1) {
+        return Promise.resolve({ ok: true, status: 200, payload: { active: false } });
+      }
+      if (method === "GET") {
+        return Promise.resolve({ ok: true, status: 200, payload: playbackPayload({
+          devices: [Object.assign({}, DEVICE_LAPTOP, { volume_percent: level }), DEVICE_SPEAKER]
+        }) });
+      }
+      level = settings.body.volume_percent;
+      const next = playbackPayload({
+        devices: [Object.assign({}, DEVICE_LAPTOP, { volume_percent: level }), DEVICE_SPEAKER]
+      });
+      return Promise.resolve({ ok: true, status: 200, payload: actionPayload(
+        "spotify_set_volume", "applied", "Spotify volume is now " + level + "%", next,
+        { observed: { volume_percent: level, confirmed: true } }) });
+    };
+    spotify.mount({ api, el, escapeHtml });
+    return drain(40).then(function () {
+      fire("change", slider(50));
+      return drain(40);
+    }).then(function () {
+      fire("change", slider(80));
+      return drain(40);
+    }).then(function () {
+      fire("change", slider(70));
+      return drain(40);
+    }).then(function () {
+      advance(120000);                       /* let every poll that will fire, fire */
+      return drain(60).then(function () {
+        return {
+          shown: (html().match(/value="(\d+)"/) || [])[1],
+          writes: record.requests.filter((r) => r.method === "PUT").map((r) => r.body)
+        };
+      });
+    });
+  }
+
+  if (scenario === "polling-pauses-during-write") {
+    let settleWrite = null;
+    const api = function (pathname, options) {
+      const settings = options || {};
+      const method = settings.method || (settings.body !== undefined ? "POST" : "GET");
+      record.requests.push({ method, path: pathname, body: settings.body || null });
+      if (pathname.indexOf("/activity") !== -1) {
+        return Promise.resolve({ ok: true, status: 200,
+                                 payload: { active: true, phase: "starting_playback",
+                                            label: "Starting selected track…" } });
+      }
+      if (method === "GET") {
+        return Promise.resolve({ ok: true, status: 200, payload: playbackPayload() });
+      }
+      return new Promise(function (resolve) {
+        settleWrite = function () {
+          resolve({ ok: true, status: 200, payload: actionPayload(
+            "spotify_play_search_result", "applied", "Spotify is playing the track you chose",
+            playbackPayload()) });
+        };
+      });
+    };
+    spotify.mount({ api, el, escapeHtml });
+    return drain(40).then(function () {
+      const before = record.requests.filter((r) => r.path.indexOf("/playback") !== -1).length;
+      spotify.playResult("msrch-1", "mres-9");
+      return drain(20).then(function () {
+        /* Two poll intervals, and still inside the play action's own longer
+           bound — so any state read here is polling that failed to pause,
+           not the pending timer correctly giving the panel back. */
+        advance(40000);
+        return drain(20).then(function () {
+          const during = record.requests.filter((r) => r.path.indexOf("/playback") !== -1).length;
+          const pendingHtml = html();
+          const activityCalls = record.requests.filter(
+            (r) => r.path.indexOf("/activity") !== -1).length;
+          if (settleWrite) { settleWrite(); }
+          return drain(60).then(function () {
+            advance(20000);
+            return drain(40).then(function () {
+              return {
+                stateReadsBefore: before,
+                stateReadsDuring: during,
+                stateReadsAfter: record.requests.filter(
+                  (r) => r.path.indexOf("/playback") !== -1).length,
+                activityCalls: activityCalls,
+                pendingHtml: pendingHtml
+              };
+            });
+          });
+        });
+      });
+    });
+  }
+
+  if (scenario === "cold-start-phases") {
+    /* The panel must name the step, not spin. The server publishes the phase;
+       this walks it through the sequence a real cold start produces. */
+    const phases = [
+      { active: true, phase: "launching_spotify", label: "Opening Spotify…" },
+      { active: true, phase: "waiting_for_spotify_device",
+        label: "Waiting for Spotify device…" },
+      { active: true, phase: "starting_playback", label: "Starting selected track…" }
+    ];
+    let index = 0;
+    let settleWrite = null;
+    const seen = [];
+    const api = function (pathname, options) {
+      const settings = options || {};
+      const method = settings.method || (settings.body !== undefined ? "POST" : "GET");
+      record.requests.push({ method, path: pathname, body: settings.body || null });
+      if (pathname.indexOf("/activity") !== -1) {
+        const payload = phases[Math.min(index++, phases.length - 1)];
+        return Promise.resolve({ ok: true, status: 200, payload });
+      }
+      if (method === "GET") {
+        return Promise.resolve({ ok: true, status: 200, payload: playbackPayload() });
+      }
+      return new Promise(function (resolve) {
+        settleWrite = function () {
+          resolve({ ok: true, status: 200, payload: actionPayload(
+            "spotify_play_search_result", "applied",
+            "Spotify is playing the track you chose", playbackPayload()) });
+        };
+      });
+    };
+    spotify.mount({ api, el, escapeHtml });
+    return drain(40).then(function () {
+      spotify.playResult("msrch-1", "mres-9");
+      let chain = drain(20);
+      for (let i = 0; i < 3; i += 1) {
+        chain = chain.then(function () {
+          advance(800);
+          return drain(20).then(function () { seen.push(html()); });
+        });
+      }
+      return chain.then(function () {
+        if (settleWrite) { settleWrite(); }
+        return drain(60).then(function () {
+          return {
+            sawLaunching: seen.some((h) => h.indexOf("Opening Spotify…") !== -1),
+            sawWaiting: seen.some((h) => h.indexOf("Waiting for Spotify device…") !== -1),
+            sawStarting: seen.some((h) => h.indexOf("Starting selected track…") !== -1),
+            html: html()
+          };
+        });
+      });
+    });
+  }
+
+  if (scenario === "recovery-failure-offers-retry") {
+    let attempts = 0;
+    const api = function (pathname, options) {
+      const settings = options || {};
+      const method = settings.method || (settings.body !== undefined ? "POST" : "GET");
+      record.requests.push({ method, path: pathname, body: settings.body || null });
+      if (pathname.indexOf("/activity") !== -1) {
+        return Promise.resolve({ ok: true, status: 200, payload: { active: false } });
+      }
+      if (method === "GET") {
+        return Promise.resolve({ ok: true, status: 200, payload: playbackPayload() });
+      }
+      attempts += 1;
+      if (attempts === 1) {
+        return Promise.resolve({ ok: false, status: 409, payload: { error: {
+          code: "spotify_no_device_after_launch",
+          message: "Spotify was opened but no playback device appeared",
+          detail: "Cofferdam waited 19s. Spotify may still be starting"
+        } } });
+      }
+      return Promise.resolve({ ok: true, status: 200, payload: actionPayload(
+        "spotify_play_search_result", "applied",
+        "Spotify is playing the track you chose", playbackPayload()) });
+    };
+    spotify.mount({ api, el, escapeHtml });
+    return drain(40).then(function () {
+      return spotify.playResult("msrch-1", "mres-9").then(function () {
+        const failedHtml = html();
+        fire("click", button("spotifyRetry"));
+        return drain(60).then(function () {
+          return {
+            failedHtml,
+            attempts,
+            html: html(),
+            playCalls: record.requests.filter(
+              (r) => r.path.indexOf("/results/") !== -1).length
+          };
+        });
+      });
+    });
+  }
 
   if (scenario === "poll-hidden") {
     return mount({ result: () => ({ payload: {} }) }).then(function () {

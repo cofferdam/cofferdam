@@ -152,16 +152,36 @@ class AuthenticationTests(SpotifyApiTestCase):
 class ReadOnlyGetTests(SpotifyApiTestCase):
     """Check 18: no GET in this group changes anything."""
 
-    def test_the_playback_route_is_the_only_get_and_it_mutates_nothing(self) -> None:
-        routes = [
-            (route.path, sorted(route.methods))
+    def test_every_spotify_get_is_a_read_and_nothing_else(self) -> None:
+        """Two GETs exist, and both are named as reads.
+
+        ``/api/spotify/activity`` (M2D.1) joined ``/playback`` when cold-start
+        recovery made an operation long enough that a phone needs to know which
+        step it is on. It touches neither Spotify nor the filesystem.
+        """
+        gets = sorted(
+            route.path
             for route in self.app.routes
             if getattr(route, "path", "").startswith("/api/spotify")
-        ]
-        for path, methods in routes:
-            with self.subTest(path=path):
-                if "GET" in methods:
-                    self.assertEqual(path, "/api/spotify/playback")
+            and "GET" in (getattr(route, "methods", None) or ())
+        )
+        self.assertEqual(gets, ["/api/spotify/activity", "/api/spotify/playback"])
+
+    def test_reading_the_activity_route_makes_no_provider_call(self) -> None:
+        response = self.get("/api/spotify/activity")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.spotify.calls, [])
+        self.assertEqual(
+            set(response.json()),
+            {"active", "operation", "phase", "label", "correlation_id", "elapsed_ms"},
+        )
+
+    def test_the_activity_route_carries_no_track_or_device(self) -> None:
+        session = self.seed_search()
+        self.post(f"/api/media/searches/{session.search_id}/results/mres-one/spotify/play")
+        body = self.get("/api/spotify/activity").text
+        for personal in ("Gönül", "Ertaş", TRACK_ID, "dev-workstation", "Test Listener"):
+            self.assertNotIn(personal, body)
 
     def test_reading_playback_sends_no_write_to_the_provider(self) -> None:
         self.assertEqual(self.get("/api/spotify/playback").status_code, 200)

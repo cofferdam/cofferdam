@@ -465,6 +465,18 @@ button.danger { color: var(--err); }
 .sp-fineprint { font-size: 12px; margin: 8px 0 0; overflow-wrap: anywhere; }
 
 .sp-pending { font-size: 12px; margin: 6px 0 0; }
+/* The in-flight phase. Cold-start recovery can take twenty seconds, and a panel
+   that showed nothing for that long would read as hung — so this says which of
+   the five steps is happening, in the server's own words. */
+.sp-pending-banner {
+  font-size: 13px; margin: 10px 0 0; color: var(--accent, #4aa3ff);
+  overflow-wrap: anywhere;
+}
+/* Inline inside a refusal line: small, and never full-width. */
+.sp-retry {
+  min-height: 0; padding: 2px 10px; font-size: 12px; border-radius: 999px;
+  vertical-align: baseline;
+}
 .sp-error { color: var(--err); font-size: 13px; margin: 10px 0 0; overflow-wrap: anywhere; }
 .sp-note { font-size: 13px; margin: 10px 0 0; overflow-wrap: anywhere; }
 .sp-note.ok { color: var(--ok, #5fd08a); }

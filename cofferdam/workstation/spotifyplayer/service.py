@@ -180,6 +180,48 @@ class SpotifyPlayerService:
             raise MissingScopes(missing)
         return tokens
 
+    # Public name for the same thing. Cold-start recovery needs it, and reaching
+    # through a leading underscore from another module is how a private helper
+    # quietly becomes an interface without anyone deciding it should be one.
+    authorized_tokens = _authorized_tokens
+
+    def observe_devices(self) -> Tuple[SpotifyDevice, ...]:
+        """The device list alone — one provider call, no playback read.
+
+        Exists for the polling loops in :mod:`.coldstart` and :mod:`.confirm`.
+        Waiting twenty seconds for a launched application to register would cost
+        forty calls through :meth:`snapshot`, against an account Spotify rate
+        limits over a rolling thirty-second window; this halves that. It
+        deliberately does **not** touch the snapshot cache: it is a narrower
+        observation than a snapshot, and storing it as one would let a later
+        reader mistake it for the whole picture.
+        """
+        tokens = self._authorized_tokens()
+        return parse_devices(self._host_id, self._client.devices(tokens))
+
+    def observe_playback(self) -> Optional[Dict[str, Any]]:
+        """Playback alone — one provider call, no device read.
+
+        Bounded to the three fields a confirmation actually compares. Returning
+        the provider's object would put an unbounded blob one caller away from a
+        response, which is the exposure the whole model exists to prevent.
+        """
+        tokens = self._authorized_tokens()
+        state = self._client.playback_state(tokens)
+        if state is None:
+            return None
+        item = state.get("item")
+        track_id = None
+        if isinstance(item, Mapping):
+            candidate = item.get("id")
+            track_id = candidate if isinstance(candidate, str) and candidate else None
+        progress = state.get("progress_ms")
+        return {
+            "is_playing": state.get("is_playing") is True,
+            "track_id": track_id,
+            "progress_ms": progress if isinstance(progress, int) and not isinstance(progress, bool) else None,
+        }
+
     # -- playback ----------------------------------------------------------
 
     def snapshot(self, refresh: bool = False) -> PlaybackSnapshot:
