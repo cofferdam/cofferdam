@@ -286,6 +286,9 @@ class PlaceholderHonestyTests(RegistryApiTestCase):
                 # here deliberately and cannot arrive unnoticed.
                 "open_media_provider",
                 "search_media_provider",
+                # M2B3A.1
+                "find_media_results",
+                "open_media_result",
             },
         )
 

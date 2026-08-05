@@ -120,15 +120,26 @@ without Opera behaves exactly as it did before.
 Neither of these exists in this build. They are written down so the current boundaries are
 recognisably deliberate rather than unfinished.
 
+> **Partly built since M2B3A.1.** Official catalogue search, result cards, user selection and
+> opening an exact item now exist for Spotify and YouTube — see
+> [`MEDIA_RESULTS.md`](MEDIA_RESULTS.md). Still unbuilt: Spotify playback control, and the whole
+> browser companion.
+
 ### Spotify semantic adapter
 
 Would add: OAuth consent, catalog search against the Web API, ranked result cards, user selection,
 opening an exact `spotify:track:…` URI, and — where account tier and API eligibility permit —
 play/pause/next and device selection.
 
+*(Catalogue search and exact opening landed in M2B3A.1, using **client credentials** rather than
+OAuth consent. That flow reaches only endpoints which do not access user information, which is why
+playback control there is not merely unimplemented but unreachable. Adding it would mean adopting
+the authorization-code flow — a milestone with its own review.)*
+
 The rule it inherits: **never silently resolve an ambiguous result.** If "play that song from the
 advert" matches four tracks, the four are shown and the user picks. An adapter that guessed and
-played would be the audio version of the false success this project already refuses once.
+played would be the audio version of the false success this project already refuses once. M2B3A.1
+follows it: five cards, an explicit pick, and an "Open first result" button that is never automatic.
 
 ### Browser companion
 

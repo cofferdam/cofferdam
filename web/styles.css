@@ -294,9 +294,36 @@ button.danger { color: var(--err); }
 .media-limits li { padding-left: 12px; position: relative; overflow-wrap: anywhere; }
 .media-limits li::before { content: "\00b7"; position: absolute; left: 4px; }
 
+/* Structured results (M2B3A.1). A result title is provider text of up to the
+   server's bound, so every text node here may wrap and every flex child may
+   shrink — the Recent-actions overflow fixed in M2B3A came from exactly the
+   opposite defaults. */
+.mr-block { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.mr-form { display: flex; gap: 8px; min-width: 0; }
+.mr-form input { flex: 1; min-width: 0; }
+.mr-form button { flex: 0 0 auto; }
+.mr-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.mr-item {
+  background: #0c141c; border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px; display: grid; gap: 6px; min-width: 0;
+}
+.mr-title { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; min-width: 0; }
+.mr-title strong { font-size: 14px; overflow-wrap: anywhere; }
+.mr-meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.mr-open { width: 100%; min-height: 40px; padding: 8px 12px; }
+.mr-first { width: 100%; }
+/* Inline inside a note line: small, and never full-width. */
+.mr-retry {
+  min-height: 0; padding: 2px 10px; font-size: 12px; border-radius: 999px;
+  vertical-align: baseline;
+}
+.media-note.err { color: var(--err); }
+
 @media (max-width: 420px) {
   .name-buttons { flex-direction: column; }
   .name-buttons button { width: 100%; }
+  .mr-form { flex-direction: column; }
+  .mr-form button { width: 100%; }
   .fact { grid-template-columns: 1fr; gap: 2px; }
   .proc-meta { margin-left: 0; }
   .proc-filters { flex-direction: column; }

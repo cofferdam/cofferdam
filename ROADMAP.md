@@ -302,13 +302,32 @@ about playback. The two adapter seams that would change that — a Spotify seman
 OAuth and real playback control, and a browser companion doing semantic DOM search on an
 already-authenticated service tab — are specified in that document and deliberately not built.
 
-### M2B3B — safe application close and restart (next)
+### M2B3A.1 — official-provider search and result selection (implemented)
+
+> **Implemented** on `feat/m2b3a1-media-result-selection` (not merged). Official Spotify Web API
+> and YouTube Data API v3 catalogue search, up to five result cards, and opening the exact selected
+> item. Documented in [`docs/MEDIA_RESULTS.md`](docs/MEDIA_RESULTS.md), decided in
+> [`DECISIONS.md`](DECISIONS.md) D-2026-08-05-7 and -8.
+
+The server stays the authority: search returns opaque handles, and a chosen result is re-resolved
+server-side into a launch target the client never sees. Credentials are a local 0600 file, never a
+PWA form. Still no playback claim, and Spotify playback control is unreachable by construction.
+
+### M2B3A.2 — Opera Companion foundation (next)
+
+The seam that would bring Netflix, Prime Video and TV+ into structured results: an approved
+companion identifying the already-signed-in service tab and performing a *semantic* search within
+it, returning real result cards the user picks from. No coordinates, no OCR, no screenshots, no
+blind first-result clicking. It is also where OQ-3 (TV+ search needing a storefront region) becomes
+answerable.
+
+### M2B3B — safe application close and restart
 
 Closing and restarting an application *instance*, following the M2B identity rule: PID plus start
 time, re-verified immediately before acting. Not in M2B3A, which terminates nothing and sends no
 process signals.
 
-### Beyond M2B3A, still not implemented
+### Beyond M2B3A.1, still not implemented
 
 Browser tab inventory (needs a browser companion reporting the browser's own tab IDs; never
 inferred from renderer processes) · agent task inventory · task resource audit · window discovery

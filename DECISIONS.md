@@ -521,10 +521,83 @@ Playback control, catalog search with real result cards, and DOM-level service s
 to the adapter seams documented in [`docs/MEDIA_PROFILES.md`](docs/MEDIA_PROFILES.md). Safe
 close/restart of application instances remains M2B3B.
 
+## D-2026-08-05-7 — The server, not the client, converts a result into an open action (EFE DECISION, ACTIVE)
+
+Structured search returns **opaque handles**. To open something, the client names a search session
+and a result; the server re-resolves both from its own memory and rebuilds the launch target from
+validated identifiers.
+
+The rejected alternative is the obvious one: send each result's `spotify:` URI or watch URL to the
+phone with the card, and let the phone send it back on tap. That is one fewer moving part, and it
+would have made Cofferdam accept a caller-supplied URI — the exact capability the typed-action
+boundary exists to withhold. No request schema in this milestone has a field for a URL, a URI, or a
+video id, and unknown fields are refused rather than ignored.
+
+Three consequences follow, and each is enforced rather than promised:
+
+- **Search sessions are bounded and in-memory.** 600 s TTL, 32 concurrent, 5 results each, no
+  persistence. They die with the process, which is honest — a restarted daemon that still honoured
+  old `search_id` values would be claiming knowledge it no longer has — and it means a record of
+  what someone was looking for does not outlive the moment they were looking.
+- **A result cannot be opened through another provider.** The client asserts a provider id and the
+  server refuses when it disagrees with the session. Without that check, a caller holding a valid
+  search id could route a YouTube video id into the Spotify native-URI adapter.
+- **Targets are rebuilt, never forwarded.** The Spotify URI is reconstructed from a validated type
+  and base-62 id; the YouTube watch URL from a constant prefix and a validated 11-character id.
+  A forwarded string would mean the value handed to a native application came from a network
+  response.
+
+**Opening the first result is an explicit button, never automatic.** Provider ranking is an
+opinion, and acting on it unasked is how the wrong song opens. The persistent auto-open-first
+preference is **deferred**: it needs a settings surface this milestone does not have, and the
+capability reports `auto_open_first_supported: false` so the phone need not guess.
+
+## D-2026-08-05-8 — Official provider APIs only, with credentials that never leave the host (EFE DECISION, ACTIVE)
+
+Structured results come from the **Spotify Web API** and the **YouTube Data API v3**, or they do
+not come at all. No scraping, no DOM automation, no browser-profile or cookie inspection.
+
+**Credentials live in `$COFFERDAM_HOME/secrets/media_providers.json`** (0600, in the existing 0700
+secrets directory) — the same place as the device token. No new mechanism was invented, because the
+repository already had a reviewed answer to "where does a local secret go", and a second one is how
+a project ends up with a secret in the place nobody audits.
+
+**There is no credential form in the PWA.** Typing a key into the phone would put the secret in a
+request body, a text input, and a file the web tier can write. There is no reviewed secure
+secret-entry mechanism over the network in this repository, and this is not the milestone to invent
+one. The only thing observable anywhere is a **status word** — `configured`, `missing`, `invalid`,
+`provider_rejected`, `temporarily_unavailable` — never a value, prefix, length, hash, or even the
+credential file's path.
+
+Two properties are structural rather than reviewed:
+
+- **Playback control is unreachable, not merely unimplemented.** Spotify's client-credentials flow
+  reaches only endpoints that do not access user information, so the token Cofferdam holds cannot
+  call a playback endpoint. YouTube uses an API key with no user scope at all.
+- **The network layer cannot be redirected.** One module talks to the internet, over stdlib
+  `http.client` with a fixed host allowlist, verified TLS, bounded timeouts and response size, and
+  **redirects that are never followed** — a 3xx is a failure, not a hop. It reads no proxy
+  environment variable, so nothing outside the code can steer an outbound request.
+
+**Nothing claims playback.** Opening the exact track opens it; every media result reports
+`playback: not_started` on success and the phone repeats that wording.
+
+**Absence is a normal state.** With no credentials the phone says "structured results not
+configured" and the M2B3A Open and Search-page actions keep working untouched — never a broken
+enabled control, and never a fabricated result.
+
+Netflix, Prime Video and TV+ publish no official catalogue-search interface for this purpose and
+are unchanged. Their catalogue entries carry no adapter key, so they cannot acquire structured
+search even if the credential store were somehow told they were configured. That case is deferred
+to M2B3A.2 — Opera Companion foundation.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when
   reproducible Ubuntu installs matter.
+- **OQ-4 — YouTube search quota.** The documented default allocation is 100 `search.list` calls per
+  day. Enough for personal use, and surfaced as its own error state; revisit only if it is actually
+  hit in practice.
 - **OQ-3 — TV+ search.** Deferred, not abandoned. A region-qualified address
   (`/{storefront}/search?term=`) does work, but Cofferdam cannot determine the account's storefront
   without probing Apple. Revisit if the browser companion — which can read the region from the tab

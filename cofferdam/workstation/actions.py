@@ -15,9 +15,9 @@ from __future__ import annotations
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Optional, Type
+from typing import Any, Callable, Dict, List, Optional, Type
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from .adapters.base import APPLICATION_KEYS, BROWSER_KEYS, HostAdapter
 from .errors import (
@@ -28,7 +28,14 @@ from .errors import (
     MediaQueryInvalid,
     bounded_detail,
 )
-from .media import PROVIDER_IDS
+from .media import (
+    PLAYBACK_NOT_STARTED,
+    PROVIDER_IDS,
+    TARGET_APPLICATION_URI,
+    get_provider,
+)
+from .mediasearch.results import MEDIA_RESULT_MODEL_VERSION, RESULT_TYPES
+from .mediasearch.service import MAX_REQUESTED_TYPES
 from .registries import is_valid_id as is_valid_registry_id
 
 ACTION_TAKE_SCREENSHOT = "take_screenshot"
@@ -37,6 +44,9 @@ ACTION_OPEN_URL = "open_url"
 # M2B3A
 ACTION_OPEN_MEDIA_PROVIDER = "open_media_provider"
 ACTION_SEARCH_MEDIA_PROVIDER = "search_media_provider"
+# M2B3A.1
+ACTION_FIND_MEDIA_RESULTS = "find_media_results"
+ACTION_OPEN_MEDIA_RESULT = "open_media_result"
 
 STATUS_RUNNING = "running"
 STATUS_SUCCEEDED = "succeeded"
@@ -194,12 +204,123 @@ class SearchMediaProviderParams(_Params):
             raise ValueError(exc.message) from exc
 
 
+def _handle(value: str, field_name: str) -> str:
+    """A server-issued opaque handle, echoed back by the client.
+
+    Shape only — existence is checked against the live search-session store at
+    execution time, where an unknown or expired handle fails closed. The point
+    of the character class is that a handle is *not* a URL, a URI, a path, or a
+    template: there is no character in it that could carry one.
+    """
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field_name} must not be empty")
+    if len(value) > 64:
+        raise ValueError(f"{field_name} is too long to be a handle")
+    if not all(character.isalnum() or character in "-_" for character in value):
+        raise ValueError(f"{field_name} must be an identifier issued by this server")
+    return value
+
+
+class FindMediaResultsParams(_Params):
+    """Run an official catalogue search.
+
+    Three fields, and none of them names a destination: an allowlisted provider
+    id, a bounded phrase, and an optional list of allowlisted result types. As
+    with the M2B3A media actions, there is deliberately no field for a URL, a
+    template, an API endpoint, or a key — ``extra="forbid"`` rejects one before
+    an adapter is reached.
+    """
+
+    provider_id: str
+    query: str
+    types: Optional[List[str]] = None
+
+    @field_validator("provider_id")
+    @classmethod
+    def _allowlisted(cls, value: str) -> str:
+        return _allowlisted_provider_id(value)
+
+    @field_validator("query")
+    @classmethod
+    def _bounded_text(cls, value: str) -> str:
+        from .media import validate_query
+
+        try:
+            return validate_query(value)
+        except MediaQueryInvalid as exc:
+            raise ValueError(exc.message) from exc
+
+    @field_validator("types")
+    @classmethod
+    def _known_types(cls, value: Optional[List[str]]) -> Optional[List[str]]:
+        # Shape and vocabulary here; the per-provider narrowing happens in the
+        # search service, which is the only place that knows which types a given
+        # provider can actually return and open.
+        if value is None:
+            return None
+        if len(value) > MAX_REQUESTED_TYPES:
+            raise ValueError(f"at most {MAX_REQUESTED_TYPES} result types may be requested")
+        for entry in value:
+            if not isinstance(entry, str) or entry not in RESULT_TYPES:
+                raise ValueError(f"types must be from: {', '.join(RESULT_TYPES)}")
+        return value
+
+
+class OpenMediaResultParams(_Params):
+    """Open one result from a verified search session.
+
+    **The whole security story of this milestone is the absence of a fourth
+    field.** There is no ``url``, no ``uri``, no ``video_id``, no ``watch_url``,
+    no ``target``. The client names a search it was given and a result it was
+    shown; the server re-resolves both from its own memory and builds the launch
+    target itself.
+
+    ``open_first`` is the explicit "Open first result" action. It is a separate
+    boolean rather than a magic ``result_id`` value so that opening index 0 is
+    always something a person asked for by name.
+    """
+
+    provider_id: str
+    search_id: str
+    result_id: Optional[str] = None
+    open_first: bool = False
+
+    @field_validator("provider_id")
+    @classmethod
+    def _allowlisted(cls, value: str) -> str:
+        return _allowlisted_provider_id(value)
+
+    @field_validator("search_id")
+    @classmethod
+    def _search_handle(cls, value: str) -> str:
+        return _handle(value, "search_id")
+
+    @field_validator("result_id")
+    @classmethod
+    def _result_handle(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return _handle(value, "result_id")
+
+    @model_validator(mode="after")
+    def _one_selection(self):
+        # Exactly one way of choosing. Accepting both would leave it ambiguous
+        # which one won, and accepting neither would leave nothing to open.
+        if self.open_first and self.result_id is not None:
+            raise ValueError("send either result_id or open_first, not both")
+        if not self.open_first and self.result_id is None:
+            raise ValueError("send result_id, or open_first to take the first result")
+        return self
+
+
 PARAM_SCHEMAS: Dict[str, Type[_Params]] = {
     ACTION_TAKE_SCREENSHOT: TakeScreenshotParams,
     ACTION_OPEN_APPLICATION: OpenApplicationParams,
     ACTION_OPEN_URL: OpenUrlParams,
     ACTION_OPEN_MEDIA_PROVIDER: OpenMediaProviderParams,
     ACTION_SEARCH_MEDIA_PROVIDER: SearchMediaProviderParams,
+    ACTION_FIND_MEDIA_RESULTS: FindMediaResultsParams,
+    ACTION_OPEN_MEDIA_RESULT: OpenMediaResultParams,
 }
 
 ACTION_NAMES = tuple(PARAM_SCHEMAS)
@@ -287,11 +408,16 @@ class ActionExecutor:
         store,
         config,
         on_event: Optional[Callable[[str, ActionRecord], None]] = None,
+        media_search=None,
     ) -> None:
         self._adapter = adapter
         self._store = store
         self._config = config
         self._on_event = on_event
+        # M2B3A.1. Injected so a test can supply a double that makes no network
+        # call, and so search sessions live for the life of the service rather
+        # than the life of one request.
+        self._media_search = media_search
 
     def _emit(self, event: str, record: ActionRecord) -> None:
         if self._on_event is not None:
@@ -359,7 +485,118 @@ class ActionExecutor:
         if action in (ACTION_OPEN_MEDIA_PROVIDER, ACTION_SEARCH_MEDIA_PROVIDER):
             return self._media(action, params)
 
+        if action == ACTION_FIND_MEDIA_RESULTS:
+            return self._find_media_results(params)
+
+        if action == ACTION_OPEN_MEDIA_RESULT:
+            return self._open_media_result(params)
+
         raise ApiError(code=CODE_UNKNOWN_ACTION, message=f"unknown action: {action}", status_code=400)
+
+    # -- official-provider results (M2B3A.1) ---------------------------------
+
+    def _require_media_search(self):
+        if self._media_search is None:  # pragma: no cover - wired by create_app
+            from .mediasearch.errors import ProviderUnconfigured
+
+            raise ProviderUnconfigured(
+                "structured media search is not available in this build"
+            )
+        return self._media_search
+
+    def _find_media_results(self, params: _Params) -> Dict[str, Any]:
+        """Official catalogue search. Returns cards, opens nothing.
+
+        A completed search is *not* an instruction to open anything, however
+        confident the provider's ranking looks. The user picks, or explicitly
+        asks for the first result — see :meth:`_open_media_result`.
+        """
+        service = self._require_media_search()
+        provider = get_provider(params.provider_id)  # type: ignore[attr-defined]
+
+        try:
+            types = service.validate_types(provider.id, params.types)  # type: ignore[attr-defined]
+        except ValueError as exc:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="invalid result types",
+                status_code=422,
+                detail=bounded_detail(exc),
+            ) from None
+
+        session = service.search(provider.id, params.query, types)  # type: ignore[attr-defined]
+        payload: Dict[str, Any] = session.to_dict()
+        payload.update(
+            {
+                "provider_name": provider.name,
+                "result_model_version": MEDIA_RESULT_MODEL_VERSION,
+                # Said even here, where nothing was launched at all: a result
+                # list is the most tempting place to imply that something is
+                # about to play.
+                "playback": PLAYBACK_NOT_STARTED,
+                "playback_started": False,
+                "note": (
+                    f"{len(session.results)} result(s) from {provider.name}'s own search. "
+                    "Nothing has been opened or played — pick one to open it."
+                )
+                if session.results
+                else f"{provider.name} returned no results for those words.",
+            }
+        )
+        return payload
+
+    def _open_media_result(self, params: _Params) -> Dict[str, Any]:
+        """Open one result the server itself resolved.
+
+        The launch target is built by the search service from the stored session
+        — the request contributed two opaque handles and nothing else. Success
+        means the launch was accepted and confirmed, exactly as in M2B3A, and
+        never that playback began.
+        """
+        service = self._require_media_search()
+        provider = get_provider(params.provider_id)  # type: ignore[attr-defined]
+
+        session, result, target = service.target_for(
+            params.search_id,  # type: ignore[attr-defined]
+            params.result_id,  # type: ignore[attr-defined]
+            provider_id=provider.id,
+            first=bool(params.open_first),  # type: ignore[attr-defined]
+        )
+
+        payload: Dict[str, Any] = {
+            "provider_id": provider.id,
+            "provider_name": provider.name,
+            "search_id": session.search_id,
+            "result_id": result.result_id,
+            "result_type": result.result_type,
+            "title": result.title,
+            "selected_by": "first_result" if params.open_first else "user",  # type: ignore[attr-defined]
+            "playback": PLAYBACK_NOT_STARTED,
+            "playback_started": False,
+        }
+
+        if target.kind == TARGET_APPLICATION_URI:
+            launch = self._adapter.open_application_uri(target.application_key, target.value)
+            payload.update(
+                {
+                    "application": launch.application,
+                    "pid": launch.pid,
+                    "detail": launch.detail,
+                    "opened_in": "application",
+                    "note": (
+                        f"Opened “{result.title}” in {provider.name}. "
+                        "Nothing is playing — press play in the app."
+                    ),
+                }
+            )
+            return payload
+
+        payload.update(self._open_url(target.value, browser_id=provider.browser_key))
+        payload["opened_in"] = "browser"
+        payload["note"] = (
+            f"Opened “{result.title}” in the browser. Nothing is playing yet."
+        )
+        return payload
 
     def _open_url(
         self,

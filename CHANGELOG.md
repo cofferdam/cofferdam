@@ -8,6 +8,35 @@ release.
 
 ### Added
 
+- **M2B3A.1 — real search results you can pick from, for Spotify and YouTube.** M2B3A could open a
+  service's search page; it could not answer "which of these is the one I meant?". This adds
+  official catalogue search — the Spotify Web API and the YouTube Data API v3 — with up to five
+  result cards, and opens the **exact** item chosen: the selected track in the native Spotify
+  application, the selected video in Opera.
+
+  **The client never names a destination.** Search returns opaque handles; opening one names a
+  search session and a result, and the server re-resolves both from its own memory and rebuilds the
+  launch target from validated identifiers. No request schema has a field for a URL, a URI or a
+  video id, and unknown fields are refused rather than ignored. Search sessions are in-memory and
+  bounded — 600 s, 32 concurrent, 5 results, gone on restart — and a result cannot be opened through
+  a provider that did not produce it.
+
+  **Credentials never leave the host.** They live in `$COFFERDAM_HOME/secrets/media_providers.json`
+  (0600), beside the device token; there is no credential form in the PWA, and the only observable
+  thing anywhere is a status word — never a value, prefix, length, or even the file's path. One
+  stdlib module makes every provider call, with a fixed host allowlist, verified TLS, bounded
+  timeouts and response size, and **redirects that are never followed**.
+
+  **Nothing claims playback**, and playback control is unreachable rather than merely
+  unimplemented: Spotify's client-credentials flow reaches only non-user endpoints. "Open first
+  result" is an explicit button, never automatic; the persistent auto-open-first preference is
+  deferred.
+
+  With no credentials configured the phone says "structured results not configured" and every
+  M2B3A action keeps working untouched. Netflix, Prime Video and TV+ are unchanged and cannot gain
+  structured search — their catalogue entries carry no adapter key. Documented in
+  [`docs/MEDIA_RESULTS.md`](docs/MEDIA_RESULTS.md).
+
 - **M2B3A — media and application launch profiles.** Spotify, YouTube, Netflix, Prime Video and
   TV+ are reachable from the phone as launch definitions, through two typed actions —
   `open_media_provider(provider_id)` and `search_media_provider(provider_id, query)` — plus a

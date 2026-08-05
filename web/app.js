@@ -618,6 +618,13 @@
       body += '<p class="media-note">' + escapeHtml(provider.search_unavailable_reason) + "</p>";
     }
 
+    // Structured results (M2B3A.1). Offered only where the service reports the
+    // capability as usable, which needs both an official adapter and
+    // credentials on this host. Where it is not, one short line says so and
+    // Open plus the search page stay exactly as they were — rather than an
+    // enabled control that could only fail.
+    body += mediaResultsBlock(provider, busy);
+
     // The host's own reason for an absence, never a guess made here.
     if (!provider.available && provider.unavailable_reason) {
       body += '<p class="media-note">' + escapeHtml(provider.unavailable_reason) + "</p>";
@@ -632,6 +639,193 @@
       badges.join("") + "</div>" + body +
       (limitations ? '<ul class="media-limits">' + limitations + "</ul>" : "") +
       "</div>";
+  }
+
+  /* ------------------------------------------------- structured results
+   *
+   * The client's whole vocabulary here is a provider id, a phrase, and the
+   * opaque handles the server issued. There is no URL, no URI and no video id
+   * anywhere in this file — the service accepts none of them, and the result
+   * cards it sends contain none of them.
+   */
+
+  /* provider_id -> { state, query, searchId, results, expiresAt, error } */
+  var mediaResults = {};
+
+  function capability(provider, name) {
+    return !!(provider.capabilities && provider.capabilities[name]);
+  }
+
+  function providerHasOfficialSearch(provider) {
+    /* Whether an official adapter exists at all, independent of credentials.
+       Netflix/Prime/TV+ report false, so they never show a "not configured"
+       hint for a feature this build was never going to give them. */
+    return provider.offers_structured_search === true;
+  }
+
+  function resultLine(result) {
+    /* The distinctions that let someone tell four “Gönül Dağı” apart, built
+       from bounded fields the server normalized. Every one is escaped. */
+    var parts = [];
+    if (result.creators && result.creators.length) { parts.push(result.creators.join(", ")); }
+    if (result.subtitle && parts.indexOf(result.subtitle) === -1) { parts.push(result.subtitle); }
+    if (result.published) { parts.push(result.published); }
+    if (typeof result.duration_seconds === "number") {
+      var mins = Math.floor(result.duration_seconds / 60);
+      var secs = result.duration_seconds % 60;
+      parts.push(mins + ":" + (secs < 10 ? "0" : "") + secs);
+    }
+    return parts.join(" · ");
+  }
+
+  function resultCard(providerId, result, busy) {
+    var badges = [badge(result.result_type)];
+    if (result.explicit === true) { badges.push(badge("explicit", "warn")); }
+    if (result.live_state) { badges.push(badge(result.live_state, "warn")); }
+    var line = resultLine(result);
+    return '<li class="mr-item">' +
+      '<div class="mr-title"><strong>' + escapeHtml(result.title) + "</strong>" +
+      badges.join("") + "</div>" +
+      (line ? '<div class="mr-meta">' + escapeHtml(line) + "</div>" : "") +
+      '<button class="mr-open" data-open-result="' + escapeHtml(providerId) + '" ' +
+      'data-result-id="' + escapeHtml(result.result_id) + '"' + (busy ? " disabled" : "") +
+      ">Open</button></li>";
+  }
+
+  function mediaResultsBlock(provider, busy) {
+    if (!capability(provider, "structured_search")) {
+      // Specific about which half is missing: a provider may be perfectly
+      // launchable while its official search is simply not set up.
+      if (providerHasOfficialSearch(provider) && !provider.structured_search_configured) {
+        return '<p class="media-note">Structured results not configured — ' +
+          "Open and Search still work.</p>";
+      }
+      return "";
+    }
+
+    var state = mediaResults[provider.id] || {};
+    var pending = state.state === "searching";
+    var locked = pending || busy;
+
+    var html = '<form class="mr-form" data-find-results="' + escapeHtml(provider.id) + '">' +
+      '<input type="search" name="query" inputmode="search" autocomplete="off" maxlength="' +
+      mediaMaxQuery + '" placeholder="Find on ' + escapeHtml(provider.name) + '" ' +
+      'aria-label="Find results on ' + escapeHtml(provider.name) + '"' +
+      (locked ? " disabled" : "") + ' value="' + escapeHtml(state.query || "") + '">' +
+      '<button type="submit"' + (locked ? " disabled" : "") + ">" +
+      (pending ? "Finding…" : "Find") + "</button></form>";
+
+    if (state.state === "searching") {
+      html += '<p class="media-note">Searching ' + escapeHtml(provider.name) + "…</p>";
+    } else if (state.state === "error") {
+      html += '<p class="media-note err">' +
+        escapeHtml(state.error || "That search did not work.") +
+        ' <button class="mr-retry" data-retry-results="' + escapeHtml(provider.id) +
+        '">Try again</button></p>';
+    } else if (state.state === "empty") {
+      html += '<p class="media-note">No results for “' + escapeHtml(state.query) + "”. " +
+        "Try different words.</p>";
+    } else if (state.state === "expired") {
+      html += '<p class="media-note">That result list has expired. ' +
+        '<button class="mr-retry" data-retry-results="' + escapeHtml(provider.id) +
+        '">Search again</button></p>';
+    } else if (state.state === "ok" && state.results && state.results.length) {
+      html += '<p class="media-note">Results for “' + escapeHtml(state.query) + "”. " +
+        "Nothing is playing — pick one to open it.</p>";
+      html += '<ul class="mr-list">' + state.results.map(function (result) {
+        return resultCard(provider.id, result, busy);
+      }).join("") + "</ul>";
+      if (capability(provider, "open_first_result")) {
+        // Explicit, never automatic: a provider's ranking is an opinion, and
+        // acting on it unasked is how the wrong song opens.
+        html += '<button class="mr-first" data-open-first="' + escapeHtml(provider.id) + '"' +
+          (busy ? " disabled" : "") + ">Open first result</button>";
+      }
+    }
+    return '<div class="mr-block">' + html + "</div>";
+  }
+
+  function setResultState(providerId, next) {
+    mediaResults[providerId] = Object.assign({}, mediaResults[providerId] || {}, next);
+    renderMedia();
+  }
+
+  function findResults(providerId, query) {
+    var provider = mediaProviderById(providerId);
+    if (!provider || !capability(provider, "structured_search")) { return; }
+    var current = mediaResults[providerId] || {};
+    if (current.state === "searching") { return; }   // no double submission
+    setResultState(providerId, { state: "searching", query: query, results: [], error: null });
+
+    api("/api/media/providers/" + encodeURIComponent(providerId) + "/results/search",
+        { body: { query: query } })
+      .then(function (response) {
+        var record = response.payload;
+        if (record && record.action_id) { upsertAction(record); }
+        if (!response.ok) {
+          var failure = (record && record.error) || {};
+          setResultState(providerId, {
+            state: "error",
+            error: failure.message || "That search did not work."
+          });
+          return;
+        }
+        var result = (record && record.result) || {};
+        var list = result.results || [];
+        setResultState(providerId, {
+          state: list.length ? "ok" : "empty",
+          searchId: result.search_id,
+          results: list,
+          expiresAt: result.expires_at,
+          error: null
+        });
+      })
+      .catch(function (error) {
+        if (error.message === "unauthorized") { return; }
+        setResultState(providerId, { state: "error", error: "Request failed." });
+      });
+  }
+
+  function openResult(providerId, resultId, useFirst) {
+    var state = mediaResults[providerId] || {};
+    if (!state.searchId) { return; }
+    if (useFirst && !(state.results && state.results.length)) {
+      // Zero results has no first result. The button is not rendered in that
+      // state; this guards the state changing under an already-queued tap.
+      toast("There are no results to open.", "err");
+      return;
+    }
+    if (mediaPending[providerId]) { return; }
+    mediaPending[providerId] = true;
+    renderMedia();
+
+    // Only handles the server issued travel here — never a URL or a URI. The
+    // provider id is sent as an assertion of which provider this card belongs
+    // to, and the server refuses if it disagrees with the search session; that
+    // mismatch check is what stops a result being opened through the wrong
+    // provider's adapter.
+    var path = "/api/media/searches/" + encodeURIComponent(state.searchId) +
+      "/results/" + encodeURIComponent(useFirst ? "first" : resultId) + "/open";
+
+    api(path, { body: { provider_id: providerId } }).then(function (response) {
+      var record = response.payload;
+      if (record && record.action_id) { upsertAction(record); }
+      if (response.ok) {
+        toast((record.result && record.result.note) || "Opened.", "ok");
+        return;
+      }
+      var failure = (record && record.error) || {};
+      if (failure.code === "media_search_expired" || failure.code === "media_search_not_found") {
+        setResultState(providerId, { state: "expired", results: [], searchId: null });
+        return;
+      }
+      toast(failure.message || "That did not open.", "err");
+    }).catch(function (error) {
+      if (error.message !== "unauthorized") { toast("Request failed.", "err"); }
+    }).then(function () {
+      mediaPending[providerId] = false;
+      renderMedia();
+    });
   }
 
   function renderMedia() {
@@ -703,6 +897,34 @@
   if (mediaCardsContainer) {
     // Delegated, because the cards are re-rendered on every state change.
     mediaCardsContainer.addEventListener("click", function (event) {
+      // Structured-result controls (M2B3A.1), checked before the plain Open.
+      var openResultButton = event.target.closest("[data-open-result]");
+      if (openResultButton) {
+        openResult(
+          openResultButton.getAttribute("data-open-result"),
+          openResultButton.getAttribute("data-result-id"),
+          false
+        );
+        return;
+      }
+      var firstButton = event.target.closest("[data-open-first]");
+      if (firstButton) {
+        openResult(firstButton.getAttribute("data-open-first"), null, true);
+        return;
+      }
+      var retryButton = event.target.closest("[data-retry-results]");
+      if (retryButton) {
+        var retryProvider = retryButton.getAttribute("data-retry-results");
+        var previous = (mediaResults[retryProvider] || {}).query;
+        // Back to a clean input, keeping the words so the user need not retype
+        // them. An expired list is cleared: showing stale cards beside "expired"
+        // invites a tap that can only fail.
+        setResultState(retryProvider, {
+          state: null, results: [], searchId: null, error: null, query: previous || ""
+        });
+        return;
+      }
+
       var button = event.target.closest("[data-media-open]");
       if (!button) { return; }
       runMediaAction(button.getAttribute("data-media-open"), "/api/actions/open-media-provider", {
@@ -711,6 +933,22 @@
     });
 
     mediaCardsContainer.addEventListener("submit", function (event) {
+      // Structured search first: both forms live in the same card, so the
+      // specific one has to be matched before the search-page fallback.
+      var findForm = event.target.closest("[data-find-results]");
+      if (findForm) {
+        event.preventDefault();
+        var findProvider = findForm.getAttribute("data-find-results");
+        var phrase = (findForm.query.value || "").trim();
+        if (!phrase) { toast("Type something to find.", "err"); return; }
+        if (phrase.length > mediaMaxQuery) {
+          toast("That search is too long (max " + mediaMaxQuery + " characters).", "err");
+          return;
+        }
+        findResults(findProvider, phrase);
+        return;
+      }
+
       var form = event.target.closest("[data-media-search]");
       if (!form) { return; }
       event.preventDefault();
@@ -878,6 +1116,9 @@
     mediaProviders = [];
     mediaLoaded = false;
     mediaPending = {};
+    // Search results say what someone was looking for. They go with the token,
+    // like everything else here that describes the user or the host.
+    mediaResults = {};
     if (el("mediaCards")) { el("mediaCards").innerHTML = '<p class="muted">Loading…</p>'; }
     // The live inventory is the same kind of thing, only more so: it lists this
     // machine's displays and running applications. It goes with the token, and

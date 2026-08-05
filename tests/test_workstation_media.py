@@ -294,10 +294,16 @@ class NoClientSuppliedTargetTests(unittest.TestCase):
         non-literal left-hand side of the ``+``.
         """
         tree = ast.parse(self.MEDIA_SOURCE.read_text(encoding="utf-8"))
+        # Module-level private ``_<provider>_search`` functions only. Scoped to
+        # the module body rather than ``ast.walk`` so a *method* whose name ends
+        # in "_search" — ``offers_structured_search`` since M2B3A.1 — cannot be
+        # mistaken for a route builder and fail this check for the wrong reason.
         builders = [
             node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.FunctionDef) and node.name.endswith("_search")
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name.startswith("_")
+            and node.name.endswith("_search")
         ]
         self.assertTrue(builders, "expected the per-provider search builders")
         for builder in builders:
