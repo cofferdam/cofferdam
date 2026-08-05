@@ -88,6 +88,15 @@
   var processInstance = "";
   var timer = null;
 
+  /* Display naming (M2B2). `editing` is the resource id of the open editor, or
+     null. The draft is kept here rather than read back off the DOM so a poll
+     mid-edit cannot discard what the user is typing. */
+  var editing = null;
+  var draftLabel = "";
+  var draftAliases = "";
+  var saving = false;
+  var saveError = null;
+
   function esc(value) { return deps.escapeHtml(value); }
 
   /* ------------------------------------------------------------- formatting */
@@ -183,17 +192,31 @@
        A user label, when one exists, is shown as an addition below — never in
        place of any of this. */
     var named = has(item.model) && item.model_source !== "edid-product-code";
-    var heading = named ? item.model
+    var hardware = named ? item.model
       : has(item.display_name) ? item.display_name
       : has(item.model) ? item.model
       : item.connector;
-    var subtitle = [item.connector, resolution, refresh].filter(has).join(" · ");
+
+    /* With a user label, it becomes the title and the hardware name moves into
+       the subtitle — added to, never replacing. The panel is still a
+       VA1650-FHD on HDMI-1 and the card still says so; the user has simply
+       given it a name they can use out loud. */
+    var label = item.overlay && has(item.overlay.label) ? item.overlay.label : null;
+    var heading = label || hardware;
+    var subtitleParts = label ? [hardware, item.connector] : [item.connector];
+    var subtitle = subtitleParts.concat([resolution, refresh]).filter(has).join(" · ");
 
     /* Expanded: what the panel *is* and how it is arranged. Serial numbers,
        EDID fingerprints and discovery backends are real and kept — one level
        further in, because they answer a question almost nobody is asking at
        the moment they tap a display. */
+    var aliases = item.overlay && item.overlay.aliases && item.overlay.aliases.length
+      ? item.overlay.aliases.join(", ")
+      : null;
+
     var details = open ? facts([
+      ["Your name", label ? esc(label) : '<span class="unset">not named yet</span>'],
+      aliases ? ["Also known as", esc(aliases)] : null,
       ["Connector", value(item.connector)],
       ["Resolution", resolution ? esc(resolution) : value(null)],
       ["Refresh rate", refresh ? esc(refresh) : value(null)],
@@ -217,9 +240,60 @@
       ["Match evidence", value(item.match_method)],
       ["Resource ID", value(item.resource_id)],
       ["Discovered by", value(item.backend)]
-    ]) : "";
+    ]) + nameEditor(item, label) : "";
 
     return card(item.resource_id, heading, subtitle, badges, item, details);
+  }
+
+  /* The naming control, inside the expanded card.
+   *
+   * Inline rather than a modal: a drawer over a phone screen would hide the
+   * very card the user is naming, and this product already answers "what is
+   * this thing" by expanding in place.
+   *
+   * A display whose identity is too weak to key an overlay to gets an
+   * explanation instead of a disabled button. The server would refuse the
+   * write, and saying why here is better than letting the user discover it by
+   * typing a name and losing it. */
+  function nameEditor(item, label) {
+    var weak = !(item.identity && item.identity.edid_sha256)
+      && !(has(item.manufacturer) && has(item.model) && has(item.serial));
+    if (weak) {
+      return '<p class="reg-note unavailable name-note">' +
+        esc("This display cannot be named: it reports no hardware identity beyond its " +
+            "connector, and a name stored against a connector would move to whatever is " +
+            "plugged in there next.") + "</p>";
+    }
+
+    if (editing !== item.resource_id) {
+      return '<div class="name-actions">' +
+        '<button class="ghost" type="button" data-name="' + esc(item.resource_id) + '">' +
+        (label ? "Edit name" : "Name display") + "</button></div>";
+    }
+
+    var error = saveError
+      ? '<p class="name-error">' + esc(saveError) + "</p>"
+      : "";
+
+    return '<div class="name-form">' + error +
+      '<label class="field"><span class="field-label">Name</span>' +
+      '<input type="text" id="nameLabel" value="' + esc(draftLabel) + '" ' +
+      'maxlength="120" autocomplete="off" spellcheck="false"' +
+      (saving ? " disabled" : "") + "></label>" +
+      '<label class="field"><span class="field-label">Other names (comma separated)</span>' +
+      '<input type="text" id="nameAliases" value="' + esc(draftAliases) + '" ' +
+      'maxlength="600" autocomplete="off" spellcheck="false"' +
+      (saving ? " disabled" : "") + "></label>" +
+      '<div class="name-buttons">' +
+      '<button class="primary" type="button" id="nameSave"' + (saving ? " disabled" : "") + ">" +
+      (saving ? "Saving…" : "Save") + "</button>" +
+      '<button class="ghost" type="button" id="nameCancel"' + (saving ? " disabled" : "") +
+      ">Cancel</button>" +
+      (label
+        ? '<button class="ghost danger" type="button" id="nameRemove"' +
+          (saving ? " disabled" : "") + ">Remove custom name</button>"
+        : "") +
+      "</div></div>";
   }
 
   function applicationCard(item) {
@@ -521,10 +595,110 @@
     });
   }
 
+  /* ------------------------------------------------------------ naming ---- */
+
+  function openEditor(resourceId) {
+    var collection = collectionOf("displays");
+    var item = null;
+    if (collection && collection.items) {
+      collection.items.forEach(function (candidate) {
+        if (candidate.resource_id === resourceId) { item = candidate; }
+      });
+    }
+    editing = resourceId;
+    saveError = null;
+    draftLabel = item && item.overlay && item.overlay.label ? item.overlay.label : "";
+    draftAliases = item && item.overlay && item.overlay.aliases
+      ? item.overlay.aliases.join(", ") : "";
+    render();
+  }
+
+  function closeEditor() {
+    editing = null;
+    saving = false;
+    saveError = null;
+    draftLabel = "";
+    draftAliases = "";
+    render();
+  }
+
+  /* The server's refusal, in the server's words.
+   *
+   * `detail` is the sentence that explains a fail-closed decision — why a
+   * connector is not a panel, why two identical monitors cannot be told apart.
+   * Dropping it in favour of a generic "save failed" would throw away the only
+   * part the user can act on. */
+  function refusal(response) {
+    var error = response && response.payload && response.payload.error;
+    if (!error) { return "The name could not be saved."; }
+    return error.detail ? error.message + " " + error.detail : error.message;
+  }
+
+  /* Nothing is written to the card until the service confirms a durable write.
+     On failure the form stays open with what the user typed still in it. */
+  function submitName(resourceId) {
+    if (saving) { return; }
+    saving = true;
+    saveError = null;
+    render();
+
+    var aliases = draftAliases.split(",").map(function (part) {
+      return part.trim();
+    }).filter(function (part) { return part.length > 0; });
+
+    deps.api("/api/runtime/displays/" + encodeURIComponent(resourceId) + "/overlay", {
+      method: "PUT",
+      body: { label: draftLabel, aliases: aliases }
+    }).then(function (response) {
+      if (!response.ok) {
+        saving = false;
+        saveError = refusal(response);
+        render();
+        return null;
+      }
+      editing = null;
+      saving = false;
+      saveError = null;
+      return load(true);
+    }).catch(function (error) {
+      if (error && error.message === "unauthorized") { return; }
+      saving = false;
+      saveError = "The name could not be saved: the workstation did not answer.";
+      render();
+    });
+  }
+
+  function removeName(resourceId) {
+    if (saving) { return; }
+    saving = true;
+    saveError = null;
+    render();
+
+    deps.api("/api/runtime/displays/" + encodeURIComponent(resourceId) + "/overlay", {
+      method: "DELETE"
+    }).then(function (response) {
+      if (!response.ok) {
+        saving = false;
+        saveError = refusal(response);
+        render();
+        return null;
+      }
+      editing = null;
+      saving = false;
+      return load(true);
+    }).catch(function (error) {
+      if (error && error.message === "unauthorized") { return; }
+      saving = false;
+      saveError = "The name could not be removed: the workstation did not answer.";
+      render();
+    });
+  }
+
   function schedule() {
     if (timer) { clearInterval(timer); }
     timer = setInterval(function () {
-      if (!document.hidden) { load(false); }
+      // A poll must not redraw the form under the user's fingers.
+      if (!document.hidden && editing === null) { load(false); }
     }, POLL_MS);
   }
 
@@ -550,6 +724,15 @@
         render();
         return;
       }
+      var nameButton = event.target.closest
+        ? event.target.closest("[data-name]") : null;
+      if (nameButton) {
+        openEditor(nameButton.getAttribute("data-name"));
+        return;
+      }
+      if (event.target.id === "nameSave") { submitName(editing); return; }
+      if (event.target.id === "nameCancel") { closeEditor(); return; }
+      if (event.target.id === "nameRemove") { removeName(editing); return; }
       if (event.target.id === "toggleProcesses") {
         showAllProcesses = !showAllProcesses;
         render();
@@ -561,6 +744,10 @@
     });
 
     document.addEventListener("input", function (event) {
+      /* The draft lives in JS, not in the DOM: a 30s poll re-renders the whole
+         view, and reading the value back off a replaced input would lose it. */
+      if (event.target.id === "nameLabel") { draftLabel = event.target.value; return; }
+      if (event.target.id === "nameAliases") { draftAliases = event.target.value; return; }
       if (event.target.id === "processQuery") {
         processQuery = event.target.value;
         showAllProcesses = false;
@@ -585,6 +772,11 @@
 
   function stop() {
     if (timer) { clearInterval(timer); timer = null; }
+    editing = null;
+    saving = false;
+    saveError = null;
+    draftLabel = "";
+    draftAliases = "";
     snapshot = null;
     loadError = null;
     render();

@@ -8,6 +8,41 @@ release.
 
 ### Added
 
+- **M2B2 — a user can name their displays, from the phone.** The first write path Cofferdam
+  exposes to the network: `PUT` and `DELETE /api/runtime/displays/{resource_id}/overlay`,
+  authenticated, `application/json` only, body capped at 8 KiB, unknown fields refused.
+
+  The client addresses a **runtime** resource and sends a label and aliases. It cannot send an
+  EDID digest, a registry name, a file path or an overlay id — those are absent from the schema,
+  not merely validated away — so a request cannot choose where its label is stored. The server
+  takes a fresh snapshot, finds the resource, and derives the persistent key from the panel.
+
+  Only a panel-grade identity may carry a durable name: a host-scoped EDID digest, or a complete
+  manufacturer/model/serial. A connector-only display is **refused** rather than stored with a
+  warning, because the read side already declines to match on a connector hint — a name kept
+  against a socket would move to whatever is plugged in there next. Two displays sharing an
+  identity fail closed on both sides.
+
+  Labels never become hardware. The card shows the user's name as its title with the real model
+  and connector directly beneath; `resource_id`, connector, manufacturer, model, serial and every
+  runtime field are untouched, and the stored entry holds no resolution, position, scale or
+  connected flag. Removing the name restores the hardware title.
+
+  Writes are serialized by an advisory `flock` on an adjacent lock file and committed through the
+  existing `write_json_atomic`, with the exact document validated by the loader's own parsers
+  before it is written and re-read afterwards — so the response is an observation rather than an
+  echo, a failed write leaves the previous file byte-identical, and a rejected edit can never
+  become a registry that fails to load at next start. `DELETE` is deliberately not idempotent.
+
+  Text follows the registry's existing Turkish-aware rules: `Büyük monitör`, `büyük monitör` and
+  `BÜYÜK MONİTÖR` are one alias, `IŞIK` matches `ışık`, composed and decomposed spellings agree,
+  and the first spelling the user wrote is the one kept. Overlay writes are audited as bounded
+  action records — operation, resource, outcome — deliberately **without** the label text, which
+  is the user's own words about their own home and does not belong in a general-purpose log.
+
+  Application-instance labels remain future work: their identity is PID plus start time, which is
+  boot-scoped, so a label could not survive the restart that makes one worth having.
+
 - **Runtime inventory (M2B) — Cofferdam can see what is actually connected and running.** The
   layer M2A deliberately did not have. Read-only discovery lives in
   `cofferdam/workstation/runtime/`, one narrow module per backend, each stating the resources it

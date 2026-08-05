@@ -230,14 +230,28 @@ logic; the gate stays open and unaffected, and no M2A document may describe M1 a
   that they have none.
 
   **What M2B is not:** no control of any kind. It starts, stops, moves, reconfigures, and
-  terminates nothing, and no route under `/api/runtime` accepts a write method. No label or alias
-  **editing** — that is the immediate M2B2 follow-up; M2B resolves overlays that already exist onto
-  discovered displays, on hardware-grade evidence only. No browser tabs, no agent task inventory,
+  terminates nothing. M2B1 accepted no write method at all; **M2B2 adds exactly two** —
+  `PUT`/`DELETE /api/runtime/displays/{resource_id}/overlay`, for naming a display. That is
+  metadata *about* a resource, not control *of* one. Overlays still resolve onto discovered
+  displays on hardware-grade evidence only, and application-instance labels remain future work
+  because their identity is boot-scoped. No browser tabs, no agent task inventory,
   no window movement, no GNOME extension, no new dependency.
 
   905 tests pass on both CI paths (744 before this branch), with zero skips when the workstation
-  extras are installed. Not yet validated against the live service: the running service is
-  deliberately still on the PR #9 validation runtime.
+  extras are installed.
+
+  **Unclosed validation gap, inherited by M2B2.** PR #13's logout/login cycle was planned,
+  approved, and instrumented — a bounded read-only recorder sampled the service every 10 seconds
+  from the user manager, which survives logout — but it never ran. All 214 samples show one
+  unchanged graphical session (`gsession-426dede61a51883c`), one unchanged gnome-shell PID, and
+  displays `ok` throughout, so no logout occurred before PR #13 was merged. What the recorder
+  *does* attest, across every sample: the unit stayed `active` with `NRestarts=0` and an unchanged
+  MainPID, `Wants=`/`BindsTo=`/`PartOf=` stayed empty, `/healthz` stayed up, unauthenticated
+  `/api/status` stayed 401, screenshot never became true, and windows never became `ok`.
+  The lifecycle behaviour at GDM and across a real login therefore remains **unverified on this
+  host** for the M2B runtime. M2B2 does not change graphical-session lifecycle behaviour, so it
+  does not close this gap and does not require a logout of its own; the cycle should be run once
+  to close it.
 
 **M2B does not change the M1 reboot gate.** It alters no boot behaviour, no systemd unit, and no
 bind logic.

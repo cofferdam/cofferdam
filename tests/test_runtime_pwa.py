@@ -124,11 +124,19 @@ class LiveViewIsReadOnlyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.live_js = live_code()
 
-    def test_the_live_view_issues_no_write_request(self) -> None:
-        for verb in ('method: "POST"', 'method: "DELETE"', 'method: "PUT"', 'method: "PATCH"'):
+    def test_the_live_view_issues_no_unexpected_write_verb(self) -> None:
+        """PUT and DELETE belong to the overlay routes. POST and PATCH are
+        nobody's — M2B2 added naming, not control."""
+        for verb in ('method: "POST"', 'method: "PATCH"'):
             with self.subTest(verb=verb):
                 self.assertNotIn(verb, self.live_js)
-        self.assertNotIn("body:", self.live_js)
+
+    def test_every_write_targets_the_display_overlay_route(self) -> None:
+        self.assertIn('"/api/runtime/displays/" + encodeURIComponent', self.live_js)
+        self.assertIn('"/overlay"', self.live_js)
+        for forbidden in ("/api/runtime/processes/", "/api/runtime/applications/"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, self.live_js)
 
     def test_the_live_view_offers_no_control_action(self) -> None:
         """No "close", no "kill", no "move to display" — none of it is built."""
@@ -136,11 +144,23 @@ class LiveViewIsReadOnlyTests(unittest.TestCase):
             with self.subTest(banned=banned):
                 self.assertNotIn(banned, self.live_js)
 
-    def test_label_editing_is_not_offered_before_it_exists(self) -> None:
-        """M2B2 adds it. Offering a control that silently does nothing is worse
-        than not offering one."""
-        self.assertNotIn("editLabel", self.live_js)
-        self.assertNotIn("saveLabel", self.live_js)
+    def test_application_instance_labels_are_still_not_offered(self) -> None:
+        """M2B2 is displays only.
+
+        An application instance's identity is boot-scoped — PID plus start time
+        — so a label attached to one could not survive the restart that makes a
+        label worth having. That needs a Cofferdam-owned session model, which is
+        later work.
+        """
+        card = self.live_js[self.live_js.index("function applicationCard") :]
+        card = card[: card.index("function processRow")]
+        self.assertNotIn("data-name", card)
+        self.assertNotIn("nameEditor", card)
+
+    def test_the_display_naming_control_exists(self) -> None:
+        for control in ("Name display", "Edit name", "Remove custom name"):
+            with self.subTest(control=control):
+                self.assertIn(control, self.live_js)
         self.assertIn("item.overlay", self.live_js)
 
 
@@ -267,6 +287,87 @@ class ProminenceTests(unittest.TestCase):
             "This is not a list of what is currently connected, running, or open.",
             self.index_html,
         )
+
+
+class DisplayNamingFlowTests(unittest.TestCase):
+    """The M2B2 editor, scanned for the properties that make it trustworthy.
+
+    The write itself is covered end-to-end in
+    ``tests/test_display_overlay_writes.py``; what matters here is the client's
+    behaviour around it — that it does not claim success early, cannot be
+    double-submitted, and keeps what the user typed when the server refuses.
+    """
+
+    def setUp(self) -> None:
+        self.live_js = live_code()
+
+    def test_the_card_is_not_updated_before_the_server_confirms(self) -> None:
+        """The refresh happens in the success branch, after a durable write.
+
+        An optimistic update here would be the display equivalent of the false
+        success this project keeps refusing: the card would show a name the
+        service never stored.
+        """
+        self.assertIn("if (!response.ok)", self.live_js)
+        self.assertIn("return load(true);", self.live_js)
+
+    def test_double_submission_is_prevented(self) -> None:
+        self.assertIn("if (saving) { return; }", self.live_js)
+        self.assertIn('(saving ? " disabled" : "")', self.live_js)
+
+    def test_a_failed_save_keeps_the_form_open_with_the_error(self) -> None:
+        self.assertIn("saveError = refusal(response)", self.live_js)
+        self.assertIn("name-error", self.live_js)
+
+    def test_the_server_reason_is_shown_not_a_generic_message(self) -> None:
+        """`detail` carries the only part of a fail-closed refusal the user can
+        act on — why a connector is not a panel, and so on."""
+        self.assertIn("error.detail", self.live_js)
+
+    def test_a_weak_identity_display_is_explained_rather_than_offered(self) -> None:
+        self.assertIn("cannot be named", self.live_js)
+        self.assertIn("edid_sha256", self.live_js)
+
+    def test_polling_does_not_redraw_an_open_editor(self) -> None:
+        self.assertIn("editing === null", self.live_js)
+
+    def test_the_draft_is_held_in_javascript_not_read_off_the_dom(self) -> None:
+        """A 30s poll replaces the markup; reading the input back would lose it."""
+        self.assertIn("draftLabel = event.target.value", self.live_js)
+        self.assertIn("draftAliases = event.target.value", self.live_js)
+
+    def test_signing_out_clears_the_draft(self) -> None:
+        stop = self.live_js[self.live_js.index("function stop()") :]
+        self.assertIn("draftLabel = \"\"", stop[:400])
+
+    def test_the_label_becomes_the_title_and_hardware_moves_to_the_subtitle(self) -> None:
+        """The card must add the user's name, never replace the panel's."""
+        self.assertIn("var heading = label || hardware;", self.live_js)
+        self.assertIn("subtitleParts = label ? [hardware, item.connector]", self.live_js)
+
+    def test_aliases_appear_only_in_the_expanded_details(self) -> None:
+        """The collapsed card shows a name and the hardware, nothing more.
+
+        Asserted against the two strings the collapsed card is actually built
+        from, rather than against the whole function — the alias list is
+        computed near the top and that is fine; what matters is that it does not
+        reach the title or the subtitle.
+        """
+        card = self.live_js[self.live_js.index("function displayCard") :]
+        card = card[: card.index("function nameEditor")]
+
+        heading = re.search(r"var heading = .*?;", card, re.S).group(0)
+        subtitle = re.search(r"var subtitle = .*?;", card, re.S).group(0)
+        self.assertNotIn("alias", heading)
+        self.assertNotIn("alias", subtitle)
+        self.assertIn("Also known as", card, "but they must be reachable when expanded")
+
+    def test_the_client_never_sends_a_persistent_key(self) -> None:
+        """Only label and aliases go up; the key is the server's to derive."""
+        body = self.live_js[self.live_js.index("body: { label: draftLabel") :][:120]
+        for forbidden in ("edid", "match", "device_id", "registry", "id:"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, body)
 
 
 if __name__ == "__main__":  # pragma: no cover

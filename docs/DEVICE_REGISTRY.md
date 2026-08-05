@@ -196,7 +196,14 @@ A matched overlay **adds** a label. It never replaces the display's `resource_id
 manufacturer, model, serial, or fingerprint, and deleting the entry leaves the display fully
 identified.
 
-**Editing labels from the UI is M2B2.** In this build the file is still authored by hand.
+**Display labels are editable from the UI as of M2B2.** `displays.json` is written by the
+service through `PUT`/`DELETE /api/runtime/displays/{resource_id}/overlay`: authenticated,
+JSON-only, bounded, serialized under an advisory lock, and written atomically. The client sends a
+label and aliases and nothing else — the persistent key is derived by the server from live
+discovery, so a request cannot choose where it is stored. Only displays with a panel-grade
+identity (an EDID digest, or a complete manufacturer/model/serial) may be named; a connector-only
+display is refused, because a name kept against a socket would move to whatever is plugged in
+there next. The other five registries are still authored by hand.
 
 ---
 

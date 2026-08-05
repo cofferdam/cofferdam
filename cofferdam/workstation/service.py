@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import secrets as _secrets
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -75,6 +76,7 @@ from .config import Config, load_config, load_or_create_token
 from .errors import (
     CODE_CONFIGURATION_INVALID,
     CODE_INTERNAL,
+    CODE_INVALID_PARAMS,
     CODE_NOT_FOUND,
     CODE_UNAUTHORIZED,
     ApiError,
@@ -82,9 +84,46 @@ from .errors import (
 from .events import STATUS_REFRESH_SECONDS, TOKEN_SUBPROTOCOL, EventHub
 from .registries import REGISTRY_NAMES, SUPPORTED_VERSION, load_registries
 from .runtime import RESOURCE_KINDS, RuntimeInventoryService
+from .runtime.overlay_store import (
+    REJECT_BUSY,
+    REJECT_INVALID_DOCUMENT,
+    REJECT_REGISTRY_UNREADABLE,
+    REJECT_WRITE_FAILED,
+    DisplayOverlayStore,
+)
+from .runtime.overlay_writes import (
+    REJECT_AMBIGUOUS_ALIAS,
+    REJECT_AMBIGUOUS_DEVICE,
+    REJECT_AMBIGUOUS_IDENTITY,
+    REJECT_NOT_LABELLED,
+    REJECT_NO_DEVICE,
+    REJECT_UNKNOWN_RESOURCE,
+    OverlayWriteRejected,
+)
 from .store import ActionStore, screenshot_path
 
 WEB_ROOT = Path(__file__).resolve().parents[2] / "web"
+
+# An overlay is a short label and a handful of aliases. Anything larger is
+# not a naming request, so the body is capped well below the registry file
+# limit and refused before it is parsed.
+MAX_OVERLAY_BODY_BYTES = 8 * 1024
+
+# Refusal code -> HTTP status. 404 for a resource that is not there, 409 for
+# a conflict the user can resolve, 503 for a transient lock, 422 for
+# everything the request itself got wrong.
+_OVERLAY_STATUS = {
+    REJECT_UNKNOWN_RESOURCE: 404,
+    REJECT_NOT_LABELLED: 404,
+    REJECT_AMBIGUOUS_IDENTITY: 409,
+    REJECT_AMBIGUOUS_ALIAS: 409,
+    REJECT_AMBIGUOUS_DEVICE: 409,
+    REJECT_NO_DEVICE: 409,
+    REJECT_REGISTRY_UNREADABLE: 409,
+    REJECT_INVALID_DOCUMENT: 422,
+    REJECT_BUSY: 503,
+    REJECT_WRITE_FAILED: 500,
+}
 
 
 def _error_response(error: ApiError) -> JSONResponse:
@@ -143,6 +182,8 @@ def create_app(
     app.state.hub = hub
     app.state.executor = executor
     app.state.inventory = inventory
+    overlays = DisplayOverlayStore(config, inventory)
+    app.state.display_overlays = overlays
 
     # -- auth ----------------------------------------------------------------
 
@@ -335,6 +376,110 @@ def create_app(
             "session": dict(snapshot.session),
             "collection": collection.to_dict(),
         }
+
+    # -- display overlays (the only write path into configuration, M2B2) -----
+    #
+    # Everything above this point is read-only. These two routes are the first
+    # thing reachable over the network that changes a file on disk, so the
+    # constraints are deliberately narrow: authenticated, JSON only, bounded,
+    # addressed by a *runtime* resource id, and never trusting the client for
+    # the persistent key. See runtime/overlay_writes.py for the reasoning.
+
+    async def _overlay_body(request: Request) -> Dict[str, Any]:
+        """Read a bounded JSON body, or refuse before parsing anything."""
+        content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if content_type != "application/json":
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="this endpoint accepts application/json only",
+                status_code=415,
+            )
+        declared = request.headers.get("content-length")
+        if declared is not None:
+            try:
+                too_big = int(declared) > MAX_OVERLAY_BODY_BYTES
+            except ValueError:
+                raise ApiError(
+                    code=CODE_INVALID_PARAMS,
+                    message="invalid Content-Length",
+                    status_code=400,
+                )
+            if too_big:
+                raise ApiError(
+                    code=CODE_INVALID_PARAMS,
+                    message="the request body is too large",
+                    status_code=413,
+                )
+        raw = await request.body()
+        # Checked again after reading: Content-Length is a claim, not a fact.
+        if len(raw) > MAX_OVERLAY_BODY_BYTES:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="the request body is too large",
+                status_code=413,
+            )
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="the request body is not valid JSON",
+                status_code=400,
+            )
+        if not isinstance(payload, dict):
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="the request body must be a JSON object",
+                status_code=400,
+            )
+        # Unknown fields are refused rather than ignored. A request carrying
+        # `edid_sha256`, `id` or `registry` is a caller trying to choose the
+        # storage key, and silently dropping it would teach them it worked.
+        unexpected = sorted(set(payload) - {"label", "aliases"})
+        if unexpected:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="unexpected field: " + unexpected[0],
+                status_code=422,
+                detail="only 'label' and 'aliases' may be sent; the persistent identity is "
+                "derived by the service from live discovery and cannot be supplied",
+            )
+        return payload
+
+    @app.put("/api/runtime/displays/{resource_id}/overlay", dependencies=[Depends(require_token)])
+    async def put_display_overlay(resource_id: str, request: Request) -> Dict[str, Any]:
+        """Create or replace the user's name for one discovered display."""
+        payload = await _overlay_body(request)
+        try:
+            result = await run_in_threadpool(
+                overlays.save, resource_id, payload.get("label"), payload.get("aliases")
+            )
+        except OverlayWriteRejected as rejection:
+            store.record_overlay_event("overlay_updated", resource_id, rejection.code)
+            raise ApiError(
+                code=rejection.code,
+                message=rejection.message,
+                status_code=_OVERLAY_STATUS.get(rejection.code, 422),
+                detail=rejection.detail,
+            )
+        store.record_overlay_event("overlay_updated", resource_id, "ok")
+        return result
+
+    @app.delete("/api/runtime/displays/{resource_id}/overlay", dependencies=[Depends(require_token)])
+    async def delete_display_overlay(resource_id: str) -> Dict[str, Any]:
+        """Remove the user's name, leaving the hardware identity as the title."""
+        try:
+            result = await run_in_threadpool(overlays.delete, resource_id)
+        except OverlayWriteRejected as rejection:
+            store.record_overlay_event("overlay_removed", resource_id, rejection.code)
+            raise ApiError(
+                code=rejection.code,
+                message=rejection.message,
+                status_code=_OVERLAY_STATUS.get(rejection.code, 422),
+                detail=rejection.detail,
+            )
+        store.record_overlay_event("overlay_removed", resource_id, "ok")
+        return result
 
     # -- live events ---------------------------------------------------------
 

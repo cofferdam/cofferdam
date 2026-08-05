@@ -198,19 +198,56 @@ class SnapshotShapeTests(RuntimeApiTestCase):
 
 
 class ReadOnlyTests(RuntimeApiTestCase):
-    """M2B observes. Control is a later milestone with its own rules."""
+    """M2B observes. Control is a later milestone with its own rules.
 
-    def test_no_runtime_route_accepts_a_write_method(self) -> None:
+    M2B2 opens exactly one exception: a user may name a display they can see.
+    That is metadata *about* a resource, not control *of* one — it starts,
+    stops, moves and reconfigures nothing. The guard below is therefore an
+    allowlist rather than a blanket ban, so the next write route has to be
+    added here deliberately instead of arriving unnoticed.
+    """
+
+    # The complete set of runtime routes permitted to change anything.
+    WRITE_ALLOWLIST = {
+        ("/api/runtime/displays/{resource_id}/overlay", "PUT"),
+        ("/api/runtime/displays/{resource_id}/overlay", "DELETE"),
+    }
+
+    def test_only_the_display_overlay_route_accepts_a_write_method(self) -> None:
         offenders = []
         for route in self.app.routes:
             path = getattr(route, "path", "")
             if not path.startswith("/api/runtime"):
                 continue
             methods = set(getattr(route, "methods", set()))
-            offenders.extend(
-                f"{path} {method}" for method in methods & {"POST", "PUT", "PATCH", "DELETE"}
-            )
-        self.assertEqual(offenders, [], f"runtime routes must be read-only: {offenders}")
+            for method in methods & {"POST", "PUT", "PATCH", "DELETE"}:
+                if (path, method) not in self.WRITE_ALLOWLIST:
+                    offenders.append(f"{path} {method}")
+        self.assertEqual(offenders, [], f"unexpected runtime write route: {offenders}")
+
+    def test_no_runtime_route_accepts_post_or_patch(self) -> None:
+        """Overlay writes are PUT/DELETE. Nothing under /api/runtime posts."""
+        for route in self.app.routes:
+            path = getattr(route, "path", "")
+            if not path.startswith("/api/runtime"):
+                continue
+            methods = set(getattr(route, "methods", set()))
+            self.assertFalse(methods & {"POST", "PATCH"}, f"{path} accepts POST/PATCH")
+
+    def test_process_and_window_control_is_still_absent(self) -> None:
+        """The milestone boundary, stated as a test.
+
+        Naming a display is not a licence to terminate a process or move a
+        window; those need identity re-verification rules this build does not
+        have.
+        """
+        paths = {getattr(route, "path", "") for route in self.app.routes}
+        for forbidden in (
+            "/api/runtime/processes/{resource_id}",
+            "/api/runtime/applications/{resource_id}/overlay",
+            "/api/runtime/windows/{resource_id}",
+        ):
+            self.assertNotIn(forbidden, paths)
 
     def test_posting_to_the_snapshot_route_is_refused(self) -> None:
         response = self.client.post("/api/runtime", headers=self.auth, json={})
