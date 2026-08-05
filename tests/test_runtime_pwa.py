@@ -164,5 +164,110 @@ class PollingIsConservativeTests(unittest.TestCase):
         self.assertIn("CofferdamLive.stop()", code_only((WEB_DIR / "app.js").read_text(encoding="utf-8")))
 
 
+class ProminenceTests(unittest.TestCase):
+    """A control plane's front page is not a system monitor.
+
+    Real-client validation found every fact on the page true and the page still
+    wrong: three GNOME helpers sat beside Opera and Firefox, and ~116 processes
+    rendered before anything a person controls. These scans pin the fix in the
+    direction that matters — demote, never drop.
+    """
+
+    def setUp(self) -> None:
+        self.live_js = live_code()
+        self.app_js = code_only((WEB_DIR / "app.js").read_text(encoding="utf-8"))
+        self.index_html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+
+    def test_the_primary_application_list_is_the_user_facing_bucket(self) -> None:
+        self.assertIn("user_facing", self.live_js)
+        self.assertIn("presentation", self.live_js)
+
+    def test_background_and_other_groups_have_their_own_sections(self) -> None:
+        self.assertIn("Background services", self.live_js)
+        self.assertIn("Other running groups", self.live_js)
+
+    def test_demoted_groups_are_still_rendered_as_cards(self) -> None:
+        """Moved out of the primary list, not dropped from the page.
+
+        The section must render ``applicationCard`` for the non-primary buckets
+        too; a client that only rendered the primary bucket would be hiding
+        running software behind a count.
+        """
+        self.assertGreaterEqual(
+            self.live_js.count("applicationCard"),
+            2,
+            "background/other buckets must render real cards, not a count",
+        )
+
+    def test_no_bucket_is_filtered_out_of_the_request(self) -> None:
+        """Prominence is a client concern; the API call stays unfiltered."""
+        self.assertNotIn("presentation=", self.live_js)
+        self.assertIn('"/api/runtime"', self.live_js)
+
+    def test_the_process_inspector_is_collapsed_by_default(self) -> None:
+        """``sections.processes`` starts falsy, so the disclosure is closed and
+        — the point of the exercise — the list is not built at all."""
+        self.assertIn("Process inspector", self.live_js)
+        self.assertIn("var open = !!sections.processes;", self.live_js)
+        self.assertNotIn("sections.processes = true", self.live_js)
+
+    def test_the_process_count_is_shown_while_collapsed(self) -> None:
+        """Collapsing must not hide how much is there."""
+        self.assertIn('<span class="count">\' + total', self.live_js)
+
+    def test_the_process_inspector_offers_search_and_an_instance_filter(self) -> None:
+        self.assertIn("processQuery", self.live_js)
+        self.assertIn("processInstance", self.live_js)
+        self.assertIn("application_instance_id", self.live_js)
+
+    def test_process_rows_keep_pid_start_time_and_state(self) -> None:
+        self.assertIn('"PID " + item.pid', self.live_js)
+        self.assertIn("item.state", self.live_js)
+        self.assertIn("item.started_at", self.live_js)
+
+    def test_an_application_card_leads_with_a_short_reference_not_a_pid(self) -> None:
+        """PID stays available, but it is not the card's identity."""
+        self.assertIn("shortRef(item.resource_id)", self.live_js)
+        self.assertIn('["Resource ID"', self.live_js)
+        self.assertIn('"PID " + item.primary_pid', self.live_js)
+
+    def test_display_technical_details_survive_behind_a_second_disclosure(self) -> None:
+        """Moved behind expansion, not removed."""
+        self.assertIn("technical(item.resource_id", self.live_js)
+        for retained in ("Serial", "Hardware fingerprint", "Manufacturer",
+                         "Physical size", "Discovered by", "Identity"):
+            with self.subTest(retained=retained):
+                self.assertIn(retained, self.live_js)
+
+    def test_windows_stays_a_truthful_capability_row(self) -> None:
+        self.assertIn("capability-row", self.live_js)
+        self.assertIn("collection.reason", self.live_js)
+
+    def test_an_unavailable_capability_is_not_offered_as_a_normal_action(self) -> None:
+        """Hidden from the primary row, and named in a collapsed area with the
+        host's own reason — not left sitting at the top greyed out."""
+        self.assertIn("screenshotSlot", self.index_html)
+        self.assertIn("capabilitiesUnavailable", self.index_html)
+        self.assertIn("renderUnavailableCapabilities", self.app_js)
+        self.assertIn("slot.hidden = capabilities.screenshot === false", self.app_js)
+
+    def test_the_unavailable_area_is_collapsed_and_starts_hidden(self) -> None:
+        self.assertIn('id="capabilitiesUnavailable" hidden', self.index_html)
+
+    def test_installed_stays_separate_from_running(self) -> None:
+        """The two vocabularies must not merge under the reshuffle.
+
+        Configuration says "installed — can launch"; the live view says
+        "running". That distinction is what the whole milestone exists for, and
+        a prominence change is exactly when it would get blurred.
+        """
+        self.assertIn("Not the same as installed", self.live_js)
+        self.assertNotIn("can launch", self.live_js)
+        self.assertIn(
+            "This is not a list of what is currently connected, running, or open.",
+            self.index_html,
+        )
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

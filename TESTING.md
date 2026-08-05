@@ -258,6 +258,12 @@ symlink semantics differ between them.
     named `operator` is not matched to `opera`, and a bundled helper called `chromium` does not
     make its host application claim to be Chromium; a shared `dbus.service` and an app-slice
     `.service` are not instance boundaries.
+  - `test_runtime_presentation.py` — a definition match and a visible desktop entry are both
+    `user_facing`; a `NoDisplay`/`Hidden`/autostart entry is `background` and **still returned by
+    the collection**; an application whose *name* reads like a daemon but whose entry is visible
+    stays user-facing (mutation check against substring classification); a group with no desktop
+    entry is `unclassified` rather than promoted or silently demoted; the entry lookup rejects
+    traversal and separators and reads only the `[Desktop Entry]` group.
   - `test_runtime_windows.py` — the collection is `unavailable` with a reason naming what was
     tried, never a successful empty list; a per-instance window count is `None` and never `0`; and
     the status vocabulary itself refuses the dishonest shapes, so the rule is not mere convention.

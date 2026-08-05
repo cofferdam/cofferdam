@@ -238,6 +238,44 @@ a program name. It deliberately does not follow `/snap/bin/opera` to its symlink
 - **Applications launched outside Cofferdam are discovered** — most of them are. Attribution is
   reported as `launch_source`, never used as a filter.
 
+### Presentation: complete inventory, curated front page
+
+Real-client validation on the phone found every fact on the page true and the page still wrong as
+a product. The primary list showed Opera and Firefox beside `evolution-alarm-notify`,
+`gsd-disk-utility-notify` and `update-notifier`, and the process section rendered ~116 rows —
+systemd, D-Bus, PipeWire — before anything a person actually controls.
+
+**The backend did not change. Discovery stays complete and the API keeps returning everything.**
+What changed is that each instance now carries a `presentation` and the evidence for it, and the
+PWA uses that to decide prominence:
+
+| `presentation` | Evidence | Where the PWA puts it |
+|---|---|---|
+| `user_facing` | matched an application **definition**; or Cofferdam launched it; or its `.desktop` entry is an ordinary visible `Type=Application` | primary list |
+| `background` | its `.desktop` entry declares `NoDisplay=true` or `Hidden=true`, or the entry lives in an XDG autostart directory | collapsed **Background services** |
+| `unclassified` | nothing decisive either way | collapsed **Other running groups** |
+
+Three properties are deliberate.
+
+**No substring matching.** `update-notifier` is background because its entry says
+`NoDisplay=true`, not because its name contains "notifier". An application called `notifier-pro`
+shipping a visible entry classifies as user-facing, and there is a test that says so.
+
+**No hardcoded host inventory.** Nothing in the classifier names an application observed on this
+machine. `NoDisplay`, `Hidden` and the autostart directories are freedesktop specifications; this
+host merely exercises them.
+
+**Uncertainty is not promotion.** A group with no desktop-entry evidence is `unclassified`, not
+"probably an app". Guessing upward fills a control plane's front page with daemons; guessing
+downward hides something the user opened. Both are worse than saying it is unsettled.
+
+A definition match does not require Cofferdam to have launched the application, and
+`user_facing` does not require a definition at all — Claude Desktop on this host matches no
+definition and is plainly user-facing on the strength of its visible desktop entry.
+
+Presentation is advisory and never filters the collection. A client that ignores it sees exactly
+what it saw before.
+
 ### Launch attribution is three-valued
 
 `launch_source` is one of `confirmed_cofferdam`, `confirmed_external`, or `unknown`. It is **not**

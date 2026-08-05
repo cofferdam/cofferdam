@@ -39,7 +39,11 @@
     <section class="panel">
       <h2>Control</h2>
       <div class="controls">
-        <button id="btnScreenshot">Screenshot</button>
+        <!-- A capability the host reports as false is not offered here. The
+             button moves into "Unavailable on this host" below rather than
+             sitting in the primary row greyed out, which reads as "broken"
+             when the truthful answer is "this desktop cannot do it". -->
+        <div id="screenshotSlot"><button id="btnScreenshot">Screenshot</button></div>
         <div class="row">
           <select id="appSelect" aria-label="application"></select>
           <button id="btnOpenApp">Open app</button>
@@ -55,6 +59,10 @@
           </div>
           <p class="muted hint" id="profileHint"></p>
         </form>
+        <details class="reg-advanced" id="capabilitiesUnavailable" hidden>
+          <summary>Unavailable on this host <span class="count" id="capabilityCount"></span></summary>
+          <ul class="capability-list" id="capabilityReasons"></ul>
+        </details>
       </div>
     </section>
 

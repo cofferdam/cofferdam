@@ -130,7 +130,52 @@
     el("btnScreenshot").disabled = capabilities.screenshot === false;
     el("btnOpenUrl").disabled = capabilities.open_url === false;
     el("urlInput").disabled = capabilities.open_url === false;
+    renderUnavailableCapabilities(host, capabilities);
     renderProfileSelect();
+  }
+
+  // Capabilities the host reports as false are demoted out of the primary
+  // control row into a collapsed area, with the host's own reason.
+  //
+  // Screen capture on this Wayland desktop is the case that forced it: the
+  // backend correctly reports `screenshot: false`, but a disabled Screenshot
+  // button still sat at the top of Control as the most prominent thing on the
+  // page — reading as a broken feature rather than as one this desktop does not
+  // offer. The capability stays truthful and stays visible; it just stops
+  // being advertised as a normal action.
+  var CAPABILITY_LABELS = {
+    screenshot: "Screenshot",
+    open_application: "Open app",
+    open_url: "Open URL"
+  };
+
+  function renderUnavailableCapabilities(host, capabilities) {
+    var container = el("capabilitiesUnavailable");
+    var list = el("capabilityReasons");
+    var slot = el("screenshotSlot");
+    if (!container || !list) { return; }
+
+    var unavailable = Object.keys(CAPABILITY_LABELS).filter(function (key) {
+      return capabilities[key] === false;
+    });
+
+    // The host publishes prose reasons in `notes`; they are shown verbatim
+    // rather than re-worded into something that might overstate the cause.
+    var notes = (host.notes || []).slice();
+    list.innerHTML = unavailable.map(function (key) {
+      var reason = notes.filter(function (note) {
+        return note.toLowerCase().indexOf(key.replace("_", " ")) !== -1
+          || (key === "screenshot" && note.toLowerCase().indexOf("screen capture") !== -1);
+      })[0];
+      return "<li><strong>" + escapeHtml(CAPABILITY_LABELS[key]) + "</strong>" +
+        (reason ? "<span class=\"muted\"> — " + escapeHtml(reason) + "</span>" : "") + "</li>";
+    }).join("");
+
+    el("capabilityCount").textContent = unavailable.length ? String(unavailable.length) : "";
+    container.hidden = unavailable.length === 0;
+    // Hidden, not merely disabled: a greyed-out primary button still claims a
+    // place in the interface that this host cannot honour.
+    if (slot) { slot.hidden = capabilities.screenshot === false; }
   }
 
   /* -------------------------------------------------------------- registries

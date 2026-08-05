@@ -24,6 +24,7 @@ from cofferdam.workstation.runtime.applications import (
     ApplicationInstanceDiscovery,
     instance_key,
 )
+from cofferdam.workstation.runtime.desktop_entries import DesktopEntryIndex
 from cofferdam.workstation.runtime.models import STATUS_OK
 
 from ._runtime_doubles import HOST_ID, FakeBoot, FakeProc, app_scope, session_cgroup
@@ -55,9 +56,25 @@ class ApplicationTestCase(unittest.TestCase):
         discovery = ProcessDiscovery(proc_root=str(self.proc.root), uid=os.getuid())
         return discovery.read_all()[0]
 
+    def entry_index(self) -> DesktopEntryIndex:
+        """An index rooted in the temp directory, so no test reads this host.
+
+        Presentation classification consults ``.desktop`` files. Left pointing
+        at the real filesystem, these tests would quietly depend on whatever the
+        developer's machine has installed and would classify differently in CI.
+        """
+        empty = Path(self._tmp.name) / "no-entries"
+        empty.mkdir(exist_ok=True)
+        return DesktopEntryIndex(
+            menu_directories=[str(empty)],
+            autostart_directories=[str(empty)],
+            home=str(empty),
+        )
+
     def collect(self, definitions=None):
         discovery = ApplicationInstanceDiscovery(
-            DEFINITIONS if definitions is None else definitions
+            DEFINITIONS if definitions is None else definitions,
+            entries=self.entry_index(),
         )
         return discovery.collect(HOST_ID, self.boot, self.facts())
 

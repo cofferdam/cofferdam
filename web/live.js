@@ -14,6 +14,26 @@
  *      so, in the words the backend supplied, and never as "0 items".
  *   3. Unknown values are absent, not guessed. A field the host did not report
  *      is left out of the card rather than filled with a plausible default.
+ *
+ * Prominence is a fourth, separate rule
+ * -------------------------------------
+ * Real-client validation on the phone found the first three all satisfied and
+ * the result still wrong as a product: the primary list mixed Opera and Firefox
+ * with three GNOME notification helpers, and the page rendered a wall of ~116
+ * processes — systemd, D-Bus, PipeWire — before anything a person controls.
+ *
+ * Cofferdam is a workstation control plane, not a system monitor. So the
+ * backend keeps discovering everything and returning everything, and *this*
+ * file decides prominence:
+ *
+ *   * the primary application list is what the backend classified `user_facing`;
+ *   * `background` and `unclassified` groups keep their cards, one tap away in
+ *     collapsed sections — moved, never dropped;
+ *   * the process inspector is collapsed, renders nothing until opened, and
+ *     then offers search and a per-application filter;
+ *   * a capability the host reports as false is not offered as a normal action.
+ *
+ * Nothing here filters the API. Every branch below is presentation.
  */
 (function (global) {
   "use strict";
@@ -24,40 +44,48 @@
      there for when the user wants "now". */
   var POLL_MS = 30000;
 
-  var KINDS = [
+  /* How many processes to draw once the inspector is opened, before offering
+     "show all". Opening is already an explicit action; this second bound keeps
+     that action from pasting several hundred rows into a phone at once. */
+  var PROCESS_PREVIEW = 40;
+
+  /* Presentation buckets for running applications, in display order. The
+     backend supplies the classification and the evidence for it; this table
+     only says what each bucket is called and whether it leads the section.
+     `primary: true` is the one list a user sees without tapping anything. */
+  var APPLICATION_GROUPS = [
     {
-      key: "displays",
-      title: "Connected displays",
-      note: "Panels this desktop session is driving right now."
+      key: "user_facing",
+      primary: true,
+      title: null,
+      note: null
     },
     {
-      key: "applications",
-      title: "Running applications",
-      note: "Applications with live processes. Not the same as installed — see Configuration below."
+      key: "background",
+      primary: false,
+      title: "Background services",
+      note: "Helpers the desktop starts for itself — notification, update and settings daemons. " +
+        "Classified from their own desktop entries (NoDisplay/Hidden, or an autostart entry), " +
+        "not from their names."
     },
     {
-      key: "processes",
-      title: "Processes",
-      note: "Processes owned by the Cofferdam user, identified by PID and start time."
-    },
-    {
-      key: "windows",
-      title: "Windows",
-      note: "Windows belonging to running applications."
+      key: "unclassified",
+      primary: false,
+      title: "Other running groups",
+      note: "Running and real, but with no decisive evidence either way. Listed here rather " +
+        "than promoted into the primary list on a guess."
     }
   ];
-
-  /* How many processes to draw before offering "show all". A desktop runs a
-     few hundred; rendering them all into a phone on first paint is slow and
-     nobody reads past the first screen anyway. */
-  var PROCESS_PREVIEW = 40;
 
   var deps = null;
   var snapshot = null;
   var loading = false;
   var loadError = null;
   var expanded = {};
+  var sections = {};
   var showAllProcesses = false;
+  var processQuery = "";
+  var processInstance = "";
   var timer = null;
 
   function esc(value) { return deps.escapeHtml(value); }
@@ -81,24 +109,15 @@
     return '<span class="badge' + (kind ? " " + kind : "") + '">' + esc(text) + "</span>";
   }
 
-  function statusBadge(collection) {
-    var status = collection.status;
-    if (status === "ok") {
-      return badge(collection.count + " found");
-    }
-    if (status === "partial") {
-      return badge(collection.count + " found · incomplete", "warn");
-    }
-    if (status === "unavailable") {
-      return badge("unavailable", "warn");
-    }
-    return badge("error", "err");
-  }
-
   function observedText(iso) {
     if (!iso) { return ""; }
     var parsed = new Date(iso);
     return isNaN(parsed.getTime()) ? "" : parsed.toLocaleTimeString();
+  }
+
+  function observedDate(iso) {
+    var parsed = new Date(iso);
+    return isNaN(parsed.getTime()) ? iso : parsed.toLocaleString();
   }
 
   function pixels(size) {
@@ -111,6 +130,30 @@
       return '<div class="fact"><dt>' + esc(row[0]) + "</dt><dd>" + row[1] + "</dd></div>";
     }).join("");
     return '<dl class="facts">' + body + "</dl>";
+  }
+
+  /* A short, stable handle for a resource. The full ID stays in the technical
+     details; this is the part a person can read back over a phone call. It is
+     a *reference*, not an identity claim — and deliberately not the PID, which
+     is reused by the kernel and means nothing across a reboot. */
+  function shortRef(resourceId) {
+    if (!resourceId) { return ""; }
+    var tail = String(resourceId).split("-").pop();
+    return "#" + tail.slice(-8);
+  }
+
+  /* A nested disclosure inside an already-expanded card. Expanding a card
+     should answer "what is this", not open a hardware datasheet; the datasheet
+     goes one level further down. */
+  function technical(id, rows) {
+    var key = "tech:" + id;
+    return '<details class="tech"' + (sections[key] ? " open" : "") + ">" +
+      '<summary data-section="' + esc(key) + '">Technical details</summary>' +
+      facts(rows) + "</details>";
+  }
+
+  function collectionOf(key) {
+    return snapshot && snapshot.collections ? snapshot.collections[key] : null;
   }
 
   /* ------------------------------------------------------------------ cards */
@@ -146,19 +189,24 @@
       : item.connector;
     var subtitle = [item.connector, resolution, refresh].filter(has).join(" · ");
 
+    /* Expanded: what the panel *is* and how it is arranged. Serial numbers,
+       EDID fingerprints and discovery backends are real and kept — one level
+       further in, because they answer a question almost nobody is asking at
+       the moment they tap a display. */
     var details = open ? facts([
       ["Connector", value(item.connector)],
+      ["Resolution", resolution ? esc(resolution) : value(null)],
+      ["Refresh rate", refresh ? esc(refresh) : value(null)],
+      ["Orientation", value(item.orientation)],
+      ["Position", item.position ? esc(item.position.x + ", " + item.position.y) : value(null)],
+      ["Scale", value(item.scale)]
+    ]) + technical(item.resource_id, [
       item.drm_connector && item.drm_connector !== item.connector
         ? ["Kernel connector", value(item.drm_connector)] : null,
       ["Manufacturer", value(item.manufacturer)],
       ["Model", value(item.model)],
       ["Serial", value(item.serial)],
       ["Reported name", value(item.display_name)],
-      ["Resolution", resolution ? esc(resolution) : value(null)],
-      ["Refresh rate", refresh ? esc(refresh) : value(null)],
-      ["Scale", value(item.scale)],
-      ["Orientation", value(item.orientation)],
-      ["Position", item.position ? esc(item.position.x + ", " + item.position.y) : value(null)],
       ["Physical size", item.physical_size_mm
         ? esc(item.physical_size_mm.width + " × " + item.physical_size_mm.height + " mm")
         : value(null)],
@@ -166,6 +214,8 @@
         + " · " + value(item.identity && item.identity.stability)],
       ["Hardware fingerprint", item.identity && item.identity.edid_sha256
         ? esc(item.identity.edid_sha256.slice(0, 16) + "…") : value(null)],
+      ["Match evidence", value(item.match_method)],
+      ["Resource ID", value(item.resource_id)],
       ["Discovered by", value(item.backend)]
     ]) : "";
 
@@ -190,7 +240,10 @@
        definition it is. Saying that out loud beats guessing. */
     if (!has(item.application_id)) { badges.push(badge("not matched to a definition", "warn")); }
 
-    var parts = [];
+    /* Subtitle carries the short reference, not the PID. The PID is still in
+       the technical details, where it belongs: it is an operating-system
+       handle, not a name for the thing. */
+    var parts = [shortRef(item.resource_id)];
     parts.push(item.process_count + (item.process_count === 1 ? " process" : " processes"));
     if (has(item.started_at)) { parts.push("since " + observedDate(item.started_at)); }
 
@@ -198,37 +251,41 @@
       ["Application definition", has(item.application_id)
         ? esc(item.application_id)
         : '<span class="unset">no definition matched this executable</span>'],
-      ["Main process", esc("PID " + item.primary_pid)],
-      ["Started", value(item.started_at)],
       ["Processes", esc(String(item.process_count))],
+      ["Started", value(item.started_at)],
       ["Executable", value(item.executable_path)],
+      /* Absent, not zero: window discovery is unavailable on this host, and a
+         "0 windows" would be a claim nobody can currently make. */
+      ["Windows", has(item.window_count)
+        ? esc(String(item.window_count))
+        : '<span class="unset">window discovery is unavailable on this host</span>']
+    ]) + technical(item.resource_id, [
+      ["Resource ID", value(item.resource_id)],
+      ["Main process", esc("PID " + item.primary_pid)],
+      ["Process start time", value(item.started_at)],
       ["Systemd unit", item.units && item.units.length ? esc(item.units.join(", ")) : value(null)],
+      ["Mapping evidence", has(item.match_method)
+        ? esc(item.match_method)
+        : '<span class="unset">no definition matched this executable</span>'],
       /* "unknown" is rendered as unset prose, never as a negative claim. */
       ["Launch source", item.launch_source === "confirmed_cofferdam"
         ? "Cofferdam started this"
         : item.launch_source === "confirmed_external"
           ? "started outside Cofferdam"
           : '<span class="unset">launch source not confirmed</span>'],
-      /* Absent, not zero: window discovery is unavailable on this host, and a
-         "0 windows" would be a claim nobody can currently make. */
-      ["Windows", has(item.window_count)
-        ? esc(String(item.window_count))
-        : '<span class="unset">window discovery is unavailable on this host</span>'],
+      ["Classified as", esc(item.presentation || "unclassified") +
+        (has(item.presentation_evidence) ? " · " + esc(item.presentation_evidence) : "")],
       ["Discovered by", value(item.backend)]
     ]) : "";
 
     return card(item.resource_id, item.display_name, parts.join(" · "), badges, item, details);
   }
 
-  function observedDate(iso) {
-    var parsed = new Date(iso);
-    return isNaN(parsed.getTime()) ? iso : parsed.toLocaleString();
-  }
-
   function processRow(item) {
     var bits = [
       "PID " + item.pid,
       item.state,
+      has(item.started_at) ? "since " + observedDate(item.started_at) : null,
       item.unit
     ].filter(has);
     return '<li class="proc"><span class="proc-name">' + esc(item.name || item.executable || "—") +
@@ -252,32 +309,167 @@
 
   /* ------------------------------------------------------------- collections */
 
-  function renderCollection(descriptor) {
-    var collection = snapshot && snapshot.collections ? snapshot.collections[descriptor.key] : null;
-    var body;
+  function unavailableNote(collection) {
+    /* The reason comes from the backend and is shown verbatim. This is the
+       single most important state in the whole view: it is what stops
+       "cannot see" being read as "nothing there". */
+    return '<p class="reg-note unavailable">' + esc(collection.reason) + "</p>";
+  }
 
+  function renderDisplays() {
+    var collection = collectionOf("displays");
+    var body;
     if (!collection) {
       body = '<p class="reg-note">Loading…</p>';
     } else if (collection.status === "unavailable" || collection.status === "error") {
-      /* The reason comes from the backend and is shown verbatim. This is the
-         single most important state in the whole view: it is what stops
-         "cannot see" being read as "nothing there". */
-      body = '<p class="reg-note unavailable">' + esc(collection.reason) + "</p>";
+      body = unavailableNote(collection);
     } else if (!collection.items.length) {
       body = '<p class="reg-note">None found right now.</p>';
-    } else if (descriptor.key === "processes") {
-      var items = showAllProcesses ? collection.items : collection.items.slice(0, PROCESS_PREVIEW);
-      body = '<ul class="proc-list">' + items.map(processRow).join("") + "</ul>";
-      if (collection.items.length > PROCESS_PREVIEW) {
-        body += '<button class="ghost" type="button" id="toggleProcesses">' +
-          (showAllProcesses
-            ? "Show fewer"
-            : "Show all " + collection.items.length) + "</button>";
-      }
     } else {
-      var render = descriptor.key === "displays" ? displayCard : applicationCard;
-      body = '<ul class="rcards">' + collection.items.map(render).join("") + "</ul>";
+      body = '<ul class="rcards">' + collection.items.map(displayCard).join("") + "</ul>";
     }
+    return section("Connected displays", collection,
+      "Panels this desktop session is driving right now.", body);
+  }
+
+  function renderApplications() {
+    var collection = collectionOf("applications");
+    if (!collection) {
+      return section("Running applications", collection,
+        "Applications with live processes.", '<p class="reg-note">Loading…</p>');
+    }
+    if (collection.status === "unavailable" || collection.status === "error") {
+      return section("Running applications", collection,
+        "Applications with live processes.", unavailableNote(collection));
+    }
+
+    var buckets = {};
+    collection.items.forEach(function (item) {
+      var key = item.presentation || "unclassified";
+      if (!buckets[key]) { buckets[key] = []; }
+      buckets[key].push(item);
+    });
+
+    var body = "";
+    APPLICATION_GROUPS.forEach(function (group) {
+      var items = buckets[group.key] || [];
+      if (group.primary) {
+        body += items.length
+          ? '<ul class="rcards">' + items.map(applicationCard).join("") + "</ul>"
+          : '<p class="reg-note">No user-facing applications are running right now.</p>';
+        return;
+      }
+      if (!items.length) { return; }
+      /* Moved, not dropped. The count is on the summary so the section is
+         honest while closed — a collapsed section that hid its size would be
+         its own small lie. */
+      var key = "apps:" + group.key;
+      body += '<details class="reg-advanced"' + (sections[key] ? " open" : "") + ">" +
+        '<summary data-section="' + esc(key) + '">' + esc(group.title) +
+        ' <span class="count">' + items.length + "</span></summary>" +
+        '<p class="reg-note">' + esc(group.note) + "</p>" +
+        '<ul class="rcards">' + items.map(applicationCard).join("") + "</ul>" +
+        "</details>";
+    });
+
+    return section("Running applications", collection,
+      "Applications with live processes. Not the same as installed — see Configuration below.",
+      body, (buckets.user_facing || []).length + " shown");
+  }
+
+  function renderProcesses() {
+    var collection = collectionOf("processes");
+    if (!collection) {
+      return section("Processes", collection, "", '<p class="reg-note">Loading…</p>');
+    }
+    if (collection.status === "unavailable" || collection.status === "error") {
+      return section("Processes", collection, "", unavailableNote(collection));
+    }
+
+    var open = !!sections.processes;
+    var total = collection.items.length;
+    var body = '<details class="reg-advanced"' + (open ? " open" : "") + ">" +
+      '<summary data-section="processes">Process inspector ' +
+      '<span class="count">' + total + "</span></summary>";
+
+    /* Rendering is skipped entirely while closed. The point of collapsing this
+       was never to hide a scrollbar — it was to stop a phone building a
+       hundred-plus DOM nodes nobody asked for on every poll. */
+    if (open) {
+      var instances = (collectionOf("applications") || { items: [] }).items;
+      var options = ['<option value="">All applications</option>'].concat(
+        instances.map(function (instance) {
+          return '<option value="' + esc(instance.resource_id) + '"' +
+            (processInstance === instance.resource_id ? " selected" : "") + ">" +
+            esc(instance.display_name) + "</option>";
+        })
+      ).join("");
+
+      var needle = processQuery.trim().toLowerCase();
+      var shown = collection.items.filter(function (item) {
+        if (processInstance && item.application_instance_id !== processInstance) { return false; }
+        if (!needle) { return true; }
+        var haystack = [item.name, item.executable, item.unit, "pid " + item.pid]
+          .filter(has).join(" ").toLowerCase();
+        return haystack.indexOf(needle) !== -1;
+      });
+
+      body += '<div class="proc-filters">' +
+        '<input type="search" id="processQuery" aria-label="Filter processes by name, unit or PID" ' +
+        'value="' + esc(processQuery) + '" autocomplete="off">' +
+        '<select id="processInstance" aria-label="filter by application">' + options + "</select>" +
+        "</div>";
+
+      var visible = showAllProcesses ? shown : shown.slice(0, PROCESS_PREVIEW);
+      body += '<p class="reg-note">' +
+        esc(shown.length + " of " + total + " processes") + "</p>";
+      body += visible.length
+        ? '<ul class="proc-list">' + visible.map(processRow).join("") + "</ul>"
+        : '<p class="reg-note">No process matches this filter.</p>';
+      if (shown.length > PROCESS_PREVIEW) {
+        body += '<button class="ghost" type="button" id="toggleProcesses">' +
+          (showAllProcesses ? "Show fewer" : "Show all " + shown.length) + "</button>";
+      }
+    }
+
+    body += "</details>";
+    return section("Processes", collection,
+      "Every process owned by the Cofferdam user, identified by PID and start time. " +
+      "Diagnostic detail — open it when you need it.", body, total + " running");
+  }
+
+  /* Windows is a capability status, not a resource list. It has no items and
+     will not have any on this host, so it renders as one compact row instead of
+     a section-sized empty state — while still saying, in the backend's own
+     words, that unavailable is not empty. */
+  function renderWindows() {
+    var collection = collectionOf("windows");
+    if (!collection) { return ""; }
+    if (collection.status === "ok" && collection.items.length) {
+      return section("Windows", collection, "Windows belonging to running applications.",
+        '<ul class="rcards">' + collection.items.map(function (item) {
+          return card(item.resource_id, item.title || "window", "", [], item, "");
+        }).join("") + "</ul>");
+    }
+    var key = "windows";
+    return '<div class="reg capability-row">' +
+      '<details' + (sections[key] ? " open" : "") + ">" +
+      '<summary data-section="' + esc(key) + '">Windows ' +
+      badge("unavailable", "warn") + "</summary>" +
+      '<p class="reg-note unavailable">' + esc(collection.reason) + "</p>" +
+      "</details></div>";
+  }
+
+  function section(title, collection, note, body, countText) {
+    var status = collection
+      ? (collection.status === "ok"
+          ? badge(countText || (collection.count + " found"))
+          : collection.status === "partial"
+            ? badge(collection.count + " found · incomplete", "warn")
+            : collection.status === "unavailable"
+              ? badge("unavailable", "warn")
+              : badge("error", "err"))
+      : badge("loading");
 
     var warnings = collection && collection.warnings && collection.warnings.length
       ? '<ul class="reg-warnings">' + collection.warnings.map(function (text) {
@@ -285,9 +477,8 @@
         }).join("") + "</ul>"
       : "";
 
-    return '<div class="reg"><div class="reg-head"><h3>' + esc(descriptor.title) + "</h3>" +
-      (collection ? statusBadge(collection) : badge("loading")) + "</div>" +
-      '<p class="reg-note">' + esc(descriptor.note) + "</p>" + warnings + body + "</div>";
+    return '<div class="reg"><div class="reg-head"><h3>' + esc(title) + "</h3>" + status + "</div>" +
+      (note ? '<p class="reg-note">' + esc(note) + "</p>" : "") + warnings + body + "</div>";
   }
 
   function render() {
@@ -297,7 +488,8 @@
     if (loadError) {
       root.innerHTML = '<p class="reg-note unavailable">' + esc(loadError) + "</p>";
     } else {
-      root.innerHTML = KINDS.map(renderCollection).join("");
+      root.innerHTML = renderDisplays() + renderApplications() +
+        renderWindows() + renderProcesses();
     }
 
     var stamp = deps.el("liveObserved");
@@ -340,6 +532,17 @@
     deps = dependencies;
 
     document.addEventListener("click", function (event) {
+      /* Disclosure state lives here rather than in the DOM, because every poll
+         replaces the markup. Letting <details> own it would silently close
+         whatever the user had open, every thirty seconds. */
+      var summary = event.target.closest ? event.target.closest("summary[data-section]") : null;
+      if (summary) {
+        event.preventDefault();
+        var name = summary.getAttribute("data-section");
+        sections[name] = !sections[name];
+        render();
+        return;
+      }
       var toggle = event.target.closest ? event.target.closest("[data-toggle]") : null;
       if (toggle) {
         var id = toggle.getAttribute("data-toggle");
@@ -354,6 +557,25 @@
       }
       if (event.target.id === "liveRefresh") {
         load(true);
+      }
+    });
+
+    document.addEventListener("input", function (event) {
+      if (event.target.id === "processQuery") {
+        processQuery = event.target.value;
+        showAllProcesses = false;
+        render();
+        var field = deps.el("processQuery");
+        /* Re-rendering replaced the input the user is typing into. */
+        if (field) { field.focus(); field.setSelectionRange(field.value.length, field.value.length); }
+      }
+    });
+
+    document.addEventListener("change", function (event) {
+      if (event.target.id === "processInstance") {
+        processInstance = event.target.value;
+        showAllProcesses = false;
+        render();
       }
     });
 

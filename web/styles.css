@@ -195,7 +195,50 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .
 .proc-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .proc-meta { color: var(--muted); font-size: 12px; margin-left: auto; }
 
+/* Collapsed secondary areas: background services, other running groups, the
+   process inspector, and unavailable capabilities. Present and reachable,
+   deliberately not competing with the primary lists for attention. */
+.reg-advanced { margin: 10px 0 0; border: 1px solid var(--line); border-radius: 10px; background: #0d151d; }
+.reg-advanced > summary {
+  cursor: pointer; padding: 10px 12px; font-size: 13px; color: var(--muted);
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; list-style: none;
+}
+.reg-advanced > summary::-webkit-details-marker { display: none; }
+.reg-advanced > summary::before { content: "▸"; font-size: 11px; }
+.reg-advanced[open] > summary::before { content: "▾"; }
+.reg-advanced > *:not(summary) { margin-left: 12px; margin-right: 12px; }
+.reg-advanced > *:last-child { margin-bottom: 12px; }
+.count {
+  background: #1b2733; border-radius: 999px; padding: 1px 8px;
+  font-size: 12px; font-variant-numeric: tabular-nums;
+}
+
+/* A second disclosure level inside an expanded card: serials, fingerprints,
+   unit names. Kept, but not the first thing a tap reveals. */
+.tech { margin: 10px 0 0; border-top: 1px solid var(--line); padding-top: 8px; }
+.tech > summary {
+  cursor: pointer; font-size: 12px; color: var(--muted); list-style: none; padding: 2px 0;
+}
+.tech > summary::-webkit-details-marker { display: none; }
+.tech > summary::before { content: "▸ "; font-size: 10px; }
+.tech[open] > summary::before { content: "▾ "; }
+
+.proc-filters { display: flex; gap: 8px; margin: 8px 0 0; flex-wrap: wrap; }
+.proc-filters input, .proc-filters select { flex: 1 1 140px; min-width: 0; }
+
+.capability-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
+.capability-list li { line-height: 1.4; }
+
+/* Windows is a capability status, not a resource list — one compact row. */
+.capability-row summary {
+  cursor: pointer; display: flex; align-items: center; gap: 8px;
+  font-size: 13px; list-style: none; padding: 2px 0;
+}
+.capability-row summary::-webkit-details-marker { display: none; }
+
 @media (max-width: 420px) {
   .fact { grid-template-columns: 1fr; gap: 2px; }
   .proc-meta { margin-left: 0; }
+  .proc-filters { flex-direction: column; }
+  .proc-filters input, .proc-filters select { flex: 1 1 auto; width: 100%; }
 }

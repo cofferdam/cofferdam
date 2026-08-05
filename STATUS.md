@@ -212,6 +212,17 @@ logic; the gate stays open and unaffected, and no M2A document may describe M1 a
   the absence of our unit is never on its own grounds for claiming an external launch. See
   [`docs/RUNTIME_INVENTORY.md`](docs/RUNTIME_INVENTORY.md).
 
+  **The phone found a third problem that no test could have caught: the page was true and still
+  wrong.** Opera and Firefox sat in the primary list beside three GNOME notification helpers, and
+  the process section rendered ~116 rows of systemd, D-Bus and PipeWire ahead of anything a person
+  controls. Cofferdam is a workstation control plane, not a system monitor. Discovery and the API
+  are unchanged and still complete; instances now carry `presentation` and
+  `presentation_evidence`, derived from definition matches and freedesktop desktop-entry metadata
+  (`NoDisplay`, `Hidden`, XDG autostart) rather than from names, and the PWA demotes background
+  helpers and undecidable groups into collapsed sections, collapses the process inspector behind
+  an explicit action with search and per-application filtering, moves technical detail behind a
+  second disclosure, and stops advertising a capability the host reports false.
+
   **Windows are `unavailable`, with a reason** — the honest result, not a stub.
   `org.gnome.Shell.Eval` returns `(false, '')` here (disabled outside unsafe-mode, and barred by
   D-2026-08-04-7 regardless), no portal enumerates windows, and the accessibility bridge is

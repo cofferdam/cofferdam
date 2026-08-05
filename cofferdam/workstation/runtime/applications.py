@@ -72,6 +72,7 @@ import os
 import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from .desktop_entries import DesktopEntryIndex
 from .identity import fingerprint
 from .models import (
     KIND_APPLICATIONS,
@@ -125,6 +126,25 @@ LAUNCH_SOURCES = (LAUNCH_SOURCE_COFFERDAM, LAUNCH_SOURCE_EXTERNAL, LAUNCH_SOURCE
 # form are listed; an unrecognised launcher segment stays ``unknown``.
 _SELF_NAMING_LAUNCHERS = frozenset({"gnome", "kde", "plasma", "xfce", "mate", "cinnamon"})
 
+# How an instance should be *presented*, which is a different question from
+# whether it was discovered. Everything discovered stays in the API; this only
+# decides where a client puts it.
+#
+# The inventory is complete on purpose, and completeness is wrong for a front
+# page: on the validation host it listed evolution-alarm-notify,
+# gsd-disk-utility-notify and update-notifier beside Opera and Firefox. Cofferdam
+# is a workstation control plane, not a system monitor, so the primary list is
+# what a person might reasonably act on and the rest stays one tap away.
+PRESENTATION_USER_FACING = "user_facing"
+PRESENTATION_BACKGROUND = "background"
+PRESENTATION_UNCLASSIFIED = "unclassified"
+
+PRESENTATIONS = (PRESENTATION_USER_FACING, PRESENTATION_BACKGROUND, PRESENTATION_UNCLASSIFIED)
+
+# ``snap.<package>.<app>-<uuid>.scope`` maps to snapd's desktop-entry naming,
+# ``<package>_<app>.desktop``.
+_SNAP_DESKTOP_ID = "{package}_{app}"
+
 _LIMITATIONS = (
     "an application instance is a systemd app scope; a D-Bus-activated application shares "
     "dbus.service with every other one and cannot be separated into its own instance",
@@ -135,6 +155,9 @@ _LIMITATIONS = (
     "launch attribution is three-valued: snapd re-parents every snap launch into its own scope, "
     "so a snap Cofferdam started reports launch_source=unknown rather than claiming something "
     "else launched it",
+    "presentation is advisory and never filters this collection: every discovered instance is "
+    "returned, classified user_facing/background/unclassified from desktop-entry and definition "
+    "evidence, and an instance with no decisive evidence is unclassified rather than promoted",
 )
 
 # systemd escapes characters it cannot put in a unit name. Only the escapes that
@@ -247,6 +270,71 @@ def launch_source(units: Sequence[str]) -> str:
     return LAUNCH_SOURCE_UNKNOWN
 
 
+def desktop_application_id(units: Sequence[str]) -> Optional[str]:
+    """The freedesktop application ID this instance's units encode, if any.
+
+    Read out of the systemd unit name — ``app-gnome-<AppID>-<pid>.scope`` and
+    snapd's ``snap.<package>.<app>-<uuid>.scope`` — rather than guessed from an
+    executable name. Returns ``None`` when the units encode no application ID,
+    which is itself a fact: an unrecognised scope leaves no desktop evidence.
+    """
+    for unit in units:
+        snap = _SNAP_SCOPE.match(unit)
+        if snap:
+            return _SNAP_DESKTOP_ID.format(
+                package=snap.group("package"), app=snap.group("app")
+            )
+    for unit in units:
+        app = _APP_SCOPE.match(unit)
+        if app:
+            return _unescape_unit(app.group("app"))
+    return None
+
+
+def presentation_of(
+    application_id: Optional[str],
+    units: Sequence[str],
+    source: str,
+    entries: DesktopEntryIndex,
+) -> Tuple[str, Optional[str]]:
+    """Where a client should show this instance, and on what evidence.
+
+    Returns ``(presentation, evidence)``. The order below is by strength of
+    evidence, and every branch is a positive finding — never a name, never a
+    substring, never a list of the programs that happen to run on this host:
+
+    1. the group matched an application **definition** the user configured, so
+       it is by construction something Cofferdam is meant to control;
+    2. Cofferdam started it, so a person asked for it;
+    3. its ``.desktop`` entry declares ``NoDisplay``/``Hidden``, or the entry
+       lives in an XDG autostart directory — the freedesktop-specified ways of
+       saying "not a thing the user picks from a menu";
+    4. its ``.desktop`` entry is an ordinary visible ``Type=Application``;
+    5. nothing decisive — ``unclassified``, which a client shows under Other
+       rather than promoting into the primary list.
+
+    Step 5 is the important one. Guessing "probably user-facing" is how a
+    control plane grows a front page full of daemons; guessing "probably
+    background" is how it hides something the user actually opened. Both are
+    worse than saying the classification is not settled.
+    """
+    if application_id:
+        return PRESENTATION_USER_FACING, "application-definition"
+
+    if source == LAUNCH_SOURCE_COFFERDAM:
+        return PRESENTATION_USER_FACING, "cofferdam-launch"
+
+    entry = entries.lookup(desktop_application_id(units))
+    if entry is not None:
+        if entry.is_background:
+            return PRESENTATION_BACKGROUND, entry.evidence()
+        if entry.is_visible_application:
+            return PRESENTATION_USER_FACING, "desktop-entry-visible"
+        return PRESENTATION_UNCLASSIFIED, entry.evidence()
+
+    return PRESENTATION_UNCLASSIFIED, "no-desktop-entry"
+
+
 def _root_of(members: Sequence[ProcessFacts]) -> ProcessFacts:
     """The member that leads the group.
 
@@ -330,8 +418,13 @@ class ApplicationInstanceDiscovery:
 
     kind = KIND_APPLICATIONS
 
-    def __init__(self, definitions: Optional[Mapping[str, Tuple[str, ...]]] = None) -> None:
+    def __init__(
+        self,
+        definitions: Optional[Mapping[str, Tuple[str, ...]]] = None,
+        entries: Optional[DesktopEntryIndex] = None,
+    ) -> None:
         self._definitions = dict(definitions or {})
+        self._entries = entries if entries is not None else DesktopEntryIndex()
 
     def group(self, facts: Sequence[ProcessFacts]) -> Dict[InstanceKey, List[ProcessFacts]]:
         groups: Dict[InstanceKey, List[ProcessFacts]] = {}
@@ -388,6 +481,10 @@ class ApplicationInstanceDiscovery:
 
             units = sorted({record.unit for record in members if record.unit})
             child_pids = sorted(record.pid for record in members if record.pid != root.pid)
+            source = launch_source(units)
+            presentation, presentation_evidence = presentation_of(
+                application_id, units, source, self._entries
+            )
 
             items.append(
                 {
@@ -417,7 +514,11 @@ class ApplicationInstanceDiscovery:
                     "unit_kind": key.unit_kind,
                     # Three-valued on purpose. See ``launch_source``: a snap
                     # that Cofferdam started is ``unknown``, never ``external``.
-                    "launch_source": launch_source(units),
+                    "launch_source": source,
+                    # Presentation only. Everything discovered is returned
+                    # either way; this says where a client should put it.
+                    "presentation": presentation,
+                    "presentation_evidence": presentation_evidence,
                     "executable_path": root.executable_path,
                     "executable": (
                         os.path.basename(root.executable_path) if root.executable_path else None
@@ -445,6 +546,12 @@ __all__ = [
     "LAUNCH_SOURCE_COFFERDAM",
     "LAUNCH_SOURCE_EXTERNAL",
     "LAUNCH_SOURCE_UNKNOWN",
+    "PRESENTATIONS",
+    "PRESENTATION_BACKGROUND",
+    "PRESENTATION_UNCLASSIFIED",
+    "PRESENTATION_USER_FACING",
+    "desktop_application_id",
     "instance_key",
     "launch_source",
+    "presentation_of",
 ]

@@ -80,6 +80,28 @@ release.
   It deliberately does not follow `/snap/bin/opera` to its symlink target `/usr/bin/snap`, which
   would classify every unrelated snap helper as Opera.
 
+### Changed
+
+- **The Live system view is a control plane, not a system monitor (2026-08-05).** Real-client
+  validation on the phone confirmed the backend correct — two real displays, Opera and Firefox as
+  one instance each, truthful unavailable states — and the *page* wrong. The primary application
+  list mixed Opera and Firefox with `evolution-alarm-notify`, `gsd-disk-utility-notify` and
+  `update-notifier`; the process section rendered ~116 rows of systemd, D-Bus and PipeWire before
+  anything a person controls; expanded display cards opened with serial numbers and EDID
+  fingerprints; and Screenshot stayed the most prominent control on a host that truthfully reports
+  it unavailable.
+
+  No inventory data was removed and no collection is filtered. Instances now carry `presentation`
+  (`user_facing` / `background` / `unclassified`) plus `presentation_evidence`, derived from
+  application-definition matches and freedesktop desktop-entry metadata — `NoDisplay`, `Hidden`,
+  and XDG autostart membership — never from name substrings and never from a list of the
+  applications on this host. Background helpers and undecidable groups keep their full cards in
+  collapsed sections; the process inspector is collapsed, builds no rows until opened, and then
+  offers search and a per-application filter; display and application technical details move
+  behind a second disclosure; an unavailable capability leaves the primary control row for a
+  collapsed "Unavailable on this host" area carrying the host's own reason; Windows becomes a
+  compact capability row instead of a section-sized empty state.
+
 ### Fixed
 
 - **Launch provenance claimed a fact it could not prove, for every snap application
