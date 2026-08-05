@@ -15,6 +15,8 @@ route                                        auth  purpose
 ``GET  /api/screenshots/{action_id}``        yes   PNG artifact
 ``GET  /api/registries``                     yes   registry load/validation status
 ``GET  /api/registries/{registry_name}``     yes   one validated registry
+``GET  /api/runtime``                        yes   live runtime snapshot
+``GET  /api/runtime/{resource_kind}``        yes   one slice of that snapshot
 ``WS   /ws``                                 yes   live events
 ``GET  /`` and static assets                 no    the PWA shell itself
 ===========================================  ====  =============================
@@ -32,6 +34,15 @@ change the configuration that decides which applications exist and which
 domains a browser profile may open. Editing is a text editor and a service
 that re-reads the file. Bringing write access inside the API is its own
 milestone, with its own review.
+
+**The runtime routes (M2B) are read-only for a second, separate reason.** They
+report what the machine currently *is* — connected displays, running processes,
+application instances — and observing is the whole contract. Nothing under
+``/api/runtime`` starts, stops, moves, reconfigures, or terminates anything;
+process and window control is a later milestone with its own identity
+re-verification rules. They are also fully authenticated: an inventory of a
+person's machine is exactly the kind of thing an unauthenticated endpoint must
+never hand out.
 """
 
 from __future__ import annotations
@@ -70,6 +81,7 @@ from .errors import (
 )
 from .events import STATUS_REFRESH_SECONDS, TOKEN_SUBPROTOCOL, EventHub
 from .registries import REGISTRY_NAMES, SUPPORTED_VERSION, load_registries
+from .runtime import RESOURCE_KINDS, RuntimeInventoryService
 from .store import ActionStore, screenshot_path
 
 WEB_ROOT = Path(__file__).resolve().parents[2] / "web"
@@ -83,6 +95,7 @@ def create_app(
     config: Optional[Config] = None,
     token: Optional[str] = None,
     adapter=None,
+    inventory=None,
 ) -> FastAPI:
     """Build the application. Arguments are injectable for tests."""
     config = config or load_config()
@@ -92,6 +105,13 @@ def create_app(
 
     store = ActionStore(config)
     hub = EventHub()
+    # The inventory service is given the adapter (for the launch table that
+    # maps a discovered process to an application definition) and a registry
+    # loader (for the optional display labels). It reads both; it writes
+    # neither, and a failure in either leaves discovery working and unmapped.
+    inventory = inventory or RuntimeInventoryService(
+        adapter=adapter, registry_loader=lambda: load_registries(config)
+    )
 
     def _on_event(event: str, record: ActionRecord) -> None:
         hub.broadcast_threadsafe(event, record.to_dict())
@@ -122,6 +142,7 @@ def create_app(
     app.state.store = store
     app.state.hub = hub
     app.state.executor = executor
+    app.state.inventory = inventory
 
     # -- auth ----------------------------------------------------------------
 
@@ -172,7 +193,7 @@ def create_app(
                 # The milestone this build implements. It says nothing about
                 # validation: M1's post-reboot gate is tracked in STATUS.md and
                 # is still open.
-                "milestone": "M2A",
+                "milestone": "M2B",
                 "actions": list(ACTION_NAMES),
                 "event_clients": hub.client_count,
             },
@@ -267,6 +288,53 @@ def create_app(
         payload = load.registry.to_dict()
         payload["source"] = load.registry.source
         return payload
+
+    # -- runtime inventory (read-only, M2B) ----------------------------------
+
+    @app.get("/api/runtime", dependencies=[Depends(require_token)])
+    async def runtime_snapshot(refresh: bool = False) -> Dict[str, Any]:
+        """One observation of this machine: displays, applications, processes, windows.
+
+        ``refresh=true`` bypasses the few-second cache. It is the only knob, it
+        costs one process scan, and it exists for the PWA's refresh button —
+        everything else reads the shared snapshot so a client can never see
+        displays from one instant beside processes from another.
+
+        Collecting walks ``/proc`` and queries the session bus, so it runs in a
+        worker thread rather than blocking the event loop.
+        """
+        snapshot = await run_in_threadpool(inventory.snapshot, refresh)
+        return snapshot.to_dict()
+
+    @app.get("/api/runtime/{resource_kind}", dependencies=[Depends(require_token)])
+    async def runtime_collection(resource_kind: str, refresh: bool = False) -> Dict[str, Any]:
+        """One collection, served with the snapshot header it belongs to.
+
+        The header is not padding: a list of processes is uninterpretable
+        without the boot it was read in, and a list of displays is
+        uninterpretable without the graphical session. A client that caches a
+        collection needs both to know when to throw it away.
+        """
+        if resource_kind not in RESOURCE_KINDS:
+            # The requested kind is arbitrary request text and is not echoed
+            # back, matching the registry routes.
+            raise ApiError(
+                code=CODE_NOT_FOUND,
+                message="unknown runtime resource kind",
+                status_code=404,
+                detail="known kinds: " + ", ".join(RESOURCE_KINDS),
+            )
+        snapshot, collection = await run_in_threadpool(
+            inventory.collection, resource_kind, refresh
+        )
+        return {
+            "version": snapshot.version,
+            "observed_at": snapshot.observed_at,
+            "host": dict(snapshot.host),
+            "boot": dict(snapshot.boot),
+            "session": dict(snapshot.session),
+            "collection": collection.to_dict(),
+        }
 
     # -- live events ---------------------------------------------------------
 
