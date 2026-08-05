@@ -149,6 +149,35 @@ class ActionStore:
             }
         )
 
+    def record_spotify_event(self, operation: str, result: str) -> None:
+        """Audit one Spotify playback action — applied, refused, or failed.
+
+        Narrower than any other audit in this file, because playback *is*
+        personal activity. What someone listened to, when, and how often is a
+        detailed picture of a person, and an action log carrying track titles
+        would quietly become a listening history: kept on disk, shown in a list,
+        and never asked for.
+
+        So this records the operation and the outcome, and nothing else. Not the
+        track, artist, album, or query; not the account; not the Spotify device
+        id; not the volume. "A track was skipped at 21:04 and it worked" is
+        enough to audit the write path, and it is the most that can be recorded
+        without describing someone's evening.
+        """
+        self.add(
+            {
+                "action_id": uuid.uuid4().hex,
+                "action": operation,
+                "status": "succeeded" if result == "ok" else "failed",
+                "started_at": _utc_now(),
+                "finished_at": _utc_now(),
+                "params": {},
+                "result": {"outcome": result},
+                "error": None if result == "ok" else {"code": result},
+                "stub": False,
+            }
+        )
+
     def recent(self, limit: int = 20) -> List[dict]:
         with self._lock:
             return list(self._records[: max(0, limit)])
