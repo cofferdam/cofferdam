@@ -710,6 +710,65 @@ would quietly become a listening history: kept on disk, shown in a list, and nev
 audit records the operation and the outcome and nothing else. The authenticated PWA may show the
 current track — it is the point of the panel — and nothing else may.
 
+## D-2026-08-06-1 — One Cofferdam-owned YouTube player, and Cofferdam owns its queue (EFE DECISION, ACTIVE)
+
+**Decision.** YouTube playback is driven through a **single Cofferdam-served player document**
+embedding one official IFrame Player API player, opened once in Opera on the workstation and
+controlled over a **loopback-only** channel with a closed message vocabulary. Cofferdam keeps its
+own play queue and never uses YouTube's playlist queue. Verified against the official IFrame Player
+API and embedded-player-parameter documentation on 2026-08-06 and recorded in
+[`docs/YOUTUBE_PLAYER.md`](docs/YOUTUBE_PLAYER.md).
+
+**Why not control a normal watch page.** The previous behaviour opened
+`https://www.youtube.com/watch?v=…` per selection. Cofferdam does not own that page, so there was
+nothing to control, every video was a new tab, and a tab appearing was the only available evidence
+of success — which is not evidence of playback at all. Controlling a page Cofferdam does not own
+would mean DOM automation, which D-2026-08-04-7 already rules out. Serving our own minimal document
+is the option that gives real control without any of that.
+
+**Why the queue is not YouTube's.** `nextVideo()`, `previousVideo()` and `playVideoAt()` are
+documented *only* against a YouTube playlist; there is no defined behaviour when none is loaded.
+Handing YouTube an array of video ids would work and would also hand it the ordering, the
+advance-on-end behaviour and the loop/shuffle state. The one thing this product must never do is let
+a **recommendation** become the next video, and a queue whose contents Cofferdam cannot enumerate is
+not a queue it can honestly report. So Next is a Cofferdam decision implemented with
+`loadVideoById`, bounded, in memory, and it refuses when nothing is queued rather than playing
+whatever would have come next.
+
+**Why the player page carries no token.** A long-lived credential in a browser tab lives in that
+tab's history and in whatever the browser syncs — a worse thing to hold than the problem it solves.
+The page is authenticated by *where it can reach*: a second listener bound to `127.0.0.1` as a
+module constant, never the tailnet. Stated honestly, that boundary grants nothing new — a process
+running as this user could already read the token file — so the work is in keeping out everything
+that is *not* a same-user process: a Host-header check against DNS rebinding, an
+`application/json` requirement that forces a preflight no CORS header ever answers, fixed paths, and
+bounded bodies, connections and polls. This is the same shape as the M2D OAuth callback listener,
+and the second use of that pattern.
+
+**The channel is closed in both directions.** Cofferdam may send five commands; the player may say
+three things. A player page has no message that starts an action, opens an application, or reaches
+any other part of the workstation API. A compromised player page gets to lie about what is playing;
+it does not get a foothold.
+
+**A player is a document that is currently saying so.** Connection state comes from a heartbeat, not
+from Opera's process list, because Opera is one process with many tabs that outlives any of them.
+This is the same rule as D-2026-08-04-6's runtime identity work and D-2026-08-05-9's refusal to
+treat a Spotify device id as an identity: a signal that is *usually* right is the most dangerous
+kind, because it works in testing.
+
+**Autoplay is reported, not defeated.** The browser refusing to start unmuted audio is a documented
+browser policy, surfaced through the API's own `onAutoplayBlocked` event. Cofferdam exposes it as a
+state with the chosen video left cued, sends `playVideo` once rather than looping, and never starts
+muted and calls that success. One click on the player window resolves it for the session, because
+media autoplay requires *sticky* activation, which is never consumed.
+
+**Viewing is personal activity, so the audit is deliberately thin.** Same reasoning as the Spotify
+decision above, and the same conclusion: the audit records the operation and the outcome and nothing
+else — no video, title, channel, query or queue content. The loopback listener silences its own HTTP
+access log, whose request lines would otherwise become a timestamped record of when somebody was
+watching something. The authenticated PWA may show the current video and the queue; nothing else
+may, and nothing is stored.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

@@ -19,11 +19,17 @@ goes quiet is exactly the question a control panel should never make you ask.
 | Control | Owner | Milestone |
 | --- | --- | --- |
 | System / output volume, mute, which speaker | this document | M2C |
-| Spotify playback volume, play/pause, track | Spotify Playback | later |
-| YouTube player volume, play/pause | YouTube Dedicated Player | later |
+| Spotify playback volume, play/pause, track | [Spotify Playback](SPOTIFY_PLAYBACK.md) | M2D |
+| YouTube player volume, play/pause, queue | [YouTube Dedicated Player](YOUTUBE_PLAYER.md) | M2E |
 
 Nothing here starts, stops, or skips playback. Choosing an output and setting a
 level is the whole surface.
+
+There are now three controls in the product called "volume", and they are three
+different things: this computer's speaker, a Spotify Connect device, and one
+YouTube player window on the workstation. Changing any one of them leaves the
+other two alone. The PWA keeps them in three panels with three headings for
+exactly that reason.
 
 ## Where the numbers come from
 

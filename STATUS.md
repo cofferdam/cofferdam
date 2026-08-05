@@ -1,9 +1,9 @@
 # Status
 
-Accurate as of **2026-08-05** (M2B runtime inventory, M2B3A media launch profiles, M2B3A.1
-official-provider result selection, M2C audio control, and M2D Spotify playback,
-[`DECISIONS.md`](DECISIONS.md) D-2026-08-05-2 … -9). Update this file when a category changes, not
-on every commit.
+Accurate as of **2026-08-06** (M2B runtime inventory, M2B3A media launch profiles, M2B3A.1
+official-provider result selection, M2C audio control, M2D Spotify playback, and M2E the YouTube
+dedicated player, [`DECISIONS.md`](DECISIONS.md) D-2026-08-05-2 … -9 and D-2026-08-06-1). Update
+this file when a category changes, not on every commit.
 
 ## Merged (on `main`)
 
@@ -474,8 +474,66 @@ logic; the gate stays open and unaffected, and no M2A document may describe M1 a
   **Not in this milestone:** seek, context playback, reading the Spotify queue, persisting a device
   preference, the YouTube dedicated player, and the Opera Companion.
 
+### M2E — YouTube dedicated player
+
+- **M2E — one player window, not a tab per video.** On branch
+  `feat/youtube-dedicated-player`, not merged. M2B3A.1 could find the exact video and open it;
+  every selection opened *another* Opera watch tab, Cofferdam could control none of them, and a
+  tab appearing was treated as success. This adds a `cofferdam/workstation/youtubeplayer/` module
+  over the official IFrame Player API — a Cofferdam-served player document, a bounded loopback
+  control channel, a versioned player snapshot, ten typed actions and thirteen routes — plus a
+  **YouTube player** panel in the PWA and *Play now* / *Add to queue* on video result cards.
+  Documented in [`docs/YOUTUBE_PLAYER.md`](docs/YOUTUBE_PLAYER.md).
+
+  **A player is a document that is currently saying so.** Connection state comes from a two-second
+  heartbeat on the control channel, never from Opera's process list, so a running browser is never
+  reported as a connected player and closing the tab is detected by the same mechanism that
+  establishes it. One launch per bounded recovery, behind a lock, so two Play now presses arriving
+  together cannot each open a tab; a launch that produces no player is a truthful timeout, never a
+  second launch.
+
+  **The queue is Cofferdam's, and that is a finding rather than a preference.** The IFrame API's
+  `nextVideo()`, `previousVideo()` and `playVideoAt()` are documented *only* in terms of a YouTube
+  playlist, with no defined behaviour when none is loaded. Passing an array of video ids would work
+  and would hand YouTube the ordering and the advance-on-end behaviour — so Next is a Cofferdam
+  decision implemented with `loadVideoById`, bounded at 25 items, in memory, and it refuses rather
+  than playing a recommendation when nothing is queued.
+
+  **The player page carries no token.** It is served by a second loopback-only listener bound to a
+  module constant, defended by a Host-header check against DNS rebinding and by an
+  `application/json` rule that forces a preflight no CORS header ever answers. The trust boundary
+  is documented honestly: a same-user process could already read the token file, so the channel
+  grants nothing new — and its vocabulary is closed in both directions, five commands out and three
+  messages in, so a player page cannot request any Cofferdam action.
+
+  **Autoplay is reported, not worked around.** The documented `onAutoplayBlocked` event becomes its
+  own state with the chosen video left loaded and cued; one click on the player window enables the
+  rest of the session, because media autoplay needs *sticky* activation, which is never consumed.
+  Cofferdam sends `playVideo` once — no retry loop — and never starts muted and calls that success.
+
+  **Nothing is claimed until the player reports it.** A volume set to 80 that the player still
+  reports as 50 is a refusal carrying the observed value; a player showing a different video than
+  the one chosen is `youtube_video_not_observed`, never success. Volume is refused rather than
+  clamped outside 0–100. Mute uses the API's real `mute()`/`unMute()`, so unlike Spotify the field
+  is plainly `muted`.
+
+  **Three volumes, three panels.** YouTube's player level, Spotify's device level and this
+  computer's speaker are independent; the player package imports no audio module at all, so that
+  separation is structural rather than a rule to remember.
+
+  1,819 tests pass on both CI paths (1,641 before), including seven mutation checks — duplicate
+  launch prevention, client-supplied video-id rejection, observed-video verification, the queue
+  bound, the PWA's stale-response guard, loopback-only binding and the Host check, and arbitrary
+  player-command rejection.
+
+  **Not re-validated on the real host yet.** The `100-youtube-player-validation` drop-in is not
+  applied, and the live service still runs the M2D build under the unchanged `90` drop-in.
+
+  **Not in this milestone:** seek, automatic queue continuation when a video ends, queue
+  persistence, and the Opera Companion for Netflix/Prime Video/TV+.
+
 **M2B does not change the M1 reboot gate.** It alters no boot behaviour, no systemd unit, and no
-bind logic. Neither does M2B3A, M2B3A.1, M2C, or M2D.
+bind logic. Neither does M2B3A, M2B3A.1, M2C, M2D, or M2E.
 
 ## Planned (active roadmap — see [`ROADMAP.md`](ROADMAP.md))
 
