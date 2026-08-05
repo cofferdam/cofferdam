@@ -462,10 +462,73 @@ Label and alias **editing** is likewise deferred, to the immediate M2B2 follow-u
 overlays that already exist onto discovered resources; every resource carries a stable
 `resource_id` and an `overlay` slot, so editing needs no change to the identity model.
 
+## D-2026-08-05-5 — Opera is Cofferdam's default browser, inside Cofferdam only (EFE DECISION, ACTIVE)
+
+Cofferdam opens generic links, and every media web service, in **Opera**. Firefox stays a
+first-class, explicitly selectable browser — by profile, or by `browser_id` on the action itself —
+and no Firefox definition is removed.
+
+The scope of the word "default" is the point:
+
+- It is a preference **inside Cofferdam**. Nothing reads or writes the desktop's default-browser
+  setting, and no file association is changed. (On the validation host the OS default already
+  happens to be Opera; the product default is deliberately not derived from it, so the two stay
+  independent.)
+- It sits **below** both configured paths. An explicit `browser_profile_id`, an explicit
+  `browser_id`, and a registry profile marked `default_for_url` all outrank it. It answers only
+  "nothing is configured — what should a link do?", where the previous answer was whichever browser
+  sorted first in the adapter's table: an implementation detail standing in for a decision.
+- It **degrades** to the pre-M2B3A behaviour on a host without Opera, rather than failing on a
+  preference that cannot be honoured.
+
+It is implemented in `browser_selection`, **not** by reordering the adapter's browser table. That
+table is still the last-resort "first installed browser wins" answer, and editing it would have
+changed the fallback itself rather than layering a preference above it.
+
+A new `browser_id` action field selects a browser directly, so "open this in Firefox" no longer
+requires writing a registry file first. It is mutually exclusive with `browser_profile_id`, and it
+does **not** escape a configured allow-list: when an enabled default profile exists, that profile's
+domain policy still binds whichever browser is named. Otherwise naming a browser would have become
+the way around the policy.
+
+## D-2026-08-05-6 — Media providers are a code-owned catalogue, and no wrapper is installed (EFE DECISION, ACTIVE)
+
+Spotify, YouTube, Netflix, Prime Video and TV+ are reachable from the phone as **launch
+definitions**, not as integrations.
+
+- **Spotify** is the real installed desktop application. Search hands it a `spotify:` URI, which is
+  an entry point the installed application registers for on this host
+  (`MimeType=x-scheme-handler/spotify`) rather than a trick.
+- **Netflix, Prime Video, TV+ and YouTube** are represented as web services opened in Opera. **No
+  unofficial Electron wrapper, and no third-party Snap or Flatpak that merely repackages a website,
+  is installed or required.** App-mode Opera windows were investigated and rejected: the installed
+  build (Opera 133, snap) exposes no `--app` switch, so Cofferdam opens an honest dedicated window
+  rather than claiming a standalone app.
+- The catalogue lives in **source**, not in a registry. A media provider *is* a URL, and the M2A
+  registries deliberately cannot name one — putting providers in a JSON file would hand that file
+  the power to aim a browser anywhere. A client sends a provider id from the allowlist and, at most,
+  a bounded search phrase; it has no vocabulary for a URL, a template, a parameter name, or a
+  scheme.
+
+**Two things are refused rather than faked.** No action claims playback: opening Netflix opens a
+page and searching Spotify opens a search, so every media result reports `playback: not_started` on
+success. And **TV+ ships without search**, because its unqualified search address redirects to the
+storefront root and discards the query — a "search" built on it would open the home page while
+reporting success, which is exactly the false success M1 established as unacceptable. The card says
+so, with the reason.
+
+Playback control, catalog search with real result cards, and DOM-level service search are deferred
+to the adapter seams documented in [`docs/MEDIA_PROFILES.md`](docs/MEDIA_PROFILES.md). Safe
+close/restart of application instances remains M2B3B.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when
   reproducible Ubuntu installs matter.
+- **OQ-3 — TV+ search.** Deferred, not abandoned. A region-qualified address
+  (`/{storefront}/search?term=`) does work, but Cofferdam cannot determine the account's storefront
+  without probing Apple. Revisit if the browser companion — which can read the region from the tab
+  that is already open and signed in — lands.
 
 ## Fable recommendations (advisory — not Efe decisions)
 

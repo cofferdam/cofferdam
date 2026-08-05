@@ -6,17 +6,37 @@ the rules are written down here rather than spread through the adapter.
 Selection
 ---------
 
-============================  =============================================
-request                       result
-============================  =============================================
+===============================  ==========================================
+request                          result
+===============================  ==========================================
+explicit ``browser_id``          that browser, or a structured refusal
 explicit ``browser_profile_id``  that profile, or a structured refusal
-no id, one enabled default    the default profile, if its browser is present
-no id, no usable default      the pre-M2A legacy browser launch, unchanged
-============================  =============================================
+no id, one enabled default       the default profile, if its browser is present
+no id, no usable default         Opera, if it is installed (M2B3A)
+none of the above                the pre-M2A legacy browser launch, unchanged
+===============================  ==========================================
 
-**An explicit profile never degrades into a different one.** Naming a profile is
-a statement about which browser context may see the URL; quietly opening it
-somewhere else would break the only guarantee a profile offers.
+**An explicit selection never degrades into a different one.** Naming a profile
+or a browser is a statement about which browser context may see the URL; quietly
+opening it somewhere else would break the only guarantee either one offers.
+
+Opera as the product default (M2B3A)
+------------------------------------
+
+When nothing has been configured, Cofferdam opens links in **Opera**. This is a
+preference *inside Cofferdam*: it reads nothing from the desktop, changes no file
+association, and leaves the operating system's own default browser exactly as the
+user set it. Firefox is untouched and stays explicitly selectable — by profile,
+or by ``browser_id`` on the action itself.
+
+It sits below both configured paths on purpose. A registry default still wins,
+so a user who has written down a preference keeps it; the product default only
+answers the question "nothing is configured, so what should a link do?", where
+the previous answer — "whichever browser sorts first in the adapter's table" —
+was an implementation detail rather than a decision. The adapter's legacy order
+is deliberately *not* edited to achieve this: that order is still what a host
+with no Opera falls back to, and rewriting it would change the legacy path
+itself rather than layering a preference above it.
 
 Policy
 ------
@@ -43,12 +63,14 @@ from dataclasses import dataclass
 from typing import Optional, Sequence
 from urllib.parse import urlparse
 
+from .adapters.base import BROWSER_KEYS
 from .errors import (
     ApplicationUnavailable,
     BrowserProfileInvalid,
     ConfigurationInvalid,
     DomainNotAllowed,
 )
+from .media import DEFAULT_BROWSER_KEY as PRODUCT_DEFAULT_BROWSER
 from .registries import (
     BROWSER_PROFILES,
     BrowserProfile,
@@ -66,7 +88,9 @@ ADAPTER_KEY_TO_APPLICATION = {
 }
 
 SOURCE_EXPLICIT = "explicit-profile"
+SOURCE_EXPLICIT_BROWSER = "explicit-browser"
 SOURCE_DEFAULT = "default-profile"
+SOURCE_PRODUCT_DEFAULT = "product-default"
 SOURCE_LEGACY = "legacy"
 
 
@@ -99,8 +123,26 @@ def select_browser(
     url: str,
     browser_profile_id: Optional[str],
     available_applications: Sequence[str],
+    browser_id: Optional[str] = None,
 ) -> BrowserChoice:
-    """Resolve a browser profile for ``url``, or raise a structured refusal."""
+    """Resolve a browser for ``url``, or raise a structured refusal.
+
+    ``browser_id`` (M2B3A) names a browser directly, without a profile. It is
+    the honest option for a machine that has configured no registries at all —
+    "open this in Firefox" should not require writing a JSON file first — and it
+    is what the phone's media cards use to pin a service to Opera. Like an
+    explicit profile it never degrades: an unavailable browser is refused, not
+    quietly replaced.
+    """
+    if browser_id is not None and browser_profile_id is not None:
+        # Two explicit selections that could disagree. Picking one would
+        # silently discard a statement the caller made on purpose.
+        raise BrowserProfileInvalid(
+            "choose either a browser or a browser profile, not both",
+            "browser_id names a browser directly; browser_profile_id names a configured "
+            "profile that already carries its own browser",
+        )
+
     try:
         registries = load_registries(config)
         profiles = registries.require(BROWSER_PROFILES)
@@ -110,6 +152,27 @@ def select_browser(
             "the local browser configuration could not be read",
             error.describe(),
         ) from None
+
+    if browser_id is not None:
+        if browser_id not in BROWSER_KEYS:
+            raise BrowserProfileInvalid(
+                "no such browser",
+                "known browsers: " + ", ".join(BROWSER_KEYS),
+            )
+        # The standing policy still binds. A machine whose default profile
+        # restricts which domains Cofferdam may open has made a statement about
+        # *this machine*, not about one browser — so naming a different browser
+        # cannot become the way around it. Without a configured default there is
+        # no policy to apply, exactly as on the legacy path.
+        standing = default_browser_profile(profiles)
+        if standing is not None:
+            _require_domain_allowed(standing, url)
+        if browser_id not in available_applications:
+            raise ApplicationUnavailable(
+                f"{browser_id} is not available on this host",
+                "the browser is not installed, or is not launchable from this session",
+            )
+        return BrowserChoice(application_key=browser_id, source=SOURCE_EXPLICIT_BROWSER)
 
     if browser_profile_id is not None:
         profile = profiles.get(browser_profile_id)
@@ -128,7 +191,7 @@ def select_browser(
 
     profile = default_browser_profile(profiles)
     if profile is None:
-        return LEGACY_CHOICE
+        return _product_default(available_applications)
 
     # The default profile's policy still binds: it was selected, so it decides.
     _require_domain_allowed(profile, url)
@@ -137,7 +200,22 @@ def select_browser(
     except ApplicationUnavailable:
         # Only an *implicit* selection may degrade, and only to the behaviour
         # that predates registries entirely. The policy check above already ran.
-        return LEGACY_CHOICE
+        return _product_default(available_applications)
+
+
+def _product_default(available_applications: Sequence[str]) -> BrowserChoice:
+    """Cofferdam's own preference, used only when nothing is configured.
+
+    Falls through to :data:`LEGACY_CHOICE` when the preferred browser is not
+    installed, so a host without Opera behaves exactly as it did before M2B3A
+    rather than failing on a preference it cannot honour. Nothing here reads or
+    writes the desktop's default-browser setting.
+    """
+    if PRODUCT_DEFAULT_BROWSER in available_applications:
+        return BrowserChoice(
+            application_key=PRODUCT_DEFAULT_BROWSER, source=SOURCE_PRODUCT_DEFAULT
+        )
+    return LEGACY_CHOICE
 
 
 def _choice(
@@ -201,9 +279,12 @@ def _hostname(url: str) -> Optional[str]:
 __all__ = [
     "ADAPTER_KEY_TO_APPLICATION",
     "LEGACY_CHOICE",
+    "PRODUCT_DEFAULT_BROWSER",
     "SOURCE_DEFAULT",
     "SOURCE_EXPLICIT",
+    "SOURCE_EXPLICIT_BROWSER",
     "SOURCE_LEGACY",
+    "SOURCE_PRODUCT_DEFAULT",
     "BrowserChoice",
     "select_browser",
 ]

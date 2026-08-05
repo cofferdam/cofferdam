@@ -193,33 +193,52 @@ Rules:
 
 ## `open_url` with a browser profile
 
-The typed `open_url` action gains one optional field:
+The typed `open_url` action gains two optional fields:
 
 ```json
 { "action": "open_url", "params": { "url": "https://example.com", "browser_profile_id": "example-opera-default" } }
+{ "action": "open_url", "params": { "url": "https://example.com", "browser_id": "firefox" } }
 ```
+
+`browser_profile_id` (M2A) selects a configured *semantic profile* by its registry id. `browser_id`
+(M2B3A) names a browser directly from the code-owned allowlist, for a machine that has configured
+no profiles — "open this in Firefox" should not require writing a JSON file first. Both are logical
+keys; neither is a program name, a path, or a profile directory. Sending **both** is refused: two
+explicit selections could disagree, and picking one would silently discard a statement the caller
+made on purpose.
 
 ### Selection
 
 | request | result |
 | --- | --- |
+| explicit valid `browser_id` | that browser |
+| explicit unknown `browser_id`, or one not installed here | **fails closed** |
 | explicit valid `browser_profile_id` | that profile's application |
 | explicit unknown or disabled profile | **fails closed** — `browser_profile_invalid` |
 | no id, exactly one enabled `default_for_url` profile whose browser is available | that profile |
-| no id, otherwise | the pre-M2A legacy browser launch, unchanged |
+| no id, otherwise | **Opera** — Cofferdam's product default (M2B3A) |
+| no id, and Opera is not installed here | the pre-M2A legacy browser launch, unchanged |
 
-**An explicit profile never falls back to another one.** Naming a profile is a statement about
-which browser context may see the URL.
+**An explicit selection never falls back to another one.** Naming a profile or a browser is a
+statement about which browser context may see the URL.
 
 Domain policy is enforced **before** anything launches, and applies to whichever profile was
 selected — explicit or default. It is checked *before* the availability check too, so a URL an
 allow-list forbids is refused whether or not the browser happens to be installed. Falling back to
 legacy behaviour can never become a way around a policy.
 
+**`browser_id` does not escape a policy either.** When an enabled `default_for_url` profile exists,
+that profile's domain policy still binds whichever browser is named — an allow-list is a statement
+about this machine, not about one browser. Without a configured default there is no policy to
+apply, exactly as on the legacy path.
+
 ### Backward compatibility
 
-A request carrying only `url` continues to work exactly as before. A machine with no registry
-files has no profiles, therefore no default, therefore takes the legacy path.
+A request carrying only `url` continues to work exactly as before, and still succeeds on a machine
+with no registry files at all. What M2B3A changed is only *which* browser answers when nothing is
+configured: Opera, by product decision ([`DECISIONS.md`](../DECISIONS.md) D-2026-08-05-5), instead
+of whichever browser the adapter's table happened to list first. A host without Opera is unaffected
+and still takes the legacy path.
 
 Registries that exist but are **invalid** fail closed instead: with an unreadable policy the
 honest answer is "I do not know what you allow", and guessing "everything" is the wrong way to be

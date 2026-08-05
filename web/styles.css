@@ -134,7 +134,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .
 
 .actions { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .actions li {
-  display: flex; gap: 10px; align-items: baseline;
+  display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
   background: #101a24; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: 14px;
 }
 .actions .st { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; padding: 2px 8px; border-radius: 999px; }
@@ -142,7 +142,14 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .
 .st.failed { background: rgba(224, 92, 92, .18); color: var(--err); }
 .st.running { background: rgba(79, 163, 255, .18); color: var(--accent); }
 .actions .when { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
-.actions .detail { color: var(--muted); font-size: 13px; }
+/* The detail is the only unbounded text in this row — a full URL, and since
+   M2B3A a search phrase up to the service's query limit. A flex item will not
+   shrink below its own min-content width, so without these one long entry
+   widens the row, then the panel, then the page, and the whole phone view
+   scrolls sideways. `min-width: 0` lets it shrink and `overflow-wrap` lets an
+   unbroken string break; `flex-wrap` above lets the timestamp drop to its own
+   line instead of being squeezed out. */
+.actions .detail { color: var(--muted); font-size: 13px; min-width: 0; overflow-wrap: anywhere; }
 
 .toasts { position: fixed; left: 12px; right: 12px; bottom: 12px; display: grid; gap: 8px; z-index: 20; pointer-events: none; }
 .toast { background: #1d2a38; border: 1px solid var(--line); border-left-width: 4px; border-radius: 10px; padding: 12px 14px; font-size: 14px; }
@@ -256,6 +263,37 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .
 .name-note { margin: 10px 0 0; }
 button.danger { color: var(--err); }
 
+/* Media launch profiles (M2B3A).
+   The column minimum is `min(260px, 100%)` rather than a bare 260px: on a
+   narrow phone the track can then shrink below 260px instead of forcing the
+   grid — and with it the whole page — wider than the viewport. */
+.media-grid {
+  display: grid; gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
+}
+.media-card {
+  background: #101a24; border: 1px solid var(--line); border-radius: 10px;
+  padding: 12px; display: flex; flex-direction: column; gap: 8px; min-width: 0;
+}
+.media-card.off { opacity: .65; }
+.media-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.media-head strong { font-size: 15px; }
+.media-actions { display: flex; gap: 8px; }
+.media-actions button { flex: 1; }
+.media-search { display: flex; gap: 8px; min-width: 0; }
+/* `min-width: 0` on the input is what actually prevents the overflow: a flex
+   item defaults to its intrinsic minimum width, and for a search box carrying
+   a placeholder like "Search Prime Video" that is wider than a phone. */
+.media-search input { flex: 1; min-width: 0; }
+.media-search button { flex: 0 0 auto; }
+.media-note { color: var(--muted); font-size: 12px; margin: 0; overflow-wrap: anywhere; }
+.media-limits {
+  list-style: none; margin: 0; padding: 0;
+  color: var(--muted); font-size: 12px; display: grid; gap: 4px;
+}
+.media-limits li { padding-left: 12px; position: relative; overflow-wrap: anywhere; }
+.media-limits li::before { content: "\00b7"; position: absolute; left: 4px; }
+
 @media (max-width: 420px) {
   .name-buttons { flex-direction: column; }
   .name-buttons button { width: 100%; }
@@ -263,4 +301,7 @@ button.danger { color: var(--err); }
   .proc-meta { margin-left: 0; }
   .proc-filters { flex-direction: column; }
   .proc-filters input, .proc-filters select { flex: 1 1 auto; width: 100%; }
+  /* One column, and the search row stacks so neither control is squeezed. */
+  .media-search { flex-direction: column; }
+  .media-search button { width: 100%; }
 }

@@ -48,17 +48,34 @@ from .linux_session import (
     process_running,
 )
 
-# Logical key -> candidate executables, in preference order. Fixed table: a
+# Browser key -> candidate executables, in preference order. Fixed table: a
 # caller can pick a key, never a command.
-_APPLICATION_COMMANDS = {
+#
+# **Declaration order is behaviour**, not style: ``_browser_key`` walks this
+# mapping for the legacy no-profile URL path and takes the first browser found
+# on PATH. Opera stays appended last so that path keeps choosing exactly what it
+# chose before M2A. Cofferdam's *product* preference for Opera is expressed
+# separately, in ``browser_selection``, where it can be seen and overridden.
+_BROWSER_COMMANDS = {
     "firefox": ("firefox", "firefox-esr"),
     "chromium": ("chromium", "chromium-browser"),
     "google-chrome": ("google-chrome", "google-chrome-stable"),
-    # M2A. Appended last on purpose: ``_browser_key`` walks this mapping in
-    # order for the legacy no-profile URL path, so adding Opera must not change
-    # which browser an existing URL-only request opens.
     "opera": ("opera", "opera-stable"),
 }
+
+# Everything launchable, browsers included. M2B3A adds the first non-browser
+# entry, so the two tables stop being the same thing: a browser can open a URL,
+# an application can only be started (or handed a URI on its own scheme).
+# Spotify is the real snap-packaged desktop application on this host — no
+# wrapper, no repackaged web page.
+_APPLICATION_COMMANDS = dict(_BROWSER_COMMANDS)
+_APPLICATION_COMMANDS["spotify"] = ("spotify",)
+
+# Which applications may be handed a URI, and on which scheme. Verified against
+# the installed application before being listed: Spotify's desktop entry on this
+# host declares ``MimeType=x-scheme-handler/spotify`` and ``Exec=… %U``, so a
+# ``spotify:`` URI is its own documented entry point rather than a guess.
+_APPLICATION_URI_SCHEMES = {"spotify": ("spotify",)}
 
 # Non-zero exit codes that mean "an instance was already running, I handed the
 # request to it, and I am done" — *not* "I failed to start".
@@ -92,6 +109,7 @@ _APPLICATION_DESKTOP_ENTRIES = {
     "chromium": ("chromium.desktop", "chromium-browser.desktop", "chromium_chromium.desktop"),
     "google-chrome": ("google-chrome.desktop",),
     "opera": ("opera.desktop", "opera-stable.desktop", "opera_opera.desktop"),
+    "spotify": ("spotify.desktop", "spotify_spotify.desktop"),
 }
 
 _DESKTOP_ENTRY_DIRECTORIES = (
@@ -115,6 +133,7 @@ _APPLICATION_PROCESS_NAMES = {
     "chromium": ("chromium", "chromium-browser", "chrome"),
     "google-chrome": ("chrome", "google-chrome", "google-chrome-stable"),
     "opera": ("opera", "opera-stable"),
+    "spotify": ("spotify",),
 }
 
 # tool -> argv template completed with the output path the service generates.
@@ -293,12 +312,17 @@ class LinuxX11Adapter(HostAdapter):
         """First allowlisted application that is actually installed.
 
         This is the pre-M2A URL path and must stay exactly as it was: it walks
-        ``_APPLICATION_COMMANDS`` in declaration order and takes the first
+        ``_BROWSER_COMMANDS`` in declaration order and takes the first
         executable found on ``PATH``. Desktop-entry detection is deliberately
         *not* consulted here — an application we can see but cannot launch is
         not a browser this path may choose.
+
+        It walks the *browser* table, never the application table. M2B3A added
+        the first non-browser application, and iterating the wider table here
+        would eventually let something that cannot render a web page be elected
+        this host's browser.
         """
-        for key, candidates in _APPLICATION_COMMANDS.items():
+        for key, candidates in _BROWSER_COMMANDS.items():
             if first_available(candidates):
                 return key
         return None
@@ -453,6 +477,10 @@ class LinuxX11Adapter(HostAdapter):
         the URL to an already-running Opera hands it to that existing instance,
         which opens a new tab in the user's session — this never starts a second,
         isolated browser and never touches a profile directory.
+
+        Only a browser key is accepted. Since M2B3A the application allowlist is
+        wider than the browser table, and "open this web page in Spotify" has to
+        be a refusal rather than something the adapter tries.
         """
         session = self._require_session()
         if application is None:
@@ -460,12 +488,15 @@ class LinuxX11Adapter(HostAdapter):
             if application is None:
                 raise AdapterUnsupported(
                     "no allowlisted browser is installed",
-                    "install one of: " + ", ".join(_APPLICATION_COMMANDS),
+                    "install one of: " + ", ".join(_BROWSER_COMMANDS),
                 )
-        elif application not in _APPLICATION_COMMANDS:
-            raise AdapterUnsupported(f"application not allowlisted: {application}")
+        elif application not in _BROWSER_COMMANDS:
+            raise AdapterUnsupported(
+                f"not an allowlisted browser: {application}",
+                "URLs may only be opened in: " + ", ".join(_BROWSER_COMMANDS),
+            )
 
-        executable = first_available(_APPLICATION_COMMANDS[application])
+        executable = first_available(_BROWSER_COMMANDS[application])
         if not executable:
             raise AdapterUnsupported(f"application not installed: {application}")
         # ``url`` has already been scheme-validated (http/https) by the action
@@ -473,6 +504,48 @@ class LinuxX11Adapter(HostAdapter):
         launch = launch_in_session(
             [executable, url],
             description="Cofferdam: open URL",
+            accept_exit_status=_DELEGATION_EXIT_STATUS.get(application, ()),
+            expect_session=session.session_id,
+        )
+        pid = self._confirm(application, launch)
+        return ApplicationLaunch(application=application, pid=pid, detail=Path(executable).name)
+
+    def open_application_uri(self, application: str, uri: str) -> ApplicationLaunch:
+        """Start an allowlisted application with a URI on its own scheme.
+
+        The URI reaches the program the same way a URL reaches a browser: as one
+        argv element of a fixed vector, through the systemd user manager, never
+        a shell and never a concatenated string. Two independent gates stand in
+        front of it — the application must appear in
+        ``_APPLICATION_URI_SCHEMES``, and the URI's scheme must be one that
+        entry permits — so an accepted key can never be handed a scheme it did
+        not register for.
+
+        ``xdg-open`` is deliberately not used, for the reason recorded in
+        :meth:`open_url`: it exits 0 after delegating whether or not anything
+        started, which is unreportable. Launching the application directly keeps
+        the outcome observable, and ``_confirm`` still has to corroborate it.
+        """
+        allowed_schemes = _APPLICATION_URI_SCHEMES.get(application)
+        if allowed_schemes is None:
+            raise AdapterUnsupported(
+                f"application does not accept URIs: {application}",
+                "URI launches are available for: " + ", ".join(_APPLICATION_URI_SCHEMES),
+            )
+        scheme = uri.split(":", 1)[0].lower() if ":" in uri else ""
+        if scheme not in allowed_schemes:
+            raise AdapterUnsupported(
+                "that URI scheme is not allowed for this application",
+                application + " accepts: " + ", ".join(s + ":" for s in allowed_schemes),
+            )
+
+        session = self._require_session()
+        executable = first_available(_APPLICATION_COMMANDS[application])
+        if not executable:
+            raise AdapterUnsupported(f"application not installed: {application}")
+        launch = launch_in_session(
+            [executable, uri],
+            description="Cofferdam: open " + application + " URI",
             accept_exit_status=_DELEGATION_EXIT_STATUS.get(application, ()),
             expect_session=session.session_id,
         )

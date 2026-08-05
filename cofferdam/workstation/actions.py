@@ -19,13 +19,24 @@ from typing import Any, Callable, Dict, Optional, Type
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from .adapters.base import APPLICATION_KEYS, HostAdapter
-from .errors import CODE_INVALID_PARAMS, CODE_UNKNOWN_ACTION, ApiError, AdapterError, bounded_detail
+from .adapters.base import APPLICATION_KEYS, BROWSER_KEYS, HostAdapter
+from .errors import (
+    CODE_INVALID_PARAMS,
+    CODE_UNKNOWN_ACTION,
+    ApiError,
+    AdapterError,
+    MediaQueryInvalid,
+    bounded_detail,
+)
+from .media import PROVIDER_IDS
 from .registries import is_valid_id as is_valid_registry_id
 
 ACTION_TAKE_SCREENSHOT = "take_screenshot"
 ACTION_OPEN_APPLICATION = "open_application"
 ACTION_OPEN_URL = "open_url"
+# M2B3A
+ACTION_OPEN_MEDIA_PROVIDER = "open_media_provider"
+ACTION_SEARCH_MEDIA_PROVIDER = "search_media_provider"
 
 STATUS_RUNNING = "running"
 STATUS_SUCCEEDED = "succeeded"
@@ -74,6 +85,20 @@ class OpenUrlParams(_Params):
     # pre-M2A behaviour exactly. This selects a *semantic profile* by its stable
     # registry id — never a browser, a binary, or a profile directory.
     browser_profile_id: Optional[str] = None
+    # M2B3A. Selects a browser directly, from the code-owned browser allowlist,
+    # for a machine that has configured no profiles. Still a logical key: the
+    # adapter owns which program that means. Mutually exclusive with
+    # ``browser_profile_id``, which ``select_browser`` enforces.
+    browser_id: Optional[str] = None
+
+    @field_validator("browser_id")
+    @classmethod
+    def _known_browser(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        if value not in BROWSER_KEYS:
+            raise ValueError(f"browser_id must be one of: {', '.join(BROWSER_KEYS)}")
+        return value
 
     @field_validator("browser_profile_id")
     @classmethod
@@ -106,10 +131,75 @@ class OpenUrlParams(_Params):
         return candidate
 
 
+def _allowlisted_provider_id(value: str) -> str:
+    """Exact match against the catalogue, like ``open_application``.
+
+    Shared by both media schemas as a plain function rather than through a
+    common base class: every schema in :data:`PARAM_SCHEMAS` inherits
+    ``_Params`` *directly*, which is what
+    ``tests/test_workstation_no_shell.py`` checks by parsing this file. A
+    schema hierarchy would still forbid extras, but it would make that
+    structural check depend on following inheritance — so the shared thing here
+    is the rule, not the base class.
+    """
+    if value not in PROVIDER_IDS:
+        raise ValueError(f"provider_id must be one of: {', '.join(PROVIDER_IDS)}")
+    return value
+
+
+class OpenMediaProviderParams(_Params):
+    """Open a media provider's application or home page.
+
+    One field, and it is an id from a code-owned allowlist. There is no URL
+    here, and deliberately no way to add one: where a provider opens is a
+    constant in :mod:`~cofferdam.workstation.media`, not something a caller
+    contributes to.
+    """
+
+    provider_id: str
+
+    @field_validator("provider_id")
+    @classmethod
+    def _allowlisted(cls, value: str) -> str:
+        return _allowlisted_provider_id(value)
+
+
+class SearchMediaProviderParams(_Params):
+    """Open a provider's own search results for a bounded phrase.
+
+    ``query`` is plain human text and nothing else. It is length-bounded and
+    control-character-free here, then percent-encoded by the media catalogue
+    into a route the catalogue owns — so it can never introduce a parameter, a
+    path segment, a fragment, or a second URL.
+    """
+
+    provider_id: str
+    query: str
+
+    @field_validator("provider_id")
+    @classmethod
+    def _allowlisted(cls, value: str) -> str:
+        return _allowlisted_provider_id(value)
+
+    @field_validator("query")
+    @classmethod
+    def _bounded_text(cls, value: str) -> str:
+        # The catalogue owns the rule so the schema and the launch path cannot
+        # drift apart; re-stating it here would give two answers to one question.
+        from .media import validate_query
+
+        try:
+            return validate_query(value)
+        except MediaQueryInvalid as exc:
+            raise ValueError(exc.message) from exc
+
+
 PARAM_SCHEMAS: Dict[str, Type[_Params]] = {
     ACTION_TAKE_SCREENSHOT: TakeScreenshotParams,
     ACTION_OPEN_APPLICATION: OpenApplicationParams,
     ACTION_OPEN_URL: OpenUrlParams,
+    ACTION_OPEN_MEDIA_PROVIDER: OpenMediaProviderParams,
+    ACTION_SEARCH_MEDIA_PROVIDER: SearchMediaProviderParams,
 }
 
 ACTION_NAMES = tuple(PARAM_SCHEMAS)
@@ -260,26 +350,127 @@ class ActionExecutor:
             return {"application": launch.application, "pid": launch.pid, "detail": launch.detail}
 
         if action == ACTION_OPEN_URL:
-            from .browser_selection import select_browser
-
-            # Profile resolution and domain policy are settled *before* any
-            # launch, so a refused URL never reaches a browser at all.
-            choice = select_browser(
-                self._config,
+            return self._open_url(
                 params.url,  # type: ignore[attr-defined]
-                params.browser_profile_id,  # type: ignore[attr-defined]
-                self._adapter.available_applications(),
+                browser_profile_id=params.browser_profile_id,  # type: ignore[attr-defined]
+                browser_id=params.browser_id,  # type: ignore[attr-defined]
             )
-            launch = self._adapter.open_url(  # type: ignore[attr-defined]
-                params.url, application=choice.application_key  # type: ignore[attr-defined]
-            )
-            result = {
-                "url": params.url,  # type: ignore[attr-defined]
-                "application": launch.application,
-                "pid": launch.pid,
-                "detail": launch.detail,
-            }
-            result.update(choice.to_result())
-            return result
+
+        if action in (ACTION_OPEN_MEDIA_PROVIDER, ACTION_SEARCH_MEDIA_PROVIDER):
+            return self._media(action, params)
 
         raise ApiError(code=CODE_UNKNOWN_ACTION, message=f"unknown action: {action}", status_code=400)
+
+    def _open_url(
+        self,
+        url: str,
+        *,
+        browser_profile_id: Optional[str] = None,
+        browser_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        from .browser_selection import select_browser
+
+        # Browser resolution and domain policy are settled *before* any launch,
+        # so a refused URL never reaches a browser at all.
+        choice = select_browser(
+            self._config,
+            url,
+            browser_profile_id,
+            self._adapter.available_applications(),
+            browser_id=browser_id,
+        )
+        launch = self._adapter.open_url(url, application=choice.application_key)
+        result: Dict[str, Any] = {
+            "url": url,
+            "application": launch.application,
+            "pid": launch.pid,
+            "detail": launch.detail,
+        }
+        result.update(choice.to_result())
+        return result
+
+    # -- media providers (M2B3A) --------------------------------------------
+
+    def _media(self, action: str, params: _Params) -> Dict[str, Any]:
+        """Open or search one allowlisted media provider.
+
+        The whole target is built here from the catalogue: the provider is
+        resolved from the allowlist, and for a search the phrase is encoded by
+        the catalogue's own builder. No part of the destination comes from the
+        request beyond the id and the words themselves.
+
+        Every result says :data:`~cofferdam.workstation.media.PLAYBACK_NOT_STARTED`
+        because that is what happened. A launch that was accepted and confirmed
+        is the entire claim; nothing in this build starts, selects, or controls
+        playback, and a result that merely said "succeeded" would be read as
+        though something were playing.
+        """
+        from .media import (
+            KIND_NATIVE_APP,
+            MEDIA_ACTION_OPEN,
+            MEDIA_ACTION_SEARCH,
+            PLAYBACK_NOT_STARTED,
+            TARGET_APPLICATION_URI,
+            get_provider,
+        )
+
+        provider = get_provider(params.provider_id)  # type: ignore[attr-defined]
+        searching = action == ACTION_SEARCH_MEDIA_PROVIDER
+
+        result: Dict[str, Any] = {
+            "provider_id": provider.id,
+            "provider_name": provider.name,
+            "provider_kind": provider.kind,
+            "media_action": MEDIA_ACTION_SEARCH if searching else MEDIA_ACTION_OPEN,
+            # Said on every media result, success included.
+            "playback": PLAYBACK_NOT_STARTED,
+            "playback_started": False,
+        }
+
+        if searching:
+            # Raises MediaSearchUnsupported for a provider with no route we can
+            # build — before anything opens, so an unsupported search never
+            # becomes "we opened the home page and called it a search".
+            target = provider.search_target(params.query)  # type: ignore[attr-defined]
+            result["query"] = params.query  # type: ignore[attr-defined]
+            result["note"] = (
+                f"Opened {provider.name}'s search results for your words. "
+                "Nothing was selected and nothing is playing."
+            )
+            if target.kind == TARGET_APPLICATION_URI:
+                launch = self._adapter.open_application_uri(
+                    target.application_key, target.value
+                )
+                result.update(
+                    {
+                        "application": launch.application,
+                        "pid": launch.pid,
+                        "detail": launch.detail,
+                        "opened_in": "application",
+                    }
+                )
+                return result
+            result.update(self._open_url(target.value, browser_id=provider.browser_key))
+            result["opened_in"] = "browser"
+            return result
+
+        if provider.kind == KIND_NATIVE_APP:
+            launch = self._adapter.open_application(provider.application_key)
+            result.update(
+                {
+                    "application": launch.application,
+                    "pid": launch.pid,
+                    "detail": launch.detail,
+                    "opened_in": "application",
+                    "note": f"Started the installed {provider.name} application.",
+                }
+            )
+            return result
+
+        target = provider.open_target()
+        result.update(self._open_url(target.value, browser_id=provider.browser_key))
+        result["opened_in"] = "browser"
+        result["note"] = (
+            f"Opened {provider.name}. You may need to sign in, and nothing is playing yet."
+        )
+        return result

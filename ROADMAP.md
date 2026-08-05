@@ -289,7 +289,26 @@ user already wrote by hand; M2B2 lets them be created and edited from the UI.
 - Also in scope, if cheap: aliases for discovered **application instances**, using the same
   mechanism. Not in scope: anything that turns an overlay into a capability.
 
-### Beyond M2B2, still not implemented
+### M2B3A — media and application launch profiles (implemented)
+
+> **Implemented** on `feat/m2b3a-media-launch-profiles` (not merged). Spotify, YouTube, Netflix,
+> Prime Video and TV+ as a code-owned launch catalogue; Opera as Cofferdam's default browser;
+> `open_media_provider` / `search_media_provider`; a Media section in the PWA. Documented in
+> [`docs/MEDIA_PROFILES.md`](docs/MEDIA_PROFILES.md), decided in [`DECISIONS.md`](DECISIONS.md)
+> D-2026-08-05-5 and -6.
+
+It is a **launch** surface, not an integration: it opens applications and pages and claims nothing
+about playback. The two adapter seams that would change that — a Spotify semantic adapter with
+OAuth and real playback control, and a browser companion doing semantic DOM search on an
+already-authenticated service tab — are specified in that document and deliberately not built.
+
+### M2B3B — safe application close and restart (next)
+
+Closing and restarting an application *instance*, following the M2B identity rule: PID plus start
+time, re-verified immediately before acting. Not in M2B3A, which terminates nothing and sends no
+process signals.
+
+### Beyond M2B3A, still not implemented
 
 Browser tab inventory (needs a browser companion reporting the browser's own tab IDs; never
 inferred from renderer processes) · agent task inventory · task resource audit · window discovery
