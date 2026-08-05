@@ -23,7 +23,7 @@ import subprocess
 from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Mapping, Optional, Sequence
 
-from ..errors import AdapterError
+from ..errors import AdapterError, AdapterUnsupported
 
 # Logical application keys. Callers may only ever send one of these strings;
 # the mapping to a real executable is the adapter's private business.
@@ -31,7 +31,20 @@ from ..errors import AdapterError
 # ``opera`` joined the list in M2A because the browser-profile registry can
 # select it. It is appended rather than inserted so the legacy "first installed
 # browser wins" URL path keeps choosing exactly what it chose before.
-APPLICATION_KEYS: tuple = ("firefox", "chromium", "google-chrome", "opera")
+#
+# ``spotify`` joined in M2B3A and is the first entry that is **not a browser**,
+# which is why the two tuples below are now separate things. Only a browser may
+# be asked to open a URL; every adapter enforces that, and the wider list is for
+# :meth:`HostAdapter.open_application` alone.
+BROWSER_KEYS: tuple = ("firefox", "chromium", "google-chrome", "opera")
+
+APPLICATION_KEYS: tuple = BROWSER_KEYS + ("spotify",)
+
+# Applications that may be handed a URI on their own registered scheme, and the
+# exact schemes each one may receive. Code-owned and closed, exactly like
+# :data:`APPLICATION_KEYS`: the *service* builds the URI from a media provider
+# in the catalogue plus validated text, and a caller has no field to put one in.
+APPLICATION_URI_SCHEMES: Dict[str, tuple] = {"spotify": ("spotify",)}
 
 SUBPROCESS_TIMEOUT_SECONDS = 20
 
@@ -101,7 +114,30 @@ class HostAdapter(abc.ABC):
         browser", the pre-M2A behaviour — or one of :data:`APPLICATION_KEYS`,
         already resolved from a browser profile by the service. It is a logical
         key, never a program name: the adapter still owns the mapping.
+
+        Only a **browser** key is accepted here. ``spotify`` is allowlisted for
+        :meth:`open_application`, not for opening arbitrary web pages.
         """
+
+    def open_application_uri(self, application: str, uri: str) -> ApplicationLaunch:
+        """Hand an allowlisted application a URI on its own registered scheme.
+
+        This is the native-application counterpart of :meth:`open_url`, and it
+        is narrow by construction:
+
+        * ``application`` must be a key of :data:`APPLICATION_URI_SCHEMES`;
+        * ``uri``'s scheme must be one that table permits *for that key*;
+        * the URI is built by :mod:`~cofferdam.workstation.media` from a
+          catalogue entry plus validated search text — there is no request
+          field anywhere that carries one.
+
+        The default raises: a platform that has not been taught this capability
+        must say so rather than improvise.
+        """
+        raise AdapterUnsupported(
+            "this host cannot open an application URI",
+            "the adapter for this platform does not implement native URI launches",
+        )
 
     def available_applications(self) -> List[str]:
         """Subset of :data:`APPLICATION_KEYS` this host can actually launch."""

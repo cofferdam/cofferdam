@@ -12,6 +12,9 @@ route                                        auth  purpose
 ``POST /api/actions/screenshot``             yes   convenience: take_screenshot
 ``POST /api/actions/open-application``       yes   convenience: open_application
 ``POST /api/actions/open-url``               yes   convenience: open_url
+``GET  /api/media/providers``                yes   media catalogue + availability
+``POST /api/actions/open-media-provider``    yes   convenience: open_media_provider
+``POST /api/actions/search-media-provider``  yes   convenience: search_media_provider
 ``GET  /api/screenshots/{action_id}``        yes   PNG artifact
 ``GET  /api/registries``                     yes   registry load/validation status
 ``GET  /api/registries/{registry_name}``     yes   one validated registry
@@ -63,7 +66,9 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from . import WORKSTATION_API_VERSION
 from .actions import (
     ACTION_OPEN_APPLICATION,
+    ACTION_OPEN_MEDIA_PROVIDER,
     ACTION_OPEN_URL,
+    ACTION_SEARCH_MEDIA_PROVIDER,
     ACTION_TAKE_SCREENSHOT,
     ACTION_NAMES,
     ActionExecutor,
@@ -72,6 +77,9 @@ from .actions import (
     validate_action,
 )
 from .adapters import select_adapter
+from .browser_selection import PRODUCT_DEFAULT_BROWSER
+from .media import KIND_NATIVE_APP, MAX_QUERY_LENGTH
+from .media import catalogue as media_catalogue
 from .config import Config, load_config, load_or_create_token
 from .errors import (
     CODE_CONFIGURATION_INVALID,
@@ -277,6 +285,47 @@ def create_app(
     @app.post("/api/actions/open-url", dependencies=[Depends(require_token)])
     async def run_open_url(params: Dict[str, Any]) -> JSONResponse:
         return await _run(ACTION_OPEN_URL, params)
+
+    # -- media providers (M2B3A) ---------------------------------------------
+
+    @app.get("/api/media/providers", dependencies=[Depends(require_token)])
+    async def list_media_providers() -> Dict[str, Any]:
+        """The code-owned media catalogue, plus what this host can honour.
+
+        ``available`` is the honest per-provider answer and is computed from the
+        adapter's live capability list, not from the catalogue: Spotify is
+        available only where the application is actually launchable, and a web
+        service only where its browser is. It is a statement about whether the
+        button would work — **never** about whether anything is running or
+        playing. Running instances are runtime inventory, and this is not that.
+        """
+        applications = await run_in_threadpool(adapter.available_applications)
+        providers = []
+        for entry in media_catalogue():
+            needed = entry["application_key"] if entry["kind"] == KIND_NATIVE_APP else entry["browser_key"]
+            available = needed in applications
+            providers.append(
+                dict(
+                    entry,
+                    available=available,
+                    unavailable_reason=None
+                    if available
+                    else f"{needed} is not installed on this host, or cannot be launched from this session",
+                )
+            )
+        return {
+            "default_browser": PRODUCT_DEFAULT_BROWSER,
+            "max_query_length": MAX_QUERY_LENGTH,
+            "providers": providers,
+        }
+
+    @app.post("/api/actions/open-media-provider", dependencies=[Depends(require_token)])
+    async def run_open_media_provider(params: Dict[str, Any]) -> JSONResponse:
+        return await _run(ACTION_OPEN_MEDIA_PROVIDER, params)
+
+    @app.post("/api/actions/search-media-provider", dependencies=[Depends(require_token)])
+    async def run_search_media_provider(params: Dict[str, Any]) -> JSONResponse:
+        return await _run(ACTION_SEARCH_MEDIA_PROVIDER, params)
 
     @app.get("/api/screenshots/{action_id}", dependencies=[Depends(require_token)])
     async def get_screenshot(action_id: str) -> Response:

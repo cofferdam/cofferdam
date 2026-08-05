@@ -20,6 +20,7 @@ from typing import List, Optional
 from ..errors import AdapterError, AdapterUnsupported
 from .base import (
     APPLICATION_KEYS,
+    BROWSER_KEYS,
     ApplicationLaunch,
     HostAdapter,
     HostStatus,
@@ -136,7 +137,13 @@ class WindowsAdapter(HostAdapter):
     def open_application(self, application: str) -> ApplicationLaunch:
         if application not in APPLICATION_KEYS:
             raise AdapterUnsupported(f"application not allowlisted: {application}")
-        executable = _resolve(_APPLICATION_COMMANDS[application])
+        # A key this development adapter has no entry for is "not installed
+        # here", not a crash. Ubuntu is the supported host, so M2B3A's Spotify
+        # entry exists there and deliberately has no Windows equivalent; looking
+        # it up directly would raise ``KeyError`` and escape as an unexplained
+        # internal error instead of an honest capability answer.
+        candidates = _APPLICATION_COMMANDS.get(application)
+        executable = _resolve(candidates) if candidates else None
         if not executable:
             raise AdapterUnsupported(f"application not installed: {application}")
         pid = spawn_fixed([executable])
@@ -145,10 +152,12 @@ class WindowsAdapter(HostAdapter):
     def open_url(self, url: str, application: Optional[str] = None) -> ApplicationLaunch:
         # Prefer launching an allowlisted browser with the URL as a single argv
         # element. ``url`` was scheme-validated (http/https) by the action schema.
+        # Browsers only: since M2B3A the application allowlist is wider than this
+        # table, and a non-browser key must be refused rather than launched.
         if application is not None:
-            candidates = _APPLICATION_COMMANDS.get(application)
+            candidates = _APPLICATION_COMMANDS.get(application) if application in BROWSER_KEYS else None
             if candidates is None:
-                raise AdapterUnsupported(f"application not allowlisted: {application}")
+                raise AdapterUnsupported(f"not an allowlisted browser: {application}")
             executable = _resolve(candidates)
             if not executable:
                 raise AdapterUnsupported(f"application not installed: {application}")

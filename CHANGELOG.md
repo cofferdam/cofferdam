@@ -8,6 +8,38 @@ release.
 
 ### Added
 
+- **M2B3A — media and application launch profiles.** Spotify, YouTube, Netflix, Prime Video and
+  TV+ are reachable from the phone as launch definitions, through two typed actions —
+  `open_media_provider(provider_id)` and `search_media_provider(provider_id, query)` — plus a
+  read-only catalogue at `GET /api/media/providers` and a Media section in the PWA.
+
+  Spotify opens its real installed desktop application, and its search hands the application a
+  `spotify:` URI, an entry point the installed build registers for on this host. The four web
+  services open in Opera. **No unofficial Electron wrapper and no website-repackaging Snap or
+  Flatpak is installed or required**, and no package was installed at all.
+
+  The provider catalogue is **code**, not a registry. A client sends an allowlisted provider id and
+  at most a bounded search phrase; there is no field anywhere for a URL, a template, a
+  query-parameter name, a scheme, or a program, and unknown fields are refused rather than ignored.
+  A query is capped at 120 characters, rejected — not stripped — if it carries control characters,
+  and percent-encoded by the catalogue into a route the catalogue owns.
+
+  **Nothing claims playback.** Opening Netflix opens a page and searching Spotify opens a search, so
+  every media result reports `playback: not_started` on success and the phone repeats that wording
+  rather than upgrading it. **TV+ ships without search**: its unqualified search address redirects
+  to the storefront root and discards the query, so a search built on it would open the home page
+  while reporting success. The card says so, with the reason.
+
+  Opening a provider does not create a runtime instance — a media definition becomes a running
+  instance only when discovery finds a real process.
+
+- **Opera is Cofferdam's default browser**, for generic links and for every media web service. This
+  is a preference *inside Cofferdam*: the desktop's own default browser and file associations are
+  untouched. An explicit profile or browser outranks it, a configured `default_for_url` profile
+  outranks it, and a host without Opera behaves exactly as before. A new optional `browser_id` on
+  `open_url` selects a browser directly — so "open this in Firefox" no longer needs a registry file
+  — and it cannot be used to escape a configured domain allow-list.
+
 - **M2B2 — a user can name their displays, from the phone.** The first write path Cofferdam
   exposes to the network: `PUT` and `DELETE /api/runtime/displays/{resource_id}/overlay`,
   authenticated, `application/json` only, body capped at 8 KiB, unknown fields refused.

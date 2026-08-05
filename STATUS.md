@@ -1,7 +1,8 @@
 # Status
 
-Accurate as of **2026-08-05** (M2B runtime inventory foundation, [`DECISIONS.md`](DECISIONS.md)
-D-2026-08-05-2 … -4). Update this file when a category changes, not on every commit.
+Accurate as of **2026-08-05** (M2B runtime inventory foundation and M2B3A media launch profiles,
+[`DECISIONS.md`](DECISIONS.md) D-2026-08-05-2 … -6). Update this file when a category changes, not
+on every commit.
 
 ## Merged (on `main`)
 
@@ -253,8 +254,38 @@ logic; the gate stays open and unaffected, and no M2A document may describe M1 a
   does not close this gap and does not require a logout of its own; the cycle should be run once
   to close it.
 
+### M2B3A — media and application launch profiles
+
+- **M2B3A — media and application launch profiles.** On branch
+  `feat/m2b3a-media-launch-profiles`, not merged. A code-owned provider catalogue
+  (`cofferdam/workstation/media.py`) covering Spotify, YouTube, Netflix, Prime Video and TV+; two
+  typed actions (`open_media_provider`, `search_media_provider`); a read-only
+  `GET /api/media/providers`; and a *Media* section in the PWA, kept separate from both *Live
+  system* and *Configuration & templates*.
+
+  Spotify is the real installed snap application, reached through its own registered `spotify:`
+  scheme. The four web services open in Opera as ordinary dedicated windows — **no unofficial
+  wrapper was installed or is required**, and Opera's build on this host exposes no `--app` switch,
+  so no app-mode window is claimed. Opera also becomes Cofferdam's default browser for generic
+  links; the OS default and file associations are untouched, and Firefox stays explicitly
+  selectable through a profile or the new `browser_id` field.
+
+  No action claims playback: every media result reports `playback: not_started` on success. TV+
+  exposes **Open only** — its unqualified search address discards the query — and says why.
+
+  1,094 tests pass with the workstation extras installed (1,035 before this branch, of which 8 were
+  updated where they encoded the pre-M2B3A default-browser behaviour).
+
+  **Not in this milestone:** closing, restarting or terminating application instances (M2B3B);
+  Spotify OAuth or Web API playback control; automatic Netflix/Prime/TV+ playback; DOM automation;
+  browser extensions; Agent Task Core. The future Spotify and browser-companion adapter seams are
+  documented, not built, in [`docs/MEDIA_PROFILES.md`](docs/MEDIA_PROFILES.md).
+
+  **The M2B validation gap above is inherited unchanged.** M2B3A alters no graphical-session
+  lifecycle behaviour and does not close it.
+
 **M2B does not change the M1 reboot gate.** It alters no boot behaviour, no systemd unit, and no
-bind logic.
+bind logic. Neither does M2B3A.
 
 ## Planned (active roadmap — see [`ROADMAP.md`](ROADMAP.md))
 

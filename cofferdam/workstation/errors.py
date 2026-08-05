@@ -29,6 +29,10 @@ CODE_CONFIGURATION_INVALID = "configuration_invalid"
 CODE_BROWSER_PROFILE_INVALID = "browser_profile_invalid"
 CODE_DOMAIN_NOT_ALLOWED = "domain_not_allowed"
 CODE_APPLICATION_UNAVAILABLE = "application_unavailable"
+# M2B3A: the media provider boundary.
+CODE_MEDIA_PROVIDER_UNKNOWN = "media_provider_unknown"
+CODE_MEDIA_SEARCH_UNSUPPORTED = "media_search_unsupported"
+CODE_MEDIA_QUERY_INVALID = "media_query_invalid"
 
 
 def bounded_detail(value: Any) -> Optional[str]:
@@ -123,3 +127,32 @@ class ApplicationUnavailable(AdapterError):
     """The application a profile selects is not installed on this host."""
 
     code = CODE_APPLICATION_UNAVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# M2B3A: refusals at the media-provider boundary
+#
+# The same fail-closed shape as above. In particular
+# :class:`MediaSearchUnsupported` is a *truthful* answer, not a stopgap: a
+# provider whose search route Cofferdam cannot build says so and opens nothing,
+# rather than opening a home page and letting the green result imply a search
+# happened.
+# ---------------------------------------------------------------------------
+
+
+class MediaProviderUnknown(AdapterError):
+    """The requested provider id is not in the code-owned allowlist."""
+
+    code = CODE_MEDIA_PROVIDER_UNKNOWN
+
+
+class MediaSearchUnsupported(AdapterError):
+    """This provider offers no search route Cofferdam can construct."""
+
+    code = CODE_MEDIA_SEARCH_UNSUPPORTED
+
+
+class MediaQueryInvalid(AdapterError):
+    """The search text was empty, over-long, or carried control characters."""
+
+    code = CODE_MEDIA_QUERY_INVALID

@@ -27,6 +27,7 @@ from cofferdam.workstation.browser_selection import (
     SOURCE_DEFAULT,
     SOURCE_EXPLICIT,
     SOURCE_LEGACY,
+    SOURCE_PRODUCT_DEFAULT,
     select_browser,
 )
 from cofferdam.workstation.config import load_config
@@ -132,25 +133,58 @@ class SelectionTestCase(unittest.TestCase):
         )
 
 
-class LegacyBehaviourTests(SelectionTestCase):
-    def test_no_registries_at_all_takes_the_legacy_path(self) -> None:
+class UnconfiguredBehaviourTests(SelectionTestCase):
+    """What a URL does when no profile has been configured to decide.
+
+    Until M2B3A the answer was the adapter's own table order, which put Firefox
+    first — an implementation detail standing in for a product decision. M2B3A
+    replaces it with an explicit one: Cofferdam opens links in Opera. The
+    fallback below it is unchanged and still tested, because a host without
+    Opera must behave exactly as it did before.
+    """
+
+    def test_no_registries_at_all_uses_the_product_default(self) -> None:
         """The state every machine is in until someone writes a registry."""
         choice = self.select()
+        self.assertEqual(choice.application_key, "opera")
+        self.assertIsNone(choice.profile_id)
+        self.assertEqual(choice.source, SOURCE_PRODUCT_DEFAULT)
+
+    def test_registries_with_no_profiles_use_the_product_default(self) -> None:
+        self.seed(profiles=[])
+        self.assertEqual(self.select().source, SOURCE_PRODUCT_DEFAULT)
+
+    def test_no_enabled_default_uses_the_product_default(self) -> None:
+        self.seed(profiles=[self.profile(default_for_url=False)])
+        self.assertEqual(self.select().source, SOURCE_PRODUCT_DEFAULT)
+
+    def test_a_disabled_default_profile_does_not_count(self) -> None:
+        self.seed(profiles=[self.profile(enabled=False)])
+        self.assertEqual(self.select().source, SOURCE_PRODUCT_DEFAULT)
+
+    def test_without_opera_the_legacy_path_is_unchanged(self) -> None:
+        """A preference we cannot honour degrades to the pre-M2B3A behaviour."""
+        choice = self.select(available=["firefox", "chromium"])
         self.assertIsNone(choice.application_key)
         self.assertIsNone(choice.profile_id)
         self.assertEqual(choice.source, SOURCE_LEGACY)
 
-    def test_registries_with_no_profiles_take_the_legacy_path(self) -> None:
-        self.seed(profiles=[])
-        self.assertEqual(self.select().source, SOURCE_LEGACY)
-
-    def test_no_enabled_default_takes_the_legacy_path(self) -> None:
-        self.seed(profiles=[self.profile(default_for_url=False)])
-        self.assertEqual(self.select().source, SOURCE_LEGACY)
-
-    def test_a_disabled_default_profile_does_not_count(self) -> None:
-        self.seed(profiles=[self.profile(enabled=False)])
-        self.assertEqual(self.select().source, SOURCE_LEGACY)
+    def test_a_configured_default_still_beats_the_product_default(self) -> None:
+        """A written-down preference outranks Cofferdam's opinion, always."""
+        self.seed(
+            profiles=[
+                self.profile(
+                    id="fallback-firefox",
+                    name="Yedek Firefox",
+                    aliases=[],
+                    application_id="firefox",
+                    preferred_display_id=None,
+                )
+            ]
+        )
+        choice = self.select()
+        self.assertEqual(choice.application_key, "firefox")
+        self.assertEqual(choice.source, SOURCE_DEFAULT)
 
 
 class DefaultProfileTests(SelectionTestCase):
@@ -299,10 +333,22 @@ class OperaDetectionTests(unittest.TestCase):
     def test_opera_is_an_allowlisted_application_key(self) -> None:
         self.assertIn("opera", APPLICATION_KEYS)
 
-    def test_adding_opera_did_not_change_the_legacy_browser_preference(self) -> None:
-        """Firefox is still chosen first when no profile selects otherwise."""
-        self.assertEqual(list(linux_x11._APPLICATION_COMMANDS)[0], "firefox")
-        self.assertEqual(list(linux_x11._APPLICATION_COMMANDS)[-1], "opera")
+    def test_adding_opera_did_not_change_the_legacy_browser_table_order(self) -> None:
+        """The adapter's own fallback order is still the pre-M2A one.
+
+        M2B3A made Opera the *product* default, and did it in
+        ``browser_selection`` rather than by reordering this table — precisely so
+        the adapter's last-resort "first installed browser wins" answer stays
+        what it always was on a host without Opera. Reordering here instead
+        would have changed the fallback itself rather than layering above it.
+        """
+        self.assertEqual(list(linux_x11._BROWSER_COMMANDS)[0], "firefox")
+        self.assertEqual(list(linux_x11._BROWSER_COMMANDS)[-1], "opera")
+
+    def test_the_browser_table_contains_only_browsers(self) -> None:
+        """Spotify is launchable, but may never be elected this host's browser."""
+        self.assertNotIn("spotify", linux_x11._BROWSER_COMMANDS)
+        self.assertIn("spotify", linux_x11._APPLICATION_COMMANDS)
 
     def test_available_applications_reports_opera_when_on_path(self) -> None:
         with patch.object(linux_x11, "first_available", lambda names: "/snap/bin/" + names[0]):

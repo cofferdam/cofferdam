@@ -15,7 +15,15 @@ import zlib
 from typing import List, Optional, Sequence, Tuple
 
 from ..errors import AdapterUnsupported
-from .base import APPLICATION_KEYS, ApplicationLaunch, HostAdapter, HostStatus, Screenshot
+from .base import (
+    APPLICATION_KEYS,
+    APPLICATION_URI_SCHEMES,
+    BROWSER_KEYS,
+    ApplicationLaunch,
+    HostAdapter,
+    HostStatus,
+    Screenshot,
+)
 
 
 def _placeholder_png(width: int = 64, height: int = 64) -> bytes:
@@ -58,6 +66,9 @@ class StubAdapter(HostAdapter):
         self.launched: List[str] = []
         self.opened_urls: List[str] = []
         self.opened_with: List[Optional[str]] = []
+        # M2B3A: (application_key, uri) pairs, so a test can assert exactly
+        # what a native provider was handed without launching anything.
+        self.opened_uris: List[Tuple[str, str]] = []
 
     def host_status(self) -> HostStatus:
         return HostStatus(
@@ -95,8 +106,11 @@ class StubAdapter(HostAdapter):
     def open_url(self, url: str, application: Optional[str] = None) -> ApplicationLaunch:
         if self._fail == "open_url":
             raise AdapterUnsupported("stub failure: open_url")
-        if application is not None and application not in APPLICATION_KEYS:
-            raise AdapterUnsupported(f"application not allowlisted: {application}")
+        # Browsers only, matching the real adapters: "open this page in Spotify"
+        # must be refused here too, or a test could pass against behaviour no
+        # real host would allow.
+        if application is not None and application not in BROWSER_KEYS:
+            raise AdapterUnsupported(f"not an allowlisted browser: {application}")
         if application is not None and application in self.missing_applications:
             raise AdapterUnsupported(f"application not installed: {application}")
         self.opened_urls.append(url)
@@ -104,6 +118,21 @@ class StubAdapter(HostAdapter):
         return ApplicationLaunch(
             application=application or "default-browser", pid=4243, detail="stub"
         )
+
+    def open_application_uri(self, application: str, uri: str) -> ApplicationLaunch:
+        """Same two gates as the real adapter: allowlisted key, allowed scheme."""
+        if self._fail == "open_application_uri":
+            raise AdapterUnsupported("stub failure: open_application_uri")
+        allowed_schemes = APPLICATION_URI_SCHEMES.get(application)
+        if allowed_schemes is None:
+            raise AdapterUnsupported(f"application does not accept URIs: {application}")
+        scheme = uri.split(":", 1)[0].lower() if ":" in uri else ""
+        if scheme not in allowed_schemes:
+            raise AdapterUnsupported("that URI scheme is not allowed for this application")
+        if application in self.missing_applications:
+            raise AdapterUnsupported(f"application not installed: {application}")
+        self.opened_uris.append((application, uri))
+        return ApplicationLaunch(application=application, pid=4244, detail="stub")
 
     def available_applications(self) -> List[str]:
         """Everything allowlisted, minus whatever a test declared missing."""

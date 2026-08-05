@@ -568,6 +568,171 @@
     hint.textContent = text;
   }
 
+  /* -------------------------------------------------------------- media
+   *
+   * Cards for the media providers the service offers. The client's whole
+   * vocabulary here is a provider id and a phrase: there is no URL, no
+   * template, and no query-parameter name anywhere in this file, because the
+   * service does not accept one. Anything a card shows comes from the
+   * catalogue the API served.
+   *
+   * The copy is doing real work. "Open" opens an app or a page and nothing
+   * more, so every card says so — a card that merely showed a play-looking
+   * button would promise something no action in this build performs. A
+   * provider whose search Cofferdam cannot build shows the service's reason
+   * instead of a disabled box with no explanation.
+   */
+
+  var mediaProviders = [];
+  var mediaLoaded = false;
+  var mediaMaxQuery = 120;
+  var mediaPending = {};
+
+  function mediaProviderById(id) {
+    var found = mediaProviders.filter(function (item) { return item.id === id; });
+    return found.length === 1 ? found[0] : null;
+  }
+
+  function mediaCard(provider) {
+    var badges = [];
+    badges.push(provider.kind === "native_app"
+      ? badge("installed app", "ok")
+      : badge("opens in Opera"));
+    if (!provider.available) { badges.push(badge("unavailable here", "warn")); }
+
+    var canSearch = provider.supported_actions.indexOf("search") !== -1;
+    var busy = mediaPending[provider.id] === true;
+    var disabled = (!provider.available || busy) ? " disabled" : "";
+
+    var body = '<div class="media-actions">' +
+      '<button class="primary" data-media-open="' + escapeHtml(provider.id) + '"' + disabled + ">" +
+      (busy ? "Opening…" : "Open") + "</button></div>";
+
+    if (canSearch) {
+      body += '<form class="media-search" data-media-search="' + escapeHtml(provider.id) + '">' +
+        '<input type="search" name="query" inputmode="search" autocomplete="off" ' +
+        'maxlength="' + mediaMaxQuery + '" placeholder="Search ' + escapeHtml(provider.name) + '" ' +
+        'aria-label="Search ' + escapeHtml(provider.name) + '"' + disabled + ">" +
+        '<button type="submit"' + disabled + ">" + (busy ? "…" : "Search") + "</button></form>";
+    } else if (provider.search_unavailable_reason) {
+      body += '<p class="media-note">' + escapeHtml(provider.search_unavailable_reason) + "</p>";
+    }
+
+    // The host's own reason for an absence, never a guess made here.
+    if (!provider.available && provider.unavailable_reason) {
+      body += '<p class="media-note">' + escapeHtml(provider.unavailable_reason) + "</p>";
+    }
+
+    var limitations = (provider.limitations || []).map(function (line) {
+      return "<li>" + escapeHtml(line) + "</li>";
+    }).join("");
+
+    return '<div class="media-card' + (provider.available ? "" : " off") + '">' +
+      '<div class="media-head"><strong>' + escapeHtml(provider.name) + "</strong>" +
+      badges.join("") + "</div>" + body +
+      (limitations ? '<ul class="media-limits">' + limitations + "</ul>" : "") +
+      "</div>";
+  }
+
+  function renderMedia() {
+    var container = el("mediaCards");
+    if (!container) { return; }
+    if (!mediaLoaded) {
+      container.innerHTML = '<p class="muted">Loading…</p>';
+      return;
+    }
+    if (!mediaProviders.length) {
+      container.innerHTML = '<p class="muted">No media providers are available from this service.</p>';
+      return;
+    }
+    container.innerHTML = mediaProviders.map(mediaCard).join("");
+  }
+
+  function loadMedia() {
+    return api("/api/media/providers").then(function (response) {
+      if (!response.ok) { throw new Error("media unavailable"); }
+      var payload = response.payload || {};
+      mediaProviders = payload.providers || [];
+      if (typeof payload.max_query_length === "number") {
+        mediaMaxQuery = payload.max_query_length;
+      }
+      mediaLoaded = true;
+      renderMedia();
+    }).catch(function (error) {
+      if (error.message === "unauthorized") { return; }
+      mediaLoaded = true;
+      mediaProviders = [];
+      var container = el("mediaCards");
+      if (container) {
+        container.innerHTML = '<p class="muted">The media catalogue could not be loaded from the service.</p>';
+      }
+    });
+  }
+
+  /* One in-flight action per provider. The flag is set before the request and
+     cleared in every exit path, so a double tap on a phone cannot open two
+     windows and a failure cannot leave a card stuck on "Opening…". */
+  function runMediaAction(providerId, path, body) {
+    if (mediaPending[providerId]) { return; }
+    var provider = mediaProviderById(providerId);
+    if (!provider || !provider.available) { return; }
+    mediaPending[providerId] = true;
+    renderMedia();
+
+    api(path, { body: body }).then(function (response) {
+      var record = response.payload;
+      if (record && record.action_id) { upsertAction(record); }
+      if (response.ok) {
+        // Deliberately not "playing": the result says what actually happened,
+        // and the toast repeats it rather than upgrading it.
+        var note = (record.result && record.result.note) || "Opened.";
+        toast(note, "ok");
+      } else {
+        var error = (record && record.error) || {};
+        toast(error.message || "That did not work.", "err");
+      }
+    }).catch(function (error) {
+      if (error.message !== "unauthorized") { toast("Request failed.", "err"); }
+    }).then(function () {
+      mediaPending[providerId] = false;
+      renderMedia();
+    });
+  }
+
+  var mediaCardsContainer = el("mediaCards");
+  if (mediaCardsContainer) {
+    // Delegated, because the cards are re-rendered on every state change.
+    mediaCardsContainer.addEventListener("click", function (event) {
+      var button = event.target.closest("[data-media-open]");
+      if (!button) { return; }
+      runMediaAction(button.getAttribute("data-media-open"), "/api/actions/open-media-provider", {
+        provider_id: button.getAttribute("data-media-open")
+      });
+    });
+
+    mediaCardsContainer.addEventListener("submit", function (event) {
+      var form = event.target.closest("[data-media-search]");
+      if (!form) { return; }
+      event.preventDefault();
+      var providerId = form.getAttribute("data-media-search");
+      var query = (form.query.value || "").trim();
+      if (!query) {
+        toast("Type something to search for.", "err");
+        return;
+      }
+      if (query.length > mediaMaxQuery) {
+        // Checked here too so the phone explains it immediately; the service
+        // enforces the same bound regardless of what this page does.
+        toast("That search is too long (max " + mediaMaxQuery + " characters).", "err");
+        return;
+      }
+      runMediaAction(providerId, "/api/actions/search-media-provider", {
+        provider_id: providerId,
+        query: query
+      });
+    });
+  }
+
   var recent = [];
 
   function renderActions() {
@@ -579,6 +744,12 @@
         detail = record.params.url || "";
       } else if (record.action === "open_application" && record.params) {
         detail = record.params.application || "";
+      } else if (record.params && record.params.provider_id) {
+        // Media actions. The provider and the words typed are what makes the
+        // entry readable; the address they were turned into is the service's
+        // business and is not shown here.
+        detail = record.params.provider_id +
+          (record.params.query ? ": " + record.params.query : "");
       }
       return "<li>" +
         '<span class="st ' + escapeHtml(record.status) + '">' + escapeHtml(record.status) + "</span>" +
@@ -702,6 +873,12 @@
     registryData = {};
     registriesLoaded = false;
     availableApplications = [];
+    // The media catalogue says which services this machine can reach; it goes
+    // with the token like everything else that describes the host.
+    mediaProviders = [];
+    mediaLoaded = false;
+    mediaPending = {};
+    if (el("mediaCards")) { el("mediaCards").innerHTML = '<p class="muted">Loading…</p>'; }
     // The live inventory is the same kind of thing, only more so: it lists this
     // machine's displays and running applications. It goes with the token, and
     // its polling stops so a signed-out device makes no further requests.
@@ -748,6 +925,9 @@
       // Registries are not needed to show the host, so they load after it and
       // a failure here never blocks the rest of the UI.
       loadRegistries();
+      // Same for the media catalogue: a service that cannot serve it still has
+      // a fully working control panel above.
+      loadMedia();
       // Same for the live inventory: it is a separate view of a separate
       // layer, and a discovery failure must not take the control panel down.
       if (global.CofferdamLive) {

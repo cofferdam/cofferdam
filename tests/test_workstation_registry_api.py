@@ -276,7 +276,17 @@ class PlaceholderHonestyTests(RegistryApiTestCase):
         payload = self.client.get("/api/status", headers=self.auth).json()
         self.assertEqual(
             set(payload["service"]["actions"]),
-            {"take_screenshot", "open_application", "open_url"},
+            {
+                "take_screenshot",
+                "open_application",
+                "open_url",
+                # M2B3A. Listed explicitly rather than loosened into a subset
+                # check: the value of this assertion is that the action set is
+                # exactly what was built, so a new capability has to be added
+                # here deliberately and cannot arrive unnoticed.
+                "open_media_provider",
+                "search_media_provider",
+            },
         )
 
 
@@ -287,13 +297,29 @@ class PlaceholderHonestyTests(RegistryApiTestCase):
 
 class OpenUrlCompatibilityTests(RegistryApiTestCase):
     def test_a_url_only_request_still_works_with_no_registries(self) -> None:
-        """(backward-compatible URL-only open_url)"""
+        """(backward-compatible URL-only open_url)
+
+        The *request* is still the pre-M2A one — a bare ``url``, no profile —
+        and it still succeeds with no registries present. What changed in
+        M2B3A is only which browser answers when nothing is configured: Opera,
+        by product decision, instead of whichever browser the adapter's table
+        happened to list first.
+        """
         response = self.post_action("open_url", {"url": "https://example.com"})
         self.assertEqual(response.status_code, 200)
         record = response.json()
         self.assertEqual(record["status"], "succeeded")
         self.assertEqual(record["result"]["url"], "https://example.com")
         self.assertIsNone(record["result"]["browser_profile_id"])
+        self.assertEqual(record["result"]["selection"], "product-default")
+        self.assertEqual(self.adapter.opened_with, ["opera"])
+
+    def test_without_opera_a_url_only_request_takes_the_legacy_path(self) -> None:
+        """A host that cannot honour the preference behaves as it did before."""
+        self.adapter.missing_applications = ("opera",)
+        response = self.post_action("open_url", {"url": "https://example.com"})
+        self.assertEqual(response.status_code, 200)
+        record = response.json()
         self.assertEqual(record["result"]["selection"], "legacy")
         self.assertEqual(self.adapter.opened_with, [None])
 
