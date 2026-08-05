@@ -678,18 +678,57 @@
     return parts.join(" · ");
   }
 
+  var SPOTIFY_PROVIDER_ID = "spotify";
+
+  function spotifyPlaybackReady() {
+    return !!(global.CofferdamSpotify && global.CofferdamSpotify.connected());
+  }
+
+  /* Play now / Add to queue, and only where they mean something.
+   *
+   * Two conditions, both structural rather than cosmetic. The provider must be
+   * Spotify, because these routes go through the Spotify player and a YouTube
+   * result has no business near them. And the result must be a **track**: an
+   * album, artist or playlist is a *context* in Spotify's model, which is a
+   * different endpoint with different semantics that this milestone deliberately
+   * does not implement. Rendering "Play now" on an artist card would be
+   * inventing a behaviour nothing has verified — those cards keep Open, which
+   * does exactly what it says.
+   *
+   * When no account is connected the buttons are shown and disabled rather than
+   * hidden: the capability is real and one panel away, and a control that
+   * silently does not exist is harder to understand than one that says why. */
+  function spotifyResultActions(providerId, result, busy) {
+    if (providerId !== SPOTIFY_PROVIDER_ID) { return ""; }
+    if (result.result_type !== "track") { return ""; }
+    var locked = busy || !spotifyPlaybackReady();
+    var suffix = ' data-result-id="' + escapeHtml(result.result_id) + '"' +
+      (locked ? " disabled" : "") + ">";
+    return '<button class="mr-play primary" data-spotify-play="' + escapeHtml(providerId) + '"' +
+        suffix + "Play now</button>" +
+      '<button class="mr-queue" data-spotify-queue="' + escapeHtml(providerId) + '"' +
+        suffix + "Add to queue</button>";
+  }
+
   function resultCard(providerId, result, busy) {
     var badges = [badge(result.result_type)];
     if (result.explicit === true) { badges.push(badge("explicit", "warn")); }
     if (result.live_state) { badges.push(badge(result.live_state, "warn")); }
     var line = resultLine(result);
+    var openLabel = providerId === SPOTIFY_PROVIDER_ID ? "Open in Spotify" : "Open";
+    /* A visible row rather than a three-dot menu. Play now is the thing someone
+       came here to press, and burying it behind a tap-and-aim on a phone would
+       make the primary action the hardest one to reach. The row wraps, so three
+       buttons never push the card sideways. */
     return '<li class="mr-item">' +
       '<div class="mr-title"><strong>' + escapeHtml(result.title) + "</strong>" +
       badges.join("") + "</div>" +
       (line ? '<div class="mr-meta">' + escapeHtml(line) + "</div>" : "") +
+      '<div class="mr-actions">' +
+      spotifyResultActions(providerId, result, busy) +
       '<button class="mr-open" data-open-result="' + escapeHtml(providerId) + '" ' +
       'data-result-id="' + escapeHtml(result.result_id) + '"' + (busy ? " disabled" : "") +
-      ">Open</button></li>";
+      ">" + openLabel + "</button></div></li>";
   }
 
   function mediaResultsBlock(provider, busy) {
@@ -735,6 +774,14 @@
       html += '<ul class="mr-list">' + state.results.map(function (result) {
         return resultCard(provider.id, result, busy);
       }).join("") + "</ul>";
+      if (provider.id === SPOTIFY_PROVIDER_ID && !spotifyPlaybackReady() &&
+          state.results.some(function (result) { return result.result_type === "track"; })) {
+        // Why the two buttons above are disabled, and where to fix it. Without
+        // this the row reads as broken rather than as one setup step away.
+        html += '<p class="media-note">Connect your Spotify account in the ' +
+          "<strong>Spotify player</strong> panel above to play or queue a track from here. " +
+          "Open in Spotify works either way.</p>";
+      }
       if (capability(provider, "open_first_result")) {
         // Explicit, never automatic: a provider's ranking is an opinion, and
         // acting on it unasked is how the wrong song opens.
@@ -828,6 +875,41 @@
     });
   }
 
+  /* Play now / Add to queue on a verified Spotify track result.
+   *
+   * The only two things sent are the search id the server issued and the result
+   * id it issued — never a Spotify URI, never a track id, never a device. The
+   * server rebuilds the URI from the session it privately remembers, so there is
+   * no field here for a client to abuse.
+   *
+   * The outcome is repeated verbatim. `spotify.js` has already reduced the
+   * server's observed state to a message; this never upgrades it, which is what
+   * keeps "added to the queue" from being read as "now playing". */
+  function spotifyResultAction(providerId, resultId, verb) {
+    var state = mediaResults[providerId] || {};
+    if (!state.searchId || !resultId) { return; }
+    if (mediaPending[providerId]) { return; }
+    if (!global.CofferdamSpotify) { return; }
+
+    mediaPending[providerId] = true;
+    renderMedia();
+
+    var call = verb === "queue"
+      ? global.CofferdamSpotify.queueResult(state.searchId, resultId)
+      : global.CofferdamSpotify.playResult(state.searchId, resultId);
+
+    call.then(function (outcome) {
+      if (!outcome) { return; }
+      toast(outcome.message || "Done.", outcome.ok && outcome.outcome !== "not_applied"
+        ? "ok" : "err");
+    }).catch(function (error) {
+      if (error && error.message !== "unauthorized") { toast("Request failed.", "err"); }
+    }).then(function () {
+      mediaPending[providerId] = false;
+      renderMedia();
+    });
+  }
+
   function renderMedia() {
     var container = el("mediaCards");
     if (!container) { return; }
@@ -904,6 +986,27 @@
           openResultButton.getAttribute("data-open-result"),
           openResultButton.getAttribute("data-result-id"),
           false
+        );
+        return;
+      }
+      // Spotify playback on a verified track result (M2D). Checked before the
+      // plain Open, and routed through spotify.js so the player panel and this
+      // card share one pending state and one account of what happened.
+      var playButton = event.target.closest("[data-spotify-play]");
+      if (playButton) {
+        spotifyResultAction(
+          playButton.getAttribute("data-spotify-play"),
+          playButton.getAttribute("data-result-id"),
+          "play"
+        );
+        return;
+      }
+      var queueButton = event.target.closest("[data-spotify-queue]");
+      if (queueButton) {
+        spotifyResultAction(
+          queueButton.getAttribute("data-spotify-queue"),
+          queueButton.getAttribute("data-result-id"),
+          "queue"
         );
         return;
       }
@@ -1128,6 +1231,11 @@
     // they are. It goes with the token, and its polling stops so a signed-out
     // device makes no further requests.
     if (global.CofferdamAudio) { global.CofferdamAudio.stop(); }
+    // Spotify player state is the most personal thing on this page: which
+    // account is connected, what is playing, and which speakers someone owns.
+    // It goes with the token, and its polling stops so a signed-out device
+    // makes no further requests against the account.
+    if (global.CofferdamSpotify) { global.CofferdamSpotify.stop(); }
     el("registrySections").innerHTML = '<p class="muted">Loading…</p>';
     el("app").hidden = true;
     el("setup").hidden = false;
@@ -1185,6 +1293,14 @@
       if (global.CofferdamAudio) {
         global.CofferdamAudio.mount({ api: api, escapeHtml: escapeHtml, el: el })
           .catch(function () { /* audio.js renders its own failure state */ });
+      }
+      // Same for the Spotify player: an account that is not connected, or a
+      // provider that cannot be reached, is a state spotify.js renders itself.
+      // It must never take the control panel down with it.
+      if (global.CofferdamSpotify) {
+        global.CofferdamSpotify.mount({ api: api, escapeHtml: escapeHtml, el: el })
+          .then(function () { renderMedia(); })
+          .catch(function () { /* spotify.js renders its own failure state */ });
       }
     });
   }
