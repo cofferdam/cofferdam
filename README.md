@@ -54,10 +54,20 @@ repeated reboots with the API reachable before anyone logs in. Two corrections c
 validation and are merged — a login-lifecycle regression (M1.1) and untruthful screenshot
 capability reporting (M1.2).
 
-Two limits are worth stating plainly rather than discovering later. **Screen capture does not
+Two milestones are in progress on branches since then. **M2A** adds semantic registries — optional
+labels, aliases, and launch preferences — over a read-only API. **M2B** adds the runtime inventory:
+Cofferdam now discovers the displays actually connected to the host and the applications actually
+running on it, and shows them in a *Live system* panel kept deliberately separate from
+configuration. That separation is the point — an application being *installed and launchable* and
+an application *running right now* are different facts, and neither view may borrow the other's
+words.
+
+Three limits are worth stating plainly rather than discovering later. **Screen capture does not
 work under Wayland on this host**, so `screenshot` reports `false` — that is the truthful answer,
-not a bug, and a Wayland-capable capture path is future work. And a **full Tailscale-outage test**
-end to end has not been run; only the bounded bind-wait logic is verified.
+not a bug, and a Wayland-capable capture path is future work. **Windows cannot be enumerated** on
+GNOME Wayland through any interface Cofferdam is willing to use, so the window inventory reports
+*unavailable* with a reason rather than an empty list. And a **full Tailscale-outage test** end to
+end has not been run; only the bounded bind-wait logic is verified.
 
 This is a personal-first project: it must be useful to its maintainer before anything else.
 There are no plans for subscriptions, hosted plans, or enterprise features.

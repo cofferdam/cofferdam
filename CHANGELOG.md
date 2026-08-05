@@ -6,7 +6,162 @@ release.
 
 ## [Unreleased]
 
+### Added
+
+- **Runtime inventory (M2B) — Cofferdam can see what is actually connected and running.** The
+  layer M2A deliberately did not have. Read-only discovery lives in
+  `cofferdam/workstation/runtime/`, one narrow module per backend, each stating the resources it
+  owns, the evidence it uses, its limitations and its status semantics. Full write-up in
+  [`docs/RUNTIME_INVENTORY.md`](docs/RUNTIME_INVENTORY.md).
+
+  - **Connected displays** — from `org.gnome.Mutter.DisplayConfig.GetCurrentState` (the
+    compositor's own view: layout, scale, orientation, refresh rate, primary, `is-builtin`),
+    joined to `/sys/class/drm` for the EDID fingerprint and physical millimetres. Deliberately
+    **not** `xrandr`: under Wayland it reports XWayland's synthetic layout, and M1 could only ever
+    honestly take a display *count* from it. The two sources are joined on the panel's own
+    EDID-derived `(manufacturer, model, serial)` triple, because the kernel says `card1-HDMI-A-1`
+    where Mutter says `HDMI-1` — content matching is exact, a hand-maintained name mapping is a
+    guess. Display identity is the SHA-256 of the EDID scoped to the host, so a label survives a
+    reboot and a cable moved to another port; a panel whose EDID cannot be read gets a
+    connector-derived identity explicitly marked `weak`. Manufacturer, model and serial are
+    reported exactly as the hardware described itself, and a panel that published no model *name*
+    is reported by its product code with `model_source` saying so — nothing becomes "Unknown".
+  - **Processes** — `/proc`, read directly. Identity is host + boot + PID + start time, never a
+    bare PID: PIDs are recycled within minutes, and `start_ticks` is published so a later control
+    action can re-verify it before acting. A host with no boot identity gets an `unavailable`
+    collection rather than bare PIDs. A process that exits mid-scan is omitted without degrading
+    the collection; one that exists but cannot be read downgrades it to `partial`.
+    `/proc/<pid>/cmdline` and `/proc/<pid>/environ` are **never opened** — both routinely carry
+    secrets, and not reading them is a far easier guarantee than redacting them.
+  - **Running application instances** — grouped by systemd cgroup scope, because the system
+    already computed the boundary. Opera's **19 processes are one running Opera**, not nineteen;
+    a GNOME launch that produces two scopes for one application is one instance, merged on
+    systemd's naming grammar rather than by substring. Mapping to an application definition
+    requires the exact basename of the root process's real executable — `operator` is not Opera,
+    and an Electron application bundling a `chromium` binary does not become Chromium. No match
+    leaves the instance running and **unmapped**, which is a complete answer.
+  - **Windows** — the interface exists and is wired into the snapshot; **no safe read-only backend
+    is available on GNOME Wayland**, so the collection reports `unavailable` with a precise
+    reason. `org.gnome.Shell.Eval` returns `(false, '')` on this host and would be arbitrary code
+    execution inside the compositor anyway; no portal enumerates windows; the accessibility bridge
+    is switched off and enabling it is the user's decision. An empty list would tell a user with
+    three windows open that they have none. The seam for a user-installed GNOME companion is
+    documented.
+
+  Collection status is a closed vocabulary — `ok` / `partial` / `unavailable` / `error` — and the
+  model *enforces* it: an `unavailable` collection that carries items, or omits a reason, raises.
+  An `ok` collection with zero items is a positive claim that the machine has none of that
+  resource. Recorded as `DECISIONS.md` D-2026-08-05-2, -3 and -4.
+
+- **Authenticated read-only runtime API.** `GET /api/runtime` serves one snapshot —
+  `observed_at`, host/boot/session identity, and the four collections — and
+  `GET /api/runtime/{resource_kind}` serves one slice of it together with that header, because a
+  list of processes is uninterpretable without the boot it was read in. Sub-endpoints slice a
+  shared snapshot rather than scanning independently, so a client can never assemble a picture
+  whose displays came from one instant and whose processes came from another. A short cache keeps
+  a polling phone from driving a continuous process scan, and is invalidated by *identity* as well
+  as by time: a replaced graphical session drops it however recent it is. `?refresh=true` bypasses
+  it. **No route accepts a write method** — process and window control is a later milestone with
+  its own identity re-verification rules.
+
+- **A "Live system" area in the PWA**, in its own `web/live.js`, separate from *Configuration &
+  templates*. The separation is structural so each file can be checked for the vocabulary the
+  other must never borrow: `app.js` renders definitions and may not say "running", `live.js`
+  renders runtime resources and may not say "installed — can launch". This closes the M2A
+  live-validation finding that the card reading *Firefox available* was taken to mean Firefox was
+  open. An `unavailable` collection renders the backend's reason, and that branch is checked
+  *before* the empty branch — an unavailable collection has zero items too. Values the host did
+  not report render as "not reported"; window counts are absent rather than zero. Cards are
+  compact and expand on tap; polling is conservative, pauses while the page is hidden, and stops
+  on sign-out.
+
+- **`HostAdapter.application_executables()`** — a read-only view of the adapter's own launch table,
+  so runtime discovery can map a process group to a definition without hardcoding a program name.
+  It deliberately does not follow `/snap/bin/opera` to its symlink target `/usr/bin/snap`, which
+  would classify every unrelated snap helper as Opera.
+
+### Changed
+
+- **The Live system view is a control plane, not a system monitor (2026-08-05).** Real-client
+  validation on the phone confirmed the backend correct — two real displays, Opera and Firefox as
+  one instance each, truthful unavailable states — and the *page* wrong. The primary application
+  list mixed Opera and Firefox with `evolution-alarm-notify`, `gsd-disk-utility-notify` and
+  `update-notifier`; the process section rendered ~116 rows of systemd, D-Bus and PipeWire before
+  anything a person controls; expanded display cards opened with serial numbers and EDID
+  fingerprints; and Screenshot stayed the most prominent control on a host that truthfully reports
+  it unavailable.
+
+  No inventory data was removed and no collection is filtered. Instances now carry `presentation`
+  (`user_facing` / `background` / `unclassified`) plus `presentation_evidence`, derived from
+  application-definition matches and freedesktop desktop-entry metadata — `NoDisplay`, `Hidden`,
+  and XDG autostart membership — never from name substrings and never from a list of the
+  applications on this host. Background helpers and undecidable groups keep their full cards in
+  collapsed sections; the process inspector is collapsed, builds no rows until opened, and then
+  offers search and a per-application filter; display and application technical details move
+  behind a second disclosure; an unavailable capability leaves the primary control row for a
+  collapsed "Unavailable on this host" area carrying the host's own reason; Windows becomes a
+  compact capability row instead of a section-sized empty state.
+
 ### Fixed
+
+- **A fresh iPhone could never connect, and said nothing about it (2026-08-05).** An onboarded
+  tablet worked; a fresh iPhone loaded the PWA shell and stayed on "Connecting…" indefinitely,
+  with no token form and no error.
+
+  `web/app.js` began its boot with a bare `localStorage.getItem(...)`. On iOS Safari, storage
+  access **throws** rather than returning null under Private Browsing, "Block All Cookies", and
+  some lockdown/MDM configurations. Nothing caught it, so the exception escaped the module's
+  IIFE and the rest of the script never ran — `#setup` and `#app` both keep `hidden` in the
+  served markup and `#connText` ships the literal "connecting…", so the page was displaying its
+  own initial HTML. It was not connecting; it was never going to do anything. The tablet was
+  unaffected because it had been onboarded earlier and had working storage, so it never reached
+  the throwing path.
+
+  Ruled out with evidence rather than assumption: the service worker is network-only and caches
+  nothing; `/ws` performs no `Origin` check; the socket scheme is derived from
+  `location.protocol`; and the journal records no `/ws` handshake from any address but the
+  tablet's, so the phone never reached the WebSocket at all. Separately noted and *not* claimed
+  as the cause: bursts of uvicorn "Invalid HTTP request received", consistent with Safari HTTPS
+  upgrade probing against an http-only origin.
+
+  Every storage access is now wrapped, with an in-memory fallback so a device whose browser
+  refuses storage still works for the session and is told it cannot be remembered. Connection
+  state is explicit and exhaustive — `connecting`, `auth_required`, `auth_rejected`,
+  `unreachable`, `connected` — with bounded timeouts on both the initial status request (8s) and
+  the WebSocket open (10s), a Retry action, and the real reason shown. Only the first attempt may
+  display "connecting…"; background reconnects keep the failure state visible, which closes a
+  second indefinite-"connecting…" path the new tests found in the reconnect loop. The boot is
+  wrapped and a last-resort `error` listener converts any unhandled throw into a real state.
+  Server authentication is unchanged: `/ws` still closes 4401 before upgrade, the REST API still
+  answers 401, and the token still travels only in a Bearer header or the WebSocket subprotocol —
+  never a URL. See [`docs/DEVICE_ONBOARDING.md`](docs/DEVICE_ONBOARDING.md).
+
+- **Launch provenance claimed a fact it could not prove, for every snap application
+  (2026-08-05).** Found during PR #13 live validation on the real Ubuntu host. Cofferdam issued
+  `open_application` for Firefox; the instance was discovered and grouped correctly, and reported
+  `launched_by_cofferdam: false` — about a launch Cofferdam had just performed. Snapd re-parents
+  every snap launch out of our `cofferdam-app-<hex>.service` into
+  `snap.<package>.<app>-<uuid>.scope` before the first scan, so the evidence is gone by then. A
+  boolean has no way to express "cannot be determined", so it asserted the one reading that was
+  definitely untrue: that something else had launched it. Opera was equally affected.
+
+  The boolean is replaced by three-valued `launch_source` — `confirmed_cofferdam`,
+  `confirmed_external`, `unknown`. Snap scopes report `unknown` unconditionally, and the absence
+  of our transient unit is never on its own grounds for `confirmed_external`: that state requires
+  a launcher to have named *itself* in the unit (`app-gnome-<AppID>-<pid>.scope`), a shape
+  Cofferdam cannot produce because `systemd-run --user --unit=` creates a `.service`. The PWA
+  badges only the two confirmed states and renders `unknown` as "launch source not confirmed",
+  never as "not launched by Cofferdam". Regression test covers a Cofferdam-started snap moved into
+  a snap scope.
+
+- **A live-validation report said Firefox was not installed on this host; it is (2026-08-05).**
+  `STATUS.md` recorded "Firefox is not installed on this host and correctly produces no instance."
+  Firefox is installed and launchable — snap 149.0.2-1, resolved at `/usr/bin/firefox` from the
+  daemon's own `PATH`, and already listed by `/api/status` as an available application in the same
+  document. It was merely not *running*. The sentence reproduced in prose exactly the
+  installed-versus-running conflation this milestone exists to remove. Corrected against live
+  evidence: launching Firefox through Cofferdam produced one `firefox` instance, 11 processes
+  grouped under one card, matched by executable basename. No discovery-code defect was involved.
 
 - **Screenshot capability was over-advertised in a Wayland session (2026-08-05).** After login,
   a daemon started at boot by lingering reported `screenshot: true` on a GNOME Wayland host

@@ -1,20 +1,106 @@
 /* Cofferdam workstation PWA (M1).
  *
- * Talks only to this origin. The device token lives in localStorage on the
- * phone and is sent as a Bearer header for API calls, and as a WebSocket
- * subprotocol for the event channel (so it never lands in a URL or access log).
+ * Talks only to this origin. The device token is entered by the user, validated
+ * against the API before it is stored, and kept in localStorage on the phone —
+ * or in memory for the session when the browser refuses storage. It is sent as
+ * a Bearer header for API calls and as a WebSocket subprotocol for the event
+ * channel, so it never lands in a URL, history entry or access log.
+ *
+ * Connection state is explicit and bounded: connecting, authentication
+ * required, authentication rejected, unreachable, connected. There is no path
+ * that leaves the page on "connecting…" — that was a real fresh-device failure
+ * on iOS Safari, where an unguarded `localStorage` read threw out of this
+ * module before anything could render a state.
  */
-(function () {
+(function (global) {
   "use strict";
 
   var TOKEN_KEY = "cofferdam.token";
   var SUBPROTOCOL = "cofferdam-token";
+
+  /* Bounded, because "connecting…" forever is not a state — it is the absence
+     of one. A fresh iPhone hit exactly that: the shell painted, the header said
+     connecting…, and nothing ever changed it. Every path below now ends in one
+     of these, and each one tells the user what to do next. */
+  var CONN_CONNECTING = "connecting";
+  var CONN_AUTH_REQUIRED = "auth_required";
+  var CONN_AUTH_REJECTED = "auth_rejected";
+  var CONN_UNREACHABLE = "unreachable";
+  var CONN_CONNECTED = "connected";
+
+  /* How long any single attempt may sit in `connecting` before it has to say
+     something truthful instead. Generous enough for a slow Tailscale link,
+     short enough that nobody stares at a dead header. */
+  var BOOTSTRAP_TIMEOUT_MS = 8000;
+  var SOCKET_OPEN_TIMEOUT_MS = 10000;
 
   var el = function (id) { return document.getElementById(id); };
   var token = null;
   var socket = null;
   var reconnectDelay = 1000;
   var heartbeatTimer = null;
+  var socketTimer = null;
+  var socketAttempts = 0;
+  var connState = CONN_CONNECTING;
+
+  /* ---------------------------------------------------------------- storage
+   *
+   * Every `localStorage` access is wrapped, because on iOS Safari the property
+   * access itself throws — Private Browsing, "Block All Cookies", and some
+   * lockdown/MDM configurations all raise SecurityError rather than returning
+   * null. The original boot read `localStorage.getItem(...)` as its very first
+   * statement with nothing around it, so that throw escaped the module IIFE,
+   * killed the rest of the script, and left the page on its hard-coded
+   * "connecting…" with both panels still `hidden`. That is the reported bug.
+   *
+   * When storage is unusable the token is held in memory for the session
+   * instead. The device still works; it just has to be entered again next
+   * launch, and the UI says so rather than pretending it saved. */
+  var memoryToken = null;
+  var storageWorks = null;
+
+  function storageAvailable() {
+    if (storageWorks !== null) { return storageWorks; }
+    try {
+      var probe = "cofferdam.probe";
+      global.localStorage.setItem(probe, "1");
+      global.localStorage.removeItem(probe);
+      storageWorks = true;
+    } catch (error) {
+      storageWorks = false;
+    }
+    return storageWorks;
+  }
+
+  function readToken() {
+    if (!storageAvailable()) { return memoryToken; }
+    try {
+      return global.localStorage.getItem(TOKEN_KEY);
+    } catch (error) {
+      storageWorks = false;
+      return memoryToken;
+    }
+  }
+
+  function writeToken(candidate) {
+    memoryToken = candidate;
+    if (!storageAvailable()) { return; }
+    try {
+      global.localStorage.setItem(TOKEN_KEY, candidate);
+    } catch (error) {
+      storageWorks = false;
+    }
+  }
+
+  function clearStoredToken() {
+    memoryToken = null;
+    if (!storageAvailable()) { return; }
+    try {
+      global.localStorage.removeItem(TOKEN_KEY);
+    } catch (error) {
+      storageWorks = false;
+    }
+  }
 
   /* ---------------------------------------------------------------- helpers */
 
@@ -29,6 +115,68 @@
   function setConn(state, text) {
     el("dot").className = "dot" + (state ? " " + state : "");
     el("connText").textContent = text;
+  }
+
+  /* The single place a connection state is set. Each state carries its own
+     header text, its own explanation, and whether retrying is the user's next
+     move — so no code path can leave the UI saying one thing and meaning
+     another. `detail` is the reason from the failure site; it is never a token
+     and never a URL. */
+  var CONN_TEXT = {};
+  CONN_TEXT[CONN_CONNECTING] = ["", "connecting…"];
+  CONN_TEXT[CONN_AUTH_REQUIRED] = ["down", "not connected"];
+  CONN_TEXT[CONN_AUTH_REJECTED] = ["down", "token rejected"];
+  CONN_TEXT[CONN_UNREACHABLE] = ["down", "unreachable"];
+  CONN_TEXT[CONN_CONNECTED] = ["live", "live"];
+
+  function setConnState(state, detail) {
+    connState = state;
+    var presentation = CONN_TEXT[state] || CONN_TEXT[CONN_UNREACHABLE];
+    setConn(presentation[0], presentation[1]);
+
+    var banner = el("connBanner");
+    var retry = el("connRetry");
+    if (!banner || !retry) { return; }
+
+    // Retry is offered exactly where retrying is the sensible next action.
+    // "Authentication required" is not one of them: the token form below is
+    // already the action, and a Retry button beside it would just re-run a
+    // request that must fail until a token exists.
+    var retryable = state === CONN_UNREACHABLE;
+    retry.hidden = !retryable;
+    if (detail) {
+      banner.textContent = detail;
+      banner.hidden = false;
+    } else {
+      banner.hidden = true;
+      banner.textContent = "";
+    }
+  }
+
+  /* A bounded wrapper: whatever `work` is, it settles. Without this the boot
+     had no upper bound at all — a fetch that never resolves (a Tailscale route
+     that black-holes, a captive portal swallowing the connection) simply left
+     the header on "connecting…" for as long as the page stayed open. */
+  function withTimeout(work, milliseconds, label) {
+    return new Promise(function (resolve, reject) {
+      var settled = false;
+      var timer = setTimeout(function () {
+        if (settled) { return; }
+        settled = true;
+        reject(new Error(label));
+      }, milliseconds);
+      work.then(function (result) {
+        if (settled) { return; }
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      }, function (error) {
+        if (settled) { return; }
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      });
+    });
   }
 
   function bytes(value) {
@@ -130,7 +278,52 @@
     el("btnScreenshot").disabled = capabilities.screenshot === false;
     el("btnOpenUrl").disabled = capabilities.open_url === false;
     el("urlInput").disabled = capabilities.open_url === false;
+    renderUnavailableCapabilities(host, capabilities);
     renderProfileSelect();
+  }
+
+  // Capabilities the host reports as false are demoted out of the primary
+  // control row into a collapsed area, with the host's own reason.
+  //
+  // Screen capture on this Wayland desktop is the case that forced it: the
+  // backend correctly reports `screenshot: false`, but a disabled Screenshot
+  // button still sat at the top of Control as the most prominent thing on the
+  // page — reading as a broken feature rather than as one this desktop does not
+  // offer. The capability stays truthful and stays visible; it just stops
+  // being advertised as a normal action.
+  var CAPABILITY_LABELS = {
+    screenshot: "Screenshot",
+    open_application: "Open app",
+    open_url: "Open URL"
+  };
+
+  function renderUnavailableCapabilities(host, capabilities) {
+    var container = el("capabilitiesUnavailable");
+    var list = el("capabilityReasons");
+    var slot = el("screenshotSlot");
+    if (!container || !list) { return; }
+
+    var unavailable = Object.keys(CAPABILITY_LABELS).filter(function (key) {
+      return capabilities[key] === false;
+    });
+
+    // The host publishes prose reasons in `notes`; they are shown verbatim
+    // rather than re-worded into something that might overstate the cause.
+    var notes = (host.notes || []).slice();
+    list.innerHTML = unavailable.map(function (key) {
+      var reason = notes.filter(function (note) {
+        return note.toLowerCase().indexOf(key.replace("_", " ")) !== -1
+          || (key === "screenshot" && note.toLowerCase().indexOf("screen capture") !== -1);
+      })[0];
+      return "<li><strong>" + escapeHtml(CAPABILITY_LABELS[key]) + "</strong>" +
+        (reason ? "<span class=\"muted\"> — " + escapeHtml(reason) + "</span>" : "") + "</li>";
+    }).join("");
+
+    el("capabilityCount").textContent = unavailable.length ? String(unavailable.length) : "";
+    container.hidden = unavailable.length === 0;
+    // Hidden, not merely disabled: a greyed-out primary button still claims a
+    // place in the interface that this host cannot honour.
+    if (slot) { slot.hidden = capabilities.screenshot === false; }
   }
 
   /* -------------------------------------------------------------- registries
@@ -421,18 +614,43 @@
   /* ------------------------------------------------------------- websocket */
 
   function connect() {
-    if (!token) { return; }
+    if (!token) { setConnState(CONN_AUTH_REQUIRED, null); return; }
+    // Scheme follows the page, so an https page never opens a plaintext socket
+    // and an http page never asks for a TLS one the server does not speak.
     var scheme = location.protocol === "https:" ? "wss:" : "ws:";
+    // Only the first attempt is allowed to show "connecting…". A background
+    // retry must not reset an established failure to an optimistic state: with
+    // a socket that hangs rather than refusing, that flip-flop reproduced the
+    // original bug exactly — a header stuck on "connecting…" forever, this time
+    // by a loop rather than by an exception.
+    socketAttempts += 1;
+    if (socketAttempts === 1) { setConnState(CONN_CONNECTING, null); }
     try {
+      // The token rides in the subprotocol, never the URL — a WebSocket URL
+      // lands in history, proxy logs and crash reports.
       socket = new WebSocket(scheme + "//" + location.host + "/ws", [SUBPROTOCOL, token]);
     } catch (error) {
-      setConn("down", "offline");
+      setConnState(CONN_UNREACHABLE, "The live connection could not be opened by this browser.");
       return;
     }
 
+    // A socket that never opens and never closes is the other way to hang
+    // forever: `onerror` does not always fire on iOS when the peer is
+    // unreachable, so the wait is bounded here rather than left to the browser.
+    clearTimeout(socketTimer);
+    socketTimer = setTimeout(function () {
+      if (socket && socket.readyState === WebSocket.CONNECTING) {
+        setConnState(CONN_UNREACHABLE,
+          "The live connection timed out. The workstation may be asleep or off the network.");
+        try { socket.close(); } catch (error) { /* already gone */ }
+      }
+    }, SOCKET_OPEN_TIMEOUT_MS);
+
     socket.onopen = function () {
+      clearTimeout(socketTimer);
       reconnectDelay = 1000;
-      setConn("live", "live");
+      socketAttempts = 0;
+      setConnState(CONN_CONNECTED, null);
       clearInterval(heartbeatTimer);
       heartbeatTimer = setInterval(function () {
         if (socket && socket.readyState === WebSocket.OPEN) { socket.send("ping"); }
@@ -454,20 +672,29 @@
 
     socket.onclose = function (event) {
       clearInterval(heartbeatTimer);
+      clearTimeout(socketTimer);
       socket = null;
+      // 4401 is the service closing before upgrade because the token did not
+      // match. That is authentication, not connectivity, and retrying it
+      // forever would be a lie dressed as persistence.
       if (event.code === 4401) { forgetToken("Token rejected — enter it again."); return; }
-      setConn("down", "reconnecting…");
+      setConnState(CONN_UNREACHABLE,
+        "Lost the live connection to the workstation. Retrying…");
       setTimeout(connect, reconnectDelay);
       reconnectDelay = Math.min(reconnectDelay * 2, 15000);
     };
 
-    socket.onerror = function () { setConn("down", "offline"); };
+    socket.onerror = function () {
+      // Deliberately not a terminal state: `onerror` is always followed by
+      // `onclose`, which is where the real reason (including 4401) arrives.
+      if (connState === CONN_CONNECTED) { setConnState(CONN_CONNECTING, null); }
+    };
   }
 
   /* ------------------------------------------------------------ token flow */
 
   function forgetToken(message) {
-    localStorage.removeItem(TOKEN_KEY);
+    clearStoredToken();
     token = null;
     if (socket) { socket.close(); socket = null; }
     // Drop the machine's registry contents with the token: they describe the
@@ -475,21 +702,40 @@
     registryData = {};
     registriesLoaded = false;
     availableApplications = [];
+    // The live inventory is the same kind of thing, only more so: it lists this
+    // machine's displays and running applications. It goes with the token, and
+    // its polling stops so a signed-out device makes no further requests.
+    if (global.CofferdamLive) { global.CofferdamLive.stop(); }
     el("registrySections").innerHTML = '<p class="muted">Loading…</p>';
     el("app").hidden = true;
     el("setup").hidden = false;
-    setConn("down", "not connected");
+    setConnState(message ? CONN_AUTH_REJECTED : CONN_AUTH_REQUIRED, null);
     if (message) {
       el("setupError").textContent = message;
       el("setupError").hidden = false;
+    }
+    // A device whose browser refuses local storage can still be used; it just
+    // cannot remember. Saying so beats silently forgetting on next launch.
+    var warning = el("storageWarning");
+    if (warning) {
+      warning.hidden = storageAvailable();
+      warning.textContent = storageAvailable() ? "" :
+        "This browser is blocking local storage, so the token will be kept for " +
+        "this session only and asked for again next time. Turning off Private " +
+        "Browsing, or allowing cookies for this site, lets it be remembered.";
     }
   }
 
   function start(candidate) {
     token = candidate;
-    return api("/api/status").then(function (response) {
+    setConnState(CONN_CONNECTING, null);
+    // The token is validated against the real API before it is stored, so a
+    // typo never becomes a persisted setting — and the request is bounded, so
+    // an unreachable host reports "unreachable" instead of hanging.
+    return withTimeout(api("/api/status"), BOOTSTRAP_TIMEOUT_MS, "timeout")
+      .then(function (response) {
       if (!response.ok) { throw new Error("status failed"); }
-      localStorage.setItem(TOKEN_KEY, candidate);
+      writeToken(candidate);
       el("setup").hidden = true;
       el("setupError").hidden = true;
       el("app").hidden = false;
@@ -502,6 +748,12 @@
       // Registries are not needed to show the host, so they load after it and
       // a failure here never blocks the rest of the UI.
       loadRegistries();
+      // Same for the live inventory: it is a separate view of a separate
+      // layer, and a discovery failure must not take the control panel down.
+      if (global.CofferdamLive) {
+        global.CofferdamLive.mount({ api: api, escapeHtml: escapeHtml, el: el })
+          .catch(function () { /* live.js renders its own failure state */ });
+      }
     });
   }
 
@@ -570,14 +822,65 @@
     if (!document.hidden && token && (!socket || socket.readyState > WebSocket.OPEN)) { connect(); }
   });
 
-  var stored = localStorage.getItem(TOKEN_KEY);
-  if (stored) {
-    start(stored).catch(function () { forgetToken("Stored token was rejected."); });
-  } else {
-    forgetToken(null);
+  el("connRetry").addEventListener("click", function () {
+    var candidate = token || readToken();
+    if (candidate) {
+      start(candidate).catch(function (error) { bootFailed(error); });
+    } else {
+      forgetToken(null);
+    }
+  });
+
+  /* Any unexpected throw during boot lands here instead of escaping the module
+     and freezing the page on its initial markup. Whatever went wrong, the user
+     gets a state and a way forward — which is the actual requirement,
+     independent of which cause produced it. */
+  function bootFailed(error) {
+    var reason = error && error.message === "timeout"
+      ? "The workstation did not answer in time. It may be asleep, or this device may not be on the tailnet yet."
+      : "Could not reach the workstation from this device.";
+    setConnState(CONN_UNREACHABLE, reason);
+    el("setup").hidden = false;
+    el("app").hidden = true;
   }
+
+  function boot() {
+    var stored = readToken();
+    if (stored) {
+      start(stored).catch(function (error) {
+        // A stored token that the service refuses is an authentication answer;
+        // anything else is a reachability answer. Conflating them is what sent
+        // a working device to the token form after a network blip.
+        if (error && error.message === "unauthorized") { return; }
+        if (error && error.message === "status failed") {
+          forgetToken("Stored token was rejected.");
+          return;
+        }
+        bootFailed(error);
+      });
+    } else {
+      // Fresh device: no token, so the honest state is "authentication
+      // required" and the token form — never an indefinite "connecting…".
+      forgetToken(null);
+    }
+  }
+
+  try {
+    boot();
+  } catch (error) {
+    bootFailed(error);
+  }
+
+  /* Last resort. If anything above this line throws in a browser we have not
+     seen, the page must still say something true rather than sit on the
+     hard-coded "connecting…" it was served with. */
+  global.addEventListener("error", function () {
+    if (connState === CONN_CONNECTING && el("app").hidden && el("setup").hidden) {
+      bootFailed(new Error("script error"));
+    }
+  });
 
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/sw.js").catch(function () { /* installability is optional */ });
   }
-})();
+})(window);

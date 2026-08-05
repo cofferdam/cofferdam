@@ -387,6 +387,81 @@ Related, recorded so the inventory milestone does not adopt a wrong assumption:
   the same conversation for a human to confirm.
 - None of Cursor, MCP, or the Opera companion is implemented in M2A.
 
+## D-2026-08-05-2 — Runtime discovery backends on GNOME Wayland (RECORDED, ACTIVE)
+
+Chosen after read-only investigation of the real host (Ubuntu, GNOME Shell 50.1, Wayland). Each
+choice is recorded with the alternative it rejects, because the rejected ones all look adequate
+until they are wrong.
+
+- **Displays: `org.gnome.Mutter.DisplayConfig.GetCurrentState`, joined to `/sys/class/drm`.**
+  Not `xrandr`. Under Wayland `xrandr` talks to XWayland, which reports a *synthetic* layout kept
+  for X11 clients — derived from the compositor's configuration but not it. M1 took only a display
+  *count* from it, and a count was the most it could honestly support. The kernel supplies the raw
+  EDID (the fingerprint) and the physical millimetres, which `GetCurrentState` does not report;
+  the compositor's `GetResources` would, but it is the deprecated interface, so sysfs is read
+  directly.
+- **The two sources are joined on the panel's own EDID-derived `(manufacturer, model, serial)`
+  triple**, not on connector names — the kernel says `card1-HDMI-A-1` where Mutter says `HDMI-1`.
+  Content matching is exact; a hand-maintained name mapping is a guess. Name matching stays as a
+  labelled fallback.
+- **Processes: `/proc`, read directly.** Not `ps`: every layer between us and the kernel's own
+  files is a layer that can reformat, truncate, or localise them.
+- **`/proc/<pid>/cmdline` and `/proc/<pid>/environ` are never opened.** Not read-then-redacted.
+  Both routinely carry secrets on a real desktop, and safely handling a secret already in memory
+  is a much harder problem than not reading it. Grouping therefore uses cgroup membership and
+  process ancestry, which need neither.
+- **Application instances: systemd cgroup scopes under `app.slice`, plus our own
+  `cofferdam-app-*.service`.** The system already computed the boundary — all nineteen of Opera's
+  processes share one `snap.opera.opera-<uuid>.scope`. A `.scope` is what systemd creates for a
+  process it did not fork itself, i.e. a launched application; the plain `.service` units also in
+  `app.slice` (`dconf`, `ssh-agent`, `gnome-keyring-daemon`, this service) are infrastructure and
+  are excluded. Units are merged on systemd's naming grammar, so the two scopes GNOME creates for
+  one launch are one instance.
+- **A definition match requires the exact basename of the root process's real executable.** Not
+  `comm` (a 15-character truncation a process can rename at will), not a substring (`operator` is
+  not Opera), and not any member's executable (an Electron application shipping a `chromium`
+  binary would otherwise be reported as Chromium). No match leaves the instance unmapped, which is
+  a complete answer.
+- **Windows: no backend exists, and the collection reports `unavailable`.**
+  `org.gnome.Shell.Eval` returns `(false, '')` on this host — disabled outside unsafe-mode — and
+  is barred by D-2026-08-04-7 regardless, since evaluating JavaScript inside the compositor is
+  arbitrary code execution in the user's shell. No portal enumerates windows. The AT-SPI bus runs
+  but `toolkit-accessibility` is `false`, and switching it on is a change to the user's desktop
+  with a real cost, not a decision this milestone makes on their behalf. Installing a GNOME
+  extension is a persistent change the user has not asked for. The seam stays open for a companion
+  extension the user installs knowingly.
+
+## D-2026-08-05-3 — `unavailable` is not `empty`, and the model enforces it (RECORDED, ACTIVE)
+
+Every runtime collection reports one of `ok`, `partial`, `unavailable`, `error`. An `ok`
+collection with zero items is a **positive claim** that the machine has none of that resource. A
+backend that cannot answer reports `unavailable` with a reason and carries no items.
+
+This is enforced in the model rather than by convention: constructing an `unavailable` or `error`
+collection that carries items, or that omits a reason, raises. The PWA checks the `unavailable`
+branch *before* the empty branch, because an unavailable collection has zero items too.
+
+The rule exists because the same false-success shape has now been found three times in this
+product — a launcher's exit code taken as evidence a window opened (M1), a registry read as a list
+of connected hardware (M2A), and "Firefox available" read as "Firefox running" (PR #9 validation).
+Telling a user their applications have no windows open, while they are looking at those windows,
+would be the fourth.
+
+## D-2026-08-05-4 — Runtime inventory is read-only; control is a separate milestone (EFE DECISION, ACTIVE)
+
+M2B observes. It starts, stops, moves, reconfigures, and terminates nothing, and no route under
+`/api/runtime` accepts a write method.
+
+Process and window **control** — closing an application, moving a window to a named display — is
+deferred to its own milestone, because it needs something discovery does not: **re-verification of
+identity immediately before acting.** A PID plus a start time captured a second ago is evidence
+about a second ago. `start_ticks` is published precisely so that check can be made, and shipping
+control without it is how the wrong process gets terminated.
+
+Label and alias **editing** is likewise deferred, to the immediate M2B2 follow-up. M2B resolves
+overlays that already exist onto discovered resources; every resource carries a stable
+`resource_id` and an `overlay` slot, so editing needs no change to the identity model.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

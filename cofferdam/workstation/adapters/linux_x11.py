@@ -490,6 +490,27 @@ class LinuxX11Adapter(HostAdapter):
         """
         return [key for key, candidates in _APPLICATION_COMMANDS.items() if first_available(candidates)]
 
+    def application_executables(self) -> dict:
+        """The launch table, inverted for runtime discovery.
+
+        The candidate names plus the basename of whatever was found on ``PATH``
+        — and deliberately **not** the basename of the symlink's final target.
+        On Ubuntu ``/snap/bin/opera`` resolves to ``/usr/bin/snap``, the generic
+        snap multiplexer, so following the link would put ``snap`` in Opera's
+        name set and classify every unrelated snap helper as Opera. The real
+        program keeps its own name where it matters: the process that actually
+        runs is ``/snap/opera/<rev>/usr/lib/.../opera``, whose basename is
+        already in the table.
+        """
+        table: dict = {}
+        for key, candidates in _APPLICATION_COMMANDS.items():
+            names = set(candidates)
+            found = first_available(candidates)
+            if found:
+                names.add(Path(found).name)
+            table[key] = tuple(sorted(names))
+        return table
+
     def unavailable_detail(self, application: str) -> Optional[str]:
         if _desktop_entry_present(_APPLICATION_DESKTOP_ENTRIES.get(application, ())):
             return (

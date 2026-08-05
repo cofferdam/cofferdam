@@ -6,23 +6,31 @@ and the human phrases that refer to them ("büyük monitör"), allowlisted appli
 profiles, future Claude Code and other agent sessions, and — eventually — routing a conversation
 started in a browser to an agent and back to where it came from.
 
-**M2A is the foundation only.** It adds registries, a read-only API over them, browser-profile
+**M2A was the foundation.** It added registries, a read-only API over them, browser-profile
 awareness for the one action that can use it today, and the documents that fix the shape of what
-comes next. It deliberately implements none of the following:
+comes next.
 
-**runtime discovery of any kind** · Raspberry Pi control · Wake-on-LAN or any physical power
-action · window movement or display placement · browser DOM access · ChatGPT or Claude web
-automation · browser extensions · agent execution · Claude Code session execution · message
-sending · natural-language action planning · desktop application scaffolding · any reboot
-behaviour change.
+**M2B adds runtime inventory** — the read-only discovery of what is actually connected and running
+right now: displays, processes, application instances, and the honest report that windows cannot be
+enumerated on this desktop. See [`RUNTIME_INVENTORY.md`](RUNTIME_INVENTORY.md).
+
+Between them they still implement none of the following:
+
+Raspberry Pi control · Wake-on-LAN or any physical power action · **process, window or display
+control of any kind** · browser DOM access · ChatGPT or Claude web automation · browser extensions ·
+agent execution · Claude Code session execution · message sending · natural-language action
+planning · desktop application scaffolding · any reboot behaviour change.
 
 And, as everywhere in this product: **no arbitrary shell execution**, at any layer, through any
-schema — and **no pixel-coordinate automation**, ever.
+schema — and **no pixel-coordinate automation**, ever. Discovery is held to the same rule: it uses
+published D-Bus interfaces and the kernel's own files, never a screenshot, an OCR pass, or an eval
+hook inside the compositor.
 
-> **M2A knows nothing about what is currently connected, running, or open.** It knows what the
-> code can do (definitions) and what the user chose to call things (overlays). Discovering the
-> live machine is the next milestone. Nothing in this repository ships pre-named as though a
-> display, browser window, or process had already been found.
+> **Configuration still knows nothing about what is currently connected, running, or open.** The
+> registries know what the code can do (definitions) and what the user chose to call things
+> (overlays); the inventory is a separate layer, gathered from the machine, and the two are
+> rendered in separate panels by separate files. Nothing in this repository ships pre-named as
+> though a display, browser window, or process had already been found.
 
 ---
 
@@ -85,19 +93,23 @@ Definitions live in the source. Configuration selects among them and can never a
 executable path, argv, command string, shell fragment, desktop-file path, or environment
 override is representable anywhere in a registry.
 
-### B. Runtime resources — discovered, **not implemented yet**
+### B. Runtime resources — discovered (M2B)
 
 What is actually here *right now*:
 
-- currently connected displays
-- currently running processes
-- current application instances
-- current windows
+- currently connected displays — **discovered**
+- currently running processes — **discovered**
+- current application instances — **discovered**
+- current windows — the interface exists and is wired in; **no safe read-only backend is available
+  on GNOME Wayland**, so the collection reports `unavailable` with a precise reason rather than an
+  empty list
 - later: browser tabs
 - later: agent task instances
 
-**None of this exists in M2A.** Cofferdam performs no runtime discovery today. That is the next
-milestone — see *M2B — Runtime inventory* in [`../ROADMAP.md`](../ROADMAP.md).
+Backends, evidence, identity rules and limitations: [`RUNTIME_INVENTORY.md`](RUNTIME_INVENTORY.md).
+Code: `cofferdam/workstation/runtime/`.
+
+**M2B observes only.** It starts, stops, moves, reconfigures, and terminates nothing.
 
 ### C. User overlays — the registry files
 
@@ -119,24 +131,29 @@ Consequently, nothing ships pre-named. There is no `large-monitor`, no "main mon
 installation. `examples/registries/` contains only entries prefixed `example`, nothing copies
 them into `$COFFERDAM_HOME`, and a machine with no registry files is a fully working machine.
 
-## Runtime resource identity — rules the inventory milestone must follow
+## Runtime resource identity
 
-Recorded now, while they are still free to keep. None is implemented in M2A.
+Recorded before the inventory existed, and **implemented in M2B** except where noted.
 
 - **A PID is visible and usable only together with process start time.** It is shown, and it can
-  be acted on, but only after the start time has been re-verified.
+  be acted on, but only after the start time has been re-verified. `start_ticks` is on the wire for
+  exactly that check.
 - **A PID alone is never a stable resource identity.** PIDs are reused; a stale PID plus an
-  action is how the wrong process gets terminated.
+  action is how the wrong process gets terminated. A host that publishes no boot identity gets an
+  `unavailable` process collection rather than bare PIDs.
 - **Application instance identity** = host/boot identity + PID + start time. The boot identity is
   what stops an identity surviving a reboot into a different process.
-- **Display identity prefers a hardware fingerprint** — EDID (or its hash) plus the owning device.
-  **Connector names such as `DP-1` are runtime hints**, not identity: they change when a cable
-  moves.
+- **Display identity prefers a hardware fingerprint** — the SHA-256 of the panel's EDID plus the
+  host identity. **Connector names such as `DP-1` are runtime hints**, not identity: they change
+  when a cable moves. A display whose EDID cannot be read falls back to a connector-derived
+  identity that is explicitly marked `weak`.
 - **Browser tabs get browser-extension tab IDs.** Tab identity comes from the browser's own API,
   through a permission-bounded companion extension. It must never be inferred from Chromium
-  process IDs — a tab is not a process, and the mapping is neither stable nor observable.
+  process IDs — a tab is not a process, and the mapping is neither stable nor observable. *Not
+  implemented; M2B discovers a browser as one application instance and says nothing about tabs.*
 - **User labels are overlays.** They may be attached when a resource is first discovered, or at
-  any time later, and a resource without a label is completely normal.
+  any time later, and a resource without a label is completely normal. M2B *resolves* existing
+  overlays onto discovered displays; *editing* them is M2B2.
 
 ## How Cofferdam is allowed to talk to the system
 
@@ -232,6 +249,20 @@ There is no `POST`, `PUT`, `PATCH`, or `DELETE` registry endpoint in M2A. Nothin
 the network can change which applications exist or which domains a profile may open. Editing is a
 text editor plus a service that re-reads the files; an atomic writer exists (with tests) for the
 milestone that adds editing, and is not wired to any route.
+
+## M2B surface
+
+| what | where |
+| --- | --- |
+| discovery backends and their limitations | [`RUNTIME_INVENTORY.md`](RUNTIME_INVENTORY.md) |
+| code | `cofferdam/workstation/runtime/` |
+| API | `GET /api/runtime`, `GET /api/runtime/{resource_kind}` — authenticated, **read-only** |
+| UI | a *Live system* panel, separate from *Configuration & templates* |
+| actions | none — M2B adds no action and changes none |
+
+The runtime routes are read-only for a second, separate reason from the registries': they report
+what the machine currently *is*, and observing is the whole contract. Process and window control is
+a later milestone with its own identity re-verification rules.
 
 ---
 
