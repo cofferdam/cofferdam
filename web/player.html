@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Cofferdam YouTube player</title>
+<!--
+  The Cofferdam-owned YouTube player document.
+
+  This page is served by the loopback-only listener in
+  cofferdam/workstation/youtubeplayer/endpoint.py and is opened once, in Opera,
+  on the workstation. It is deliberately *not* part of the PWA: the PWA is the
+  phone's remote control and is reachable over the tailnet, while this page is
+  the thing being controlled and is reachable only from this machine.
+
+  What it contains is the whole point of the milestone: exactly one official
+  YouTube IFrame player, for the whole session. Choosing a new video calls
+  loadVideoById on the player that is already here. Nothing on this page opens a
+  tab, navigates anywhere, or knows any Cofferdam address other than the
+  loopback channel it was served from.
+
+  There is no token on this page, in its URL, or in its storage. See the
+  endpoint module for why, and for what the same-user trust boundary is worth.
+-->
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: #0f1720;
+    color: #e6edf3;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: .75rem;
+    padding: .75rem 1rem;
+    border-bottom: 1px solid #23303d;
+  }
+  h1 { font-size: 1rem; margin: 0; font-weight: 600; }
+  .dot {
+    width: .6rem; height: .6rem; border-radius: 50%;
+    background: #f0883e; flex: none;
+  }
+  .dot.on { background: #3fb950; }
+  .dot.off { background: #f85149; }
+  #status { color: #8b98a5; font-size: .85rem; }
+  main { flex: 1; display: flex; align-items: center; justify-content: center; padding: 1rem; }
+  /* The documented minimum for an embedded player is 200x200; this is well
+     above it at every window size the workstation realistically uses. */
+  #stage {
+    position: relative;
+    width: 100%;
+    max-width: 1280px;
+    aspect-ratio: 16 / 9;
+    min-height: 240px;
+    background: #000;
+    border-radius: .5rem;
+    overflow: hidden;
+  }
+  #stage iframe { width: 100%; height: 100%; border: 0; display: block; }
+  #idle, #gate {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 1rem; text-align: center; padding: 2rem;
+    background: rgba(15, 23, 32, .92);
+  }
+  #idle p, #gate p { margin: 0; max-width: 34rem; line-height: 1.5; color: #c9d5e1; }
+  button {
+    font: inherit; font-weight: 600;
+    padding: .7rem 1.4rem; border-radius: .4rem;
+    border: 0; background: #2f81f7; color: #fff; cursor: pointer;
+  }
+  button:hover { background: #4d94f8; }
+  footer { padding: .75rem 1rem; border-top: 1px solid #23303d; color: #8b98a5; font-size: .8rem; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>Cofferdam YouTube player</h1>
+  <span id="status">connecting…</span>
+</header>
+
+<main>
+  <div id="stage">
+    <!-- The official IFrame player is inserted here, once, on the first video.
+         It is built by player.js rather than by the API's own element
+         replacement so that the iframe's `allow` attribute — which is what
+         delegates autoplay permission to a cross-origin frame — is set by this
+         product and not left to chance. -->
+    <div id="idle">
+      <p><strong>No video loaded yet.</strong></p>
+      <p>Pick a YouTube result on your phone and press <strong>Play now</strong>.
+         It will play here, in this window.</p>
+    </div>
+
+    <!-- Shown only when the browser has actually refused to start playback.
+         It is never shown pre-emptively: a browser that allows playback should
+         never make somebody click something to be told it was not needed. -->
+    <div id="gate" hidden>
+      <p><strong>Your browser needs one click before it will play sound.</strong></p>
+      <p>This is a browser rule, not a Cofferdam setting. Click once here and the
+         player keeps working from your phone for the rest of this session.</p>
+      <button id="enable" type="button">Enable playback</button>
+    </div>
+  </div>
+</main>
+
+<footer id="note">
+  This window is Cofferdam's YouTube player. Leave it open — your phone controls it.
+  Closing it is safe; Cofferdam will notice and can open it again.
+</footer>
+
+<script src="/player.js"></script>
+</body>
+</html>
