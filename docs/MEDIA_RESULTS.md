@@ -107,24 +107,31 @@ where `/proc/<pid>/environ` and crash dumps would expose it).
 
 ### Setup
 
-**Spotify** — <https://developer.spotify.com/dashboard> → create an app → copy
-the client id and secret. No redirect URI is needed: the client-credentials flow
-does not use one. Development mode is fine; the user allowlist does not affect
-catalogue search.
+**The full step-by-step guide is [`MEDIA_PROVIDER_SETUP.md`](MEDIA_PROVIDER_SETUP.md)** —
+console walkthroughs for both providers, the exact file schema and permissions,
+how to validate the configuration without printing any credential value, and
+troubleshooting for each provider state. The summary below is the shape of it.
+
+**Spotify** — <https://developer.spotify.com/dashboard> → create an app →
+tick **Web API** → copy the client id and secret. The dashboard requires a
+redirect URI to save the form, but the client-credentials flow does not use one,
+so its value is not part of the catalogue-search path. Development mode is fine;
+the user allowlist does not affect catalogue search.
 
 **YouTube** — <https://console.cloud.google.com/> → create a project → enable
-**YouTube Data API v3** → create an **API key**. Restricting the key to that API
-is recommended.
+**YouTube Data API v3** → create an **API key** → restrict it to that API, and
+leave *"Authenticate API calls through a service account"* disabled, since
+Cofferdam sends an API key rather than a signed JWT.
 
 Then, on the workstation:
 
 ```bash
 install -m 700 -d ~/cofferdam/secrets
-touch ~/cofferdam/secrets/media_providers.json
-chmod 600 ~/cofferdam/secrets/media_providers.json
+install -m 600 /dev/null ~/cofferdam/secrets/media_providers.json
 # edit it in a local editor and paste the values there
 ```
 
+Creating the file empty and editing it keeps every secret out of shell history.
 The file is re-read per request, so a correction takes effect without a restart
 — and a *removed* credential stops working at once rather than lingering in a
 process that started before the removal.

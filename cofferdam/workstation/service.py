@@ -23,6 +23,12 @@ route                                        auth  purpose
 ``GET  /api/registries/{registry_name}``     yes   one validated registry
 ``GET  /api/runtime``                        yes   live runtime snapshot
 ``GET  /api/runtime/{resource_kind}``        yes   one slice of that snapshot
+``GET  /api/audio``                          yes   live audio snapshot
+``GET  /api/audio/{resource_kind}``          yes   outputs or streams
+``PUT  /api/audio/outputs/{id}/default``     yes   choose the default output
+``PUT  /api/audio/outputs/{id}/volume``      yes   set that output's volume
+``PUT  /api/audio/outputs/{id}/mute``        yes   mute or unmute that output
+``PUT  /api/audio/streams/{id}/output``      yes   always refused on this host
 ``WS   /ws``                                 yes   live events
 ``GET  /`` and static assets                 no    the PWA shell itself
 ===========================================  ====  =============================
@@ -49,6 +55,16 @@ process and window control is a later milestone with its own identity
 re-verification rules. They are also fully authenticated: an inventory of a
 person's machine is exactly the kind of thing an unauthenticated endpoint must
 never hand out.
+
+**The audio routes (M2C) are the first ones that change the physical state of
+the machine** — the volume in the room changes when they are called. They are
+therefore the narrowest surface in this file. A client may send exactly three
+kinds of value: a runtime ``resource_id`` in the path, an integer percentage,
+and a boolean. There is no field for a node id, a device name, a PipeWire
+property, a profile, a command, or a program, and those are absent from the
+schemas rather than validated and rejected. Reads are ``GET`` and change
+nothing; every change is a ``PUT`` with a JSON body, a bounded length, and a
+strict field set.
 """
 
 from __future__ import annotations
@@ -82,6 +98,17 @@ from .actions import (
     validate_action,
 )
 from .adapters import select_adapter
+from .audio import AudioActionExecutor, AudioActionRejected, AudioInventoryService
+from .audio.actions import (
+    REJECT_GRAPH_CHANGED,
+    REJECT_INVALID_MUTE,
+    REJECT_INVALID_VOLUME,
+    REJECT_RESOURCE_CHANGED,
+    REJECT_UNAVAILABLE,
+    REJECT_UNSUPPORTED,
+)
+from .audio.actions import REJECT_UNKNOWN_RESOURCE as REJECT_AUDIO_UNKNOWN_RESOURCE
+from .audio.models import AUDIO_RESOURCE_KINDS
 from .browser_selection import PRODUCT_DEFAULT_BROWSER
 from .media import KIND_NATIVE_APP, MAX_QUERY_LENGTH
 from .media import catalogue as media_catalogue
@@ -141,6 +168,26 @@ _OVERLAY_STATUS = {
     REJECT_WRITE_FAILED: 500,
 }
 
+# An audio request body is one number or one boolean. Two kilobytes is already
+# far more than that shape can need, and the body is refused on length before it
+# is parsed.
+MAX_AUDIO_BODY_BYTES = 2 * 1024
+
+# Refusal code -> HTTP status. A resource that is no longer there is 404; one
+# that changed underneath the request is 409, because retrying against a fresh
+# snapshot is exactly the right response; a request that was wrong is 422; a
+# capability this host does not have is 501, which distinguishes "not built" from
+# "temporarily broken".
+_AUDIO_STATUS = {
+    REJECT_AUDIO_UNKNOWN_RESOURCE: 404,
+    REJECT_RESOURCE_CHANGED: 409,
+    REJECT_GRAPH_CHANGED: 409,
+    REJECT_UNAVAILABLE: 503,
+    REJECT_INVALID_VOLUME: 422,
+    REJECT_INVALID_MUTE: 422,
+    REJECT_UNSUPPORTED: 501,
+}
+
 
 def _error_response(error: ApiError) -> JSONResponse:
     return JSONResponse(status_code=error.status_code, content=error.to_payload())
@@ -152,6 +199,7 @@ def create_app(
     adapter=None,
     inventory=None,
     media_search=None,
+    audio=None,
 ) -> FastAPI:
     """Build the application. Arguments are injectable for tests."""
     config = config or load_config()
@@ -168,6 +216,12 @@ def create_app(
     inventory = inventory or RuntimeInventoryService(
         adapter=adapter, registry_loader=lambda: load_registries(config)
     )
+    # The audio service gets the adapter for the same reason the inventory does:
+    # its launch table is what turns a kernel-verified process behind a playback
+    # stream into "this is Spotify". Without it every stream stays unclassified,
+    # which is a degradation and not a failure.
+    audio = audio or AudioInventoryService(adapter=adapter)
+    audio_actions = AudioActionExecutor(audio)
 
     def _on_event(event: str, record: ActionRecord) -> None:
         hub.broadcast_threadsafe(event, record.to_dict())
@@ -207,6 +261,8 @@ def create_app(
     app.state.executor = executor
     app.state.inventory = inventory
     app.state.media_search = media_search
+    app.state.audio = audio
+    app.state.audio_actions = audio_actions
     overlays = DisplayOverlayStore(config, inventory)
     app.state.display_overlays = overlays
 
@@ -611,6 +667,204 @@ def create_app(
             )
         store.record_overlay_event("overlay_removed", resource_id, "ok")
         return result
+
+    # -- audio (M2C: the first routes that change the physical machine) -------
+    #
+    # Reads are GET and change nothing. Changes are PUT, because each one sets a
+    # named property of a named resource to a supplied value — the shape PUT
+    # describes. There is no GET that mutates, and no mutation reachable without
+    # a body.
+
+    @app.get("/api/audio", dependencies=[Depends(require_token)])
+    async def audio_snapshot(refresh: bool = False) -> Dict[str, Any]:
+        """One observation of this machine's audio: outputs, streams, defaults.
+
+        Reading the graph shells out to ``pw-dump``, so it runs in a worker
+        thread rather than blocking the event loop.
+        """
+        snapshot = await run_in_threadpool(audio.snapshot, refresh)
+        return snapshot.to_dict()
+
+    @app.get("/api/audio/{resource_kind}", dependencies=[Depends(require_token)])
+    async def audio_collection(resource_kind: str, refresh: bool = False) -> Dict[str, Any]:
+        """One collection, served with the snapshot header it belongs to.
+
+        The header carries the graph identity, which is what tells a client
+        whether the resource ids it is holding still mean anything.
+        """
+        if resource_kind not in AUDIO_RESOURCE_KINDS:
+            raise ApiError(
+                code=CODE_NOT_FOUND,
+                message="unknown audio resource kind",
+                status_code=404,
+                detail="known kinds: " + ", ".join(AUDIO_RESOURCE_KINDS),
+            )
+        snapshot, collection = await run_in_threadpool(audio.collection, resource_kind, refresh)
+        return {
+            "version": snapshot.version,
+            "observed_at": snapshot.observed_at,
+            "host": dict(snapshot.host),
+            "boot": dict(snapshot.boot),
+            "graph": dict(snapshot.graph),
+            "backend": snapshot.backend,
+            "default_output_resource_id": snapshot.default_output_resource_id,
+            "collection": collection.to_dict(),
+        }
+
+    async def _audio_body(request: Request, allowed: set) -> Dict[str, Any]:
+        """Read a bounded JSON body, or refuse before parsing anything.
+
+        ``allowed`` is the complete set of acceptable keys for the route. A body
+        carrying anything else is refused rather than filtered: a request with a
+        ``node_id``, a ``command`` or a ``sink`` field is a client trying to
+        address the backend directly, and silently dropping it would teach that
+        client the attempt was fine.
+        """
+        content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if content_type != "application/json":
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="this endpoint accepts application/json only",
+                status_code=415,
+            )
+        declared = request.headers.get("content-length")
+        if declared is not None:
+            try:
+                too_big = int(declared) > MAX_AUDIO_BODY_BYTES
+            except ValueError:
+                raise ApiError(
+                    code=CODE_INVALID_PARAMS, message="invalid Content-Length", status_code=400
+                )
+            if too_big:
+                raise ApiError(
+                    code=CODE_INVALID_PARAMS,
+                    message="the request body is too large",
+                    status_code=413,
+                )
+        raw = await request.body()
+        # Checked again after reading: Content-Length is a claim, not a fact.
+        if len(raw) > MAX_AUDIO_BODY_BYTES:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS, message="the request body is too large", status_code=413
+            )
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="the request body is not valid JSON",
+                status_code=400,
+            )
+        if not isinstance(payload, dict):
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="the request body must be a JSON object",
+                status_code=400,
+            )
+        unexpected = sorted(set(payload) - allowed)
+        if unexpected:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="unexpected field: " + unexpected[0],
+                status_code=422,
+                detail="this endpoint accepts only: " + ", ".join(sorted(allowed))
+                if allowed
+                else "this endpoint accepts no fields",
+            )
+        return payload
+
+    async def _run_audio(name: str, operation, resource_id: str, *args) -> Dict[str, Any]:
+        """Run one audio action, auditing the outcome either way.
+
+        ``name`` is passed explicitly so a refused action — which never reaches
+        the executor's result envelope — is still audited under the operation
+        the user actually attempted.
+        """
+        try:
+            result = await run_in_threadpool(operation, resource_id, *args)
+        except AudioActionRejected as rejection:
+            store.record_audio_event(name, resource_id, rejection.code)
+            raise ApiError(
+                code=rejection.code,
+                message=rejection.message,
+                status_code=_AUDIO_STATUS.get(rejection.code, 422),
+                detail=rejection.detail,
+            )
+        # The audit records the *observed* outcome, not the fact that a command
+        # was issued: an action that ran and did not take effect is recorded as
+        # the failure it was.
+        outcome = result.get("outcome")
+        store.record_audio_event(
+            name,
+            resource_id,
+            "ok" if outcome == "applied" else str(outcome),
+            (result.get("output") or {}).get("device_type"),
+        )
+        return result
+
+    @app.put("/api/audio/outputs/{resource_id}/default", dependencies=[Depends(require_token)])
+    async def put_audio_default(resource_id: str, request: Request) -> Dict[str, Any]:
+        """Make one discovered output the default for new sound.
+
+        The body carries no fields — the resource is in the path and the
+        operation is the route. It is still read and validated so that a client
+        sending something is told, rather than having it quietly ignored.
+        """
+        await _audio_body(request, allowed=set())
+        return await _run_audio(
+            "set_default_audio_output", audio_actions.set_default_output, resource_id
+        )
+
+    @app.put("/api/audio/outputs/{resource_id}/volume", dependencies=[Depends(require_token)])
+    async def put_audio_volume(resource_id: str, request: Request) -> Dict[str, Any]:
+        """Set one output's volume, as a whole percentage from 0 to 100."""
+        payload = await _audio_body(request, allowed={"volume_percent"})
+        if "volume_percent" not in payload:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="volume_percent is required",
+                status_code=422,
+            )
+        return await _run_audio(
+            "set_output_volume",
+            audio_actions.set_output_volume,
+            resource_id,
+            payload["volume_percent"],
+        )
+
+    @app.put("/api/audio/outputs/{resource_id}/mute", dependencies=[Depends(require_token)])
+    async def put_audio_mute(resource_id: str, request: Request) -> Dict[str, Any]:
+        """Mute or unmute one output."""
+        payload = await _audio_body(request, allowed={"muted"})
+        if "muted" not in payload:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS, message="muted is required", status_code=422
+            )
+        return await _run_audio(
+            "set_output_mute", audio_actions.set_output_mute, resource_id, payload["muted"]
+        )
+
+    @app.put("/api/audio/streams/{resource_id}/output", dependencies=[Depends(require_token)])
+    async def put_audio_stream_output(resource_id: str, request: Request) -> Dict[str, Any]:
+        """Move a playing stream to another output — refused on this backend.
+
+        The route exists so the refusal is a documented ``501`` with a reason a
+        person can read, rather than a ``404`` that looks like a bug. See
+        :mod:`cofferdam.workstation.audio.actions` for why it is not implemented.
+        """
+        payload = await _audio_body(request, allowed={"output_resource_id"})
+        try:
+            return await run_in_threadpool(
+                audio_actions.move_stream, resource_id, payload.get("output_resource_id")
+            )
+        except AudioActionRejected as rejection:
+            store.record_audio_event("move_audio_stream", resource_id, rejection.code)
+            raise ApiError(
+                code=rejection.code,
+                message=rejection.message,
+                status_code=_AUDIO_STATUS.get(rejection.code, 422),
+                detail=rejection.detail,
+            )
 
     # -- live events ---------------------------------------------------------
 

@@ -76,6 +76,22 @@
       </div>
     </section>
 
+    <!-- Audio (M2C). Placed above Media on purpose: turning the volume down is
+         the thing someone reaches for their phone to do, and it should not be
+         below a list of services to open. This is the *system* output volume —
+         the same level the laptop's own volume keys change. A per-service
+         player volume is a different control and is not in this panel. -->
+    <section class="panel" id="audioPanel">
+      <div class="panel-head">
+        <h2>Audio</h2>
+        <div class="row tight">
+          <span class="muted" id="audioObserved"></span>
+          <button id="audioRefresh" class="ghost">Refresh</button>
+        </div>
+      </div>
+      <div id="audioSections"><p class="muted">Loading…</p></div>
+    </section>
+
     <!-- Media launch profiles (M2B3A). Deliberately its own panel and not part
          of "Live system": every card here is a *definition* — something
          Cofferdam can open — and none of them says anything about what is
@@ -140,6 +156,7 @@
 
 <div class="toasts" id="toasts" aria-live="polite"></div>
 <script src="/live.js"></script>
+<script src="/audio.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

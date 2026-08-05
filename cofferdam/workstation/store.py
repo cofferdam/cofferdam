@@ -112,6 +112,43 @@ class ActionStore:
             }
         )
 
+    def record_audio_event(
+        self,
+        operation: str,
+        resource_id: str | None,
+        result: str,
+        device_type: str | None = None,
+    ) -> None:
+        """Audit one audio action — applied, refused, or failed.
+
+        Bounded on purpose, and narrower than it could be. What gets recorded is
+        the operation, which resource it addressed, how it turned out, and the
+        coarse device category. What does not get recorded is anything about
+        *what was playing*: no stream titles, no application content, no
+        property dumps. The same reasoning as display-overlay auditing — this
+        log is read by the PWA, kept on disk, and shown beside everything else,
+        so it carries what an audit needs and nothing that would turn it into a
+        listening history.
+
+        Volume levels are also left out. Knowing that the volume was changed and
+        whether it worked is what makes this path auditable; a timestamped
+        record of exactly how loud someone had their speakers all evening adds
+        nothing to that and is a more personal trace than it first looks.
+        """
+        self.add(
+            {
+                "action_id": uuid.uuid4().hex,
+                "action": operation,
+                "status": "succeeded" if result == "ok" else "failed",
+                "started_at": _utc_now(),
+                "finished_at": _utc_now(),
+                "params": {"resource_id": resource_id},
+                "result": {"outcome": result, "device_type": device_type},
+                "error": None if result == "ok" else {"code": result},
+                "stub": False,
+            }
+        )
+
     def recent(self, limit: int = 20) -> List[dict]:
         with self._lock:
             return list(self._records[: max(0, limit)])
