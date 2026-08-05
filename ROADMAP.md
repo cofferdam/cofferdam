@@ -238,6 +238,26 @@ sees the host *and can make the host do things*.
     after discovery, or later through the desktop or mobile UI. A label is never the identity.
 - **Honest-empty rule:** a machine with no registry files stays fully working, and the UI shows
   empty/configuration states rather than sample data.
+- **"Available" is not "running" — the UI must say which it means.** Observed during PR #9's live
+  validation: the M2A card reads *Firefox available*, and that is true only in the definition
+  sense — the application is installed and launchable. It says nothing about whether Firefox is
+  running right now, and a reader can easily take it the other way. M2B must present these as
+  four distinct things and never let one stand in for another:
+  1. **application definition** — the concept exists and Cofferdam knows how to launch it;
+  2. **available to launch** — a definition whose executable was found on this host;
+  3. **running application instance** — an actual process, with verified PID **and** start time;
+  4. **current windows** — belonging to an instance.
+- **Display discovery behaviour** (approved; implement in this milestone):
+  - Discover **all currently connected displays** live, including the laptop panel and every
+    external display. Discovery is the source of truth; a registry entry never conjures one.
+  - Show each display's **real system/hardware identity first** — connector, model, resolution,
+    and an EDID-derived fingerprint where the system exposes them. Report only what was actually
+    read; absent fields stay absent rather than being guessed.
+  - Let the user **select a discovered display and add or edit a label/alias** for it, from the
+    desktop or mobile UI.
+  - The label is an **optional overlay layered on top of** the hardware identity. It never
+    replaces, renames, or becomes that identity, and removing it must leave the display fully
+    identified.
 - **Dependencies:** M2A (vocabulary and IDs). Blocks the useful parts of M2 and M3, and blocks
   named-display selection for Wayland capture.
 

@@ -206,9 +206,13 @@
       }
     } else if (name === "applications") {
       parts.push("adapter " + escapeHtml(item.adapter_key));
+      // "available" alone reads as "running" to anyone who has not read the
+      // three-layer model. This is a statement about the *definition* — the
+      // executable was found, so a launch would work. Whether an instance is
+      // running is runtime inventory, which does not exist yet.
       badges.push(availableApplications.indexOf(item.adapter_key) !== -1
-        ? badge("available", "ok")
-        : badge("not available here", "warn"));
+        ? badge("installed — can launch", "ok")
+        : badge("not installed here", "warn"));
     } else if (name === "browser_profiles") {
       var application = applicationById(item.application_id);
       parts.push("uses " + escapeHtml(application ? application.name : item.application_id));

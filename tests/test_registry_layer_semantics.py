@@ -336,6 +336,17 @@ class UserInterfaceHonestyTests(unittest.TestCase):
         self.assertIn("Browser launch preferences", self.app_js)
         self.assertIn("Application definitions", self.app_js)
 
+    def test_availability_badge_does_not_read_as_running(self) -> None:
+        """Raised during live validation: "available" was taken as "running".
+
+        The badge is a fact about the *definition* — the executable was found,
+        so a launch would work. Whether an instance is running is runtime
+        inventory, which does not exist yet, so the badge must not imply it.
+        """
+        self.assertIn("installed — can launch", self.app_js)
+        self.assertNotIn('badge("available"', self.app_js)
+        self.assertNotIn('badge("running"', self.app_js)
+
     def test_the_ui_never_pre_names_a_resource(self) -> None:
         combined = (self.app_js + self.index_html).lower()
         for banned in PRE_NAMED_RESOURCES:
