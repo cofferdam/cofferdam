@@ -61,6 +61,34 @@ MEDIA_ACTION_OPEN = "open"
 MEDIA_ACTION_SEARCH = "search"
 MEDIA_ACTIONS = (MEDIA_ACTION_OPEN, MEDIA_ACTION_SEARCH)
 
+# -- capabilities (M2B3A.1) --------------------------------------------------
+#
+# ``supported_actions`` says what the *catalogue* offers. Capabilities answer a
+# different question: what can this *host* do right now. Whether structured
+# search works depends on credentials that live outside the catalogue entirely,
+# and can change between two requests with no code change at all — so it cannot
+# be a constant on the provider, and it is computed per request instead.
+#
+# A closed vocabulary, so the phone can branch on exact names and an adapter
+# cannot invent a capability by returning a new string.
+CAPABILITY_OPEN_HOME = "open_home"
+CAPABILITY_OPEN_SEARCH_PAGE = "open_search_page"
+CAPABILITY_STRUCTURED_SEARCH = "structured_search"
+CAPABILITY_OPEN_SELECTED_RESULT = "open_selected_result"
+CAPABILITY_OPEN_FIRST_RESULT = "open_first_result"
+CAPABILITY_AUTO_OPEN_FIRST = "auto_open_first_supported"
+CAPABILITY_PLAYBACK_CONTROL = "playback_control"
+
+CAPABILITIES = (
+    CAPABILITY_OPEN_HOME,
+    CAPABILITY_OPEN_SEARCH_PAGE,
+    CAPABILITY_STRUCTURED_SEARCH,
+    CAPABILITY_OPEN_SELECTED_RESULT,
+    CAPABILITY_OPEN_FIRST_RESULT,
+    CAPABILITY_AUTO_OPEN_FIRST,
+    CAPABILITY_PLAYBACK_CONTROL,
+)
+
 # How a built target must be handed to the host.
 TARGET_URL = "url"
 TARGET_APPLICATION_URI = "application_uri"
@@ -193,11 +221,54 @@ class MediaProvider:
     _search_builder: Optional[Callable[[str], str]] = None
     _search_target_kind: Optional[str] = None
     search_unavailable_reason: Optional[str] = None
+    # M2B3A.1. Names the official-provider adapter that can return real results
+    # for this provider, or ``None`` where no official interface is used. It is
+    # a *key*, not an adapter instance: the catalogue stays a plain data
+    # structure with no network machinery hanging off it, and the service maps
+    # the key to a built adapter. Netflix, Prime Video and TV+ leave it ``None``
+    # and therefore cannot acquire structured search by accident.
+    structured_search_key: Optional[str] = None
 
     # -- questions the rest of the product asks -----------------------------
 
     def supports(self, action: str) -> bool:
         return action in self.supported_actions
+
+    @property
+    def offers_structured_search(self) -> bool:
+        """Whether an official adapter exists — *not* whether it is usable.
+
+        Usability additionally requires credentials, which is a host fact
+        rather than a catalogue fact. See :meth:`capabilities`.
+        """
+        return self.structured_search_key is not None
+
+    def capabilities(self, *, structured_search_configured: bool = False) -> Dict[str, bool]:
+        """What this host can do with this provider, right now.
+
+        ``structured_search_configured`` is supplied by the caller from the
+        credential store. Everything downstream of structured search —
+        selecting a result, opening the first one — is gated on the same fact,
+        because without results there is nothing to select.
+
+        ``playback_control`` is present and ``False`` for every provider. Saying
+        it explicitly is the point: a missing key reads as "not implemented
+        yet", while an explicit ``False`` is a statement that this build does
+        not do it.
+        """
+        usable = self.offers_structured_search and structured_search_configured
+        return {
+            CAPABILITY_OPEN_HOME: True,
+            CAPABILITY_OPEN_SEARCH_PAGE: self.supports(MEDIA_ACTION_SEARCH),
+            CAPABILITY_STRUCTURED_SEARCH: usable,
+            CAPABILITY_OPEN_SELECTED_RESULT: usable,
+            CAPABILITY_OPEN_FIRST_RESULT: usable,
+            # Deferred in M2B3A.1: only the explicit button ships. Reported as
+            # a capability so the phone need not guess, and so turning it on
+            # later is a change to one value rather than a new vocabulary.
+            CAPABILITY_AUTO_OPEN_FIRST: False,
+            CAPABILITY_PLAYBACK_CONTROL: False,
+        }
 
     @property
     def requires_browser(self) -> bool:
@@ -228,7 +299,7 @@ class MediaProvider:
             application_key=self.application_key,
         )
 
-    def to_dict(self) -> Dict[str, object]:
+    def to_dict(self, *, structured_search_configured: bool = False) -> Dict[str, object]:
         """The catalogue as the phone sees it.
 
         Deliberately carries **no** URL template, no query-parameter name, and
@@ -236,11 +307,25 @@ class MediaProvider:
         no vocabulary for anything else. ``home_url`` is included because it is
         a constant destination a person may reasonably want to read, not a
         template anything can fill in.
+
+        Since M2B3A.1 it also carries ``capabilities``. Note what is *not* here:
+        no credential value, no credential path, no key prefix, no adapter
+        internals. ``structured_search_configured`` arrives as a bare boolean
+        that the credential store derived; this method never sees a secret.
         """
         return {
             "id": self.id,
             "name": self.name,
             "kind": self.kind,
+            "capabilities": self.capabilities(
+                structured_search_configured=structured_search_configured
+            ),
+            # Whether an official adapter exists *at all*, independent of
+            # credentials. The phone needs both facts to say the right thing:
+            # "not configured yet" belongs only to a provider that could be
+            # configured, and Netflix/Prime/TV+ must never be offered a setup
+            # hint for a feature this build was never going to give them.
+            "offers_structured_search": self.offers_structured_search,
             "supported_actions": list(self.supported_actions),
             "requires_browser": self.requires_browser,
             "browser_key": self.browser_key,
@@ -272,7 +357,13 @@ MEDIA_PROVIDERS: Tuple[MediaProvider, ...] = (
         # trick. No account, token, or Web API call is involved.
         _search_builder=_spotify_search,
         _search_target_kind=TARGET_APPLICATION_URI,
+        # M2B3A.1: official Web API catalogue search, when credentials exist.
+        # The client-credentials flow it uses reaches only non-user endpoints,
+        # so this adapter *cannot* control playback even in principle.
+        structured_search_key="spotify",
         limitations=(
+            "Find results uses Spotify's official catalogue search. Picking one opens that exact "
+            "item in the Spotify app — it does not start playing it.",
             "Search opens Spotify's own search results for your words. "
             "It does not pick a track and it does not start playing anything.",
             "Playback control needs Spotify account consent and is not part of this build.",
@@ -287,9 +378,14 @@ MEDIA_PROVIDERS: Tuple[MediaProvider, ...] = (
         supported_actions=(MEDIA_ACTION_OPEN, MEDIA_ACTION_SEARCH),
         _search_builder=_youtube_search,
         _search_target_kind=TARGET_URL,
+        # M2B3A.1: official Data API v3 video search, when an API key exists.
+        structured_search_key="youtube",
         limitations=(
+            "Find results uses YouTube's official search API. Picking one opens that exact video "
+            "in Opera — it does not start playing it.",
             "Search opens the YouTube results page for your words. "
             "It does not open the first result and it does not start a video.",
+            "The official API allows roughly 100 searches a day by default.",
         ),
     ),
     MediaProvider(
@@ -363,9 +459,18 @@ def get_provider(provider_id: object) -> MediaProvider:
     )
 
 
-def catalogue() -> Tuple[Dict[str, object], ...]:
-    """The whole catalogue, in declaration order, as plain dictionaries."""
-    return tuple(provider.to_dict() for provider in MEDIA_PROVIDERS)
+def catalogue(configured_providers: Tuple[str, ...] = ()) -> Tuple[Dict[str, object], ...]:
+    """The whole catalogue, in declaration order, as plain dictionaries.
+
+    ``configured_providers`` lists the ids whose official-search credentials the
+    credential store reports as usable. It is a tuple of *ids* rather than
+    anything credential-shaped, so no secret can reach this function even by
+    accident.
+    """
+    return tuple(
+        provider.to_dict(structured_search_configured=provider.id in configured_providers)
+        for provider in MEDIA_PROVIDERS
+    )
 
 
 __all__ = [

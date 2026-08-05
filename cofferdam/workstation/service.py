@@ -13,8 +13,11 @@ route                                        auth  purpose
 ``POST /api/actions/open-application``       yes   convenience: open_application
 ``POST /api/actions/open-url``               yes   convenience: open_url
 ``GET  /api/media/providers``                yes   media catalogue + availability
+``GET  /api/media/diagnostics``              yes   provider credential *status words*
 ``POST /api/actions/open-media-provider``    yes   convenience: open_media_provider
 ``POST /api/actions/search-media-provider``  yes   convenience: search_media_provider
+``POST /api/media/providers/{id}/results/search``          yes  official catalogue search
+``POST /api/media/searches/{sid}/results/{rid}/open``      yes  open a resolved result
 ``GET  /api/screenshots/{action_id}``        yes   PNG artifact
 ``GET  /api/registries``                     yes   registry load/validation status
 ``GET  /api/registries/{registry_name}``     yes   one validated registry
@@ -65,8 +68,10 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from . import WORKSTATION_API_VERSION
 from .actions import (
+    ACTION_FIND_MEDIA_RESULTS,
     ACTION_OPEN_APPLICATION,
     ACTION_OPEN_MEDIA_PROVIDER,
+    ACTION_OPEN_MEDIA_RESULT,
     ACTION_OPEN_URL,
     ACTION_SEARCH_MEDIA_PROVIDER,
     ACTION_TAKE_SCREENSHOT,
@@ -80,6 +85,9 @@ from .adapters import select_adapter
 from .browser_selection import PRODUCT_DEFAULT_BROWSER
 from .media import KIND_NATIVE_APP, MAX_QUERY_LENGTH
 from .media import catalogue as media_catalogue
+from .mediasearch.results import MAX_RESULTS, MEDIA_RESULT_MODEL_VERSION
+from .mediasearch.service import MediaSearchService
+from .mediasearch.sessions import SEARCH_SESSION_TTL_SECONDS
 from .config import Config, load_config, load_or_create_token
 from .errors import (
     CODE_CONFIGURATION_INVALID,
@@ -143,6 +151,7 @@ def create_app(
     token: Optional[str] = None,
     adapter=None,
     inventory=None,
+    media_search=None,
 ) -> FastAPI:
     """Build the application. Arguments are injectable for tests."""
     config = config or load_config()
@@ -163,7 +172,14 @@ def create_app(
     def _on_event(event: str, record: ActionRecord) -> None:
         hub.broadcast_threadsafe(event, record.to_dict())
 
-    executor = ActionExecutor(adapter, store, config, on_event=_on_event)
+    # M2B3A.1. One instance per service, so its search sessions outlive a single
+    # request and die with the process — which is the intended lifetime, since a
+    # session is a short-lived memory of what someone was looking for.
+    media_search = media_search or MediaSearchService(config)
+
+    executor = ActionExecutor(
+        adapter, store, config, on_event=_on_event, media_search=media_search
+    )
 
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -190,6 +206,7 @@ def create_app(
     app.state.hub = hub
     app.state.executor = executor
     app.state.inventory = inventory
+    app.state.media_search = media_search
     overlays = DisplayOverlayStore(config, inventory)
     app.state.display_overlays = overlays
 
@@ -300,8 +317,12 @@ def create_app(
         playing. Running instances are runtime inventory, and this is not that.
         """
         applications = await run_in_threadpool(adapter.available_applications)
+        # M2B3A.1. Reading the credential *file* is I/O, so it runs off the
+        # event loop. What comes back is a tuple of provider ids — never a
+        # credential, not even briefly, and not even inside this closure.
+        configured = await run_in_threadpool(media_search.configured_providers)
         providers = []
-        for entry in media_catalogue():
+        for entry in media_catalogue(configured):
             needed = entry["application_key"] if entry["kind"] == KIND_NATIVE_APP else entry["browser_key"]
             available = needed in applications
             providers.append(
@@ -311,13 +332,33 @@ def create_app(
                     unavailable_reason=None
                     if available
                     else f"{needed} is not installed on this host, or cannot be launched from this session",
+                    # A separate axis from ``available``: Spotify can be
+                    # perfectly launchable while its official search is not set
+                    # up, and the phone must say those two things differently.
+                    structured_search_configured=entry["id"] in configured,
                 )
             )
         return {
             "default_browser": PRODUCT_DEFAULT_BROWSER,
             "max_query_length": MAX_QUERY_LENGTH,
+            "max_results": MAX_RESULTS,
+            "result_model_version": MEDIA_RESULT_MODEL_VERSION,
+            "search_session_ttl_seconds": SEARCH_SESSION_TTL_SECONDS,
             "providers": providers,
         }
+
+    @app.get("/api/media/diagnostics", dependencies=[Depends(require_token)])
+    async def media_diagnostics() -> Dict[str, Any]:
+        """Whether each provider's official search is configured — and no more.
+
+        One status word per provider from a closed vocabulary
+        (``configured``/``missing``/``invalid``/…). It deliberately does **not**
+        return, and has no way to return, a credential value, a prefix, a
+        length, a hash, or the path of the credential file. The setup
+        documentation names that path; an API response is not the place to
+        publish a host's filesystem layout.
+        """
+        return await run_in_threadpool(media_search.diagnostics)
 
     @app.post("/api/actions/open-media-provider", dependencies=[Depends(require_token)])
     async def run_open_media_provider(params: Dict[str, Any]) -> JSONResponse:
@@ -326,6 +367,47 @@ def create_app(
     @app.post("/api/actions/search-media-provider", dependencies=[Depends(require_token)])
     async def run_search_media_provider(params: Dict[str, Any]) -> JSONResponse:
         return await _run(ACTION_SEARCH_MEDIA_PROVIDER, params)
+
+    # -- official-provider results (M2B3A.1) ---------------------------------
+    #
+    # Two routes, shaped so the client never names a destination. Search takes a
+    # provider and a phrase; open takes a search id and a result id, both issued
+    # by this server. No route here accepts a URL, a URI, or a video id.
+
+    @app.post(
+        "/api/media/providers/{provider_id}/results/search",
+        dependencies=[Depends(require_token)],
+    )
+    async def find_media_results(provider_id: str, params: Dict[str, Any]) -> JSONResponse:
+        # The path segment is merged into the typed params rather than trusted
+        # on its own: it still goes through the same allowlist validator as
+        # every other provider id in the product.
+        body = dict(params or {})
+        body["provider_id"] = provider_id
+        return await _run(ACTION_FIND_MEDIA_RESULTS, body)
+
+    @app.post(
+        "/api/media/searches/{search_id}/results/{result_id}/open",
+        dependencies=[Depends(require_token)],
+    )
+    async def open_media_result(
+        search_id: str, result_id: str, params: Dict[str, Any]
+    ) -> JSONResponse:
+        """Open one result, resolved by the server from its own search session.
+
+        ``result_id`` may be the literal ``first`` to take index 0 — the
+        explicit "Open first result" action. That spelling exists so the intent
+        is visible in the request line, and it is translated into the typed
+        ``open_first`` flag rather than smuggled through as a result id.
+        """
+        body = dict(params or {})
+        body["search_id"] = search_id
+        if result_id == "first":
+            body["open_first"] = True
+            body.pop("result_id", None)
+        else:
+            body["result_id"] = result_id
+        return await _run(ACTION_OPEN_MEDIA_RESULT, body)
 
     @app.get("/api/screenshots/{action_id}", dependencies=[Depends(require_token)])
     async def get_screenshot(action_id: str) -> Response:

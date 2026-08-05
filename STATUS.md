@@ -1,7 +1,7 @@
 # Status
 
-Accurate as of **2026-08-05** (M2B runtime inventory foundation and M2B3A media launch profiles,
-[`DECISIONS.md`](DECISIONS.md) D-2026-08-05-2 … -6). Update this file when a category changes, not
+Accurate as of **2026-08-05** (M2B runtime inventory, M2B3A media launch profiles, and M2B3A.1
+official-provider result selection, [`DECISIONS.md`](DECISIONS.md) D-2026-08-05-2 … -8). Update this file when a category changes, not
 on every commit.
 
 ## Merged (on `main`)
@@ -284,8 +284,38 @@ logic; the gate stays open and unaffected, and no M2A document may describe M1 a
   **The M2B validation gap above is inherited unchanged.** M2B3A alters no graphical-session
   lifecycle behaviour and does not close it.
 
+### M2B3A.1 — official-provider search and result selection
+
+- **M2B3A.1 — real results you can pick from, for Spotify and YouTube.** On branch
+  `feat/m2b3a1-media-result-selection`, not merged. Official catalogue search through the Spotify
+  Web API and the YouTube Data API v3, as `cofferdam/workstation/mediasearch/` — credentials,
+  transport, per-provider adapters, a versioned result model, and bounded search sessions. Two typed
+  actions (`find_media_results`, `open_media_result`), two routes under `/api/media/`, a
+  status-word-only `/api/media/diagnostics`, and result cards in the PWA.
+
+  **The client never names a destination:** search returns opaque handles, and the server
+  re-resolves a chosen result from its own bounded session and rebuilds the launch target itself.
+  **Credentials never leave the host** — a 0600 file beside the device token, no PWA form, and
+  status words as the entire diagnostic surface. **Nothing claims playback**, and Spotify playback
+  control is unreachable by construction rather than by restraint.
+
+  Netflix, Prime Video and TV+ are unchanged and structurally cannot gain structured search.
+
+  1,191 tests pass on both CI paths (1,095 before this branch), including six mutation checks that
+  prove the safety guards are load-bearing. One real defect was found by driving the PWA rather than
+  the API — the phone omitted `provider_id` on open, so every selection failed while every unit test
+  passed — and it now has a regression test exercising the client's exact payload.
+
+  **Provider credentials are not configured on this host yet**, so the live provider validation in
+  [`docs/MEDIA_RESULTS.md`](docs/MEDIA_RESULTS.md) is still outstanding; the unconfigured path was
+  verified end to end instead.
+
+  **Not in this milestone:** Netflix/Prime/TV+ result parsing, Opera Companion, DOM automation,
+  Spotify playback or device control, a persistent auto-open-first preference, M2B3B, Agent Task
+  Core.
+
 **M2B does not change the M1 reboot gate.** It alters no boot behaviour, no systemd unit, and no
-bind logic. Neither does M2B3A.
+bind logic. Neither does M2B3A or M2B3A.1.
 
 ## Planned (active roadmap — see [`ROADMAP.md`](ROADMAP.md))
 
