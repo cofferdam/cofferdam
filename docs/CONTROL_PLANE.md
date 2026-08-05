@@ -153,7 +153,11 @@ Recorded before the inventory existed, and **implemented in M2B** except where n
   implemented; M2B discovers a browser as one application instance and says nothing about tabs.*
 - **User labels are overlays.** They may be attached when a resource is first discovered, or at
   any time later, and a resource without a label is completely normal. M2B *resolves* existing
-  overlays onto discovered displays; *editing* them is M2B2.
+  overlays onto discovered displays; *editing* them from the PWA is M2B2, via
+  `PUT`/`DELETE /api/runtime/displays/{resource_id}/overlay` — see
+  [`RUNTIME_INVENTORY.md`](RUNTIME_INVENTORY.md). The client addresses a runtime
+  resource; the server derives the persistent key. Application-instance labels
+  remain future work: their identity is boot-scoped.
 
 ## How Cofferdam is allowed to talk to the system
 

@@ -13,10 +13,16 @@ import json
 import os
 import tempfile
 import threading
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
 
 from .config import Config
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 class ActionStore:
@@ -78,6 +84,33 @@ class ActionStore:
                 self._records.insert(0, record)
                 del self._records[self._config.max_action_records :]
             self._write_locked()
+
+    def record_overlay_event(self, operation: str, resource_id: str, result: str) -> None:
+        """Audit one display-overlay write, successful or refused.
+
+        Deliberately **without the label or the aliases**. They are the user's
+        own words about their own home — "Büyük monitör", "Laptop ekranı" — and
+        the action log is a broad surface: it is read by the PWA, kept on disk,
+        and shown in a list beside everything else. Recording that a name was
+        set, for which resource, and whether it worked is enough to audit the
+        write path; recording *what* the name is would put personal content into
+        a general-purpose log for no investigative gain.
+
+        The resource id is a host-scoped digest, not a serial number or an EDID.
+        """
+        self.add(
+            {
+                "action_id": uuid.uuid4().hex,
+                "action": operation,
+                "status": "succeeded" if result == "ok" else "failed",
+                "started_at": _utc_now(),
+                "finished_at": _utc_now(),
+                "params": {"resource_id": resource_id},
+                "result": {"outcome": result},
+                "error": None if result == "ok" else {"code": result},
+                "stub": False,
+            }
+        )
 
     def recent(self, limit: int = 20) -> List[dict]:
         with self._lock:

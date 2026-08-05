@@ -28,12 +28,15 @@ as it was. A failed write never destroys the previous configuration.
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import json
 import os
 import stat
 import tempfile
+import time
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 from .common import SUPPORTED_VERSION
 
@@ -98,4 +101,77 @@ def _fsync_directory(directory: Path) -> None:
         os.close(fd)
 
 
-__all__ = ["FILE_MODE", "registry_document", "write_json_atomic"]
+class RegistryLockTimeout(RuntimeError):
+    """Another writer held the registry lock for too long."""
+
+
+# How long a writer waits for the lock before giving up. A registry write is a
+# few kilobytes and a rename; anything slower than this is a stuck process, and
+# an API request must fail with a real error rather than hang the event loop.
+LOCK_TIMEOUT_SECONDS = 5.0
+LOCK_POLL_SECONDS = 0.05
+
+
+@contextlib.contextmanager
+def registry_lock(path: Path, timeout: float = LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
+    """Serialize read-modify-write cycles on one registry file.
+
+    ``write_json_atomic`` alone makes a write all-or-nothing, which is enough
+    for a single writer. It is *not* enough for the M2B2 edit flow, which is
+    read-modify-write: two overlay saves arriving together would both read the
+    old file, and the second ``os.replace`` would silently discard the first
+    user's change. No corruption, but a lost update — which is worse, because
+    nothing reports it.
+
+    An adjacent ``.lock`` file is used rather than the registry itself, so the
+    lock is never held on a file that is about to be replaced by rename. The
+    lock file is created once and left in place; its existence carries no
+    meaning and its content is never read.
+
+    Advisory locks are unsupported on some filesystems. Rather than pretend,
+    this degrades to no locking and says so once, matching how the Trust Core
+    approval store already handles the same limitation.
+    """
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - POSIX only in this product
+        yield
+        return
+
+    lock_path = Path(str(path) + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as error:
+                if error.errno in (errno.EACCES, errno.EAGAIN):
+                    if time.monotonic() >= deadline:
+                        raise RegistryLockTimeout(
+                            "another write to this registry is still in progress"
+                        ) from error
+                    time.sleep(LOCK_POLL_SECONDS)
+                    continue
+                # Locking genuinely unsupported here: proceed unlocked rather
+                # than refuse every write on such a filesystem.
+                break
+        try:
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+__all__ = [
+    "FILE_MODE",
+    "LOCK_TIMEOUT_SECONDS",
+    "RegistryLockTimeout",
+    "registry_document",
+    "registry_lock",
+    "write_json_atomic",
+]

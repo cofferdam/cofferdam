@@ -242,7 +242,23 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .
 }
 .capability-row summary::-webkit-details-marker { display: none; }
 
+/* Display naming (M2B2). Inline in the expanded card rather than a modal: a
+   drawer over a phone screen would cover the card being named. */
+.name-actions { margin: 10px 0 0; }
+.name-form { margin: 10px 0 0; display: grid; gap: 8px; }
+.name-form .field { display: grid; gap: 4px; }
+.name-form input { width: 100%; min-width: 0; box-sizing: border-box; }
+.name-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+.name-error {
+  margin: 0; padding: 8px 10px; border-radius: 8px; font-size: 13px; line-height: 1.4;
+  background: rgba(224, 92, 92, .15); border: 1px solid var(--err); color: #f0b0b0;
+}
+.name-note { margin: 10px 0 0; }
+button.danger { color: var(--err); }
+
 @media (max-width: 420px) {
+  .name-buttons { flex-direction: column; }
+  .name-buttons button { width: 100%; }
   .fact { grid-template-columns: 1fr; gap: 2px; }
   .proc-meta { margin-left: 0; }
   .proc-filters { flex-direction: column; }

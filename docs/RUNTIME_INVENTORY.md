@@ -372,20 +372,135 @@ displays, no overlay is applied and `overlay_skipped` records why.
 
 A broken or missing registry yields no overlays and no error. An unlabelled display is complete.
 
-### What M2B2 adds
+### Naming a display (M2B2)
 
-Label and alias **editing**, which this milestone does not have:
+The first write path Cofferdam exposes to the network. Everything else under `/api/runtime` still
+observes only.
 
-1. the user selects a discovered card in the PWA or desktop client;
-2. they add or edit a label and aliases;
-3. the overlay is written atomically, keyed by the resource's **stable** identity — the EDID
-   fingerprint for a display — through the existing `write_json_atomic`;
-4. the resource keeps its system identity; the label is layered on it;
-5. a display later disconnected still has its overlay and stays distinguishable from a connected
-   one, because the overlay is keyed to the panel rather than to the connector it was in.
+```
+PUT    /api/runtime/displays/{resource_id}/overlay    {"label": "...", "aliases": [...]}
+DELETE /api/runtime/displays/{resource_id}/overlay
+```
 
-Every discovered resource already carries an `overlay` field and a stable `resource_id`, so that
-flow needs no change to the identity model.
+Both require the device token. There is no `GET` on the overlay path — the overlay is served as a
+field of the display itself, so there is nothing extra to fetch.
+
+**The client addresses a runtime resource and nothing else.** A request carries a `resource_id`, a
+label, and aliases. It carries no EDID digest, no registry name, no file path, and no overlay id —
+those fields are not validated-and-rejected, they are absent from the schema, and a body
+containing any of them is refused with 422. The server takes a **fresh** snapshot (bypassing the
+few-second read cache), finds that resource, and derives the persistent key itself. A caller
+cannot choose where its label is stored, so it cannot choose someone else's.
+
+#### Which displays may be named
+
+| Identity | May be named | Key |
+|---|---|---|
+| EDID reported | yes | host-scoped EDID digest |
+| no EDID, but complete manufacturer + model + serial | yes | that triple |
+| connector only (`stability: weak`) | **no** | — |
+| two connected displays sharing either identity | **no** | — |
+
+A weak identity is **refused**, not stored with a warning. This is the stricter of the two options
+the milestone allowed, and it is chosen for consistency: the read side already refuses to match on
+a connector hint, so a weak overlay could be written and would then never resolve. Storing
+something that cannot work — and warning about it — is a worse lie than declining. `HDMI-1` is a
+socket, not a monitor; a name kept against one would move to whatever is plugged in there next.
+
+Ambiguity fails closed on both sides. Two panels with byte-identical EDID — genuinely common with
+two of the same model whose firmware publishes no serial — can be told apart on screen (discovery
+appends the connector to the resource id) but not durably, so neither may be named.
+
+#### What is stored, and what is not
+
+An overlay entry holds only user-owned metadata plus the evidence needed to find the panel again:
+
+```json
+{"id": "...", "device_id": "...", "name": "Büyük monitör", "aliases": ["harici ekran"],
+ "enabled": true, "match": {"edid_sha256": "...", "manufacturer": "...", "model": "...",
+ "serial": "...", "connector_hint": "HDMI-1"}}
+```
+
+It stores **no** resolution, position, scale, primary flag, connected flag, or `resource_id`.
+Those change while the label does not, and a stored copy would be a second, staler source of truth
+for something discovery already owns. `connector_hint` is written for a human reading the file by
+hand and is never used to resolve.
+
+Because the key is the panel, a label follows its monitor across a reboot, a cable moved to
+another port, and a connector renumber — and does **not** follow the socket to a different monitor.
+
+#### Validation
+
+Repository conventions rather than new numbers: label and aliases at most 120 characters, at most
+24 aliases, at most 200 entries in the registry, request body capped at 8 KiB, `application/json`
+only. Text is NFC-normalized, trimmed, internal whitespace collapsed, and control and format
+characters (Unicode `Cc`/`Cf`) refused — the latter because invisible characters let two different
+strings render identically.
+
+Duplicate aliases are detected with the registry's existing Turkish-aware `normalize_alias`, so
+`Büyük monitör`, `büyük monitör` and `BÜYÜK MONİTÖR` are one alias, and `IŞIK` matches `ışık`
+where a naive `lower()` would not. **The first spelling the user wrote is the one kept**:
+normalization decides equality, never presentation. An alias — or a label — already used by a
+*different* display overlay is refused, because a phrase pointing at two displays makes both
+unaddressable.
+
+#### Durability and concurrency
+
+The order is the property:
+
+1. fresh snapshot, so the identity is verified at the moment of the write;
+2. validate label and aliases;
+3. derive the key; refuse weak or ambiguous identity;
+4. take an advisory `flock` on an adjacent `.lock` file, then re-read the registry **inside** it;
+5. validate the exact document about to be written, using the loader's own envelope check and
+   item parsers;
+6. `write_json_atomic`;
+7. re-read, and only then respond.
+
+Step 4 exists because this is a read-modify-write: `write_json_atomic` alone makes a single write
+all-or-nothing, but two saves arriving together would both read the old file and the second rename
+would silently discard the first — no corruption, a lost update, and nothing reporting it. Step 5
+exists so a rejected edit cannot become a registry that fails to load at next start. Step 7 means
+the response is an observation, not an echo of the request.
+
+A failed write leaves the previous file byte-identical and returns a real error. Nothing reports
+success it has not earned.
+
+`DELETE` is **not idempotent**: removing a name from a display that has none returns 404
+`not_labelled`. That matches the repository's convention that a refusal names its reason, and a
+cheerful 200 would most often mask the likelier cause — the user is looking at a different display
+than they think.
+
+#### Stale overlays
+
+An overlay for a monitor that is currently unplugged stays in the registry and is simply not
+resolved. It never manufactures a display: a disconnected panel appears in no collection, and the
+count reflects what is connected. Plug it back in and the name returns.
+
+#### Privacy and audit
+
+Every overlay write — created, updated, removed, rejected, failed — is recorded as a bounded
+action record: timestamp, operation, `resource_id`, and outcome or refusal code.
+
+The label and aliases are deliberately **not** in that record. They are the user's own words about
+their own home, and the action log is a broad surface: served to the PWA, kept on disk, listed
+beside everything else. Knowing that a name was set, for which resource, and whether it worked is
+enough to audit the write path; storing *what* the name is would put personal content into a
+general-purpose log for no investigative gain. Tokens, authorization headers, raw EDID bytes and
+registry file contents are never logged.
+
+#### Still future work
+
+**Application-instance labels.** An application instance is identified by PID plus start time,
+which is boot-scoped by construction — a label attached to one could not survive the restart that
+makes a label worth having. That needs a Cofferdam-owned session identity, which is a later
+milestone. Process and window labels are out for the same reason, plus the control-surface rules
+they would need.
+
+**Binding a daemon to its own device entry.** A display overlay must reference a device. With
+exactly one device registered, that one is used; with none or several, the write is refused with a
+clear reason rather than guessed. Nothing in this build tells the daemon which registered device
+it is running on.
 
 ---
 
