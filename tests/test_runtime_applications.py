@@ -164,19 +164,63 @@ class DefinitionIsNotAnInstanceTests(ApplicationTestCase):
 
 
 class LaunchedOutsideCofferdamTests(ApplicationTestCase):
-    """(10) An application launched outside Cofferdam may still be discovered."""
+    """(10) An application launched outside Cofferdam may still be discovered.
 
-    def test_a_gnome_launched_application_is_discovered(self) -> None:
+    Launch attribution is three-valued. The rule under test throughout is that
+    the absence of Cofferdam's transient unit is never by itself evidence that
+    something else performed the launch.
+    """
+
+    def test_a_snap_launch_is_unattributable_not_external(self) -> None:
         self.add_opera(3)
         collection, _ = self.collect()
         instance = collection.items[0]
 
-        self.assertFalse(
-            instance["launched_by_cofferdam"],
-            "Opera was launched from the desktop, not by us",
+        self.assertEqual(
+            instance["launch_source"], "unknown",
+            "a snap scope is equally consistent with either launcher",
         )
         self.assertEqual(instance["unit_kind"], "snap")
         self.assertEqual(instance["state"], "running")
+
+    def test_a_gnome_launched_application_is_confirmed_external(self) -> None:
+        """``app-gnome-`` is positive evidence: the shell named itself."""
+        self.proc.add(
+            5880, comm="update-notifier", ppid=5664, start_ticks=3989,
+            cgroup=app_scope("app-gnome-update\\x2dnotifier-5880.scope"),
+            executable="/usr/bin/update-notifier",
+        )
+        collection, _ = self.collect()
+
+        self.assertEqual(collection.items[0]["launch_source"], "confirmed_external")
+
+    def test_a_cofferdam_started_snap_is_unknown_after_reparenting(self) -> None:
+        """Regression for the live-validation finding of 2026-08-05.
+
+        Cofferdam launched Firefox through ``open_application``; snapd moved it
+        out of ``cofferdam-app-<hex>.service`` into
+        ``snap.firefox.firefox-<uuid>.scope`` before the first scan. The old
+        boolean reported ``launched_by_cofferdam: false`` — a statement that
+        something else had launched it, which was untrue.
+
+        The only honest answer once the evidence is gone is ``unknown``, and it
+        must specifically not be ``confirmed_external``.
+        """
+        self.proc.add(
+            30041, comm="firefox", ppid=2446, start_ticks=715790,
+            cgroup=app_scope(
+                "snap.firefox.firefox-e914192c-b83f-4d6b-8e17-b96f7bbc045e.scope"
+            ),
+            executable="/snap/firefox/8107/usr/lib/firefox/firefox",
+        )
+        collection, _ = self.collect()
+        instance = collection.items[0]
+
+        self.assertEqual(instance["launch_source"], "unknown")
+        self.assertNotIn(
+            "launched_by_cofferdam", instance,
+            "the boolean model was removed; it could not express this case",
+        )
 
     def test_a_cofferdam_launched_application_is_marked_as_ours(self) -> None:
         self.proc.add(
@@ -187,7 +231,7 @@ class LaunchedOutsideCofferdamTests(ApplicationTestCase):
         collection, _ = self.collect()
         instance = collection.items[0]
 
-        self.assertTrue(instance["launched_by_cofferdam"])
+        self.assertEqual(instance["launch_source"], "confirmed_cofferdam")
         self.assertEqual(instance["unit_kind"], "cofferdam")
 
     def test_one_gnome_launch_producing_two_scopes_is_one_instance(self) -> None:

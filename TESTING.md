@@ -251,7 +251,10 @@ symlink semantics differ between them.
     a second independent launch is a second one; the instance root is chosen by ancestry, not by
     start order; one GNOME launch producing two scopes is one instance while two different
     applications are not merged; Firefox being an available definition produces no instance until
-    a Firefox process exists; an application launched outside Cofferdam is discovered; a process
+    a Firefox process exists; an application launched outside Cofferdam is discovered; launch
+    attribution is three-valued — a GNOME scope is `confirmed_external`, our own transient unit is
+    `confirmed_cofferdam`, and a **Cofferdam-started snap that snapd re-parented into a snap scope
+    is `unknown`, not falsely external** (regression for the 2026-08-05 live finding); a process
     named `operator` is not matched to `opera`, and a bundled helper called `chromium` does not
     make its host application claim to be Chromium; a shared `dbus.service` and an app-slice
     `.service` are not instance boundaries.

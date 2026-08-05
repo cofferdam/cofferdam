@@ -100,6 +100,31 @@ _APP_SCOPE = re.compile(r"^app-(?:(?P<launcher>[^-]+)-)?(?P<app>.+)-(?P<disc>[^-
 # ``snap.<package>.<app>-<uuid>.scope``
 _SNAP_SCOPE = re.compile(r"^snap\.(?P<package>[^.]+)\.(?P<app>[^-]+)-(?P<disc>.+)\.scope$")
 
+# How the launch of an instance can be attributed — on evidence, never on the
+# absence of it.
+#
+# The earlier model was a boolean, ``launched_by_cofferdam``, and live
+# validation caught it being wrong: snapd re-parents a snap launch out of our
+# ``cofferdam-app-<hex>.service`` into its own ``snap.<pkg>.<app>-<uuid>.scope``
+# before the first scan, so a Firefox that Cofferdam *had* just started was
+# reported ``false``. "We cannot prove we started this" and "something else
+# started this" are different claims, and only the first was true.
+#
+# Hence three states, with ``unknown`` a real answer rather than a placeholder.
+LAUNCH_SOURCE_COFFERDAM = "confirmed_cofferdam"
+LAUNCH_SOURCE_EXTERNAL = "confirmed_external"
+LAUNCH_SOURCE_UNKNOWN = "unknown"
+
+LAUNCH_SOURCES = (LAUNCH_SOURCE_COFFERDAM, LAUNCH_SOURCE_EXTERNAL, LAUNCH_SOURCE_UNKNOWN)
+
+# Desktop launchers that name themselves in the scope they create:
+# ``app-gnome-<ApplicationID>-<pid>.scope``. Cofferdam never produces that shape
+# — ``systemd-run --user --unit=`` makes a ``.service`` — so the launcher
+# segment is positive evidence that something else performed the launch, not
+# merely evidence that we did not. Only shells actually observed to write this
+# form are listed; an unrecognised launcher segment stays ``unknown``.
+_SELF_NAMING_LAUNCHERS = frozenset({"gnome", "kde", "plasma", "xfce", "mate", "cinnamon"})
+
 _LIMITATIONS = (
     "an application instance is a systemd app scope; a D-Bus-activated application shares "
     "dbus.service with every other one and cannot be separated into its own instance",
@@ -107,6 +132,9 @@ _LIMITATIONS = (
     "a process group whose executable matches no application definition is reported unmapped "
     "rather than guessed",
     "window counts are present only when window discovery is available on this host",
+    "launch attribution is three-valued: snapd re-parents every snap launch into its own scope, "
+    "so a snap Cofferdam started reports launch_source=unknown rather than claiming something "
+    "else launched it",
 )
 
 # systemd escapes characters it cannot put in a unit name. Only the escapes that
@@ -182,6 +210,41 @@ def instance_key(cgroup_path: Optional[str], unit: Optional[str]) -> Optional[In
     # for instance. It is still one launched thing, so the whole unit name is
     # the key; nothing is merged with it.
     return InstanceKey(_unescape_unit(unit[: -len(".scope")]), unit, "scope")
+
+
+def launch_source(units: Sequence[str]) -> str:
+    """Who started this instance, judged only from evidence the units carry.
+
+    Returns one of :data:`LAUNCH_SOURCES`. The rules, in order:
+
+    * our own transient unit is still there — ``confirmed_cofferdam``;
+    * a snap scope — ``unknown``, always. Snapd re-parents *every* snap launch
+      into ``snap.<pkg>.<app>-<uuid>.scope``, discarding whatever unit started
+      it, so the scope is equally consistent with a Cofferdam launch and a user
+      double-click. Nothing here can tell them apart, and inventing an answer is
+      exactly the bug this replaced;
+    * a scope whose launcher segment names a desktop shell — ``confirmed_external``;
+    * anything else — ``unknown``.
+
+    The absence of our unit is never on its own a reason to say something else
+    launched it: that inference is what produced the false ``false``.
+    """
+    for unit in units:
+        if unit.startswith(COFFERDAM_UNIT_PREFIX) and unit.endswith(".service"):
+            return LAUNCH_SOURCE_COFFERDAM
+
+    # Checked before the launcher rule: a snap scope is unattributable even when
+    # some other unit sits beside it, because re-parenting is what destroyed the
+    # evidence in the first place.
+    if any(_SNAP_SCOPE.match(unit) for unit in units):
+        return LAUNCH_SOURCE_UNKNOWN
+
+    for unit in units:
+        match = _APP_SCOPE.match(unit)
+        if match and match.group("launcher") in _SELF_NAMING_LAUNCHERS:
+            return LAUNCH_SOURCE_EXTERNAL
+
+    return LAUNCH_SOURCE_UNKNOWN
 
 
 def _root_of(members: Sequence[ProcessFacts]) -> ProcessFacts:
@@ -352,7 +415,9 @@ class ApplicationInstanceDiscovery:
                     "process_count": len(members),
                     "units": units,
                     "unit_kind": key.unit_kind,
-                    "launched_by_cofferdam": key.unit_kind == "cofferdam",
+                    # Three-valued on purpose. See ``launch_source``: a snap
+                    # that Cofferdam started is ``unknown``, never ``external``.
+                    "launch_source": launch_source(units),
                     "executable_path": root.executable_path,
                     "executable": (
                         os.path.basename(root.executable_path) if root.executable_path else None
@@ -376,5 +441,10 @@ __all__ = [
     "BACKEND_CGROUP",
     "COFFERDAM_UNIT_PREFIX",
     "InstanceKey",
+    "LAUNCH_SOURCES",
+    "LAUNCH_SOURCE_COFFERDAM",
+    "LAUNCH_SOURCE_EXTERNAL",
+    "LAUNCH_SOURCE_UNKNOWN",
     "instance_key",
+    "launch_source",
 ]

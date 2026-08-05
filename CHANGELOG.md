@@ -82,6 +82,33 @@ release.
 
 ### Fixed
 
+- **Launch provenance claimed a fact it could not prove, for every snap application
+  (2026-08-05).** Found during PR #13 live validation on the real Ubuntu host. Cofferdam issued
+  `open_application` for Firefox; the instance was discovered and grouped correctly, and reported
+  `launched_by_cofferdam: false` — about a launch Cofferdam had just performed. Snapd re-parents
+  every snap launch out of our `cofferdam-app-<hex>.service` into
+  `snap.<package>.<app>-<uuid>.scope` before the first scan, so the evidence is gone by then. A
+  boolean has no way to express "cannot be determined", so it asserted the one reading that was
+  definitely untrue: that something else had launched it. Opera was equally affected.
+
+  The boolean is replaced by three-valued `launch_source` — `confirmed_cofferdam`,
+  `confirmed_external`, `unknown`. Snap scopes report `unknown` unconditionally, and the absence
+  of our transient unit is never on its own grounds for `confirmed_external`: that state requires
+  a launcher to have named *itself* in the unit (`app-gnome-<AppID>-<pid>.scope`), a shape
+  Cofferdam cannot produce because `systemd-run --user --unit=` creates a `.service`. The PWA
+  badges only the two confirmed states and renders `unknown` as "launch source not confirmed",
+  never as "not launched by Cofferdam". Regression test covers a Cofferdam-started snap moved into
+  a snap scope.
+
+- **A live-validation report said Firefox was not installed on this host; it is (2026-08-05).**
+  `STATUS.md` recorded "Firefox is not installed on this host and correctly produces no instance."
+  Firefox is installed and launchable — snap 149.0.2-1, resolved at `/usr/bin/firefox` from the
+  daemon's own `PATH`, and already listed by `/api/status` as an available application in the same
+  document. It was merely not *running*. The sentence reproduced in prose exactly the
+  installed-versus-running conflation this milestone exists to remove. Corrected against live
+  evidence: launching Firefox through Cofferdam produced one `firefox` instance, 11 processes
+  grouped under one card, matched by executable basename. No discovery-code defect was involved.
+
 - **Screenshot capability was over-advertised in a Wayland session (2026-08-05).** After login,
   a daemon started at boot by lingering reported `screenshot: true` on a GNOME Wayland host
   because `scrot` was on `PATH`, and the phone enabled a Screenshot button whose action could

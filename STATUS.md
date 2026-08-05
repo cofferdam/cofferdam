@@ -194,7 +194,23 @@ logic; the gate stays open and unaffected, and no M2A document may describe M1 a
   **19 processes are reported as one running application**, mapped to the `opera` definition; a
   GNOME-launched application whose launch produced two systemd scopes is reported as one instance;
   application groups with no matching definition are reported running and **unmapped** rather than
-  guessed. Firefox is not installed on this host and correctly produces no instance.
+  guessed. Firefox **is** installed and launchable here (snap 149.0.2-1, resolved at
+  `/usr/bin/firefox`, and listed by `/api/status` as an available application); it simply was not
+  running, so it correctly produced no instance. Launching it through Cofferdam during the same
+  validation made exactly one `firefox` instance appear on the next refresh — 11 processes grouped
+  under one card, matched to the `firefox` definition by executable basename. An earlier draft of
+  this line read "Firefox is not installed on this host", which was wrong, contradicted the
+  `applications: ["firefox", "opera"]` observation recorded above, and reproduced in prose the very
+  installed-versus-running conflation this milestone exists to remove.
+
+  That same launch exposed a second, unrelated truthfulness defect, now fixed. Launch provenance
+  was a boolean, `launched_by_cofferdam`, and the Firefox that Cofferdam had just started came back
+  `false`: snapd re-parents a snap launch into `snap.<package>.<app>-<uuid>.scope`, discarding our
+  transient unit before the first scan. The boolean had no way to say "the evidence is gone", so it
+  asserted the one thing that was untrue. It is replaced by three-valued `launch_source`
+  (`confirmed_cofferdam` / `confirmed_external` / `unknown`); snap launches report `unknown`, and
+  the absence of our unit is never on its own grounds for claiming an external launch. See
+  [`docs/RUNTIME_INVENTORY.md`](docs/RUNTIME_INVENTORY.md).
 
   **Windows are `unavailable`, with a reason** — the honest result, not a stub.
   `org.gnome.Shell.Eval` returns `(false, '')` here (disabled outside unsafe-mode, and barred by

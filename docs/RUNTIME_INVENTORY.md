@@ -235,8 +235,44 @@ a program name. It deliberately does not follow `/snap/bin/opera` to its symlink
   `ptyxis-spawn-<uuid>.scope` and is discovered.
 - **A browser tab is not an application instance** and is never inferred from renderer processes.
   Tab discovery needs a browser companion reporting real tab IDs; that is a later milestone.
-- **Applications launched outside Cofferdam are discovered** — most of them are. Whether Cofferdam
-  started it is reported as `launched_by_cofferdam`, not used as a filter.
+- **Applications launched outside Cofferdam are discovered** — most of them are. Attribution is
+  reported as `launch_source`, never used as a filter.
+
+### Launch attribution is three-valued
+
+`launch_source` is one of `confirmed_cofferdam`, `confirmed_external`, or `unknown`. It is **not**
+a boolean, and that is a correction forced by live validation on 2026-08-05.
+
+The field started as `launched_by_cofferdam: true|false`. A Cofferdam-issued `open_application`
+for Firefox produced a correctly grouped instance — and reported `false`. Snapd had re-parented
+the launch out of our `cofferdam-app-<hex>.service` into
+`snap.firefox.firefox-<uuid>.scope` before the first scan, taking the evidence with it. A boolean
+has nowhere to put "the evidence is gone", so it said the one thing that was definitely untrue:
+that something other than Cofferdam had started it.
+
+The rules now, in order:
+
+| Evidence | `launch_source` |
+|---|---|
+| our `cofferdam-app-<hex>.service` is still the unit | `confirmed_cofferdam` |
+| any `snap.<package>.<app>-<uuid>.scope` | `unknown` — always |
+| a scope naming a desktop shell, `app-gnome-<AppID>-<pid>.scope` | `confirmed_external` |
+| anything else | `unknown` |
+
+Two properties are deliberate. **Snap always yields `unknown`**, even when another unit sits
+beside it, because re-parenting is precisely what destroyed the evidence — a snap scope is equally
+consistent with a Cofferdam launch and a user double-click. **The absence of our unit is never on
+its own grounds for `confirmed_external`**; that inference is the bug. `confirmed_external`
+requires a launcher to have *named itself* in the unit, which Cofferdam never does because
+`systemd-run --user --unit=` creates a `.service`, not an `app-*.scope`.
+
+The PWA shows a badge only for the two confirmed states. `unknown` reads *"launch source not
+confirmed"* in the expanded facts and contributes no badge; it must never render as "not launched
+by Cofferdam".
+
+Attributing a launch across a snapd re-parent needs launch-time bookkeeping — record the PID and
+start time we started and match it back on scan — rather than unit-name inspection. That is not in
+M2B1.
 - **Window counts are absent, not zero**, while window discovery is unavailable.
 
 ---

@@ -176,7 +176,16 @@
     var open = !!expanded[item.resource_id];
 
     var badges = [badge("running")];
-    if (item.launched_by_cofferdam) { badges.push(badge("launched by Cofferdam")); }
+    /* Launch attribution is three-valued. Only a confirmed attribution earns a
+       badge: `unknown` says nothing here, because a badge reading "not launched
+       by Cofferdam" would be a claim the backend cannot make — snapd re-parents
+       snap launches and destroys the evidence either way. The expanded facts
+       spell the uncertainty out; the badge row stays silent. */
+    if (item.launch_source === "confirmed_cofferdam") {
+      badges.push(badge("launched by Cofferdam"));
+    } else if (item.launch_source === "confirmed_external") {
+      badges.push(badge("launched outside Cofferdam"));
+    }
     /* An unmatched instance is running and real; we simply cannot say which
        definition it is. Saying that out loud beats guessing. */
     if (!has(item.application_id)) { badges.push(badge("not matched to a definition", "warn")); }
@@ -194,6 +203,12 @@
       ["Processes", esc(String(item.process_count))],
       ["Executable", value(item.executable_path)],
       ["Systemd unit", item.units && item.units.length ? esc(item.units.join(", ")) : value(null)],
+      /* "unknown" is rendered as unset prose, never as a negative claim. */
+      ["Launch source", item.launch_source === "confirmed_cofferdam"
+        ? "Cofferdam started this"
+        : item.launch_source === "confirmed_external"
+          ? "started outside Cofferdam"
+          : '<span class="unset">launch source not confirmed</span>'],
       /* Absent, not zero: window discovery is unavailable on this host, and a
          "0 windows" would be a claim nobody can currently make. */
       ["Windows", has(item.window_count)
