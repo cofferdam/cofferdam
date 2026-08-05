@@ -141,15 +141,21 @@
    * agent profiles are placeholders with no execution behind them, and
    * conversation routes are templates that route nothing. A card that merely
    * looked inert would still imply the feature exists.
+   *
+   * The titles and notes below also have to keep the three layers apart. None
+   * of these sections is a runtime resource: a display entry is a label with
+   * nothing discovered behind it yet, and a browser profile is a launch
+   * preference, not an open window. Runtime discovery is a later milestone, and
+   * until it exists the UI must not read as though it had already happened.
    */
 
   var REGISTRIES = [
-    { name: "devices", title: "Devices", note: "Descriptive only. No addresses, credentials, or power control." },
-    { name: "displays", title: "Displays", note: "Named panels. M2A does not move windows." },
-    { name: "applications", title: "Applications", note: "Allowlisted applications, selected by adapter key." },
-    { name: "browser_profiles", title: "Browser profiles", note: "Which browser opens a URL, and which domains it may open." },
-    { name: "agent_profiles", title: "Agent profiles", note: "Placeholders. No agent execution exists in this build." },
-    { name: "conversation_routes", title: "Conversation routes", note: "Templates only. Nothing is routed in this build." }
+    { name: "devices", title: "Devices", note: "Declared by you, not discovered. No addresses, credentials, or power control." },
+    { name: "displays", title: "Display labels", note: "Optional labels, waiting for a display to be discovered. Not a list of connected displays." },
+    { name: "applications", title: "Application definitions", note: "Code-owned allowlist: what Cofferdam can launch. Not what is installed, and not what is running." },
+    { name: "browser_profiles", title: "Browser launch preferences", note: "Which browser opens a URL, and which domains it may open. Not an open window or a running process." },
+    { name: "agent_profiles", title: "Agent profile placeholders", note: "Placeholders. No agent execution exists in this build." },
+    { name: "conversation_routes", title: "Route templates", note: "Templates only. Nothing is routed in this build." }
   ];
 
   var registryData = {};
@@ -245,7 +251,10 @@
       // show it verbatim so the file can actually be fixed.
       body = '<p class="reg-note">' + escapeHtml(entry.error || "This registry's configuration is invalid.") + "</p>";
     } else if (!entry.items.length) {
-      body = '<p class="reg-note">Nothing configured yet.</p>';
+      // Empty is a valid, fully working machine — not a missing feature and not
+      // something to fill with sample data. Say so, so nobody "fixes" it by
+      // copying the committed examples in.
+      body = '<p class="reg-note">Nothing configured — this is normal, and everything still works.</p>';
     } else {
       body = '<ul class="reg-list">' +
         entry.items.map(function (item) { return describeItem(descriptor.name, item); }).join("") +
@@ -349,7 +358,7 @@
     if (!profile) {
       var defaults = enabledProfiles().filter(function (item) { return item.default_for_url; });
       hint.textContent = defaults.length === 1
-        ? "Uses “" + defaults[0].name + "”, this machine's default for URLs."
+        ? "Uses “" + defaults[0].name + "”, your configured default for URLs."
         : registriesLoaded && enabledProfiles().length === 0
           ? "No browser profiles configured — the host's usual browser is used."
           : "Uses the host's usual browser.";

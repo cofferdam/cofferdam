@@ -213,6 +213,21 @@ symlink semantics differ between them.
   `adapter_unsupported` **and starts no capture process**, a non-zero tool exit stays a bounded
   `adapter_failed`, and a zero-byte capture is a failure rather than a screenshot.
 
+- **M2A (registry layer semantics):** `tests/test_registry_layer_semantics.py` pins that a
+  registry is an **overlay or a definition, never runtime discovery**. It fails if any runtime
+  code or shipped script references the committed examples directory (a "helpful" first-run
+  seeding step would fill a real machine's UI with devices that do not exist); if a committed
+  *overlay* example carries an id or name that does not say `example`; if an application
+  *definition* is example-prefixed (definitions name real code-owned concepts, so the rule is
+  deliberately inverted there); if a pre-named resource such as `large-monitor`, `personal-opera`,
+  or "Büyük monitör" reappears in an example or in the PWA; if a committed profile points at a
+  display id that nothing discovered; if a registry schema grows a field that could name an
+  executable, command, or argv, or one that could assert liveness (`pid`, `tab_id`, `running`);
+  if loading with no files reports an error or **creates a file**; or if the PWA stops saying that
+  it is configuration rather than live state and that empty is normal. It also enforces
+  D-2026-08-04-7 structurally: no import, shipped argv, or declared dependency may be a
+  coordinate-automation or OCR tool. Standard-library only, so it runs on the stdlib-only CI path.
+
 ## What is not yet covered
 
 The `git apply` executor (PR3c2) and the audit chain (PR3d) are not yet implemented; the

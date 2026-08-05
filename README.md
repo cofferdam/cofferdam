@@ -6,7 +6,8 @@ phone, that can safely improve itself.**
 Cofferdam turns one Ubuntu Desktop machine into a personal server with a graphical desktop and
 multiple displays, controlled from a phone or tablet through a Cofferdam-owned responsive
 web/PWA interface. From the couch or away from home, you can check that the host is healthy,
-open applications, take a screenshot, send a YouTube video to the second display, start a
+open applications, take a screenshot where the desktop session allows it, send a YouTube video
+to the second display, start a
 Claude Code task in a project, watch its progress as a simple status card — and ask Cofferdam
 to add a feature *to itself*, watch the candidate version get built and tested, activate it,
 and roll it back if it misbehaves.
@@ -46,12 +47,17 @@ current critical path. The workstation product described above is being built no
 milestone (M1) is a phone-reachable control surface on Ubuntu: live host status, screenshots,
 launching a browser, and opening a URL on the host — surviving reboot unattended.
 
-M1 is **implemented and exercised on a Windows development host** — the service, typed actions,
-authentication, live events, and the PWA all run, and a real screenshot, application launch, and
-URL open were performed through the phone-sized UI. That was implementation validation only.
-**Nothing has been validated on Ubuntu yet**: the Linux screenshot tools, `xdg-open`, display
-enumeration, the systemd unit, reboot survival, and Tailscale access are all unverified until
-`docs/checklists/m1-ubuntu-validation.md` is run on real hardware.
+M1 is **implemented and validated on the real Ubuntu host** (GNOME/Wayland): the service, typed
+actions, authentication, live events, and the PWA all run; application launch and URL opening
+were performed from the phone over the tailnet; and the systemd unit survives logout, login, and
+repeated reboots with the API reachable before anyone logs in. Two corrections came out of that
+validation and are merged — a login-lifecycle regression (M1.1) and untruthful screenshot
+capability reporting (M1.2).
+
+Two limits are worth stating plainly rather than discovering later. **Screen capture does not
+work under Wayland on this host**, so `screenshot` reports `false` — that is the truthful answer,
+not a bug, and a Wayland-capable capture path is future work. And a **full Tailscale-outage test**
+end to end has not been run; only the bounded bind-wait logic is verified.
 
 This is a personal-first project: it must be useful to its maintainer before anything else.
 There are no plans for subscriptions, hosted plans, or enterprise features.
@@ -97,12 +103,6 @@ never bypass activation/rollback procedures.
 - [`SECURITY.md`](SECURITY.md) — vulnerability reporting.
 - [`TESTING.md`](TESTING.md) — test strategy.
 - [`PROVENANCE.md`](PROVENANCE.md) — clean-room provenance statement.
-
-## Credit
-
-The multi-model review idea that influenced earlier planning is inspired by the "council"
-concept from [karpathy/llm-council](https://github.com/karpathy/llm-council). Concept only — no
-code, text, or design is derived from that project, and no endorsement is implied.
 
 ## License
 

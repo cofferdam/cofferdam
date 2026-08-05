@@ -1,6 +1,6 @@
 # Application and browser-profile registries
 
-Files:
+Files (optional; absent on a fresh install):
 
 ```
 $COFFERDAM_HOME/config/registries/applications.json
@@ -9,9 +9,28 @@ $COFFERDAM_HOME/config/registries/browser_profiles.json
 
 Common envelope, ID and alias rules are in [`DEVICE_REGISTRY.md`](DEVICE_REGISTRY.md).
 
+> ## Neither of these describes anything that is running
+>
+> `applications.json` selects among **code-owned definitions** — the concept "Opera", not an
+> Opera window. `browser_profiles.json` holds **optional launch preferences** — which browser
+> should open a URL and which domains it may open.
+>
+> **A browser profile is not a running browser process, not an open window, and not a tab.**
+> Enumerating running application instances, windows, and (later) tabs is the next milestone
+> (*M2B — Runtime inventory*). Nothing ships pre-named: there is no `personal-opera`,
+> "main browser", or "backup browser" in this repository or in a default installation. A
+> discovered application instance will arrive with **no** user label, and may be given one
+> afterwards.
+>
+> The one live thing this layer does report is whether an application is **launchable on this
+> host right now** — an executable found on `PATH`. That is a fact about installation, not about
+> anything currently open.
+
 ---
 
 ## `applications.json`
+
+Selects among the definitions the code already implements. It cannot introduce one.
 
 ```json
 {
@@ -64,15 +83,17 @@ resets, or reconfigures a browser**, and never reads or copies a browser profile
 
 ## `browser_profiles.json`
 
+A **launch preference**: what should happen the next time Cofferdam is asked to open a URL.
+
 ```json
 {
-  "id": "personal-opera",
-  "name": "Kişisel Opera",
-  "aliases": ["kişisel tarayıcı", "ana tarayıcı"],
+  "id": "example-opera-default",
+  "name": "Example — open URLs in Opera",
+  "aliases": [],
   "enabled": true,
   "application_id": "opera",
   "default_for_url": true,
-  "preferred_display_id": "large-monitor",
+  "preferred_display_id": null,
   "launch_mode": "default-instance",
   "domain_policy": { "mode": "allow-all", "domains": [] }
 }
@@ -88,11 +109,15 @@ resets, or reconfigures a browser**, and never reads or copies a browser profile
 
 ### What a profile is, at this stage
 
-`personal-opera` is a **semantic Cofferdam profile**. It selects:
+A profile is a **semantic launch preference**. It selects:
 
-- the Opera application,
+- an application definition (Opera or Firefox),
 - a URL policy,
 - optionally, preferred-display metadata for future use.
+
+That is the whole of it. It is **not** a description of a browser that is open, a window, a tab,
+or a process — none of which Cofferdam can see yet. Two enabled profiles both pointing at Opera
+would be two *preferences*, not two browsers.
 
 It does **not** yet select a separate on-disk Opera profile. `launch_mode: "default-instance"`
 means exactly what it says: the URL is handed to Opera the way any desktop launcher would, so an
@@ -105,7 +130,8 @@ tokens · extension secrets. No field exists for any of these.
 
 `preferred_display_id` is **metadata only** in M2A. No window movement occurs; nothing in the
 product reads it to place anything. It is recorded in the action result so the phone can show it,
-labelled as metadata.
+labelled as metadata. It can only reference a display *label* you wrote — since no display has
+been discovered, on a fresh install the honest value is `null`.
 
 ### Domain policy
 
@@ -142,7 +168,7 @@ Rules:
 The typed `open_url` action gains one optional field:
 
 ```json
-{ "action": "open_url", "params": { "url": "https://example.com", "browser_profile_id": "personal-opera" } }
+{ "action": "open_url", "params": { "url": "https://example.com", "browser_profile_id": "example-opera-default" } }
 ```
 
 ### Selection

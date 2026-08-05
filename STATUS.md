@@ -1,7 +1,7 @@
 # Status
 
 Accurate as of **2026-08-04** (M2A control plane foundation, [`DECISIONS.md`](DECISIONS.md)
-D-2026-08-04-1). Update this file when a category changes, not on every commit.
+D-2026-08-04-3). Update this file when a category changes, not on every commit.
 
 ## Merged (on `main`)
 
@@ -107,11 +107,25 @@ logic; the gate stays open and unaffected, and no M2A document may describe M1 a
   This validation found and fixed a real defect: a URL handed to an already-running Opera was
   being reported as a failed action (see the CHANGELOG entry on Opera's delegation exit code).
 
-  **What M2A is not:** no Raspberry Pi control, Wake-on-LAN or power actions, window movement,
-  browser DOM access, web automation, browser extension, agent execution, message sending,
-  natural-language planning, desktop application scaffolding, or registry write API. Agent
-  profiles are placeholders (`execution_status: not-implemented`) and conversation routes are
-  templates; the PWA labels both as such and offers no control that would suggest otherwise.
+  **What M2A is not:** **no runtime discovery of any kind**, no Raspberry Pi control, Wake-on-LAN
+  or power actions, window movement, browser DOM access, web automation, browser extension, agent
+  execution, message sending, natural-language planning, desktop application scaffolding, or
+  registry write API. Agent profiles are placeholders (`execution_status: not-implemented`) and
+  conversation routes are templates; the PWA labels both as such and offers no control that would
+  suggest otherwise.
+
+  **Registry semantics corrected before merge.** The registries were first written as though they
+  described the machine — they shipped a `large-monitor` named "Büyük monitör", a
+  `personal-opera`, and a `fallback-firefox`. Nothing had been discovered: those were labels for
+  resources no code had ever looked for, presented in the PWA under "Machine registries". The
+  world is now split into three layers (`DECISIONS.md` D-2026-08-04-6) — code-owned
+  **definitions**, **runtime resources** (discovered; *not implemented*, milestone M2B), and
+  **user overlays** (all a registry file is). Every committed *overlay* example id and name now
+  begins with `example`; application **definitions** deliberately keep neutral concept ids
+  (`opera`, `firefox`) because those name real code-owned concepts; nothing copies examples into
+  `$COFFERDAM_HOME`; and the PWA panel is "Configuration & templates" whose empty state says
+  empty is normal and everything still works. Pinned by
+  `tests/test_registry_layer_semantics.py`.
 
 - **M1.1 — service lifecycle correction.** Branch
   `fix/workstation-service-login-lifecycle`. Fixes a **login-blocking regression**: the M1 unit's

@@ -247,7 +247,7 @@ Consequences to keep true:
 - No secrets, tokens, browser profiles, screenshots, hostnames, or Tailscale addresses in any
   tracked file. This is now a publication guarantee, not a tidiness preference.
 
-## D-2026-08-04-1 — Cofferdam is a local, permission-bounded control plane (EFE DECISION, ACTIVE)
+## D-2026-08-04-3 — Cofferdam is a local, permission-bounded control plane (EFE DECISION, ACTIVE)
 
 Cofferdam's scope is a control plane for one person's computing environment: the Ubuntu
 workstation, future Raspberry Pi guardian/controller nodes, named displays and the human aliases
@@ -298,7 +298,7 @@ one is load-bearing for the others. Full rationale is in [`docs/CONTROL_PLANE.md
 14. **The post-reboot M1 validation gate remains open and must not be represented as passed.**
     M2A changes nothing about it. See [`STATUS.md`](STATUS.md).
 
-## D-2026-08-04-2 — Thin Tauri desktop companion, not now (EFE DECISION, ACTIVE)
+## D-2026-08-04-4 — Thin Tauri desktop companion, not now (EFE DECISION, ACTIVE)
 
 An ADR comparing an installed PWA, a Tauri 2 thin shell, and Electron is recorded in
 [`docs/DESKTOP_APP.md`](docs/DESKTOP_APP.md). Decision: **recommend a thin Tauri 2 companion**
@@ -312,7 +312,7 @@ is not an approval mechanism. Electron buys predictability with a bundled Chromi
 Node runtime, which is a large recurring cost and a standing temptation to move logic out of the
 daemon.
 
-## D-2026-08-04-3 — Registries are stdlib-only and read-only in M2A (RECORDED, ACTIVE)
+## D-2026-08-04-5 — Registries are stdlib-only and read-only in M2A (RECORDED, ACTIVE)
 
 The registry loader (`cofferdam/workstation/registries/`) uses the standard library rather than
 pydantic, which the action schemas do use. Two reasons: configuration failures must produce
@@ -324,6 +324,68 @@ extras. No database and no YAML parsing is added, and no new third-party depende
 M2A exposes **no registry write API** — no `POST`, `PUT`, `PATCH`, or `DELETE`. Nothing reachable
 over the network can change which applications exist or which domains a browser profile may open.
 An atomic writer utility exists with tests, unwired, for the milestone that adds editing.
+
+## D-2026-08-04-6 — Definitions, runtime resources, and user overlays are three layers (EFE DECISION, ACTIVE)
+
+Cofferdam's world separates into three layers, and conflating them makes configuration lie about
+the machine:
+
+- **A. Definitions** — code-owned and not configurable: allowlisted application definitions such
+  as `opera` and `firefox`, the safe launch adapters, and the bounded executable and desktop-entry
+  candidates.
+- **B. Runtime resources** — what is actually here right now: connected displays, running
+  processes, application instances, windows, later browser tabs, later agent task instances.
+- **C. User overlays** — optional names, aliases, preferences, and policy metadata. This is all a
+  registry file is.
+
+**Cofferdam must ultimately discover real runtime resources first; registries act only as optional
+semantic overlays.** Discover the resource, *then* attach the label — never the reverse.
+
+Consequences, corrected in M2A after the registries were first written the wrong way round:
+
+- **Registries must not pretend to be runtime discovery.** Writing `displays.json` does not make a
+  display exist; a browser profile is a launch preference, not an open browser window or process.
+- **Nothing ships pre-named.** No `large-monitor`, "main monitor", "small monitor", "laptop
+  display", `personal-opera`, "main browser", or "backup browser" in the repository or in a
+  default installation. Committed examples are format illustrations whose every id and name begins
+  with `example`, and nothing copies them into `$COFFERDAM_HOME`.
+- **A machine with no registry files is a fully working machine.** The UI shows honest empty and
+  configuration states rather than sample data.
+- A discovered display or application instance arrives with **no** user label; one may be added at
+  discovery time or at any point later.
+
+### Runtime resource identity rules (recorded now, implemented in the inventory milestone)
+
+- A **PID is visible and usable only with process start-time verification.**
+- **PID alone is never a stable resource identity** — PIDs are reused, and a stale PID plus an
+  action is how the wrong process gets terminated.
+- **Application instance identity** = host/boot identity + PID + start time.
+- **Display identity prefers a hardware fingerprint** (EDID, or its hash) plus the owning device.
+  **Connector names such as `DP-1` are runtime hints, not identity.**
+- **Browser tabs will receive browser-extension tab IDs** and must never be inferred from Chromium
+  PIDs.
+- **User labels are overlays** and may be attached at creation time or later.
+
+## D-2026-08-04-7 — Semantic interfaces only; no pixel-coordinate automation (EFE DECISION, ACTIVE)
+
+For all later work, prefer: official APIs · CLI protocols · MCP · browser extension APIs · D-Bus ·
+systemd · desktop portals · semantic accessibility interfaces.
+
+**Mouse-coordinate and screen-pixel automation is not an accepted core mechanism**, and none
+exists in the product. Clicking at (x, y) is unverifiable, breaks silently on any layout or
+resolution change, and reproduces exactly the class of false success that M1 was spent
+eliminating. Where a semantic interface genuinely does not exist, the correct answer is to report
+the capability as unavailable.
+
+Related, recorded so the inventory milestone does not adopt a wrong assumption:
+
+- **Cursor is not a way to access or continue an existing ChatGPT consumer conversation.**
+- **Cursor CLI is a future target-agent adapter**, in the same category as Claude Code.
+- Existing ChatGPT conversations will connect to Cofferdam through **a ChatGPT App/MCP tool** for
+  explicit task dispatch and result retrieval, and/or **a permission-bounded Opera companion
+  extension** that associates a tab/conversation with a task and prepares the returned result in
+  the same conversation for a human to confirm.
+- None of Cursor, MCP, or the Opera companion is implemented in M2A.
 
 ## OPEN QUESTIONS
 

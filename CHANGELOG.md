@@ -74,9 +74,28 @@ release.
   - **Docs:** `docs/CONTROL_PLANE.md`, `docs/DEVICE_REGISTRY.md`, `docs/APPLICATION_PROFILES.md`,
     `docs/AGENT_ROUTING.md`, and `docs/DESKTOP_APP.md` (an ADR comparing an installed PWA, a
     Tauri 2 thin shell, and Electron — recommending a thin Tauri companion, with no scaffolding
-    added in M2A). Decisions recorded as `DECISIONS.md` D-2026-08-04-1..3.
+    added in M2A). Decisions recorded as `DECISIONS.md` D-2026-08-04-3..5.
+  - **Registries are overlays, not runtime discovery.** They were first written the wrong way
+    round: the committed examples shipped a `large-monitor` named "Büyük monitör", a
+    `personal-opera`, and a `fallback-firefox`, and the PWA presented them as "Machine
+    registries". Nothing had been discovered — those were labels for resources no code had ever
+    looked for, and a browser profile read as though it meant an open browser. The product now
+    separates **definitions** (code-owned: which applications exist as a concept), **runtime
+    resources** (connected displays, running processes, application instances, windows —
+    **not implemented**, milestone M2B), and **user overlays** (optional labels, aliases,
+    preferences: all a registry file is). Consequences: every committed overlay example id and
+    name begins with `example`; application definitions keep neutral concept ids (`opera`,
+    `firefox`) because they name real code-owned concepts; no code path, shipped script, or
+    first-run step copies examples into `$COFFERDAM_HOME`; a machine with no registry files is
+    fully working; and the PWA panel became "Configuration & templates", with per-section titles
+    naming each layer and an empty state reading "Nothing configured — this is normal, and
+    everything still works". Recorded as `DECISIONS.md` D-2026-08-04-6, with D-2026-08-04-7
+    adding the semantic-interfaces-only rule — no pixel-coordinate automation, and Cursor as a
+    future *target-agent adapter* rather than a route into an existing ChatGPT conversation.
+    Pinned by `tests/test_registry_layer_semantics.py`.
 
-  M2A implements no Raspberry Pi control, Wake-on-LAN or power action, window movement, browser
+  M2A implements no runtime discovery of any kind, and no Raspberry Pi control, Wake-on-LAN or
+  power action, window movement, browser
   DOM access, web automation, browser extension, agent execution, message sending,
   natural-language planning, or desktop application scaffolding — and changes no reboot
   behaviour. **M1's post-reboot validation gate remains open.**

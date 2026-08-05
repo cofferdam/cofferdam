@@ -2,17 +2,17 @@
   "version": 1,
   "items": [
     {
-      "id": "claude-code-cofferdam",
-      "name": "Claude Code · Cofferdam",
-      "aliases": ["cofferdam claude"],
+      "id": "example-claude-code",
+      "name": "Example — Claude Code adapter",
+      "aliases": [],
       "enabled": true,
       "adapter_kind": "claude-code",
       "execution_status": "not-implemented"
     },
     {
-      "id": "local-ollama",
-      "name": "Local Ollama",
-      "aliases": ["yerel model"],
+      "id": "example-ollama",
+      "name": "Example — local Ollama adapter",
+      "aliases": [],
       "enabled": false,
       "adapter_kind": "ollama",
       "execution_status": "not-implemented"

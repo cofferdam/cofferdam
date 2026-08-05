@@ -59,12 +59,15 @@
     </section>
 
     <section class="panel" id="registryPanel">
-      <h2>Machine registries</h2>
+      <h2>Configuration &amp; templates</h2>
       <p class="muted">
-        What this machine knows about: its devices, named displays, applications, browser
-        profiles, and placeholders for agents and routes.
+        What you have <em>configured</em> — optional labels, launch preferences, and templates.
+        <strong>This is not a list of what is currently connected, running, or open.</strong>
+        Cofferdam does not discover live displays, processes, windows, or tabs yet; that is the
+        runtime-inventory milestone. Nothing here proves a display exists or a browser is open.
         <strong>Read-only in this build</strong> — edit the JSON files under
-        <code>$COFFERDAM_HOME/config/registries/</code> and reload.
+        <code>$COFFERDAM_HOME/config/registries/</code> and reload. Empty is normal and fully
+        working.
       </p>
       <div id="registrySections"><p class="muted">Loading…</p></div>
     </section>

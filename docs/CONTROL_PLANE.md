@@ -10,13 +10,19 @@ started in a browser to an agent and back to where it came from.
 awareness for the one action that can use it today, and the documents that fix the shape of what
 comes next. It deliberately implements none of the following:
 
-Raspberry Pi control · Wake-on-LAN or any physical power action · window movement or display
-placement · browser DOM access · ChatGPT or Claude web automation · browser extensions · agent
-execution · Claude Code session execution · message sending · natural-language action planning ·
-desktop application scaffolding · any reboot behaviour change.
+**runtime discovery of any kind** · Raspberry Pi control · Wake-on-LAN or any physical power
+action · window movement or display placement · browser DOM access · ChatGPT or Claude web
+automation · browser extensions · agent execution · Claude Code session execution · message
+sending · natural-language action planning · desktop application scaffolding · any reboot
+behaviour change.
 
 And, as everywhere in this product: **no arbitrary shell execution**, at any layer, through any
-schema.
+schema — and **no pixel-coordinate automation**, ever.
+
+> **M2A knows nothing about what is currently connected, running, or open.** It knows what the
+> code can do (definitions) and what the user chose to call things (overlays). Discovering the
+> live machine is the next milestone. Nothing in this repository ships pre-named as though a
+> display, browser window, or process had already been found.
 
 ---
 
@@ -29,7 +35,9 @@ schema.
    future desktop companion ──►  Python daemon  ──►  adapters ──► the machine
      (thin, optional)             (authoritative)
                                       │
-                                      ├── registries   (what exists, what it is called)
+                                      ├── definitions  (code-owned: what CAN be done)
+                                      ├── overlays     (registries: optional names + preferences)
+                                      ├── inventory    (LATER: what is actually here right now)
                                       ├── policy       (what is allowed, what needs confirming)
                                       ├── state        (action records; later, task records)
                                       └── routing      (later: origin ⇄ agent ⇄ return route)
@@ -61,12 +69,95 @@ alternatives weighed.
 
 ---
 
+## Three layers: definitions, runtime resources, user overlays
+
+This is the distinction the whole product turns on, and getting it wrong makes configuration lie
+about the machine.
+
+### A. Definitions — code-owned, not configurable
+
+- Allowlisted **application definitions**: `opera`, `firefox`. These say a concept exists and
+  that the code knows how to launch it.
+- **Launch adapters** and their **bounded executable candidates** (`opera`, `opera-stable`,
+  `firefox`, `firefox-esr`) and desktop-entry basenames.
+
+Definitions live in the source. Configuration selects among them and can never add one: no
+executable path, argv, command string, shell fragment, desktop-file path, or environment
+override is representable anywhere in a registry.
+
+### B. Runtime resources — discovered, **not implemented yet**
+
+What is actually here *right now*:
+
+- currently connected displays
+- currently running processes
+- current application instances
+- current windows
+- later: browser tabs
+- later: agent task instances
+
+**None of this exists in M2A.** Cofferdam performs no runtime discovery today. That is the next
+milestone — see *M2B — Runtime inventory* in [`../ROADMAP.md`](../ROADMAP.md).
+
+### C. User overlays — the registry files
+
+Optional names, aliases, preferences, and policy metadata. That is all a registry is.
+
+### The rule that follows
+
+**Registries must not pretend to be runtime discovery.** Writing `displays.json` does not make a
+display exist, and reading it does not tell you what is plugged in. A display entry is a *label
+waiting for a display*; a browser profile is a *launch preference*, not an open browser window; a
+device entry is something you declared, not something Cofferdam found.
+
+Ordering matters for everything after M2A: **discover the real resource first, then attach the
+optional label.** Never the reverse. A label invented before the resource is a guess that will
+quietly disagree with the machine.
+
+Consequently, nothing ships pre-named. There is no `large-monitor`, no "main monitor", no
+"laptop display", no `personal-opera`, no "backup browser" in this repository or in a default
+installation. `examples/registries/` contains only entries prefixed `example`, nothing copies
+them into `$COFFERDAM_HOME`, and a machine with no registry files is a fully working machine.
+
+## Runtime resource identity — rules the inventory milestone must follow
+
+Recorded now, while they are still free to keep. None is implemented in M2A.
+
+- **A PID is visible and usable only together with process start time.** It is shown, and it can
+  be acted on, but only after the start time has been re-verified.
+- **A PID alone is never a stable resource identity.** PIDs are reused; a stale PID plus an
+  action is how the wrong process gets terminated.
+- **Application instance identity** = host/boot identity + PID + start time. The boot identity is
+  what stops an identity surviving a reboot into a different process.
+- **Display identity prefers a hardware fingerprint** — EDID (or its hash) plus the owning device.
+  **Connector names such as `DP-1` are runtime hints**, not identity: they change when a cable
+  moves.
+- **Browser tabs get browser-extension tab IDs.** Tab identity comes from the browser's own API,
+  through a permission-bounded companion extension. It must never be inferred from Chromium
+  process IDs — a tab is not a process, and the mapping is neither stable nor observable.
+- **User labels are overlays.** They may be attached when a resource is first discovered, or at
+  any time later, and a resource without a label is completely normal.
+
+## How Cofferdam is allowed to talk to the system
+
+Prefer, in this order: official APIs · CLI protocols · MCP · browser extension APIs · D-Bus ·
+systemd · desktop portals · semantic accessibility interfaces.
+
+**Mouse-coordinate and screen-pixel automation is not an accepted core mechanism.** No
+pixel-coordinate automation exists in M2A and none may be added: clicking at (x, y) is unverifiable,
+silently breaks on any layout or resolution change, and produces exactly the false successes that
+M1 was spent eliminating. Where a semantic interface genuinely does not exist, the answer is to
+say the capability is unavailable — not to aim at a pixel.
+
 ## Naming: stable IDs, human aliases
 
 Every registry item has an immutable ASCII kebab-case `id` and a human `name` plus `aliases`.
-People say "büyük monitör"; references between registries say `large-monitor`. Aliases are
-resolved *through the registries* — never guessed, never fuzzy-matched — and an ambiguous phrase
-is refused rather than resolved to a coin flip.
+People say "büyük monitör"; references between registries use a stable ID. Aliases are resolved
+*through the registries* — never guessed, never fuzzy-matched — and an ambiguous phrase is refused
+rather than resolved to a coin flip.
+
+An alias is a **label on something**. Until the runtime inventory milestone can discover a real
+display, "büyük monitör" has nothing to be a label *of*, which is why no display ships pre-named.
 
 Alias matching folds Unicode case, trims and collapses whitespace, and folds Turkish dotted and
 dotless I together, so "MONİTÖR", "monitör", "IŞIK" and "ışık" behave the way a Turkish speaker
@@ -129,8 +220,8 @@ the first such action cannot be added without one.
 
 | what | where |
 | --- | --- |
-| registry files | `$COFFERDAM_HOME/config/registries/*.json` |
-| committed placeholders | [`examples/registries/`](../examples/registries/) |
+| registry files (optional; absent by default) | `$COFFERDAM_HOME/config/registries/*.json` |
+| format illustrations, never copied anywhere | [`examples/registries/`](../examples/registries/) |
 | schemas | [`DEVICE_REGISTRY.md`](DEVICE_REGISTRY.md), [`APPLICATION_PROFILES.md`](APPLICATION_PROFILES.md), [`AGENT_ROUTING.md`](AGENT_ROUTING.md) |
 | code | `cofferdam/workstation/registries/` |
 | API | `GET /api/registries`, `GET /api/registries/{registry_name}` — authenticated, **read-only** |

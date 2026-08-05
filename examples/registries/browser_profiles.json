@@ -2,13 +2,13 @@
   "version": 1,
   "items": [
     {
-      "id": "personal-opera",
-      "name": "Kişisel Opera",
-      "aliases": ["kişisel tarayıcı", "ana tarayıcı"],
+      "id": "example-opera-default",
+      "name": "Example — open URLs in Opera",
+      "aliases": [],
       "enabled": true,
       "application_id": "opera",
       "default_for_url": true,
-      "preferred_display_id": "large-monitor",
+      "preferred_display_id": null,
       "launch_mode": "default-instance",
       "domain_policy": {
         "mode": "allow-all",
@@ -16,9 +16,9 @@
       }
     },
     {
-      "id": "fallback-firefox",
-      "name": "Yedek Firefox",
-      "aliases": ["yedek tarayıcı"],
+      "id": "example-firefox-restricted",
+      "name": "Example — Firefox, restricted to a few domains",
+      "aliases": [],
       "enabled": true,
       "application_id": "firefox",
       "default_for_url": false,
@@ -26,7 +26,7 @@
       "launch_mode": "default-instance",
       "domain_policy": {
         "mode": "allow-list",
-        "domains": ["example.com", "wikipedia.org"]
+        "domains": ["example.com", "example.org"]
       }
     }
   ]

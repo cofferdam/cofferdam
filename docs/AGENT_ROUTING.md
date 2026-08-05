@@ -13,6 +13,10 @@ Common envelope, ID and alias rules are in [`DEVICE_REGISTRY.md`](DEVICE_REGISTR
 > starts, no message is sent, no conversation is routed, and no browser DOM is touched. These two
 > registries exist so the *shape* of that work is fixed before any of it is built — and so the
 > constraints below are written down while they are still cheap to keep.
+>
+> These registries are **user overlays**, not a live inventory. An agent profile is a name for an
+> adapter that does not exist yet; it is not a running session. Enumerating live agent task
+> instances is a later milestone, after *M2B — Runtime inventory*.
 
 ---
 
@@ -48,9 +52,9 @@ Metadata placeholders. That is the entire M2A scope.
 
 ```json
 {
-  "id": "claude-code-cofferdam",
-  "name": "Claude Code · Cofferdam",
-  "aliases": ["cofferdam claude"],
+  "id": "example-claude-code",
+  "name": "Example — Claude Code adapter",
+  "aliases": [],
   "enabled": true,
   "adapter_kind": "claude-code",
   "execution_status": "not-implemented"
@@ -82,12 +86,12 @@ imply the feature exists.
 
 ```json
 {
-  "id": "chatgpt-to-cofferdam-claude",
-  "name": "ChatGPT → Cofferdam Claude",
-  "aliases": ["bu chati cofferdam claude'a yolla"],
+  "id": "example-connector-route",
+  "name": "Example — connector hand-off, prepared reply needs confirming",
+  "aliases": [],
   "enabled": true,
-  "source_kind": "opera-extension",
-  "target_agent_profile_id": "claude-code-cofferdam",
+  "source_kind": "future-connector",
+  "target_agent_profile_id": "example-claude-code",
   "return_mode": "prepare-then-confirm"
 }
 ```
@@ -120,6 +124,34 @@ none of them, and records the rule so the first one cannot arrive without a conf
 
 ---
 
+## How an existing ChatGPT conversation will actually connect
+
+Recorded as future architecture so the runtime inventory milestone does not adopt a wrong
+assumption. **None of it is implemented in this PR.**
+
+Two mechanisms, usable separately or together:
+
+1. **A ChatGPT App / MCP tool** for explicit task dispatch and result retrieval. The conversation
+   calls a tool; the tool talks to the daemon over a defined protocol; results come back through
+   the same channel. This is the clean path, because both ends are official interfaces.
+2. **A permission-bounded Opera companion extension** that associates a browser tab and its
+   conversation with a task, and prepares the returned result *in that same conversation* for a
+   human to confirm. The extension supplies the browser's own tab identity — it never has to
+   guess, and Cofferdam never has to infer a tab from a process.
+
+Neither mechanism gives Cofferdam the right to speak on the user's behalf: `prepare-then-confirm`
+still means a human confirms before anything leaves.
+
+### Cursor
+
+- **Cursor is not a way to access or continue an existing ChatGPT consumer conversation.** It is
+  not a client for those conversations and must never be treated as one. Any design that routes a
+  ChatGPT conversation "through Cursor" is built on a false premise.
+- **Cursor CLI is a future *target-agent* adapter**, in the same category as Claude Code: something
+  a task can be dispatched *to*. That is the only role it has here.
+- It is not implemented in this PR, and `adapter_kind` deliberately gains no `cursor-cli` member
+  yet — adding one would advertise a capability that does not exist.
+
 ## Boundaries this design keeps
 
 - **Browser DOM automation is a replaceable adapter, never the core architecture.** If it ships,
@@ -128,3 +160,9 @@ none of them, and records the rule so the first one cannot arrive without a conf
   request. It never becomes the place decisions are made, and it is not built in M2A.
 - **The Python daemon owns routing records.** Not the browser, not the extension, not a desktop
   companion.
+- **Tab identity comes from the browser's own extension API.** It must never be inferred from
+  Chromium process IDs: a tab is not a process, and that mapping is neither stable nor observable.
+- **No pixel-coordinate or mouse-position automation**, here or anywhere. Prefer official APIs,
+  CLI protocols, MCP, browser extension APIs, D-Bus, systemd, desktop portals, and semantic
+  accessibility interfaces. Where no semantic interface exists, the honest answer is that the
+  capability is unavailable — not to aim at a pixel.

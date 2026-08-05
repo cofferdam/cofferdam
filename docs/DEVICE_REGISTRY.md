@@ -1,18 +1,36 @@
 # Device and display registries
 
-Two of the six registries described in [`CONTROL_PLANE.md`](CONTROL_PLANE.md). Both are
-**descriptive**: they say what exists and what it is called. Neither can say how to reach it or
+Two of the six registries described in [`CONTROL_PLANE.md`](CONTROL_PLANE.md). Both are **user
+overlays** — optional names, aliases, and metadata. Neither can say how to reach something or
 what to do to it.
 
-Files:
+Files (optional; absent on a fresh install):
 
 ```
 $COFFERDAM_HOME/config/registries/devices.json
 $COFFERDAM_HOME/config/registries/displays.json
 ```
 
-Committed placeholders: [`examples/registries/`](../examples/registries/). The real files are
-machine-specific and are never committed.
+[`examples/registries/`](../examples/registries/) holds *format illustrations* — every id and
+name there is prefixed `example`, and nothing copies them into `$COFFERDAM_HOME`. The real files
+are machine-specific and are never committed.
+
+> ## These are not a live inventory
+>
+> **A display entry is a label waiting for a display. It is not a connected display.**
+>
+> Cofferdam performs **no runtime discovery in M2A**. Writing `displays.json` does not make a
+> display exist, and reading it tells you nothing about what is plugged in right now. Discovering
+> connected displays is the next milestone (*M2B — Runtime inventory*, see
+> [`../ROADMAP.md`](../ROADMAP.md)).
+>
+> The intended order is **discover first, label second**: the live system reports a display, and
+> that display may *then* be given an optional label such as "Büyük monitör". Nothing ships
+> pre-named — there is no `large-monitor`, "main monitor", "small monitor", or "laptop display"
+> anywhere in this repository or in a default installation, because inventing a name before the
+> resource exists is a guess that will quietly disagree with the machine.
+>
+> A device entry is likewise something **you declared**, not something Cofferdam found.
 
 ---
 
@@ -78,11 +96,13 @@ cannot be hijacked by someone naming one display after another display's ID.
 
 ## `devices.json`
 
+A device is a machine **you declare**. Cofferdam does not go looking for machines.
+
 ```json
 {
-  "id": "ubuntu-workstation",
-  "name": "Ubuntu workstation",
-  "aliases": ["bilgisayar", "ana bilgisayar"],
+  "id": "example-workstation",
+  "name": "Example workstation",
+  "aliases": ["örnek bilgisayar"],
   "enabled": true,
   "kind": "workstation",
   "platform": "linux",
@@ -106,15 +126,19 @@ not by Cofferdam, and not by being handed to a model as though it were part of a
 
 ## `displays.json`
 
+**An optional label, not a connected display.** On a machine that has not been configured, this
+file is absent and that is correct — the honest answer to "which displays are attached?" in M2A
+is "Cofferdam does not know yet".
+
 ```json
 {
-  "id": "large-monitor",
-  "device_id": "ubuntu-workstation",
-  "name": "Büyük monitör",
-  "aliases": ["büyük ekran", "ana monitör"],
+  "id": "example-display",
+  "device_id": "example-workstation",
+  "name": "Example display",
+  "aliases": ["örnek ekran"],
   "enabled": true,
   "match": {
-    "connector_hint": "DP-1",
+    "connector_hint": null,
     "manufacturer": null,
     "model": null,
     "serial": null,
@@ -135,10 +159,22 @@ not by Cofferdam, and not by being handed to a model as though it were part of a
 - No commands, executable paths, scripts, window rules, or positioning actions. There is no field
   for them.
 
-**M2A does not move windows.** The schema exists so that later voice or text input can resolve
-"büyük monitör" to `large-monitor`, and so that a display can be recognised again after a cable
-change. `preferred_display_id` on a browser profile is metadata only — see
+**M2A does not move windows, and does not enumerate displays.** The schema exists so that, once
+the runtime inventory milestone can see the real panels, a discovered display can be given a
+label — and so that later voice or text input can resolve that label back to the display it names.
+`preferred_display_id` on a browser profile is metadata only — see
 [`APPLICATION_PROFILES.md`](APPLICATION_PROFILES.md).
+
+### Display identity, for the inventory milestone
+
+Recorded now, implemented later:
+
+- **Prefer a hardware fingerprint**: EDID (or its SHA-256 hash) together with the owning device.
+  That survives cables, ports, and reboots.
+- **`connector_hint` is a runtime hint, never identity.** `DP-1` becomes `DP-2` when a cable
+  moves; treating it as identity silently retargets whatever was pointed at it.
+- **A discovered display needs no label.** Labels are overlays, addable at discovery time or any
+  time afterwards, and a display without one is completely normal.
 
 ---
 

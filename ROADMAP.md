@@ -171,6 +171,7 @@ sees the host *and can make the host do things*.
   extensions, agent execution, Claude Code session execution, message sending, natural-language
   action planning, desktop application scaffolding, registry write APIs, and any reboot behaviour
   change.
+
 ## M1.1 — Service lifecycle correction (unplanned; forced by a regression)
 
 - **Objective:** make enabling Cofferdam safe for the host's graphical login. The M1 unit left
@@ -189,6 +190,56 @@ sees the host *and can make the host do things*.
   what actually holds the session, so a single always-on unit never has to pretend it has one.
   Revisit if Cofferdam ever needs to hold live session-scoped resources itself.
 - **Dependencies:** none. Blocks completion of M1's Ubuntu validation.
+
+## M1.2 — Truthful screenshot capability (unplanned; forced by a finding)
+
+- **Objective:** a reported capability must describe the live session, not this process. A daemon
+  started at boot advertised `screenshot: true` on a Wayland host because `scrot` was on `PATH`.
+- **Binding constraint (D-2026-08-05-1):** graphical state is read from the verified session, never
+  from the daemon's own frozen environment; absence of a variable is not evidence of the opposite
+  value; capabilities are recomputed per request and never cached across a logout.
+- **Status:** merged and validated live. Screen capture under Wayland is still **not implemented**
+  — `screenshot: false` is the truthful answer, not a placeholder for a bug.
+
+### Deferred from M1.2 (non-blocking)
+
+- **Wayland-compatible remote screen capture.** One-shot capture that actually works under
+  Wayland, and later live remote viewing, plus **named-display selection** so a capture can target
+  a chosen display rather than "the screen". Constraints already established on this host:
+  `scrot`/`maim`/`import` return a black frame under Wayland;
+  `org.gnome.Shell.Screenshot.Screenshot` returns `AccessDenied` to a non-portal caller; and
+  `org.freedesktop.portal.Screenshot.Screenshot` never emits a `Response` even with
+  `interactive: false`. `gnome-screenshot` is the adapter's preferred tool and remains
+  uninstalled and unvalidated here. **The current truthful `screenshot: false` is acceptable until
+  this is implemented**, and named-display selection depends on M2B display discovery.
+
+## M2B — Runtime inventory: what is actually here right now
+
+- **Objective:** the layer M2A deliberately does not have. M2A knows what the code can do
+  (definitions) and what the user chose to call things (overlays); M2B discovers the **runtime
+  resources** that actually exist. Until it lands, Cofferdam performs no runtime discovery at all.
+- **Scope:** connected displays · running processes · application instances · windows. Later, and
+  not in the first pass: browser tabs (through a browser companion) and agent task instances.
+- **Binding constraint (D-2026-08-04-6):** discover the resource first, *then* attach a label.
+  A registry entry is an optional overlay and never evidence that a resource exists.
+- **Identity rules this milestone must implement** (recorded now so the implementation cannot
+  quietly pick something weaker):
+  - A **PID is visible and usable, but is never a stable identity on its own** — PIDs are reused,
+    and a stale PID plus an action is how the wrong process gets terminated.
+  - **Application instance identity** = host/device identity + boot identity + PID + process
+    start time. Before controlling or terminating a process, Cofferdam re-verifies that the PID
+    *and* start time still identify the same process.
+  - **Never terminate an application on a broad command-name match.**
+  - **Display identity prefers a hardware fingerprint** — EDID (or its hash) plus the owning
+    device. Connector names such as `HDMI-1` or `eDP-1` are runtime *hints*, not identities.
+  - **Browser tabs use browser-extension/browser-API tab and conversation IDs**, and are never
+    inferred from Chromium process PIDs.
+  - **User labels are overlays**, attachable at creation where creation is Cofferdam-owned, or
+    after discovery, or later through the desktop or mobile UI. A label is never the identity.
+- **Honest-empty rule:** a machine with no registry files stays fully working, and the UI shows
+  empty/configuration states rather than sample data.
+- **Dependencies:** M2A (vocabulary and IDs). Blocks the useful parts of M2 and M3, and blocks
+  named-display selection for Wayland capture.
 
 ## M2 — Desktop hands: processes, windows, displays
 
@@ -265,6 +316,38 @@ sees the host *and can make the host do things*.
   if it turns out subtle.
 - **Deferred:** multi-agent orchestration, ChatGPT automation (the media profile from M3
   already allows "open ChatGPT logged in"; pasting externally prepared prompts already works).
+
+### Required later: per-task resource audit (recorded now, not implemented)
+
+Every task card should expose an expandable **resource audit** — what the task actually touched,
+where evidence exists for it:
+
+files read · files modified · files created · files deleted · applications accessed · browser
+profiles or tabs accessed · URLs and domains opened · processes with **verified** PIDs and start
+times · external connectors used · approvals granted · artifacts, commits, and outputs produced.
+
+Each resource event correlates to: task ID · originating request · actor/agent · operation type ·
+timestamp · resource identity · **evidence source** · result.
+
+Evidence source is one of: an agent-reported tool event · a Git diff · an OS-observed process
+event · a browser-extension event · a Cofferdam-owned action execution.
+
+**The honesty rule that makes this worth having:** Cofferdam must not claim complete visibility
+into file reads or resource access when the adapter or the operating system did not provide that
+evidence. An unobserved read is reported as unknown, never as "did not happen". Process entries
+follow the M2B identity rule — PID plus start time, verified.
+
+### Card and UI architecture (recorded now; no visual redesign in this milestone)
+
+- Desktop and mobile consume the **same backend resource/task model**. The model is the contract;
+  the clients are views of it.
+- Cards may have **compact and expanded** forms; mobile cards may expand on selection.
+- Cards may later be connected in a Lego-like or graph-like representation, where **visual edges
+  represent real task/routing relationships** — never decoration.
+- **UI position must never become business logic.** Where a card sits on screen carries no
+  meaning the backend does not already hold.
+- The final design language is decided separately. Until then, **truthful functionality outranks
+  visual polish**.
 
 ## M5 — Guardian and A/B slots
 
@@ -389,6 +472,23 @@ sees the host *and can make the host do things*.
   OpenClaw replacement decisions (revisit the register below here).
 
 ---
+
+## Remote wake and unattended login (future; approved direction, not scheduled)
+
+Recorded so the shape is not re-litigated later. **None of this is implemented, and none of it
+may be started before the milestones above.**
+
+- A **Raspberry Pi 3 B+** becomes the always-on Wake-on-LAN controller for the workstation.
+- A **Raspberry Pi Pico (RP2040)** connects directly to the laptop as a bounded USB command
+  interface plus HID keyboard.
+- **The Raspberry Pi never receives or forwards the Ubuntu password.** It wakes the machine and
+  nothing more.
+- Once the laptop is reachable, the **phone** sends an ephemeral credential to the Ubuntu
+  headless daemon. The daemon issues **one bounded credential-entry request** to the Pico.
+- Success is confirmed by a **fresh graphical-session agent registration** — not by a screenshot,
+  and not by assuming the keystrokes landed.
+- **No permanent password storage.** No HDMI capture is required for the first version. **No
+  pixel automation** (D-2026-08-04-7).
 
 ## After M7 (later milestones, unordered)
 
