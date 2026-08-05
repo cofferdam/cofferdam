@@ -641,6 +641,75 @@ playback volume belongs to the Spotify Playback milestone and a YouTube player's
 Two controls both labelled "volume" that mean different things is exactly the ambiguity a control
 panel must not create.
 
+## D-2026-08-05-9 — Spotify playback is a *user* authorization, kept apart from everything else (EFE DECISION, ACTIVE)
+
+**Decision.** Controlling the user's own Spotify player is built on Authorization Code with PKCE,
+completed once in a browser **on the workstation** against a loopback redirect, with the resulting
+refresh token stored locally under owner-only permissions and kept in a different file from the
+catalogue-search credential. Verified against the official Spotify developer documentation on
+2026-08-05 and recorded in [`docs/SPOTIFY_PLAYBACK.md`](docs/SPOTIFY_PLAYBACK.md).
+
+**Three different kinds of power, three different modules.** The catalogue-search credential is an
+*application* credential that says nothing about any person and can only read a public catalogue.
+This is a *user* credential: proof that a human let Cofferdam change what they are listening to. And
+the audio milestone controls a *machine*: this computer's speakers. Deleting the Spotify OAuth file
+disconnects an account; deleting the catalogue file turns off search; neither touches PipeWire. They
+are separate packages, separate files and separate PWA panels, because a user with two sliders
+labelled "volume" cannot tell which one made the room go quiet.
+
+**PKCE, because it needs no secret.** Spotify's current documentation recommends it wherever a
+client secret cannot be safely stored, and the token exchange carries none. That is the reason it is
+used rather than plain Authorization Code: the catalogue secret already on this host never travels
+anywhere near the authorization path, so nothing in that path can leak it.
+
+**The callback is loopback-only, and that is structural.** Spotify's redirect rules permit HTTP for
+a loopback address and refuse `localhost`, so the registered URI is `http://127.0.0.1:8888/callback`
+and the temporary listener binds to `127.0.0.1` — a module constant, not configuration, and the
+constructor raises on anything else. It serves one path and answers everything else with 404 without
+reading a query string. Binding it to the Tailscale address instead would make the registered URI a
+lie *and* put an authorization endpoint on a network. **`127.0.0.1` on a phone is the phone**, so
+the flow is workstation-bound by construction and the PWA says so rather than leaving someone
+waiting for a tab that cannot arrive.
+
+**Absence of a refresh token means keep the one you have.** The PKCE documentation states that a
+refresh response "might not include a new refresh token". Reading that as "the token is gone" would
+disconnect a working account at the next restart, and it would look like the user's fault.
+
+**A device id is not an identity, again.** Spotify documents its device id as persistent "to some
+extent" and allows it to be `null` — the same trap as a PipeWire node id, and the same answer: the
+client holds an opaque host-scoped handle, the provider id stays server-side, and the handle is
+re-resolved against a freshly read device list before every targeted action. **No fallback to
+matching a device by name**, because two speakers can share one and a name is something someone
+typed into a phone once. Device handles are not persisted as preferences in this milestone, because
+they are not stable enough to be one.
+
+**Mute is volume zero, and the product says so.** Spotify publishes no mute operation anywhere in
+its player API, so the flag is named `muted_by_cofferdam` — never `muted` — and the panel states the
+mechanism in plain words. Unmuting is then a question Spotify cannot answer, so the level is
+remembered locally in `state/`, deliberately outside the credential file. When no level is known —
+a fresh install, a cleared state directory, a mute performed in the Spotify app itself — **unmute
+refuses and asks the user to pick one**. Restoring to 50% "because that is reasonable" would be
+Cofferdam deciding how loud somebody's speakers get.
+
+**A 204 is an acknowledgement, not an outcome.** Every player write returns `204 No Content`, and
+the documentation warns that execution order is not guaranteed across player endpoints. So every
+action re-reads playback and reports what it observed, and playing a chosen track verifies that the
+item now playing is the item that was requested. Queueing is the one operation that reports
+`accepted_by_provider` rather than an observation — and it explicitly does not claim playback
+started, because the current track is expected to keep playing.
+
+**A track is named by which search result it was.** Play and queue take the search id and result id
+the server issued and nothing else; the server rebuilds the `spotify:track:…` URI from the private
+item in the existing session. There is no request field for a URI, a track id, a device id or a URL
+to validate — they are *absent from the schema*, which is a stronger guarantee than a rejection. The
+existing cross-provider and session-expiry checks do the rest.
+
+**Playback state is personal activity, so the audit is deliberately thin.** What someone listened
+to, when, and how often is a detailed picture of a person, and an action log carrying track titles
+would quietly become a listening history: kept on disk, shown in a list, and never asked for. The
+audit records the operation and the outcome and nothing else. The authenticated PWA may show the
+current track — it is the point of the panel — and nothing else may.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

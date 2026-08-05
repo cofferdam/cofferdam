@@ -1,8 +1,8 @@
 # Status
 
 Accurate as of **2026-08-05** (M2B runtime inventory, M2B3A media launch profiles, M2B3A.1
-official-provider result selection, and M2C audio control,
-[`DECISIONS.md`](DECISIONS.md) D-2026-08-05-2 … -8). Update this file when a category changes, not
+official-provider result selection, M2C audio control, and M2D Spotify playback,
+[`DECISIONS.md`](DECISIONS.md) D-2026-08-05-2 … -9). Update this file when a category changes, not
 on every commit.
 
 ## Merged (on `main`)
@@ -373,8 +373,72 @@ logic; the gate stays open and unaffected, and no M2A document may describe M1 a
   **Not in this milestone:** per-application playback volume, card profile switching, Bluetooth
   pairing, and any provider's own player volume.
 
+### M2D — Spotify playback with user OAuth
+
+- **M2D — play the track you picked, and control the player that is playing it.** On branch
+  `feat/spotify-playback-oauth`, not merged. M2B3A.1 could find the exact song and open Spotify; it
+  could not press play. This adds a `cofferdam/workstation/spotifyplayer/` module over the official
+  Spotify Web API — one-time user authorization, a versioned playback snapshot, opaque Connect
+  device handles, nine typed actions, and ten routes — plus a **Spotify player** panel in the PWA
+  and *Play now* / *Add to queue* on Spotify track result cards. Documented in
+  [`docs/SPOTIFY_PLAYBACK.md`](docs/SPOTIFY_PLAYBACK.md).
+
+  **Authorization Code with PKCE, completed on the workstation.** PKCE needs no client secret, so
+  the catalogue-search secret already on this host never enters the authorization path. The
+  redirect is the loopback URI `http://127.0.0.1:8888/callback` — permitted by Spotify's current
+  rules, where `localhost` is not — and the temporary listener binds to `127.0.0.1` only, serves
+  exactly one path, and stops on success, failure or timeout. `127.0.0.1` on a phone is the phone,
+  so Cofferdam opens the page in Opera on the workstation and the PWA says so in as many words
+  rather than leaving someone waiting for a tab that cannot arrive.
+
+  **The refresh token is the only durable half.** `secrets/spotify_user_oauth.json`, `0600` in a
+  `0700` directory, written through `mkstemp` + `fsync` + `os.replace` so it is never momentarily
+  world-readable and never half-written. The access token stays in memory. A refresh response
+  **without** a new refresh token keeps the one already held, which the current PKCE documentation
+  says can happen and which the naive reading would turn into a disconnection at the next restart.
+
+  **No action reports what it has not observed.** Every player write answers `204 No Content` —
+  Spotify acknowledging the request, not the speaker changing — and the documentation warns that
+  execution order is not guaranteed. So each action re-reads playback and compares; `requested` and
+  `observed` are separate keys. Playing a chosen track verifies that the item now playing is the
+  item that was asked for. Queueing reports `accepted_by_provider` and explicitly does not claim
+  playback started.
+
+  **A Spotify device id is not an identity** — the documentation says "persistent to some extent"
+  and allows `null` — so the client holds only an opaque `spdev-…` handle, re-resolved against a
+  freshly read device list before every targeted action, with no fallback to matching a device by
+  name. **Spotify publishes no mute operation**, so mute is volume-to-zero under the name
+  `muted_by_cofferdam`, and unmute refuses rather than inventing a level when none was recorded.
+
+  **Play now takes a search id and a result id and nothing else.** The server rebuilds the
+  `spotify:track:…` URI from the private `ProviderItem` in the existing search session, so there is
+  no request field for a URI, a track id or a device id to validate. Track results only; albums,
+  artists and playlists are contexts and keep *Open in Spotify*.
+
+  **Playback is personal activity.** Audit records carry the operation and the outcome and nothing
+  else — no track, artist, album, query, account or device id — the package makes no logging call,
+  the callback listener silences the HTTP access log whose request line would carry the
+  authorization code, and `web/spotify.js` makes no `console` call at all. The authenticated PWA
+  shows the current track; nothing else does, and no listening history is kept.
+
+  1,570 tests pass on both CI paths (1,303 before this branch), including seven mutation checks
+  covering callback state validation, loopback-only binding, client-supplied URI rejection,
+  stale-device rejection, playback observation verification, unknown-unmute restore rejection, and
+  secret redaction. One real defect was found while writing them: a disconnected account produced an
+  empty device list, so every action refused with "no active device" — true of the list and false
+  about the world, and it would have sent someone to switch on a speaker when what they needed was
+  to authorize an account. The connection is now checked before any device is resolved.
+
+  **Not validated on the real host yet.** The `90-spotify-playback-validation` drop-in is not
+  applied, and the live service still runs the M2C build under the unchanged `80` drop-in. Until a
+  real authorization and a real playback run have happened from the phone, M2D must not be
+  described as validated.
+
+  **Not in this milestone:** seek, context playback, reading the Spotify queue, persisting a device
+  preference, the YouTube dedicated player, and the Opera Companion.
+
 **M2B does not change the M1 reboot gate.** It alters no boot behaviour, no systemd unit, and no
-bind logic. Neither does M2B3A, M2B3A.1, or M2C.
+bind logic. Neither does M2B3A, M2B3A.1, M2C, or M2D.
 
 ## Planned (active roadmap — see [`ROADMAP.md`](ROADMAP.md))
 

@@ -8,6 +8,57 @@ release.
 
 ### Added
 
+- **M2D — press play on the track you picked, from your phone.** Cofferdam could find the exact
+  song and open Spotify; you still had to press play yourself. This adds control of your **own
+  Spotify account's player**: what is playing now, pause and resume, previous and next, Spotify's
+  own volume, its Connect devices, and *Play now* / *Add to queue* on a track you chose from a
+  search result. Setup and troubleshooting in
+  [`docs/SPOTIFY_PLAYBACK.md`](docs/SPOTIFY_PLAYBACK.md).
+
+  **You authorize once, in Opera on the workstation.** Authorization Code with PKCE, which needs no
+  client secret — so the catalogue-search secret already on this host never enters the flow. The
+  redirect is the loopback URI `http://127.0.0.1:8888/callback`, which Spotify's current rules
+  permit and which `localhost` would not satisfy; the temporary listener binds to `127.0.0.1` and
+  nothing else, serves exactly one path, and stops on success, failure or timeout. `127.0.0.1` on a
+  phone *is the phone*, so the PWA says "continue in Opera on the workstation" instead of leaving
+  you waiting for a tab that cannot arrive, and the attempt expires on its own rather than hanging.
+
+  **The refresh token is stored `0600` in a `0700` directory, written atomically**, in its own file
+  separate from the catalogue credential; the access token is never written to disk. A refresh
+  response that omits a new refresh token **keeps** the one already held — Spotify documents that
+  this happens, and the naive reading would disconnect a working account at the next restart.
+  *Disconnect* removes the local authorization and says plainly that it did **not** revoke access at
+  Spotify, because the API publishes no revocation endpoint for this flow; the guide says where to
+  do that half.
+
+  **No action claims what it did not see.** Every player write answers `204 No Content` — Spotify
+  acknowledging the request, not the speaker changing — so each action re-reads playback and
+  compares, with `requested` and `observed` as separate keys. Playing a chosen track verifies the
+  item now playing *is* the item you asked for. Adding to the queue reports that Spotify accepted it
+  and explicitly does not claim playback started.
+
+  **A Spotify device id is not an identity** — the documentation says "persistent to some extent"
+  and allows it to be absent — so the phone only ever holds an opaque handle, re-resolved against a
+  freshly read device list before any device-targeted action, with no fallback to matching a device
+  by name. Restricted devices, which Spotify documents as accepting no Web API commands at all, show
+  their controls as unavailable rather than as buttons that can only fail.
+
+  **Spotify has no mute, so Cofferdam's mute is volume zero and says so** — the flag is
+  `muted_by_cofferdam`, never `muted`. Unmute restores the level Cofferdam recorded, and when there
+  is none it **refuses and asks you to choose one** rather than picking a number nobody asked for.
+  Spotify's volume and the computer's volume stay two clearly labelled controls in two panels.
+
+  **Play now sends a search id and a result id and nothing else** — the server rebuilds the Spotify
+  URI from the session it privately remembers, so there is no field for a URI, a track id or a
+  device id anywhere in the request. Track results only; albums, artists and playlists keep *Open in
+  Spotify*, because those are contexts and inventing "play this artist" would be inventing
+  behaviour nothing verified.
+
+  **What you listen to stays yours.** Audit records carry the operation and the outcome and nothing
+  else — no track, artist, album, query, account or device id. Nothing is written to the daemon log,
+  including by the callback listener whose default access log would have contained the authorization
+  code. No listening history is kept, and the panel makes no browser console call.
+
 - **M2C — turn the volume down from your phone, and be told the truth about it.** Cofferdam could
   open Spotify and pick the exact track; it could not change how loud the room was. This adds
   reading and safely controlling the workstation's real PipeWire/WirePlumber audio: the current

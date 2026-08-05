@@ -339,6 +339,37 @@ Streams are associated with an application only through the daemon's kernel-veri
 **Not in this milestone:** per-application playback volume, card profile switching (turning an HDMI
 output on), Bluetooth pairing, and any provider's own player volume.
 
+### M2D — Spotify playback with user OAuth (implemented)
+
+> **Implemented** on `feat/spotify-playback-oauth` (not merged). Controlling the user's *own*
+> Spotify account: playback state, pause/resume, previous/next, Spotify's player volume, its
+> Connect devices, and playing or queueing a track chosen from an existing verified search result.
+> Documented in [`docs/SPOTIFY_PLAYBACK.md`](docs/SPOTIFY_PLAYBACK.md).
+
+Authorization Code with **PKCE**, which needs no client secret — so the catalogue-search secret
+already on the host never enters the authorization path. The redirect is the loopback URI
+`http://127.0.0.1:8888/callback`, which Spotify's rules permit and which `localhost` would not
+satisfy. A temporary listener binds to `127.0.0.1` and nothing else, serves one path, and stops on
+success, failure or timeout. `127.0.0.1` on a phone is the phone, so the page opens in Opera **on
+the workstation** and the PWA says so rather than leaving someone waiting for a tab that cannot
+arrive.
+
+The refresh token lives in `secrets/spotify_user_oauth.json`, `0600` in a `0700` directory, written
+atomically; the access token is never persisted. A refresh response without a new refresh token
+**keeps** the one already held — Spotify documents that this happens, and treating it as loss would
+disconnect a working account at the next restart.
+
+Every action re-reads playback and reports what it observed. A Spotify device id is documented as
+persistent only "to some extent", so the client only ever holds an opaque handle, re-resolved
+against a fresh device list before any targeted action. Spotify publishes no mute operation, so mute
+is volume-to-zero under the name `muted_by_cofferdam`, and unmute **refuses rather than guessing**
+when no restore level is known. Play now and Add to queue take a search id and a result id and
+nothing else — the server rebuilds the track URI from the session it privately remembers, so there
+is no request field for a URI to validate.
+
+**Not in this milestone:** seek, context playback (albums, artists, playlists), reading the queue,
+persisting a device preference, and any YouTube player.
+
 ### M2B3A.2 — Opera Companion foundation (next)
 
 The seam that would bring Netflix, Prime Video and TV+ into structured results: an approved
