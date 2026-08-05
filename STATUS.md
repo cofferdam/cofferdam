@@ -1,7 +1,8 @@
 # Status
 
-Accurate as of **2026-08-05** (M2B runtime inventory, M2B3A media launch profiles, and M2B3A.1
-official-provider result selection, [`DECISIONS.md`](DECISIONS.md) D-2026-08-05-2 … -8). Update this file when a category changes, not
+Accurate as of **2026-08-05** (M2B runtime inventory, M2B3A media launch profiles, M2B3A.1
+official-provider result selection, and M2C audio control,
+[`DECISIONS.md`](DECISIONS.md) D-2026-08-05-2 … -8). Update this file when a category changes, not
 on every commit.
 
 ## Merged (on `main`)
@@ -314,8 +315,50 @@ logic; the gate stays open and unaffected, and no M2A document may describe M1 a
   Spotify playback or device control, a persistent auto-open-first preference, M2B3B, Agent Task
   Core.
 
+### M2C — audio control foundation
+
+- **M2C — turn the volume down from the phone, and be told the truth about it.** On branch
+  `feat/audio-control-foundation`, not merged. A focused `cofferdam/workstation/audio/` module over
+  PipeWire 1.6.2 / WirePlumber 0.5.13, read through `pw-dump` and driven through `wpctl` — outputs,
+  streams, a versioned snapshot, three typed actions, and four routes under `/api/audio/`. An Audio
+  panel in the PWA with a bounded slider, mute, and a collapsed outputs list.
+
+  **These are the first routes that change the physical machine.** A client may send a runtime
+  resource id, an integer percentage, and a boolean; there is no field for a node id, a device name,
+  a PipeWire property, a command or a program. **A PipeWire node id is never an identity** — it is
+  reused after its object is destroyed — so an output is addressed by a digest over host, audio
+  graph cookie and stable node name, and the node's name *and* PipeWire serial are re-verified
+  against a fresh graph read immediately before acting.
+
+  **No action reports success it has not observed.** `wpctl` exits zero for a command it accepted;
+  accepted is not applied, so every action re-reads the host and compares. `requested` and
+  `observed` are separate keys in every response.
+
+  **`move_audio_stream` is published as `unavailable` with its reason, not implemented** —
+  WirePlumber offers no command for it, and the metadata workaround would address a stream by its
+  transient node id and leave that application pinned to that output for future sessions.
+
+  **What is playing is never read.** Stream fields are an allowlist, so `media.name` — the track or
+  video title — cannot leak. An application is named only through `pipewire.sec.pid`, the daemon's
+  kernel-verified peer credential, resolved through `/proc` to an exact executable match; anything
+  else stays unclassified with a reason.
+
+  1,303 tests pass on both CI paths (1,191 before this branch), including six mutation checks
+  covering stale resource acceptance, node-id reuse, values above 100, unverified success, false
+  stream movement, and arbitrary backend command acceptance. One real defect was found by running
+  the code against this host rather than against fixtures: `pw-dump` publishes `Metadata` properties
+  at the top level with no `info` key, so reading only `info.props` found no default sink and
+  reported a machine with a working speaker as having no default output.
+
+  **This host currently exposes exactly one usable output** — the internal speaker. The NVIDIA HDMI
+  card sits at profile `off` with every HDMI route reporting `available=no`, so live validation of
+  *switching* outputs needs a second one connected first.
+
+  **Not in this milestone:** per-application playback volume, card profile switching, Bluetooth
+  pairing, and any provider's own player volume.
+
 **M2B does not change the M1 reboot gate.** It alters no boot behaviour, no systemd unit, and no
-bind logic. Neither does M2B3A or M2B3A.1.
+bind logic. Neither does M2B3A, M2B3A.1, or M2C.
 
 ## Planned (active roadmap — see [`ROADMAP.md`](ROADMAP.md))
 

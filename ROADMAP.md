@@ -313,6 +313,32 @@ The server stays the authority: search returns opaque handles, and a chosen resu
 server-side into a launch target the client never sees. Credentials are a local 0600 file, never a
 PWA form. Still no playback claim, and Spotify playback control is unreachable by construction.
 
+### M2C — audio control foundation (implemented)
+
+> **Implemented** on `feat/audio-control-foundation` (not merged). Reading and safely changing the
+> workstation's PipeWire/WirePlumber audio state from the phone: current output, connected outputs,
+> system volume, mute, and active playback streams. Documented in
+> [`docs/AUDIO_CONTROL.md`](docs/AUDIO_CONTROL.md).
+
+The first routes in the product that change the *physical* state of the machine, so the surface is
+the narrowest yet: a resource id, an integer, and a boolean. A PipeWire node id is never an
+identity — it is reused after its object is destroyed — so an output is addressed by a digest over
+host, audio graph and stable node name, and re-verified against a fresh graph read immediately
+before acting.
+
+Volume is read and written on one scale (`wpctl`'s perceptual scale, which is also GNOME's), never
+the linear gain PipeWire stores, so the phone and the laptop screen agree. Every action re-reads
+the host and reports observed state; an accepted command that did not take effect is reported as
+`not_applied`. Moving an already-playing stream is published as **unavailable** with its reason
+rather than implemented, because WirePlumber offers no command for it and the metadata workaround
+would pin an application to an output for future sessions.
+
+Streams are associated with an application only through the daemon's kernel-verified
+`pipewire.sec.pid`, never a self-declared name; what is playing is never read.
+
+**Not in this milestone:** per-application playback volume, card profile switching (turning an HDMI
+output on), Bluetooth pairing, and any provider's own player volume.
+
 ### M2B3A.2 — Opera Companion foundation (next)
 
 The seam that would bring Netflix, Prime Video and TV+ into structured results: an approved

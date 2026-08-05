@@ -591,6 +591,56 @@ are unchanged. Their catalogue entries carry no adapter key, so they cannot acqu
 search even if the credential store were somehow told they were configured. That case is deferred
 to M2B3A.2 — Opera Companion foundation.
 
+## D-2026-08-05-9 — Audio resources are graph-scoped, and a PipeWire node id is never authority (EFE DECISION, ACTIVE)
+
+M2C is the first part of the product that changes the **physical** state of the machine. Three
+rules follow from that, and they are binding on every later audio milestone.
+
+**A PipeWire node id is an address, not an identity.** The daemon hands out small integers and
+**reuses them once the object they named is destroyed**, so node 58 is the built-in speaker today
+and could be a Bluetooth headset after a restart. An output is therefore addressed by a
+`resource_id` digested from host + audio-graph cookie + the sink's stable node name, and the node's
+name *and* PipeWire `object.serial` are re-verified against a fresh graph read immediately before
+acting. A node id being present is not enough; it must still be the same object. The client never
+sends a node id, and no code path accepts one as authority. A separate `stable_id` omits the graph
+so the later preferred-output overlay has a key that survives restarts.
+
+**One volume scale, and it is the one the user can see.** PipeWire stores gain linearly; `wpctl`
+and the desktop's own slider use a cubic perceptual scale — the development host read `0.846138`
+linear and `0.95` through `wpctl`. Publishing the linear figure would put 85% on the phone for a
+speaker the laptop calls 95%. Volume is therefore read *and* written through `wpctl` only, and no
+curve is assumed anywhere in the codebase. Mute is read from the graph, where it is an unambiguous
+boolean, which keeps the verification independent of the tool that performed the write. The product
+range is 0–100 and amplification above unity is not offered; out-of-range input is **refused, never
+clamped**, because a client asking for 150 has a bug and quietly giving it 100 hides that bug.
+
+**An accepted command is not an applied change.** `wpctl` exits zero for anything it accepts, so
+every action re-reads the host afterwards and reports observed state, with `requested` and
+`observed` as separate keys. Selecting a default output reports what the streams actually did:
+whether already-playing audio follows is WirePlumber policy, and the honest answer is "the default
+moved, this stream did not" rather than a clean success.
+
+**`move_audio_stream` is refused, not implemented.** WirePlumber on this host exposes no command
+for it — `wpctl` has `set-default`, `set-volume`, `set-mute`, `set-profile` and `set-route`. It
+could be done by writing PipeWire metadata keyed by the stream's *transient node id*, which is
+exactly the identity above, and WirePlumber's `node.stream.restore-target` would then persist that
+choice and pin the application to that output for future sessions — a lasting change nobody asked
+for. The capability is published as `unavailable` with that reason. **A shell command accepting two
+numeric ids is not evidence that an operation is safe.**
+
+**Streams are named only on evidence the application did not supply.** `application.name` is a
+string a client chooses. The association uses `pipewire.sec.pid`, which the daemon writes from
+socket peer credentials and a client cannot forge, resolved through `/proc` to an **exact**
+executable match. Anything short of that stays unclassified with a reason: telling someone Spotify
+is playing when it is not is worse than saying "unidentified". Published stream fields are an
+**allowlist**, never a filtered property bag, so `media.name` — the track or video title — cannot
+leak through a key nobody thought to ban.
+
+**System volume and player volume stay separate.** The output level belongs here; Spotify's
+playback volume belongs to the Spotify Playback milestone and a YouTube player's volume to its own.
+Two controls both labelled "volume" that mean different things is exactly the ambiguity a control
+panel must not create.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

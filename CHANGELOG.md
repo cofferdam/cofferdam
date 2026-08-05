@@ -8,6 +8,56 @@ release.
 
 ### Added
 
+- **M2C — turn the volume down from your phone, and be told the truth about it.** Cofferdam could
+  open Spotify and pick the exact track; it could not change how loud the room was. This adds
+  reading and safely controlling the workstation's real PipeWire/WirePlumber audio: the current
+  output, the outputs actually connected, system volume, mute, and what is currently making sound.
+
+  **These are the first routes that change the physical machine**, so the surface is the narrowest
+  in the service: a runtime resource id in the path, an integer percentage, and a boolean. There is
+  no field for a node id, a device name, a PipeWire property, a profile, a command or a program —
+  absent from the schemas rather than validated and rejected — and unknown fields are refused
+  rather than ignored. No shell is constructed; every backend call is a fixed argument vector.
+
+  **A PipeWire node id is never an identity.** The daemon reuses those integers once their object is
+  destroyed, so an output is addressed by a digest over host, audio-graph cookie and stable node
+  name, and both the node name and PipeWire's monotonic serial are re-verified against a fresh graph
+  read immediately before acting. An id from before an audio-server restart resolves to nothing
+  rather than to whatever now occupies the slot.
+
+  **The volume number matches the one on the laptop screen.** PipeWire stores gain linearly while
+  `wpctl` and GNOME use a cubic perceptual scale — 0.846138 linear reads as 0.95 through `wpctl` —
+  so publishing the stored value would have shown 85% for a speaker the desktop calls 95%. Volume
+  is read and written through one interface on one scale, with no curve assumed anywhere. Values
+  above 100% are not offered, and out-of-range input is refused rather than clamped.
+
+  **No action claims a success it has not observed.** `wpctl` exits zero for a command it merely
+  accepted, so every action re-reads the host and compares; `requested` and `observed` are separate
+  keys in every response. Choosing a different output reports what the streams actually did — if
+  music that was already playing stayed behind, the phone says so instead of reporting a clean
+  switch.
+
+  **Moving one playing stream is published as `unavailable` with its reason, not implemented.**
+  WirePlumber offers no command for it, and the metadata workaround would address a stream by its
+  transient node id and leave that application pinned to that output for future sessions.
+
+  **What is playing is never read.** Stream fields are built from an allowlist, so the track or
+  video title in `media.name` cannot leak; an application is named only through the daemon's
+  kernel-verified `pipewire.sec.pid`, resolved through `/proc` to an exact executable match, and
+  anything less stays unclassified with a reason. The audit records the operation, resource and
+  observed outcome — and deliberately not the volume level.
+
+  Documented in [`docs/AUDIO_CONTROL.md`](docs/AUDIO_CONTROL.md), decided in
+  [`DECISIONS.md`](DECISIONS.md) D-2026-08-05-9.
+
+- **A complete Spotify and YouTube credential setup guide**
+  ([`docs/MEDIA_PROVIDER_SETUP.md`](docs/MEDIA_PROVIDER_SETUP.md)) — console walkthroughs for both
+  providers including the Web API selection, why the Spotify redirect URI is irrelevant to
+  catalogue search, restricting the YouTube key and leaving service-account authentication off; the
+  exact file schema and permissions; how to validate the configuration without printing any
+  credential value; where credentials must never be put; and troubleshooting for each provider
+  state.
+
 - **M2B3A.1 — real search results you can pick from, for Spotify and YouTube.** M2B3A could open a
   service's search page; it could not answer "which of these is the one I meant?". This adds
   official catalogue search — the Spotify Web API and the YouTube Data API v3 — with up to five
@@ -199,6 +249,13 @@ release.
   compact capability row instead of a section-sized empty state.
 
 ### Fixed
+
+- **The default audio output was reported as absent on a host that had one.** `pw-dump` publishes
+  `Metadata` objects with their properties at the **top level** and no `info` key at all, unlike
+  nodes and devices. Reading only `info.props` therefore found no `default.audio.sink`, and a
+  machine with a perfectly good speaker was described as having no default output. Found by running
+  the code against the real host rather than against fixtures, and the test fixture now reproduces
+  both shapes so it cannot regress.
 
 - **A fresh iPhone could never connect, and said nothing about it (2026-08-05).** An onboarded
   tablet worked; a fresh iPhone loaded the PWA shell and stayed on "Connecting…" indefinitely,
