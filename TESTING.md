@@ -258,6 +258,15 @@ symlink semantics differ between them.
     named `operator` is not matched to `opera`, and a bundled helper called `chromium` does not
     make its host application claim to be Chromium; a shared `dbus.service` and an app-slice
     `.service` are not instance boundaries.
+  - `test_pwa_connection.py` — runs the real `web/app.js` inside a stubbed DOM with a fake clock
+    (`tests/pwa_harness.js`, skipped when `node` is absent), because the fresh-iPhone bug was
+    control flow that never arrived rather than a wrong string a scan could find. Pins that a
+    fresh device is offered the token form; that blocked `localStorage` does not kill the boot and
+    the user is told the token cannot be remembered; that an onboarded device connects without a
+    prompt; that a rejected token and a 4401 socket close both report *authentication*; that a
+    status request or socket which never answers times out into `unreachable` with Retry; that
+    background reconnects never reset the header to "connecting…"; and that the token appears in
+    no URL and no console line in any of the eight scenarios.
   - `test_runtime_presentation.py` — a definition match and a visible desktop entry are both
     `user_facing`; a `NoDisplay`/`Hidden`/autostart entry is `background` and **still returned by
     the collection**; an application whose *name* reads like a daemon but whose entry is visible

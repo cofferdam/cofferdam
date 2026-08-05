@@ -104,6 +104,38 @@ release.
 
 ### Fixed
 
+- **A fresh iPhone could never connect, and said nothing about it (2026-08-05).** An onboarded
+  tablet worked; a fresh iPhone loaded the PWA shell and stayed on "Connecting…" indefinitely,
+  with no token form and no error.
+
+  `web/app.js` began its boot with a bare `localStorage.getItem(...)`. On iOS Safari, storage
+  access **throws** rather than returning null under Private Browsing, "Block All Cookies", and
+  some lockdown/MDM configurations. Nothing caught it, so the exception escaped the module's
+  IIFE and the rest of the script never ran — `#setup` and `#app` both keep `hidden` in the
+  served markup and `#connText` ships the literal "connecting…", so the page was displaying its
+  own initial HTML. It was not connecting; it was never going to do anything. The tablet was
+  unaffected because it had been onboarded earlier and had working storage, so it never reached
+  the throwing path.
+
+  Ruled out with evidence rather than assumption: the service worker is network-only and caches
+  nothing; `/ws` performs no `Origin` check; the socket scheme is derived from
+  `location.protocol`; and the journal records no `/ws` handshake from any address but the
+  tablet's, so the phone never reached the WebSocket at all. Separately noted and *not* claimed
+  as the cause: bursts of uvicorn "Invalid HTTP request received", consistent with Safari HTTPS
+  upgrade probing against an http-only origin.
+
+  Every storage access is now wrapped, with an in-memory fallback so a device whose browser
+  refuses storage still works for the session and is told it cannot be remembered. Connection
+  state is explicit and exhaustive — `connecting`, `auth_required`, `auth_rejected`,
+  `unreachable`, `connected` — with bounded timeouts on both the initial status request (8s) and
+  the WebSocket open (10s), a Retry action, and the real reason shown. Only the first attempt may
+  display "connecting…"; background reconnects keep the failure state visible, which closes a
+  second indefinite-"connecting…" path the new tests found in the reconnect loop. The boot is
+  wrapped and a last-resort `error` listener converts any unhandled throw into a real state.
+  Server authentication is unchanged: `/ws` still closes 4401 before upgrade, the REST API still
+  answers 401, and the token still travels only in a Bearer header or the WebSocket subprotocol —
+  never a URL. See [`docs/DEVICE_ONBOARDING.md`](docs/DEVICE_ONBOARDING.md).
+
 - **Launch provenance claimed a fact it could not prove, for every snap application
   (2026-08-05).** Found during PR #13 live validation on the real Ubuntu host. Cofferdam issued
   `open_application` for Firefox; the instance was discovered and grouped correctly, and reported

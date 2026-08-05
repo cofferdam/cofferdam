@@ -11,18 +11,28 @@
 <body>
 <header class="bar">
   <h1>Cofferdam</h1>
-  <div class="conn" id="conn"><span class="dot" id="dot"></span><span id="connText">connecting…</span></div>
+  <div class="conn" id="conn">
+    <span class="dot" id="dot"></span><span id="connText">connecting…</span>
+    <button id="connRetry" class="ghost" hidden>Retry</button>
+  </div>
 </header>
 
 <main>
+  <!-- The real reason, whenever the connection is not simply working. Empty and
+       hidden otherwise; never a stand-in for a state we have not established. -->
+  <div class="banner err" id="connBanner" hidden></div>
+
   <section class="panel" id="setup" hidden>
     <h2>Connect</h2>
     <p class="muted">Paste the device token printed by the service on first start. It is stored only on this device.</p>
     <div class="row">
+      <!-- type=password so the token is masked and kept out of autofill and
+           screenshots. It is submitted in a request body/header, never a URL. -->
       <input type="password" id="tokenInput" placeholder="device token" autocomplete="off" spellcheck="false">
       <button id="saveToken" class="primary">Save</button>
     </div>
     <p class="error" id="setupError" hidden></p>
+    <p class="muted" id="storageWarning" hidden></p>
   </section>
 
   <div id="app" hidden>

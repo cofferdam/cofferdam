@@ -55,6 +55,12 @@ main { max-width: 1100px; margin: 0 auto; padding: 16px; display: grid; gap: 16p
 
 .banner { border-radius: var(--radius); padding: 12px 16px; font-size: 14px; }
 .banner.warn { background: rgba(224, 163, 58, .15); border: 1px solid var(--warn); color: #f0cd8c; }
+/* The connection banner: the real reason a device is not connected. Sized to
+   carry a sentence, because "unreachable" alone is not actionable. */
+.banner.err { background: rgba(224, 92, 92, .15); border: 1px solid var(--err); color: #f0b0b0; margin-bottom: 12px; }
+/* Retry sits in the header beside the state it acts on, and is hidden unless
+   retrying is genuinely the user's next move. */
+.conn button { font-size: 12px; padding: 2px 10px; }
 
 .cards { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
 .card { background: #101a24; border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
