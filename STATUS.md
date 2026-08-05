@@ -1,7 +1,7 @@
 # Status
 
-Accurate as of **2026-08-04** (M2A control plane foundation, [`DECISIONS.md`](DECISIONS.md)
-D-2026-08-04-3). Update this file when a category changes, not on every commit.
+Accurate as of **2026-08-05** (M2B runtime inventory foundation, [`DECISIONS.md`](DECISIONS.md)
+D-2026-08-05-2 … -4). Update this file when a category changes, not on every commit.
 
 ## Merged (on `main`)
 
@@ -169,6 +169,51 @@ logic; the gate stays open and unaffected, and no M2A document may describe M1 a
   automated tests pass on both CI paths); live validation is a separate decision, because the
   running service is deliberately still on the M1.1 validation runtime — see
   [`docs/SERVICE_LIFECYCLE.md`](docs/SERVICE_LIFECYCLE.md).
+
+### M2B — runtime inventory
+
+- **M2B — runtime inventory foundation.** On branch `feat/m2b-runtime-inventory-foundation`, not
+  merged. The layer M2A deliberately did not have: read-only discovery of what is **actually
+  connected and running**, as `cofferdam/workstation/runtime/` — one narrow module per backend,
+  each stating the resources it owns, the evidence it uses, its limitations, and its status
+  semantics. Authenticated read-only `GET /api/runtime` and `GET /api/runtime/{resource_kind}`; a
+  *Live system* panel in the PWA, kept separate from *Configuration & templates*. Documented in
+  [`docs/RUNTIME_INVENTORY.md`](docs/RUNTIME_INVENTORY.md).
+
+  Backends, chosen after read-only investigation of the real host and recorded as `DECISIONS.md`
+  D-2026-08-05-2: `org.gnome.Mutter.DisplayConfig.GetCurrentState` joined to `/sys/class/drm` for
+  displays (**not** `xrandr`, which under Wayland reports XWayland's synthetic layout); `/proc`
+  read directly for processes, never opening `cmdline` or `environ`; systemd cgroup scopes for
+  application instances; and **no backend at all for windows**.
+
+  **Observed on the real Ubuntu host** (2026-08-05, GNOME Shell 50.1, Wayland) with the live
+  service left untouched on its existing validation runtime: the internal panel and one external
+  monitor are discovered as **two distinct resources**, each with a real connector, model,
+  resolution, refresh rate, physical size and EDID-derived fingerprint, and each classified
+  internal/external from the compositor's own `is-builtin` rather than from its name. Opera's
+  **19 processes are reported as one running application**, mapped to the `opera` definition; a
+  GNOME-launched application whose launch produced two systemd scopes is reported as one instance;
+  application groups with no matching definition are reported running and **unmapped** rather than
+  guessed. Firefox is not installed on this host and correctly produces no instance.
+
+  **Windows are `unavailable`, with a reason** — the honest result, not a stub.
+  `org.gnome.Shell.Eval` returns `(false, '')` here (disabled outside unsafe-mode, and barred by
+  D-2026-08-04-7 regardless), no portal enumerates windows, and the accessibility bridge is
+  switched off on this host. Reporting an empty list would tell a user with three windows open
+  that they have none.
+
+  **What M2B is not:** no control of any kind. It starts, stops, moves, reconfigures, and
+  terminates nothing, and no route under `/api/runtime` accepts a write method. No label or alias
+  **editing** — that is the immediate M2B2 follow-up; M2B resolves overlays that already exist onto
+  discovered displays, on hardware-grade evidence only. No browser tabs, no agent task inventory,
+  no window movement, no GNOME extension, no new dependency.
+
+  905 tests pass on both CI paths (744 before this branch), with zero skips when the workstation
+  extras are installed. Not yet validated against the live service: the running service is
+  deliberately still on the PR #9 validation runtime.
+
+**M2B does not change the M1 reboot gate.** It alters no boot behaviour, no systemd unit, and no
+bind logic.
 
 ## Planned (active roadmap — see [`ROADMAP.md`](ROADMAP.md))
 

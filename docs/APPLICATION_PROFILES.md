@@ -79,6 +79,34 @@ Opera is not assumed to be installed. If it is absent, the API and the PWA repor
 unavailable, and no action pretends otherwise. **Cofferdam never installs, updates, removes,
 resets, or reconfigures a browser**, and never reads or copies a browser profile directory.
 
+### Launchable is not running
+
+Four distinct things, and none may stand in for another. The confusion is not hypothetical: during
+PR #9's live validation, the card reading *Firefox available* was taken to mean Firefox was open.
+
+1. **application definition** — the concept exists and the code knows how to launch it. This
+   document, and `applications.json`.
+2. **available to launch** — a definition whose executable was found on `PATH` on this host.
+   `GET /api/status`; the *Configuration & templates* panel; the badge reads
+   *installed — can launch*.
+3. **running application instance** — actual processes, with a verified PID **and** start time.
+   `GET /api/runtime/applications` (M2B); the *Live system* panel; the badge reads *running*.
+4. **current windows** — belonging to an instance. Unavailable on GNOME Wayland, and reported as
+   unavailable rather than as zero.
+
+Firefox being installed produces **no** entry in the runtime applications collection until a
+Firefox process exists. The two views live in separate files (`web/app.js` and `web/live.js`) so
+that each can be checked for the vocabulary the other must never borrow.
+
+### A browser profile is not a browser window
+
+A profile in `browser_profiles.json` is a launch preference. It carries no PID, no window, no tab,
+and no liveness at all, and its existence is not evidence that a browser is open. Runtime
+discovery sees a running browser as **one application instance** — Opera's nineteen processes are
+one Opera — and says nothing about tabs: tab identity requires a browser companion reporting the
+browser's own tab IDs, and is never inferred from renderer processes. See
+[`RUNTIME_INVENTORY.md`](RUNTIME_INVENTORY.md).
+
 ---
 
 ## `browser_profiles.json`

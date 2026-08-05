@@ -215,9 +215,15 @@ sees the host *and can make the host do things*.
 
 ## M2B — Runtime inventory: what is actually here right now
 
+> **M2B1 is implemented** on `feat/m2b-runtime-inventory-foundation` (not merged): read-only
+> discovery of displays, processes and application instances, an authenticated read-only
+> `/api/runtime`, and a *Live system* panel. Windows are reported `unavailable` with a reason —
+> no safe read-only backend exists on GNOME Wayland. Backends, evidence and limitations:
+> [`docs/RUNTIME_INVENTORY.md`](docs/RUNTIME_INVENTORY.md). What remains is **M2B2**, below.
+
 - **Objective:** the layer M2A deliberately does not have. M2A knows what the code can do
   (definitions) and what the user chose to call things (overlays); M2B discovers the **runtime
-  resources** that actually exist. Until it lands, Cofferdam performs no runtime discovery at all.
+  resources** that actually exist.
 - **Scope:** connected displays · running processes · application instances · windows. Later, and
   not in the first pass: browser tabs (through a browser companion) and agent task instances.
 - **Binding constraint (D-2026-08-04-6):** discover the resource first, *then* attach a label.
@@ -254,12 +260,41 @@ sees the host *and can make the host do things*.
     and an EDID-derived fingerprint where the system exposes them. Report only what was actually
     read; absent fields stay absent rather than being guessed.
   - Let the user **select a discovered display and add or edit a label/alias** for it, from the
-    desktop or mobile UI.
+    desktop or mobile UI. *(M2B2 — the one part of this section the foundation does not ship.)*
   - The label is an **optional overlay layered on top of** the hardware identity. It never
     replaces, renames, or becomes that identity, and removing it must leave the display fully
     identified.
 - **Dependencies:** M2A (vocabulary and IDs). Blocks the useful parts of M2 and M3, and blocks
   named-display selection for Wayland capture.
+
+### M2B2 — labels and aliases on discovered resources (immediate follow-up)
+
+The one piece of M2B above that the foundation does **not** implement. M2B1 *resolves* overlays a
+user already wrote by hand; M2B2 lets them be created and edited from the UI.
+
+- **Flow:** the user selects a discovered card in the PWA or the desktop client → adds or edits a
+  label and aliases → the overlay is written **atomically** (the existing `write_json_atomic`,
+  which has tests and is still wired to no route) → the resource keeps its system identity, with
+  the label layered on it.
+- **Keyed to the stable identity**, never to a connector or a PID: the EDID fingerprint for a
+  display. A display later disconnected keeps its overlay and stays distinguishable from a
+  connected one, because the key describes the panel rather than the socket it was in.
+- **No new identity model is needed.** Every discovered resource already carries a stable
+  `resource_id` and an `overlay` slot, and the resolver already refuses ambiguous matches and
+  connector-hint-only matches.
+- **The first write path into the registries.** M2A and M2B1 are entirely read-only over the
+  network, so this milestone owns the whole question of network-reachable configuration writes:
+  validation before write, bounded payloads, what an overlay may and may not contain, and whether
+  a write needs confirmation. That is why it is a separate milestone rather than a patch.
+- Also in scope, if cheap: aliases for discovered **application instances**, using the same
+  mechanism. Not in scope: anything that turns an overlay into a capability.
+
+### Beyond M2B2, still not implemented
+
+Browser tab inventory (needs a browser companion reporting the browser's own tab IDs; never
+inferred from renderer processes) · agent task inventory · task resource audit · window discovery
+on GNOME Wayland (needs a companion extension the user installs knowingly) · **any** process,
+window, or display *control*.
 
 ## M2 — Desktop hands: processes, windows, displays
 

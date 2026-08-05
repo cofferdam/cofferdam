@@ -55,6 +55,51 @@ service from the desktop session it controls — by design, it *is* the desktop 
 Anything privileged (package installation, system configuration, destructive migrations) is out
 of scope for M1 and is the intended future home of the preserved Trust Core boundary.
 
+## Runtime inventory posture (M2B)
+
+M2B reads the machine. That puts a **new class of data on the wire** — what is plugged into
+somebody's desk, and which applications they have open — and it is treated accordingly.
+
+- **Authenticated, always.** `GET /api/runtime` and `GET /api/runtime/{resource_kind}` require the
+  same device token as every other state-revealing route. There is no anonymous summary and no
+  count endpoint, and the token is checked *before* any scan runs, so an unauthenticated request
+  cannot even cause the host to walk `/proc`.
+- **Read-only, structurally.** No route under `/api/runtime` accepts `POST`, `PUT`, `PATCH`, or
+  `DELETE` — asserted by inspecting the registered routes rather than by trying a few verbs.
+  Discovery starts, stops, moves, reconfigures, and terminates nothing. Process and window
+  *control* is a later milestone with its own identity re-verification rules.
+- **Command lines and environment blocks are never read.** `/proc/<pid>/cmdline` and
+  `/proc/<pid>/environ` are not opened at all — not read-then-redacted. Both routinely carry an API
+  key passed as an argument, a token in an environment variable, or a database URL with its
+  password. Grouping is built on cgroup membership and process ancestry instead, and the absence is
+  asserted structurally over the package source as well as behaviourally over the payload, so
+  "just this once, for classification" cannot creep back in.
+- **Window titles are not exposed**, because window enumeration is unavailable on this desktop at
+  all. If a future backend provides them they are sensitive by default: never logged, never
+  persisted, served only through the authenticated API. A window title is routinely a document
+  name, a message subject, or a customer's name.
+- **No browser profile inspection.** A running browser is discovered as one application instance
+  from its processes. No profile directory, cookie store, history file, or tab list is read.
+- **Identities are derived, not raw.** `/etc/machine-id`, `/proc/sys/kernel/random/boot_id`, and
+  the graphical session's activation stamp are published as domain-separated SHA-256 prefixes.
+  None is a secret, but all are stable global identifiers, and an authenticated client needs their
+  comparison properties rather than the identifiers themselves.
+- **Semantic interfaces only, at the discovery layer too.** Displays come from
+  `org.gnome.Mutter.DisplayConfig` (read-only getters, named from a fixed table) and
+  `/sys/class/drm`. No screenshot, no OCR, no pixel matching, and no `org.gnome.Shell.Eval` —
+  evaluating JavaScript inside the compositor is arbitrary code execution in the user's shell, and
+  is refused even though it is the one interface that could answer the window question. No GNOME
+  extension is installed.
+- **Failure is a status, not a crash.** Every backend degrades to `unavailable`/`error` with a
+  bounded, code-owned reason carrying no path, command line, or exception text. A discovery fault
+  cannot take down the daemon, the session, or the login.
+- **Session-scoped data expires with the session.** A cached snapshot is discarded the moment the
+  graphical session's identity changes, so a previous session's displays are never served as
+  current.
+
+Details, including every backend's limitations:
+[`docs/RUNTIME_INVENTORY.md`](docs/RUNTIME_INVENTORY.md).
+
 ## Reporting a vulnerability
 
 Please report suspected security issues **privately** rather than opening a public issue: email

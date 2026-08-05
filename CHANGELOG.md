@@ -6,6 +6,80 @@ release.
 
 ## [Unreleased]
 
+### Added
+
+- **Runtime inventory (M2B) — Cofferdam can see what is actually connected and running.** The
+  layer M2A deliberately did not have. Read-only discovery lives in
+  `cofferdam/workstation/runtime/`, one narrow module per backend, each stating the resources it
+  owns, the evidence it uses, its limitations and its status semantics. Full write-up in
+  [`docs/RUNTIME_INVENTORY.md`](docs/RUNTIME_INVENTORY.md).
+
+  - **Connected displays** — from `org.gnome.Mutter.DisplayConfig.GetCurrentState` (the
+    compositor's own view: layout, scale, orientation, refresh rate, primary, `is-builtin`),
+    joined to `/sys/class/drm` for the EDID fingerprint and physical millimetres. Deliberately
+    **not** `xrandr`: under Wayland it reports XWayland's synthetic layout, and M1 could only ever
+    honestly take a display *count* from it. The two sources are joined on the panel's own
+    EDID-derived `(manufacturer, model, serial)` triple, because the kernel says `card1-HDMI-A-1`
+    where Mutter says `HDMI-1` — content matching is exact, a hand-maintained name mapping is a
+    guess. Display identity is the SHA-256 of the EDID scoped to the host, so a label survives a
+    reboot and a cable moved to another port; a panel whose EDID cannot be read gets a
+    connector-derived identity explicitly marked `weak`. Manufacturer, model and serial are
+    reported exactly as the hardware described itself, and a panel that published no model *name*
+    is reported by its product code with `model_source` saying so — nothing becomes "Unknown".
+  - **Processes** — `/proc`, read directly. Identity is host + boot + PID + start time, never a
+    bare PID: PIDs are recycled within minutes, and `start_ticks` is published so a later control
+    action can re-verify it before acting. A host with no boot identity gets an `unavailable`
+    collection rather than bare PIDs. A process that exits mid-scan is omitted without degrading
+    the collection; one that exists but cannot be read downgrades it to `partial`.
+    `/proc/<pid>/cmdline` and `/proc/<pid>/environ` are **never opened** — both routinely carry
+    secrets, and not reading them is a far easier guarantee than redacting them.
+  - **Running application instances** — grouped by systemd cgroup scope, because the system
+    already computed the boundary. Opera's **19 processes are one running Opera**, not nineteen;
+    a GNOME launch that produces two scopes for one application is one instance, merged on
+    systemd's naming grammar rather than by substring. Mapping to an application definition
+    requires the exact basename of the root process's real executable — `operator` is not Opera,
+    and an Electron application bundling a `chromium` binary does not become Chromium. No match
+    leaves the instance running and **unmapped**, which is a complete answer.
+  - **Windows** — the interface exists and is wired into the snapshot; **no safe read-only backend
+    is available on GNOME Wayland**, so the collection reports `unavailable` with a precise
+    reason. `org.gnome.Shell.Eval` returns `(false, '')` on this host and would be arbitrary code
+    execution inside the compositor anyway; no portal enumerates windows; the accessibility bridge
+    is switched off and enabling it is the user's decision. An empty list would tell a user with
+    three windows open that they have none. The seam for a user-installed GNOME companion is
+    documented.
+
+  Collection status is a closed vocabulary — `ok` / `partial` / `unavailable` / `error` — and the
+  model *enforces* it: an `unavailable` collection that carries items, or omits a reason, raises.
+  An `ok` collection with zero items is a positive claim that the machine has none of that
+  resource. Recorded as `DECISIONS.md` D-2026-08-05-2, -3 and -4.
+
+- **Authenticated read-only runtime API.** `GET /api/runtime` serves one snapshot —
+  `observed_at`, host/boot/session identity, and the four collections — and
+  `GET /api/runtime/{resource_kind}` serves one slice of it together with that header, because a
+  list of processes is uninterpretable without the boot it was read in. Sub-endpoints slice a
+  shared snapshot rather than scanning independently, so a client can never assemble a picture
+  whose displays came from one instant and whose processes came from another. A short cache keeps
+  a polling phone from driving a continuous process scan, and is invalidated by *identity* as well
+  as by time: a replaced graphical session drops it however recent it is. `?refresh=true` bypasses
+  it. **No route accepts a write method** — process and window control is a later milestone with
+  its own identity re-verification rules.
+
+- **A "Live system" area in the PWA**, in its own `web/live.js`, separate from *Configuration &
+  templates*. The separation is structural so each file can be checked for the vocabulary the
+  other must never borrow: `app.js` renders definitions and may not say "running", `live.js`
+  renders runtime resources and may not say "installed — can launch". This closes the M2A
+  live-validation finding that the card reading *Firefox available* was taken to mean Firefox was
+  open. An `unavailable` collection renders the backend's reason, and that branch is checked
+  *before* the empty branch — an unavailable collection has zero items too. Values the host did
+  not report render as "not reported"; window counts are absent rather than zero. Cards are
+  compact and expand on tap; polling is conservative, pauses while the page is hidden, and stops
+  on sign-out.
+
+- **`HostAdapter.application_executables()`** — a read-only view of the adapter's own launch table,
+  so runtime discovery can map a process group to a definition without hardcoding a program name.
+  It deliberately does not follow `/snap/bin/opera` to its symlink target `/usr/bin/snap`, which
+  would classify every unrelated snap helper as Opera.
+
 ### Fixed
 
 - **Screenshot capability was over-advertised in a Wayland session (2026-08-05).** After login,

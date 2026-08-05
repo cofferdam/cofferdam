@@ -228,6 +228,56 @@ symlink semantics differ between them.
   D-2026-08-04-7 structurally: no import, shipped argv, or declared dependency may be a
   coordinate-automation or OCR tool. Standard-library only, so it runs on the stdlib-only CI path.
 
+- **M2B (runtime inventory):** seven files, 140 tests, standard-library only so the whole set runs
+  on the stdlib-only CI path. The fixtures are *real* rather than mocks that agree with the parser:
+  a writable fake `/proc` whose `stat` layout is cross-checked against a live `/proc/self/stat`,
+  and an EDID builder emitting byte-correct 128-byte blocks with a valid checksum. A test
+  asserting "an absent serial is not invented" is worthless if the fixture cannot produce a block
+  that has none.
+
+  - `test_runtime_displays.py` — two connected panels stay two distinct resources; a disconnected
+    connector is not a display; internal/external is classified from the compositor's `is-builtin`
+    or from the kernel connector type and **never** from a display name that merely says
+    "Built-in"; an unreadable EDID leaves the fingerprint and physical size absent rather than
+    placeholdered; identity is stable across reads and **survives the same panel moving to another
+    connector**; two panels with byte-identical EDIDs stay two resources, both marked weak.
+  - `test_runtime_processes.py` — the same PID at a different start time is a different resource,
+    and the same PID and start time is the same one; a different boot or host is a different
+    resource; a host with no boot identity yields an `unavailable` collection rather than bare
+    PIDs; a process exiting mid-scan is omitted without degrading the status while an *unreadable*
+    one downgrades to `partial`; a real secret written into a fixture's `cmdline` and `environ`
+    never reaches the payload, and no runtime module opens either file (asserted over the AST).
+  - `test_runtime_applications.py` — nineteen Opera processes are **one** running application, and
+    a second independent launch is a second one; the instance root is chosen by ancestry, not by
+    start order; one GNOME launch producing two scopes is one instance while two different
+    applications are not merged; Firefox being an available definition produces no instance until
+    a Firefox process exists; an application launched outside Cofferdam is discovered; a process
+    named `operator` is not matched to `opera`, and a bundled helper called `chromium` does not
+    make its host application claim to be Chromium; a shared `dbus.service` and an app-slice
+    `.service` are not instance boundaries.
+  - `test_runtime_windows.py` — the collection is `unavailable` with a reason naming what was
+    tried, never a successful empty list; a per-instance window count is `None` and never `0`; and
+    the status vocabulary itself refuses the dishonest shapes, so the rule is not mere convention.
+  - `test_runtime_service.py` — GUI-scoped collections are unavailable before login while
+    processes stay available to the headless daemon; a replaced session or a logout invalidates
+    the cache immediately, however recent it is; one `/proc` walk feeds both the process and the
+    application collection; a stub adapter reports unavailable rather than borrowing this
+    machine's real data; an overlay adds a label without touching any identity field; a
+    `connector_hint` alone never matches; an overlay for a display nothing found creates nothing.
+  - `test_workstation_runtime_api.py` — every route rejects an unauthenticated request, a 401
+    leaks no host detail, and **no scan runs before the token is checked**; no runtime route
+    accepts a write method (asserted against the registered routes rather than by trying verbs);
+    an unavailable collection is distinguishable from an empty one over the wire.
+  - `test_runtime_pwa.py` — the live view ships no sample resource and no example-registry id; the
+    `unavailable` branch is checked **before** the empty branch, because an unavailable collection
+    has zero items too; absent values render as "not reported"; the view issues no write request
+    and offers no control that does not exist yet; polling is not aggressive and stops on sign-out.
+
+  Several of these are paired with an explicit **mutation check** — the same property asserted
+  against a deliberately broken input, so a guard that could never fail is visible as such.
+  `test_registry_layer_semantics.py` gains the structural counterpart: `app.js` may not say
+  "running", `live.js` may not say "installed — can launch", and neither may call the other's API.
+
 ## What is not yet covered
 
 The `git apply` executor (PR3c2) and the audit chain (PR3d) are not yet implemented; the

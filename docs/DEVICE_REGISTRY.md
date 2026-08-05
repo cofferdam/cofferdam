@@ -127,8 +127,9 @@ not by Cofferdam, and not by being handed to a model as though it were part of a
 ## `displays.json`
 
 **An optional label, not a connected display.** On a machine that has not been configured, this
-file is absent and that is correct — the honest answer to "which displays are attached?" in M2A
-is "Cofferdam does not know yet".
+file is absent and that is correct. "Which displays are attached?" is answered by the runtime
+inventory (`GET /api/runtime/displays`), never by this file; an entry here is a name waiting for a
+panel that discovery may or may not find.
 
 ```json
 {
@@ -159,22 +160,43 @@ is "Cofferdam does not know yet".
 - No commands, executable paths, scripts, window rules, or positioning actions. There is no field
   for them.
 
-**M2A does not move windows, and does not enumerate displays.** The schema exists so that, once
-the runtime inventory milestone can see the real panels, a discovered display can be given a
-label — and so that later voice or text input can resolve that label back to the display it names.
-`preferred_display_id` on a browser profile is metadata only — see
-[`APPLICATION_PROFILES.md`](APPLICATION_PROFILES.md).
+**Cofferdam still does not move windows.** M2B does enumerate the connected displays
+([`RUNTIME_INVENTORY.md`](RUNTIME_INVENTORY.md)), so an entry here can now be matched to a panel
+that was actually found — which is what the schema was waiting for. `preferred_display_id` on a
+browser profile is still metadata only — see [`APPLICATION_PROFILES.md`](APPLICATION_PROFILES.md).
 
-### Display identity, for the inventory milestone
+### Display identity
 
-Recorded now, implemented later:
+Recorded before discovery existed; **implemented in M2B**:
 
-- **Prefer a hardware fingerprint**: EDID (or its SHA-256 hash) together with the owning device.
-  That survives cables, ports, and reboots.
+- **Prefer a hardware fingerprint**: the SHA-256 of the panel's EDID together with the owning
+  host. That survives cables, ports, and reboots.
 - **`connector_hint` is a runtime hint, never identity.** `DP-1` becomes `DP-2` when a cable
   moves; treating it as identity silently retargets whatever was pointed at it.
 - **A discovered display needs no label.** Labels are overlays, addable at discovery time or any
   time afterwards, and a display without one is completely normal.
+
+### How an entry here is matched to a discovered display
+
+The resolver attaches this entry's `name` and `aliases` to a discovered display only on
+**hardware-grade** evidence:
+
+- `match.edid_sha256` equal to the discovered panel's EDID digest, **or**
+- `match.manufacturer` + `match.model` + `match.serial` — all three present, all three equal.
+
+**`match.connector_hint` on its own never matches.** It is a socket, not a panel: plug a different
+monitor into `HDMI-1` and the hint still fits while the hardware does not. Matching on it would
+silently move a label onto somebody else's monitor. The field exists to help a human write the file
+and to disambiguate for a person reading it.
+
+Ambiguity fails closed. If two entries match one display, or one entry matches two displays,
+neither is applied and the display reports why it stayed unlabelled.
+
+A matched overlay **adds** a label. It never replaces the display's `resource_id`, connector,
+manufacturer, model, serial, or fingerprint, and deleting the entry leaves the display fully
+identified.
+
+**Editing labels from the UI is M2B2.** In this build the file is still authored by hand.
 
 ---
 
@@ -187,7 +209,14 @@ GET /api/registries/displays
 ```
 
 Both require the same device token as every other state-revealing route; unauthenticated requests
-get `401`. There is no write endpoint in M2A.
+get `401`. There is no write endpoint.
+
+For what is actually plugged in right now — connector, model, resolution, refresh rate, physical
+size, and an EDID fingerprint — use the runtime inventory instead:
+
+```
+GET /api/runtime/displays        → the displays this session is driving, discovered live
+```
 
 Errors are bounded and structured. A configuration failure reports the registry, a structural
 location such as `items[3].match.edid_sha256`, and a code-owned explanation — never a filesystem

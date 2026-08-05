@@ -122,6 +122,30 @@ Guardian protocol; A/B update state and history; task cards; authorization categ
 adapter interfaces. **No external tool's schema — OpenClaw's included — is ever the canonical
 data model.**
 
+### Three layers, kept apart
+
+Everything the runtime slot knows about the machine sits in exactly one of three layers.
+Conflating them is how configuration starts lying about hardware:
+
+1. **Definitions** — code-owned. Which applications exist as a concept, which launch adapters are
+   permitted, which executables each may resolve to. Configuration selects among them and can
+   never add one. `cofferdam/workstation/adapters/`.
+2. **Runtime resources** — discovered from the machine at a stated instant: connected displays,
+   running processes, application instances, windows. `cofferdam/workstation/runtime/`, described
+   in [`docs/RUNTIME_INVENTORY.md`](docs/RUNTIME_INVENTORY.md).
+3. **User overlays** — optional labels, aliases, preferences, policy metadata.
+   `cofferdam/workstation/registries/`.
+
+A definition being available does not mean it is running. A browser profile existing does not mean
+a browser process or a tab is open. A runtime item comes from a current observation of the system,
+and an empty or unavailable inventory stays empty rather than being filled with examples.
+
+The ordering is binding: **discover the resource first, then attach the optional label.** A label
+invented before the resource is a guess that will quietly disagree with the machine.
+
+The desktop and mobile clients consume the **same** backend resource model. The model is the
+contract; the clients are views of it.
+
 ### Typed actions and routing
 
 Natural language becomes Cofferdam-owned typed actions (e.g. `open_application`,
