@@ -526,7 +526,7 @@ logic; the gate stays open and unaffected, and no M2A document may describe M1 a
   bound, the PWA's stale-response guard, loopback-only binding and the Host check, and arbitrary
   player-command rejection.
 
-  **Not re-validated on the real host yet.** The `100-youtube-player-validation` drop-in is not
+  **Not re-validated on the real host yet.** The `95-youtube-player-validation` drop-in is not
   applied, and the live service still runs the M2D build under the unchanged `90` drop-in.
 
   **Not in this milestone:** seek, automatic queue continuation when a video ends, queue

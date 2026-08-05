@@ -60,7 +60,7 @@ phone.
 ### The exact rollback command
 
 ```bash
-rm ~/.config/systemd/user/cofferdam-workstation.service.d/100-youtube-player-validation.conf && systemctl --user daemon-reload && systemctl --user restart cofferdam-workstation.service
+rm ~/.config/systemd/user/cofferdam-workstation.service.d/95-youtube-player-validation.conf && systemctl --user daemon-reload && systemctl --user restart cofferdam-workstation.service
 ```
 
 That removes **only** the M2E layer and returns the service to the unchanged
@@ -73,7 +73,7 @@ and goes with it.
 ## 1. Install the validation layer
 
 ```bash
-cp ~/cofferdam/clones/youtube-dedicated-player/deploy/validation/100-youtube-player-validation.conf ~/.config/systemd/user/cofferdam-workstation.service.d/
+cp ~/cofferdam/clones/youtube-dedicated-player/deploy/validation/95-youtube-player-validation.conf ~/.config/systemd/user/cofferdam-workstation.service.d/
 ```
 
 ```bash
@@ -82,10 +82,22 @@ systemctl --user daemon-reload && systemctl --user restart cofferdam-workstation
 
 ### Confirm the layer actually took effect
 
-**Do not skip this.** systemd does not sort drop-ins byte-wise: `sort` puts
-`100-` *before* `90-`, which would silently leave the old runtime in place.
-systemd compares digit runs numerically, so `90-` < `100-` and the new file
-wins — but confirm it rather than trusting either intuition:
+**Do not skip this.** The number in the filename is load-bearing and the obvious
+choice is wrong.
+
+systemd applies drop-ins in **byte-wise** lexicographic order of their filenames.
+A file called `100-…` sorts immediately after `10-…` and *before* `20-…` … `90-…`,
+so it would be overridden by the M2D drop-in and the service would go on running
+the old clone with no error anywhere. That is not a hypothetical: a `100-` file
+was installed during this milestone, reloaded and restarted, and left
+`WorkingDirectory` pointing at the M2D clone. `systemctl --user cat` showed why.
+
+`95-` sorts after `90-` byte-wise and is unambiguous. (`systemd-analyze
+compare-versions` reports `90-… < 100-…`, but that command implements *version*
+comparison and is not what orders drop-in filenames. The manual page's word
+"lexicographic" is literal.)
+
+Whatever the number, confirm the result rather than the name:
 
 ```bash
 systemctl --user show cofferdam-workstation.service -p ExecStart -p WorkingDirectory
@@ -94,6 +106,14 @@ systemctl --user show cofferdam-workstation.service -p ExecStart -p WorkingDirec
 `WorkingDirectory` must now read
 `/home/nrgis/cofferdam/clones/youtube-dedicated-player`. If it still reads
 `spotify-playback-oauth`, the layer did not win — roll back and stop.
+
+To see the order systemd actually used:
+
+```bash
+systemctl --user cat cofferdam-workstation.service | grep -E '^# /home.*\.conf$'
+```
+
+The M2E file must be **last** in that list.
 
 Then confirm the service is healthy and has not restarted in a loop:
 
@@ -161,7 +181,7 @@ Expected output: nothing.
 Whether validation passes or fails, the rollback is the same single command:
 
 ```bash
-rm ~/.config/systemd/user/cofferdam-workstation.service.d/100-youtube-player-validation.conf && systemctl --user daemon-reload && systemctl --user restart cofferdam-workstation.service
+rm ~/.config/systemd/user/cofferdam-workstation.service.d/95-youtube-player-validation.conf && systemctl --user daemon-reload && systemctl --user restart cofferdam-workstation.service
 ```
 
 Then confirm the pre-state is restored:
