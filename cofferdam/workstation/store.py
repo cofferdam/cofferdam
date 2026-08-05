@@ -16,7 +16,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from .config import Config
 
@@ -144,6 +144,44 @@ class ActionStore:
                 "finished_at": _utc_now(),
                 "params": {"resource_id": resource_id},
                 "result": {"outcome": result, "device_type": device_type},
+                "error": None if result == "ok" else {"code": result},
+                "stub": False,
+            }
+        )
+
+    def record_spotify_event(
+        self, operation: str, result: str, correlation_id: Optional[str] = None
+    ) -> None:
+        """Audit one Spotify playback action — applied, refused, or failed.
+
+        Narrower than any other audit in this file, because playback *is*
+        personal activity. What someone listened to, when, and how often is a
+        detailed picture of a person, and an action log carrying track titles
+        would quietly become a listening history: kept on disk, shown in a list,
+        and never asked for.
+
+        So this records the operation and the outcome, and nothing else. Not the
+        track, artist, album, or query; not the account; not the Spotify device
+        id; not the volume. "A track was skipped at 21:04 and it worked" is
+        enough to audit the write path, and it is the most that can be recorded
+        without describing someone's evening.
+
+        ``correlation_id`` (M2D.1) is the one addition, and it is safe precisely
+        because it is meaningless on its own: random hex minted per operation,
+        carrying nothing about the account or the track. It exists so a slow
+        cold-start recovery can be lined up with the phase log it produced, which
+        is what made diagnosing "Play now did nothing the first time" possible
+        without recording what was played.
+        """
+        self.add(
+            {
+                "action_id": uuid.uuid4().hex,
+                "action": operation,
+                "status": "succeeded" if result == "ok" else "failed",
+                "started_at": _utc_now(),
+                "finished_at": _utc_now(),
+                "params": {},
+                "result": {"outcome": result, "correlation_id": correlation_id},
                 "error": None if result == "ok" else {"code": result},
                 "stub": False,
             }

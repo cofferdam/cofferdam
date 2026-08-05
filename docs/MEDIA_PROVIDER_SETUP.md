@@ -46,11 +46,15 @@ prefix, suffix, length, or hash.
 
 ## 1. Spotify
 
-Spotify is used for **catalogue search only**. Cofferdam authenticates with the
-Client Credentials flow, whose token by design reaches only endpoints that do
-not access user information. It cannot read your library and it cannot control
-playback. (Playback arrives in a later milestone, with its own user OAuth
-consent and its own review.)
+The credentials in this guide are used for **catalogue search only**. Cofferdam
+authenticates with the Client Credentials flow, whose token by design reaches
+only endpoints that do not access user information. It cannot read your library
+and it cannot control playback.
+
+Playback control is a **separate, additional** authorization — your own Spotify
+account consenting once, on the workstation — and it is set up in
+[`SPOTIFY_PLAYBACK.md`](SPOTIFY_PLAYBACK.md). It needs the client id configured
+here, so do this guide first; it does **not** use the client secret.
 
 ### 1.1 Create the application
 
@@ -79,10 +83,15 @@ consent and its own review.)
 
 ### 1.3 Development mode is fine
 
-A new Spotify app starts in development mode. Its five-user allowlist applies to
+A new Spotify app starts in development mode. Its allowlist applies to
 *authenticated user* tokens; a client-credentials token carries no user, so the
 allowlist does not affect catalogue search. The shared quota bucket does apply
 and shows up as rate limiting — see troubleshooting.
+
+**It does affect playback.** The Spotify account that authorizes playback control
+mints a user token, so that account must be added to the app's allowed users
+before it will work. That is the commonest reason a first authorization is
+refused, and it is covered in [`SPOTIFY_PLAYBACK.md`](SPOTIFY_PLAYBACK.md).
 
 ---
 
@@ -321,5 +330,10 @@ before it is worth raising.
   provider requirements as verified on 2026-08-05, and the search-session model.
 * [`MEDIA_PROFILES.md`](MEDIA_PROFILES.md) — which services Cofferdam can open
   and how they are launched.
+* [`SPOTIFY_PLAYBACK.md`](SPOTIFY_PLAYBACK.md) — **controlling Spotify playback**,
+  which is a separate, additional authorization: the credentials in this guide
+  search the catalogue and cannot touch a player. That guide covers the one-time
+  user consent, the Premium requirement, and the development-mode allowlist that
+  applies to user tokens but not to the search credential set up here.
 * [`AUDIO_CONTROL.md`](AUDIO_CONTROL.md) — system volume, mute, and output
   selection, which are separate from any provider's own player volume.

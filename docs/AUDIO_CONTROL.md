@@ -273,3 +273,7 @@ systemctl --user is-active pipewire wireplumber
   play, which is what produces the streams this panel observes.
 * [`MEDIA_PROVIDER_SETUP.md`](MEDIA_PROVIDER_SETUP.md) — Spotify and YouTube
   credential setup.
+* [`SPOTIFY_PLAYBACK.md`](SPOTIFY_PLAYBACK.md) — **Spotify's own player volume
+  and Connect devices, which are not this panel.** Turning Spotify down does
+  not change this machine's output level, and turning this machine down does
+  not change Spotify's. Two controls, two panels, two subsystems.

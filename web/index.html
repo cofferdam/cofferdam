@@ -92,6 +92,29 @@
       <div id="audioSections"><p class="muted">Loading…</p></div>
     </section>
 
+    <!-- Spotify player (M2D). Deliberately a separate panel from Audio above,
+         and directly above Media below, because the search results in Media are
+         where a track is chosen and this is where it plays. The volume here is
+         *Spotify's own* player level on a Spotify Connect device — possibly a
+         phone in another room. It is not this computer's speaker; that is the
+         Audio panel, and the two must never be mistaken for each other. -->
+    <section class="panel" id="spotifyPanel">
+      <div class="panel-head">
+        <h2>Spotify player</h2>
+        <div class="row tight">
+          <span class="muted" id="spotifyObserved"></span>
+          <button id="spotifyRefresh" class="ghost">Refresh</button>
+        </div>
+      </div>
+      <p class="muted">
+        Controls <strong>your Spotify account's own player</strong> and its Connect devices, using
+        an authorization you grant once on the workstation. <strong>This is not the Audio panel
+        above</strong> — that is this computer's speaker volume, and the two are separate
+        controls. Playback control requires Spotify Premium; catalogue search does not.
+      </p>
+      <div id="spotifySections"><p class="muted">Loading…</p></div>
+    </section>
+
     <!-- Media launch profiles (M2B3A). Deliberately its own panel and not part
          of "Live system": every card here is a *definition* — something
          Cofferdam can open — and none of them says anything about what is
@@ -157,6 +180,7 @@
 <div class="toasts" id="toasts" aria-live="polite"></div>
 <script src="/live.js"></script>
 <script src="/audio.js"></script>
+<script src="/spotify.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

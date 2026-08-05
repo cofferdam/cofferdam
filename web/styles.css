@@ -310,7 +310,12 @@ button.danger { color: var(--err); }
 .mr-title { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; min-width: 0; }
 .mr-title strong { font-size: 14px; overflow-wrap: anywhere; }
 .mr-meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
-.mr-open { width: 100%; min-height: 40px; padding: 8px 12px; }
+/* The action row on a result card (M2D adds Play now and Add to queue beside
+   Open). It wraps rather than scrolls: three buttons on a narrow phone become
+   two rows, which is the only arrangement that cannot push the page sideways.
+   Every child may shrink to nothing, and every one is at least a thumb tall. */
+.mr-actions { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.mr-actions button { flex: 1 1 8em; min-width: 0; min-height: 40px; padding: 8px 12px; }
 .mr-first { width: 100%; }
 /* Inline inside a note line: small, and never full-width. */
 .mr-retry {
@@ -391,4 +396,109 @@ button.danger { color: var(--err); }
   .audio-volume input[type="range"] { flex: 1 1 100%; order: 3; }
   .audio-volume-value { margin-left: auto; }
   .audio-select { width: 100%; }
+
+  /* The Spotify player's narrow-screen rules live in this same block rather
+     than a second one of their own. Both panels carry a slider with the same
+     problem, and one place to look for "what happens on a small phone" is worth
+     more than tidy per-feature separation. */
+  .sp-volume { flex-wrap: wrap; }
+  .sp-volume input[type="range"] { flex: 1 1 100%; order: 3; }
+  .sp-volume-value { margin-left: auto; }
+  .sp-connected { grid-template-columns: 1fr; }
+  .sp-connected button { justify-self: start; }
+  .sp-device-picker select, .sp-device-picker button { flex: 1 1 100%; }
 }
+
+/* Spotify player (M2D). Visually a sibling of the Audio panel and deliberately
+   not identical to it: the two panels control different machines' volume, and a
+   user glancing at the page should be able to tell which one they are touching
+   from shape alone. Every text node here is provider text — a track title, an
+   artist, a speaker someone named themselves — so all of it wraps and every
+   flex child may shrink. */
+.sp-account { display: grid; gap: 6px; min-width: 0; }
+.sp-headline { font-size: 15px; font-weight: 600; margin: 0; overflow-wrap: anywhere; }
+.sp-account .muted { font-size: 13px; margin: 0; overflow-wrap: anywhere; }
+.sp-account button { min-height: 40px; justify-self: start; }
+.sp-connected { grid-template-columns: 1fr auto; align-items: center; }
+.sp-connected button { justify-self: end; }
+
+.sp-now { display: grid; gap: 4px; margin-top: 12px; min-width: 0; }
+.sp-now-title {
+  display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap;
+  font-size: 17px; min-width: 0;
+}
+.sp-now-title strong { overflow-wrap: anywhere; }
+.sp-now-meta { font-size: 13px; overflow-wrap: anywhere; }
+
+/* Position at the last observation, not an animation. Polling is conservative
+   on purpose, so a bar that crept forward between observations would be the one
+   thing on this panel that was not measured. */
+.sp-progress { margin-top: 6px; display: grid; gap: 4px; min-width: 0; }
+.sp-progress-bar {
+  height: 4px; border-radius: 999px; background: #16222e; overflow: hidden;
+}
+.sp-progress-bar span { display: block; height: 100%; background: var(--accent, #4aa3ff); }
+.sp-progress-times { display: flex; justify-content: space-between; font-size: 12px; }
+
+.sp-transport { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; min-width: 0; }
+.sp-transport .sp-btn { flex: 1 1 5em; min-width: 0; min-height: 44px; }
+
+.sp-volume { display: flex; align-items: center; gap: 10px; margin-top: 14px; min-width: 0; }
+.sp-volume-label { color: var(--muted); font-size: 13px; flex: 0 0 auto; }
+.sp-volume input[type="range"] {
+  flex: 1 1 auto; min-width: 0; height: 36px; accent-color: var(--accent, #4aa3ff);
+}
+.sp-volume-value {
+  flex: 0 0 auto; font-variant-numeric: tabular-nums; min-width: 3.5ch; text-align: right;
+}
+.sp-mute-row {
+  display: flex; align-items: center; gap: 10px; margin-top: 10px;
+  flex-wrap: wrap; min-width: 0;
+}
+.sp-mute-row button { min-height: 40px; }
+.sp-badge {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+  background: #16222e; border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px;
+  color: var(--muted); white-space: nowrap;
+}
+/* The mute-is-volume-zero sentence lives in the panel, not only in the docs. */
+.sp-fineprint { font-size: 12px; margin: 8px 0 0; overflow-wrap: anywhere; }
+
+.sp-pending { font-size: 12px; margin: 6px 0 0; }
+/* The in-flight phase. Cold-start recovery can take twenty seconds, and a panel
+   that showed nothing for that long would read as hung — so this says which of
+   the five steps is happening, in the server's own words. */
+.sp-pending-banner {
+  font-size: 13px; margin: 10px 0 0; color: var(--accent, #4aa3ff);
+  overflow-wrap: anywhere;
+}
+/* Inline inside a refusal line: small, and never full-width. */
+.sp-retry {
+  min-height: 0; padding: 2px 10px; font-size: 12px; border-radius: 999px;
+  vertical-align: baseline;
+}
+.sp-error { color: var(--err); font-size: 13px; margin: 10px 0 0; overflow-wrap: anywhere; }
+.sp-note { font-size: 13px; margin: 10px 0 0; overflow-wrap: anywhere; }
+.sp-note.ok { color: var(--ok, #5fd08a); }
+.sp-note.warn { color: var(--warn); }
+/* "No active device" and "this device has no volume control" are facts about
+   Spotify's world, not faults in the request, so they read as information. */
+.sp-unavailable { color: var(--muted); font-size: 13px; margin: 10px 0 0; overflow-wrap: anywhere; }
+
+.sp-fold { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px; }
+.sp-fold > summary { cursor: pointer; font-size: 14px; }
+.sp-fold > .muted { font-size: 12px; margin: 8px 0; overflow-wrap: anywhere; }
+.sp-device-picker { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; min-width: 0; }
+.sp-device-picker select { flex: 1 1 12em; min-width: 0; min-height: 40px; }
+.sp-device-picker button { flex: 0 1 auto; min-height: 40px; }
+.sp-device-list { display: grid; gap: 8px; margin-top: 10px; }
+.sp-device {
+  background: #0c141c; border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px; display: grid; gap: 4px; min-width: 0;
+}
+.sp-device.current { border-color: var(--accent, #4aa3ff); }
+.sp-device-name { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
+.sp-device-sub { font-size: 12px; overflow-wrap: anywhere; }
+.sp-warnings { margin: 10px 0 0; padding-left: 18px; color: var(--warn); font-size: 12px; }
+.sp-warnings li { overflow-wrap: anywhere; }
+.sp-warnings:empty { display: none; }

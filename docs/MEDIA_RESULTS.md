@@ -294,6 +294,9 @@ blind first-result clicking.
 
 ## Related
 
+* [`SPOTIFY_PLAYBACK.md`](SPOTIFY_PLAYBACK.md) — M2D, which plays a verified *track* result
+  through the user's own Spotify account. It reuses these search sessions rather than adding a
+  second catalogue search, and the client still sends only the handles issued here.
 * [`MEDIA_PROFILES.md`](MEDIA_PROFILES.md) — the M2B3A launch surface this builds on
 * [`APPLICATION_PROFILES.md`](APPLICATION_PROFILES.md) — browser routing and `browser_id`
 * [`DECISIONS.md`](../DECISIONS.md) — D-2026-08-05-7 and -8

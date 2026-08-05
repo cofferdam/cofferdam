@@ -65,6 +65,16 @@ property, a profile, a command, or a program, and those are absent from the
 schemas rather than validated and rejected. Reads are ``GET`` and change
 nothing; every change is a ``PUT`` with a JSON body, a bounded length, and a
 strict field set.
+
+**The Spotify routes (M2D) control someone else's account**, so the client's
+vocabulary is narrower still: an opaque device handle, a search id, a result id,
+an integer, and a boolean. There is no field for a Spotify URI, a track id, a
+device id, an access token, an authorization code, or a redirect URI — a track
+is named by *which search result it was*, and the server rebuilds the URI from
+its own session. The OAuth callback is **not** served by this application: it is
+a separate loopback-only listener that exists for a few minutes during
+authorization and is unreachable from the tailnet. See
+:mod:`cofferdam.workstation.spotifyplayer.callback`.
 """
 
 from __future__ import annotations
@@ -110,18 +120,47 @@ from .audio.actions import (
 from .audio.actions import REJECT_UNKNOWN_RESOURCE as REJECT_AUDIO_UNKNOWN_RESOURCE
 from .audio.models import AUDIO_RESOURCE_KINDS
 from .browser_selection import PRODUCT_DEFAULT_BROWSER
+from .spotifyplayer import AuthorizationRunner, SpotifyActionExecutor, SpotifyPlayerService
+from .spotifyplayer.coldstart import DeviceRecovery, SpotifyLauncher
+from .spotifyplayer.errors import (
+    CODE_DEVICE_AMBIGUOUS,
+    CODE_DEVICE_RESTRICTED,
+    CODE_DEVICE_UNKNOWN,
+    CODE_INVALID_VOLUME,
+    CODE_LAUNCH_FAILED,
+    CODE_NO_DEVICE_AFTER_LAUNCH,
+    CODE_PLAYBACK_NOT_OBSERVED,
+    CODE_MISSING_SCOPES,
+    CODE_NOT_CONNECTED,
+    CODE_NO_ACTIVE_DEVICE,
+    CODE_PREMIUM_REQUIRED,
+    CODE_PROVIDER_REJECTED,
+    CODE_PROVIDER_UNAVAILABLE,
+    CODE_RATE_LIMITED,
+    CODE_RESULT_NOT_PLAYABLE,
+    CODE_UNMUTE_UNKNOWN,
+    CODE_VOLUME_UNSUPPORTED,
+    SpotifyPlayerError,
+)
 from .media import KIND_NATIVE_APP, MAX_QUERY_LENGTH
 from .media import catalogue as media_catalogue
+from .mediasearch.errors import (
+    CODE_RESULT_NOT_FOUND,
+    CODE_SEARCH_EXPIRED,
+    CODE_SEARCH_NOT_FOUND,
+)
 from .mediasearch.results import MAX_RESULTS, MEDIA_RESULT_MODEL_VERSION
 from .mediasearch.service import MediaSearchService
 from .mediasearch.sessions import SEARCH_SESSION_TTL_SECONDS
 from .config import Config, load_config, load_or_create_token
 from .errors import (
+    CODE_ADAPTER_FAILED,
     CODE_CONFIGURATION_INVALID,
     CODE_INTERNAL,
     CODE_INVALID_PARAMS,
     CODE_NOT_FOUND,
     CODE_UNAUTHORIZED,
+    AdapterError,
     ApiError,
 )
 from .events import STATUS_REFRESH_SECONDS, TOKEN_SUBPROTOCOL, EventHub
@@ -189,6 +228,46 @@ _AUDIO_STATUS = {
 }
 
 
+# A Spotify request body is a handle, an integer, or a boolean.
+MAX_SPOTIFY_BODY_BYTES = 2 * 1024
+
+# Refusal code -> HTTP status. 409 for "the world moved, refresh and retry",
+# 402 for the one case that is genuinely about the account's plan, 429 for
+# provider rate limiting so a client can back off on the right signal.
+_SPOTIFY_STATUS = {
+    CODE_NOT_CONNECTED: 409,
+    CODE_MISSING_SCOPES: 409,
+    CODE_PREMIUM_REQUIRED: 402,
+    CODE_NO_ACTIVE_DEVICE: 409,
+    # M2D.1 cold-start recovery. 409 throughout: every one of these is "the
+    # world is not in a state where this can happen yet", which a client fixes
+    # by choosing something or trying again — not a malformed request.
+    CODE_NO_DEVICE_AFTER_LAUNCH: 409,
+    CODE_DEVICE_AMBIGUOUS: 409,
+    CODE_LAUNCH_FAILED: 409,
+    CODE_PLAYBACK_NOT_OBSERVED: 409,
+    CODE_DEVICE_UNKNOWN: 404,
+    CODE_DEVICE_RESTRICTED: 409,
+    CODE_VOLUME_UNSUPPORTED: 409,
+    CODE_INVALID_VOLUME: 422,
+    CODE_UNMUTE_UNKNOWN: 409,
+    CODE_RESULT_NOT_PLAYABLE: 422,
+    CODE_RATE_LIMITED: 429,
+    CODE_PROVIDER_REJECTED: 502,
+    CODE_PROVIDER_UNAVAILABLE: 503,
+}
+
+# The search-session refusals a Spotify result action can hit. Same codes the
+# existing open-result path already returns, so the PWA has one thing to branch
+# on — "that result list has expired, search again" — however the result was
+# being used.
+_MEDIA_SEARCH_STATUS = {
+    CODE_SEARCH_NOT_FOUND: 404,
+    CODE_SEARCH_EXPIRED: 409,
+    CODE_RESULT_NOT_FOUND: 404,
+}
+
+
 def _error_response(error: ApiError) -> JSONResponse:
     return JSONResponse(status_code=error.status_code, content=error.to_payload())
 
@@ -200,6 +279,7 @@ def create_app(
     inventory=None,
     media_search=None,
     audio=None,
+    spotify=None,
 ) -> FastAPI:
     """Build the application. Arguments are injectable for tests."""
     config = config or load_config()
@@ -230,6 +310,20 @@ def create_app(
     # request and die with the process — which is the intended lifetime, since a
     # session is a short-lived memory of what someone was looking for.
     media_search = media_search or MediaSearchService(config)
+    # The Spotify player reuses the catalogue credential store for the client id
+    # only — PKCE needs no secret, so the secret in that file never enters the
+    # authorization path — and the *existing* search sessions as the sole
+    # authority for what a "track" is. No second catalogue search exists.
+    spotify = spotify or SpotifyPlayerService(config, media_search.credentials)
+    # Cold-start recovery (M2D.1). The launcher is the *existing* allowlisted
+    # application path — the same one the Media panel's "Open" button uses — so
+    # playback gains no new way to start a process and constructs no command of
+    # its own. Recovery is what makes "press Play with Spotify closed" work.
+    spotify_recovery = DeviceRecovery(spotify, SpotifyLauncher(adapter))
+    spotify_actions = SpotifyActionExecutor(
+        spotify, media_search.sessions, recovery=spotify_recovery
+    )
+    spotify_authorize = AuthorizationRunner(spotify, adapter)
 
     executor = ActionExecutor(
         adapter, store, config, on_event=_on_event, media_search=media_search
@@ -263,6 +357,10 @@ def create_app(
     app.state.media_search = media_search
     app.state.audio = audio
     app.state.audio_actions = audio_actions
+    app.state.spotify = spotify
+    app.state.spotify_actions = spotify_actions
+    app.state.spotify_authorize = spotify_authorize
+    app.state.spotify_recovery = spotify_recovery
     overlays = DisplayOverlayStore(config, inventory)
     app.state.display_overlays = overlays
 
@@ -865,6 +963,293 @@ def create_app(
                 status_code=_AUDIO_STATUS.get(rejection.code, 422),
                 detail=rejection.detail,
             )
+
+
+    # -- Spotify playback (M2D: control of the user's own account) ------------
+    #
+    # Narrower than any surface above it. A client may send an opaque device
+    # handle, a search id, a result id, an integer and a boolean. It may not
+    # send a Spotify URI, a track id, a device id, a token, an authorization
+    # code, or a redirect URI: none of those is a field in any schema here.
+
+    async def _spotify_body(request: Request, allowed: set) -> Dict[str, Any]:
+        """A bounded JSON body with a strict field set, or a refusal."""
+        content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if content_type != "application/json":
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="this endpoint accepts application/json only",
+                status_code=415,
+            )
+        declared = request.headers.get("content-length")
+        if declared is not None:
+            try:
+                too_big = int(declared) > MAX_SPOTIFY_BODY_BYTES
+            except ValueError:
+                raise ApiError(
+                    code=CODE_INVALID_PARAMS, message="invalid Content-Length", status_code=400
+                )
+            if too_big:
+                raise ApiError(
+                    code=CODE_INVALID_PARAMS,
+                    message="the request body is too large",
+                    status_code=413,
+                )
+        raw = await request.body()
+        if len(raw) > MAX_SPOTIFY_BODY_BYTES:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS, message="the request body is too large", status_code=413
+            )
+        if not raw:
+            payload: Any = {}
+        else:
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                raise ApiError(
+                    code=CODE_INVALID_PARAMS,
+                    message="the request body is not valid JSON",
+                    status_code=400,
+                )
+        if not isinstance(payload, dict):
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="the request body must be a JSON object",
+                status_code=400,
+            )
+        unexpected = sorted(set(payload) - allowed)
+        if unexpected:
+            # Refused, not ignored. A body carrying `uri`, `device_id`,
+            # `access_token` or `code` is a client trying to address Spotify
+            # directly, and dropping the field silently would teach it that the
+            # attempt was acceptable.
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="unexpected field: " + unexpected[0],
+                status_code=422,
+                detail=(
+                    "this endpoint accepts only: " + ", ".join(sorted(allowed))
+                    if allowed
+                    else "this endpoint accepts no fields"
+                ),
+            )
+        return payload
+
+    async def _run_spotify(name: str, operation, *args) -> Dict[str, Any]:
+        """Run one Spotify action, auditing the operation and its outcome only.
+
+        The audit deliberately records no track, artist, album or query — see
+        store.record_spotify_event.
+        """
+        try:
+            result = await run_in_threadpool(operation, *args)
+        except SpotifyPlayerError as rejection:
+            store.record_spotify_event(name, rejection.code)
+            raise ApiError(
+                code=rejection.code,
+                message=rejection.message,
+                status_code=_SPOTIFY_STATUS.get(rejection.code, 422),
+                detail=rejection.detail,
+            )
+        except AdapterError as rejection:
+            # The search-session refusals: expired session, unknown result, and
+            # the cross-provider check that stops a YouTube result being routed
+            # into the Spotify player. They come from the *existing* media-search
+            # layer — this milestone deliberately built no second one — and they
+            # already carry the right codes, so they are mapped rather than
+            # rewritten. Without this they would fall through to the catch-all
+            # handler and reach the phone as "internal error", which would send
+            # someone hunting for a bug instead of pressing Search again.
+            code = getattr(rejection, "code", CODE_ADAPTER_FAILED)
+            store.record_spotify_event(name, code)
+            raise ApiError(
+                code=code,
+                message=rejection.message,
+                status_code=_MEDIA_SEARCH_STATUS.get(code, 409),
+                detail=rejection.detail,
+            )
+        outcome = result.get("outcome")
+        store.record_spotify_event(
+            name,
+            "ok" if outcome in ("applied", "accepted_by_provider") else str(outcome),
+            correlation_id=result.get("correlation_id"),
+        )
+        return result
+
+    @app.get("/api/spotify/playback", dependencies=[Depends(require_token)])
+    async def spotify_playback(refresh: bool = False) -> Dict[str, Any]:
+        """Connection status, playback state, and Connect devices.
+
+        Reading talks to Spotify, so it runs in a worker thread. It changes
+        nothing: no GET in this group has a side effect.
+        """
+        snapshot = await run_in_threadpool(spotify.snapshot, refresh)
+        payload = snapshot.to_dict()
+        payload["authorization"] = spotify_authorize.status()
+        return payload
+
+    @app.get("/api/spotify/activity", dependencies=[Depends(require_token)])
+    async def spotify_activity() -> Dict[str, Any]:
+        """What a long Spotify operation is doing right now. No provider call.
+
+        Cold-start recovery can take twenty seconds — open Spotify, wait for its
+        device, transfer to it, start the track, confirm it started — and a phone
+        showing a spinner for that long is indistinguishable from a phone that has
+        hung. This is what the PWA polls meanwhile.
+
+        Deliberately free: it reads one in-memory record and touches neither
+        Spotify nor the filesystem, so watching a slow operation cannot make the
+        rate limit that operation is already fighting any worse. It carries a
+        phase from a closed vocabulary, a correlation id, and an elapsed time —
+        no track, no device, no account.
+        """
+        return spotify_actions.activity.snapshot()
+
+    @app.post("/api/spotify/authorize", dependencies=[Depends(require_token)])
+    async def spotify_start_authorization(request: Request) -> Dict[str, Any]:
+        """Begin one PKCE attempt and open the page in Opera on the workstation.
+
+        Returns immediately with an instruction for the phone; the attempt runs
+        in the background and times out on its own. The authorization URL is not
+        returned — it can only be completed on the workstation, and handing it to
+        a phone would invite a failure that looks like Cofferdam's fault.
+        """
+        await _spotify_body(request, allowed=set())
+        try:
+            return await run_in_threadpool(spotify_authorize.start)
+        except SpotifyPlayerError as rejection:
+            store.record_spotify_event("spotify_authorize", rejection.code)
+            raise ApiError(
+                code=rejection.code,
+                message=rejection.message,
+                status_code=_SPOTIFY_STATUS.get(rejection.code, 409),
+                detail=rejection.detail,
+            )
+
+    @app.delete("/api/spotify/authorize", dependencies=[Depends(require_token)])
+    async def spotify_cancel_authorization() -> Dict[str, Any]:
+        """Cancel a pending attempt, so a remote user is never stuck waiting."""
+        cancelled = await run_in_threadpool(spotify_authorize.cancel)
+        return {"cancelled": bool(cancelled), "authorization": spotify_authorize.status()}
+
+    @app.post("/api/spotify/disconnect", dependencies=[Depends(require_token)])
+    async def spotify_disconnect(request: Request) -> Dict[str, Any]:
+        """Remove the local authorization. This does not revoke at Spotify."""
+        await _spotify_body(request, allowed=set())
+        return await _run_spotify("spotify_disconnect", spotify_actions.disconnect)
+
+    _SPOTIFY_TRANSPORT = {
+        "pause": lambda: spotify_actions.pause(),
+        "resume": lambda: spotify_actions.resume(),
+        "next": lambda: spotify_actions.skip(True),
+        "previous": lambda: spotify_actions.skip(False),
+    }
+
+    @app.post("/api/spotify/player/{operation}", dependencies=[Depends(require_token)])
+    async def spotify_transport(operation: str, request: Request) -> Dict[str, Any]:
+        """Pause, resume, next, previous — each re-read and verified after."""
+        if operation not in _SPOTIFY_TRANSPORT:
+            raise ApiError(
+                code=CODE_NOT_FOUND,
+                message="unknown player operation",
+                status_code=404,
+                detail="known operations: " + ", ".join(sorted(_SPOTIFY_TRANSPORT)),
+            )
+        await _spotify_body(request, allowed=set())
+        return await _run_spotify(
+            "spotify_" + operation, _SPOTIFY_TRANSPORT[operation]
+        )
+
+    @app.put("/api/spotify/player/volume", dependencies=[Depends(require_token)])
+    async def spotify_volume(request: Request) -> Dict[str, Any]:
+        """Set Spotify's own device volume. Separate from the computer's."""
+        payload = await _spotify_body(request, allowed={"volume_percent", "device_resource_id"})
+        if "volume_percent" not in payload:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS, message="volume_percent is required", status_code=422
+            )
+        return await _run_spotify(
+            "spotify_set_volume",
+            spotify_actions.set_volume,
+            payload["volume_percent"],
+            payload.get("device_resource_id"),
+        )
+
+    @app.put("/api/spotify/player/mute", dependencies=[Depends(require_token)])
+    async def spotify_mute(request: Request) -> Dict[str, Any]:
+        """Mute or unmute Spotify — which means volume zero, and says so."""
+        payload = await _spotify_body(request, allowed={"muted", "device_resource_id"})
+        if "muted" not in payload:
+            raise ApiError(code=CODE_INVALID_PARAMS, message="muted is required", status_code=422)
+        return await _run_spotify(
+            "spotify_set_mute",
+            spotify_actions.set_muted,
+            payload["muted"],
+            payload.get("device_resource_id"),
+        )
+
+    @app.put("/api/spotify/player/device", dependencies=[Depends(require_token)])
+    async def spotify_transfer(request: Request) -> Dict[str, Any]:
+        """Move Spotify playback to another Connect device.
+
+        This does not change this computer's audio output; that is the Computer
+        Audio panel, and the response says so explicitly.
+        """
+        payload = await _spotify_body(request, allowed={"device_resource_id", "play"})
+        if "device_resource_id" not in payload:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS, message="device_resource_id is required", status_code=422
+            )
+        play = payload.get("play", False)
+        if not isinstance(play, bool):
+            raise ApiError(
+                code=CODE_INVALID_PARAMS, message="play must be true or false", status_code=422
+            )
+        return await _run_spotify(
+            "spotify_transfer_playback",
+            spotify_actions.transfer,
+            payload["device_resource_id"],
+            play,
+        )
+
+    @app.post(
+        "/api/media/searches/{search_id}/results/{result_id}/spotify/play",
+        dependencies=[Depends(require_token)],
+    )
+    async def spotify_play_result(
+        search_id: str, result_id: str, request: Request
+    ) -> Dict[str, Any]:
+        """Play the exact track behind a verified Spotify search result.
+
+        The track is named by *which result it was*. The server rebuilds the
+        Spotify URI from its own search session, so there is no request field
+        for a URI or a track id to validate.
+        """
+        payload = await _spotify_body(request, allowed={"device_resource_id"})
+        return await _run_spotify(
+            "spotify_play_search_result",
+            spotify_actions.play_search_result,
+            search_id,
+            result_id,
+            payload.get("device_resource_id"),
+        )
+
+    @app.post(
+        "/api/media/searches/{search_id}/results/{result_id}/spotify/queue",
+        dependencies=[Depends(require_token)],
+    )
+    async def spotify_queue_result(
+        search_id: str, result_id: str, request: Request
+    ) -> Dict[str, Any]:
+        """Add the exact track behind a verified result to the Spotify queue."""
+        payload = await _spotify_body(request, allowed={"device_resource_id"})
+        return await _run_spotify(
+            "spotify_queue_search_result",
+            spotify_actions.queue_search_result,
+            search_id,
+            result_id,
+            payload.get("device_resource_id"),
+        )
 
     # -- live events ---------------------------------------------------------
 

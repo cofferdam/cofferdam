@@ -65,11 +65,13 @@ function advance(ms) {
 
 const record = {
   fetchUrls: [],
+  fetchBodies: [],
   socketUrls: [],
   socketProtocols: [],
   consoleOutput: [],
   timerErrors: [],
-  uncaught: null
+  uncaught: null,
+  spotifyCalls: []
 };
 
 function makeElement(id) {
@@ -95,6 +97,26 @@ function makeElement(id) {
     closest() { return null; },
     querySelectorAll() { return []; }
   };
+}
+
+/* A stand-in for an element inside a delegated handler.
+ *
+ * app.js dispatches on `event.target.closest("[data-…]")`, so an event target is
+ * only useful here if it can answer that question. `attrs` is the set of data
+ * attributes the real button would carry; `closest` matches a bare
+ * `[attribute]` selector against it, which is the only shape app.js uses. */
+function delegateTarget(attrs, extra) {
+  const element = Object.assign({
+    id: "",
+    getAttribute(name) {
+      return Object.prototype.hasOwnProperty.call(attrs, name) ? attrs[name] : null;
+    },
+    closest(selector) {
+      const wanted = String(selector).replace(/^\[|\]$/g, "");
+      return Object.prototype.hasOwnProperty.call(attrs, wanted) ? element : null;
+    }
+  }, extra || {});
+  return element;
 }
 
 const elements = {};
@@ -158,13 +180,90 @@ const STATUS_PAYLOAD = {
   applications: []
 };
 
+/* The media catalogue and one structured search, so the result cards under test
+   are produced by the real render path from a realistic server answer rather
+   than assembled by the harness. */
+function mediaProvider(id, name, kind) {
+  return {
+    id, name, kind,
+    available: true,
+    supported_actions: ["open", "search"],
+    offers_structured_search: true,
+    structured_search_configured: true,
+    capabilities: { structured_search: true, open_first_result: true },
+    search_unavailable_reason: null,
+    unavailable_reason: null,
+    limitations: []
+  };
+}
+
+const MEDIA_PROVIDERS_PAYLOAD = {
+  max_query_length: 120,
+  providers: [
+    mediaProvider("spotify", "Spotify", "native_app"),
+    mediaProvider("youtube", "YouTube", "web")
+  ]
+};
+
+const SEARCH_RESULTS = {
+  spotify: [
+    { provider_id: "spotify", result_id: "mres-track", result_type: "track",
+      title: "Gönül Dağı", subtitle: "Gönül Dağı", creators: ["Neşet Ertaş"],
+      duration_seconds: 240, published: null, explicit: false, live_state: null,
+      provider_metadata: {}, selectable: true, open_action_supported: true },
+    { provider_id: "spotify", result_id: "mres-album", result_type: "album",
+      title: "Gönül Dağı", subtitle: null, creators: ["Neşet Ertaş"],
+      duration_seconds: null, published: "1998", explicit: null, live_state: null,
+      provider_metadata: {}, selectable: true, open_action_supported: true },
+    { provider_id: "spotify", result_id: "mres-artist", result_type: "artist",
+      title: "Neşet Ertaş", subtitle: null, creators: [], duration_seconds: null,
+      published: null, explicit: null, live_state: null, provider_metadata: {},
+      selectable: true, open_action_supported: true }
+  ],
+  youtube: [
+    { provider_id: "youtube", result_id: "mres-video", result_type: "video",
+      title: "Gönül Dağı", subtitle: null, creators: ["TRT Arşiv"],
+      duration_seconds: 260, published: "2019", explicit: null, live_state: null,
+      provider_metadata: {}, selectable: true, open_action_supported: true }
+  ]
+};
+
 function makeFetch(mode) {
-  return function (url) {
+  return function (url, options) {
     record.fetchUrls.push(String(url));
+    if (options && options.body !== undefined) {
+      record.fetchBodies.push({ url: String(url), body: String(options.body) });
+    }
     if (mode === "timeout") { return new Promise(function () { /* never settles */ }); }
     if (mode === "unauthorized") { return jsonResponse(401, { detail: "unauthorized" }); }
     if (mode === "network-error") { return Promise.reject(new TypeError("Load failed")); }
-    if (String(url).indexOf("/api/actions") !== -1) { return jsonResponse(200, { actions: [] }); }
+    var text = String(url);
+    if (text.indexOf("/api/media/providers") !== -1 && text.indexOf("/results/search") !== -1) {
+      var providerId = text.indexOf("youtube") !== -1 ? "youtube" : "spotify";
+      return jsonResponse(200, {
+        action_id: "act-" + providerId,
+        action: "find_media_results",
+        status: "succeeded",
+        result: {
+          search_id: "msrch-" + providerId,
+          provider_id: providerId,
+          results: SEARCH_RESULTS[providerId],
+          expires_at: "2026-08-05T12:10:00.000Z"
+        }
+      });
+    }
+    if (text.indexOf("/api/media/providers") !== -1) {
+      return jsonResponse(200, MEDIA_PROVIDERS_PAYLOAD);
+    }
+    if (text.indexOf("/spotify/play") !== -1 || text.indexOf("/spotify/queue") !== -1) {
+      return jsonResponse(200, {
+        operation: "spotify_play_search_result",
+        outcome: "applied",
+        message: "Spotify is playing the track you chose",
+        playback: {}
+      });
+    }
+    if (text.indexOf("/api/actions") !== -1) { return jsonResponse(200, { actions: [] }); }
     return jsonResponse(200, STATUS_PAYLOAD);
   };
 }
@@ -219,7 +318,31 @@ const SCENARIOS = {
   stored_token_status_timeout: { storage: { seed: TOKEN }, fetch: "timeout", ws: "open" },
   stored_token_ws_hangs: { storage: { seed: TOKEN }, fetch: "ok", ws: "hang" },
   stored_token_ws_rejected: { storage: { seed: TOKEN }, fetch: "ok", ws: "reject-4401" },
-  storage_blocked_then_token_entered: { storage: "throws", fetch: "ok", ws: "open" }
+  storage_blocked_then_token_entered: { storage: "throws", fetch: "ok", ws: "open" },
+  /* M2D: what a Spotify track card offers, and what a non-track card does not,
+     with a connected account and without one. Driven through the real search
+     path so the cards under test are the ones the page would actually build. */
+  media_results_spotify_connected: {
+    storage: { seed: TOKEN }, fetch: "ok", ws: "open", search: "spotify", spotify: true
+  },
+  media_results_spotify_disconnected: {
+    storage: { seed: TOKEN }, fetch: "ok", ws: "open", search: "spotify", spotify: false
+  },
+  media_results_youtube: {
+    storage: { seed: TOKEN }, fetch: "ok", ws: "open", search: "youtube", spotify: true
+  },
+  spotify_play_result_click: {
+    storage: { seed: TOKEN }, fetch: "ok", ws: "open", search: "spotify", spotify: true,
+    click: "play"
+  },
+  spotify_play_result_double_click: {
+    storage: { seed: TOKEN }, fetch: "ok", ws: "open", search: "spotify", spotify: true,
+    click: "play", clickTwice: true
+  },
+  spotify_queue_result_click: {
+    storage: { seed: TOKEN }, fetch: "ok", ws: "open", search: "spotify", spotify: true,
+    click: "queue"
+  }
 };
 
 const config = SCENARIOS[scenario];
@@ -261,6 +384,28 @@ const sandbox = {
 windowStub.localStorage = sandbox.localStorage;
 windowStub.addEventListener = function () {};
 windowStub.CofferdamLive = null;
+/* A stand-in for spotify.js. app.js must ask it whether an account is connected
+   and must route Play now / Add to queue through it — never construct a Spotify
+   URI, a track id or a device id of its own. Recording the calls is how the test
+   can see exactly what app.js hands over: a search id and a result id, and
+   nothing else. */
+windowStub.CofferdamSpotify = config.spotify === undefined ? null : {
+  mount() { return Promise.resolve(); },
+  stop() { record.spotifyCalls.push({ call: "stop" }); },
+  refresh() { return Promise.resolve(); },
+  connected() { return config.spotify === true; },
+  playResult(searchId, resultId) {
+    record.spotifyCalls.push({ call: "playResult", searchId, resultId });
+    return Promise.resolve({ ok: true, outcome: "applied", message: "playing" });
+  },
+  queueResult(searchId, resultId) {
+    record.spotifyCalls.push({ call: "queueResult", searchId, resultId });
+    return Promise.resolve({
+      ok: true, outcome: "accepted_by_provider",
+      message: "Spotify accepted the track into the queue — what is playing now has not changed"
+    });
+  }
+};
 sandbox.globalThis = sandbox;
 
 vm.createContext(sandbox);
@@ -290,6 +435,34 @@ function drain(rounds) {
   return chain.then(() => settle(40));
 }
 
+/* Second phase for the M2D scenarios: run a real structured search through the
+   real submit handler, then optionally tap one of the buttons it produced. */
+function runSearch() {
+  const form = delegateTarget(
+    { "data-find-results": config.search },
+    { query: { value: "Gönül Dağı" } }
+  );
+  const handlers = elements.mediaCards.listeners.submit || [];
+  handlers.forEach((fn) => {
+    try { fn({ target: form, preventDefault() {} }); }
+    catch (error) { record.uncaught = String(error && error.message); }
+  });
+  return drain(40);
+}
+
+function tapResultButton(kind) {
+  const attribute = kind === "queue" ? "data-spotify-queue" : "data-spotify-play";
+  const attrs = {};
+  attrs[attribute] = "spotify";
+  attrs["data-result-id"] = "mres-track";
+  const target = delegateTarget(attrs);
+  const handlers = elements.mediaCards.listeners.click || [];
+  handlers.forEach((fn) => {
+    try { fn({ target }); }
+    catch (error) { record.uncaught = String(error && error.message); }
+  });
+}
+
 drain(60).then(() => {
   // Optional second phase: a user typing a token into the fresh form.
   if (scenario === "storage_blocked_then_token_entered") {
@@ -297,6 +470,14 @@ drain(60).then(() => {
     const handlers = elements.saveToken.listeners.click || [];
     handlers.forEach((fn) => { try { fn(); } catch (error) { record.uncaught = String(error.message); } });
     return drain(40);
+  }
+  if (config.search) {
+    return runSearch().then(() => {
+      if (!config.click) { return null; }
+      tapResultButton(config.click);
+      if (config.clickTwice) { tapResultButton(config.click); }
+      return drain(40);
+    });
   }
   return null;
 }).then(() => {
@@ -316,6 +497,9 @@ drain(60).then(() => {
     storageWarningHidden: elements.storageWarning.hidden,
     storageWarningText: elements.storageWarning.textContent,
     fetchUrls: record.fetchUrls,
+    fetchBodies: record.fetchBodies,
+    mediaCardsHtml: elements.mediaCards.innerHTML,
+    spotifyCalls: record.spotifyCalls,
     socketUrls: record.socketUrls,
     socketProtocols: record.socketProtocols,
     consoleOutput: record.consoleOutput,
