@@ -502,3 +502,71 @@ button.danger { color: var(--err); }
 .sp-warnings { margin: 10px 0 0; padding-left: 18px; color: var(--warn); font-size: 12px; }
 .sp-warnings li { overflow-wrap: anywhere; }
 .sp-warnings:empty { display: none; }
+
+/* YouTube player (M2E). Visually a sibling of the Spotify panel above it and of
+   the Audio panel above that, because the three are genuinely different things
+   that all have a "volume": this computer's speaker, a Spotify Connect device,
+   and one video player in one browser window on the workstation. The panels are
+   kept apart so the sliders are never mistaken for one another, and every rule
+   below carries `min-width: 0` and `overflow-wrap` for the same reason the rest
+   of this file does — an unbroken video title must wrap rather than push the
+   page sideways on a phone. */
+.yt-status {
+  display: flex; align-items: center; gap: 10px; margin-top: 10px;
+  flex-wrap: wrap; min-width: 0;
+}
+.yt-status button { min-height: 40px; }
+
+.yt-now {
+  background: #0c141c; border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px; margin-top: 12px; display: grid; gap: 4px; min-width: 0;
+}
+.yt-title {
+  display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap;
+  font-size: 15px; min-width: 0; overflow-wrap: anywhere;
+}
+.yt-meta { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; min-width: 0; }
+.yt-time { font-variant-numeric: tabular-nums; }
+
+.yt-transport { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; min-width: 0; }
+.yt-transport button { flex: 1 1 5em; min-width: 0; min-height: 44px; }
+
+.yt-volume { display: flex; align-items: center; gap: 10px; margin-top: 14px;
+  flex-wrap: wrap; min-width: 0; }
+.yt-volume .field { flex: 1 1 12em; min-width: 0; }
+.yt-volume input[type="range"] {
+  width: 100%; min-width: 0; height: 36px; accent-color: var(--accent, #4aa3ff);
+}
+.yt-volume-value {
+  flex: 0 0 auto; font-variant-numeric: tabular-nums; min-width: 3.5ch; text-align: right;
+}
+.yt-volume button { flex: 0 0 auto; min-height: 40px; }
+/* The separation sentence is part of the control, not a footnote, so it spans
+   the row rather than competing with the slider for space. */
+.yt-volume .hint { flex: 1 1 100%; font-size: 12px; margin: 4px 0 0; overflow-wrap: anywhere; }
+
+.yt-queue { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px; }
+.yt-queue-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; min-width: 0; }
+.yt-queue-head button { min-height: 40px; }
+.yt-queue-list {
+  list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 8px;
+  min-width: 0;
+}
+.yt-queue-item {
+  background: #0c141c; border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px; display: flex; gap: 8px; align-items: center;
+  flex-wrap: wrap; min-width: 0;
+}
+.yt-queue-item.current { border-color: var(--accent, #4aa3ff); }
+.yt-queue-text { flex: 1 1 12em; min-width: 0; display: grid; gap: 2px; }
+.yt-queue-title { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
+.yt-queue-remove { flex: 0 0 auto; min-height: 40px; }
+
+@media (max-width: 480px) {
+  /* On a phone the slider takes its own line and the mute button sits beside
+     the readout, so neither is ever a thumb-width target squeezed to nothing. */
+  .yt-volume .field { flex: 1 1 100%; order: 1; }
+  .yt-volume-value { order: 2; margin-left: 0; }
+  .yt-volume button { order: 3; margin-left: auto; }
+  .yt-queue-remove { flex: 1 1 100%; }
+}

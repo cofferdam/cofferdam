@@ -710,12 +710,42 @@
         suffix + "Add to queue</button>";
   }
 
+  var YOUTUBE_PROVIDER_ID = "youtube";
+
+  /* Play now / Add to queue on a verified YouTube video result.
+   *
+   * The same two structural conditions as the Spotify row above, for the same
+   * reasons. The provider must be YouTube, because these routes go through the
+   * dedicated player and a Spotify track has no business near them. And the
+   * result must be a **video**: a channel or playlist card has no video id, so
+   * rendering Play now on one would be offering a button whose only outcome is a
+   * refusal.
+   *
+   * Unlike the Spotify row, these are *not* disabled when the player is closed.
+   * Play now with no player open is the whole point — it opens one, waits for
+   * it, and continues the same request — so disabling them until a player
+   * existed would put the product's primary action behind a setup step it does
+   * not have. */
+  function youtubeResultActions(providerId, result, busy) {
+    if (providerId !== YOUTUBE_PROVIDER_ID) { return ""; }
+    if (result.result_type !== "video") { return ""; }
+    if (!global.CofferdamYouTube) { return ""; }
+    var suffix = ' data-result-id="' + escapeHtml(result.result_id) + '"' +
+      (busy ? " disabled" : "") + ">";
+    return '<button class="mr-play primary" data-youtube-play="' + escapeHtml(providerId) + '"' +
+        suffix + "Play now</button>" +
+      '<button class="mr-queue" data-youtube-queue="' + escapeHtml(providerId) + '"' +
+        suffix + "Add to queue</button>";
+  }
+
   function resultCard(providerId, result, busy) {
     var badges = [badge(result.result_type)];
     if (result.explicit === true) { badges.push(badge("explicit", "warn")); }
     if (result.live_state) { badges.push(badge(result.live_state, "warn")); }
     var line = resultLine(result);
-    var openLabel = providerId === SPOTIFY_PROVIDER_ID ? "Open in Spotify" : "Open";
+    var openLabel = providerId === SPOTIFY_PROVIDER_ID
+      ? "Open in Spotify"
+      : (providerId === YOUTUBE_PROVIDER_ID ? "Open in YouTube" : "Open");
     /* A visible row rather than a three-dot menu. Play now is the thing someone
        came here to press, and burying it behind a tap-and-aim on a phone would
        make the primary action the hardest one to reach. The row wraps, so three
@@ -726,6 +756,7 @@
       (line ? '<div class="mr-meta">' + escapeHtml(line) + "</div>" : "") +
       '<div class="mr-actions">' +
       spotifyResultActions(providerId, result, busy) +
+      youtubeResultActions(providerId, result, busy) +
       '<button class="mr-open" data-open-result="' + escapeHtml(providerId) + '" ' +
       'data-result-id="' + escapeHtml(result.result_id) + '"' + (busy ? " disabled" : "") +
       ">" + openLabel + "</button></div></li>";
@@ -910,6 +941,46 @@
     });
   }
 
+  /* Play now / Add to queue on a verified YouTube video result.
+   *
+   * The two things sent are the search id the server issued and the result id it
+   * issued — never a YouTube URL, never a video id, never a player command. The
+   * server resolves the video from the session it privately remembers, so there
+   * is no field here for a client to abuse.
+   *
+   * Routed through `youtube.js` so the player panel and this card share one
+   * pending state and one account of what happened, and so the outcome is
+   * repeated verbatim rather than upgraded — which is what keeps "added to the
+   * queue" from being read as "now playing", and "autoplay blocked" from being
+   * read as "playing". */
+  function youtubeResultAction(providerId, resultId, verb) {
+    var state = mediaResults[providerId] || {};
+    if (!state.searchId || !resultId) { return; }
+    if (mediaPending[providerId]) { return; }   /* no double submission */
+    if (!global.CofferdamYouTube) { return; }
+
+    mediaPending[providerId] = true;
+    renderMedia();
+
+    var call = verb === "queue"
+      ? global.CofferdamYouTube.queueResult(state.searchId, resultId)
+      : global.CofferdamYouTube.playResult(state.searchId, resultId);
+
+    call.then(function (outcome) {
+      if (!outcome) { return; }
+      // The server's own sentence, and its own verdict on whether the thing
+      // happened. `applied` and `queued` are the only successes; blocked and
+      // partial are warnings that say what to do next.
+      var good = outcome.outcome === "applied" || outcome.outcome === "queued";
+      toast(outcome.note || "Done.", good ? "ok" : "err");
+    }).catch(function (error) {
+      if (error && error.message !== "unauthorized") { toast("Request failed.", "err"); }
+    }).then(function () {
+      mediaPending[providerId] = false;
+      renderMedia();
+    });
+  }
+
   function renderMedia() {
     var container = el("mediaCards");
     if (!container) { return; }
@@ -1006,6 +1077,28 @@
         spotifyResultAction(
           queueButton.getAttribute("data-spotify-queue"),
           queueButton.getAttribute("data-result-id"),
+          "queue"
+        );
+        return;
+      }
+      // YouTube playback on a verified video result (M2E). Checked before the
+      // plain Open for the same reason the Spotify pair is: Play now is what
+      // someone came here to press, and Open in YouTube stays available beside
+      // it as the explicit "give me the normal watch page" action.
+      var youtubePlayButton = event.target.closest("[data-youtube-play]");
+      if (youtubePlayButton) {
+        youtubeResultAction(
+          youtubePlayButton.getAttribute("data-youtube-play"),
+          youtubePlayButton.getAttribute("data-result-id"),
+          "play"
+        );
+        return;
+      }
+      var youtubeQueueButton = event.target.closest("[data-youtube-queue]");
+      if (youtubeQueueButton) {
+        youtubeResultAction(
+          youtubeQueueButton.getAttribute("data-youtube-queue"),
+          youtubeQueueButton.getAttribute("data-result-id"),
           "queue"
         );
         return;
@@ -1236,6 +1329,11 @@
     // It goes with the token, and its polling stops so a signed-out device
     // makes no further requests against the account.
     if (global.CofferdamSpotify) { global.CofferdamSpotify.stop(); }
+    // The YouTube player is the same kind of thing, and just as personal: what
+    // somebody is watching and what they lined up to watch next. It goes with
+    // the token, and its polling stops so a signed-out device makes no further
+    // requests.
+    if (global.CofferdamYouTube) { global.CofferdamYouTube.stop(); }
     el("registrySections").innerHTML = '<p class="muted">Loading…</p>';
     el("app").hidden = true;
     el("setup").hidden = false;
@@ -1301,6 +1399,14 @@
         global.CofferdamSpotify.mount({ api: api, escapeHtml: escapeHtml, el: el })
           .then(function () { renderMedia(); })
           .catch(function () { /* spotify.js renders its own failure state */ });
+      }
+      // Same again for the YouTube player: a host with no browser to open one
+      // in, or a player that is simply not open yet, is a state youtube.js
+      // renders itself. It must never take the control panel down with it.
+      if (global.CofferdamYouTube) {
+        global.CofferdamYouTube.mount({ api: api, escapeHtml: escapeHtml, el: el })
+          .then(function () { renderMedia(); })
+          .catch(function () { /* youtube.js renders its own failure state */ });
       }
     });
   }
