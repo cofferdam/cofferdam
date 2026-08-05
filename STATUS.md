@@ -354,6 +354,22 @@ logic; the gate stays open and unaffected, and no M2A document may describe M1 a
   card sits at profile `off` with every HDMI route reporting `available=no`, so live validation of
   *switching* outputs needs a second one connected first.
 
+  **Partially validated on the real Ubuntu host** (2026-08-05, PipeWire 1.6.2 / WirePlumber 0.5.13,
+  GNOME Wayland) under the `80-audio-control-validation` drop-in: the service runs the M2C build,
+  still bound only to the Tailscale address, `NRestarts=0`; `/healthz` returns 200; `/api/audio`
+  returns 401 unauthenticated and, authenticated, reports the real default output
+  (*Raptor Lake-P/U/H cAVS Speaker*, `builtin_speaker`, route *Speaker*) at **95%**, matching
+  `wpctl get-volume` exactly; the HDMI card's absence is explained rather than omitted; the running
+  Spotify client is identified through kernel-verified process evidence with **no media title
+  anywhere in the payload**; and `move_audio_stream` is published as `unavailable` with its reason.
+  Spotify and YouTube catalogue search both still return five selectable results on this runtime,
+  and `/api/runtime` is unchanged.
+
+  **The write path is deliberately not self-validated.** Setting a volume, muting, or switching
+  output changes the machine the user is sitting at, so those steps are left for the user to run
+  from the phone rather than performed automatically. Until they are, M2C must not be described as
+  fully validated.
+
   **Not in this milestone:** per-application playback volume, card profile switching, Bluetooth
   pairing, and any provider's own player volume.
 
