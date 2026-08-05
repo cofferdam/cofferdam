@@ -150,3 +150,52 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .
   .controls { grid-template-columns: 1fr; }
   .toasts { left: auto; right: 24px; width: 360px; }
 }
+
+/* ---- Live system (M2B runtime inventory) --------------------------------
+   Cards are compact by default and expand on tap. Position carries no
+   meaning: a card's place in the list is not business logic, and the backend
+   holds every relationship the view shows. */
+
+.panel-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.panel-head h2 { margin: 0; }
+.panel-head .row { margin-left: auto; }
+.row.tight { gap: 8px; flex: 0 0 auto; }
+
+.reg-note.unavailable {
+  background: rgba(224, 163, 58, .10); border-left: 3px solid var(--warn);
+  padding: 8px 10px; border-radius: 0 8px 8px 0; margin-top: 8px;
+}
+.reg-warnings { list-style: none; margin: 8px 0 0; padding: 0; color: var(--warn); font-size: 13px; display: grid; gap: 4px; }
+
+.rcards { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 8px; }
+.rcard { background: #101a24; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.rcard.open { border-color: var(--accent); }
+.rcard-head {
+  width: 100%; display: grid; gap: 2px; text-align: left;
+  background: transparent; border: 0; padding: 10px 12px; color: inherit; font: inherit; cursor: pointer;
+}
+.rcard-title { font-weight: 600; font-size: 14px; }
+.rcard-sub { color: var(--muted); font-size: 13px; }
+.rcard-sub:empty { display: none; }
+.rcard-badges { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+.rcard-body { padding: 0 12px 12px; border-top: 1px solid var(--line); }
+.overlay-label { padding: 0 12px 8px; font-size: 13px; color: var(--muted); }
+
+.facts { margin: 10px 0 0; display: grid; gap: 6px; }
+.fact { display: grid; grid-template-columns: 40% 1fr; gap: 10px; font-size: 13px; }
+.fact dt { color: var(--muted); }
+.fact dd { margin: 0; word-break: break-word; }
+.unset { color: var(--muted); font-style: italic; }
+
+.proc-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 4px; }
+.proc {
+  display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
+  background: #101a24; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font-size: 13px;
+}
+.proc-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.proc-meta { color: var(--muted); font-size: 12px; margin-left: auto; }
+
+@media (max-width: 420px) {
+  .fact { grid-template-columns: 1fr; gap: 2px; }
+  .proc-meta { margin-left: 0; }
+}

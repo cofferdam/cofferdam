@@ -4,7 +4,7 @@
  * phone and is sent as a Bearer header for API calls, and as a WebSocket
  * subprotocol for the event channel (so it never lands in a URL or access log).
  */
-(function () {
+(function (global) {
   "use strict";
 
   var TOKEN_KEY = "cofferdam.token";
@@ -475,6 +475,10 @@
     registryData = {};
     registriesLoaded = false;
     availableApplications = [];
+    // The live inventory is the same kind of thing, only more so: it lists this
+    // machine's displays and running applications. It goes with the token, and
+    // its polling stops so a signed-out device makes no further requests.
+    if (global.CofferdamLive) { global.CofferdamLive.stop(); }
     el("registrySections").innerHTML = '<p class="muted">Loading…</p>';
     el("app").hidden = true;
     el("setup").hidden = false;
@@ -502,6 +506,12 @@
       // Registries are not needed to show the host, so they load after it and
       // a failure here never blocks the rest of the UI.
       loadRegistries();
+      // Same for the live inventory: it is a separate view of a separate
+      // layer, and a discovery failure must not take the control panel down.
+      if (global.CofferdamLive) {
+        global.CofferdamLive.mount({ api: api, escapeHtml: escapeHtml, el: el })
+          .catch(function () { /* live.js renders its own failure state */ });
+      }
     });
   }
 
@@ -580,4 +590,4 @@
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/sw.js").catch(function () { /* installability is optional */ });
   }
-})();
+})(window);

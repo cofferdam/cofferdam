@@ -58,16 +58,34 @@
       </div>
     </section>
 
+    <section class="panel" id="livePanel">
+      <div class="panel-head">
+        <h2>Live system</h2>
+        <div class="row tight">
+          <span class="muted" id="liveObserved"></span>
+          <button id="liveRefresh" class="ghost">Refresh</button>
+        </div>
+      </div>
+      <p class="muted">
+        What is <em>actually connected and running</em> on this machine right now, discovered from
+        the system itself. <strong>This is not your configuration</strong> — an application listed
+        here has live processes, and a display listed here is plugged in and in use.
+        Where the host cannot answer, this panel says so instead of showing an empty list.
+      </p>
+      <div id="liveSections"><p class="muted">Loading…</p></div>
+    </section>
+
     <section class="panel" id="registryPanel">
       <h2>Configuration &amp; templates</h2>
       <p class="muted">
         What you have <em>configured</em> — optional labels, launch preferences, and templates.
         <strong>This is not a list of what is currently connected, running, or open.</strong>
-        Cofferdam does not discover live displays, processes, windows, or tabs yet; that is the
-        runtime-inventory milestone. Nothing here proves a display exists or a browser is open.
+        Nothing here proves a display exists or a browser is open: an entry is a label or a
+        preference you wrote down, and it stays here whether or not the thing it names is
+        plugged in.
         <strong>Read-only in this build</strong> — edit the JSON files under
         <code>$COFFERDAM_HOME/config/registries/</code> and reload. Empty is normal and fully
-        working.
+        working. For what is connected and running right now, see <em>Live system</em> above.
       </p>
       <div id="registrySections"><p class="muted">Loading…</p></div>
     </section>
@@ -89,6 +107,7 @@
 </main>
 
 <div class="toasts" id="toasts" aria-live="polite"></div>
+<script src="/live.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

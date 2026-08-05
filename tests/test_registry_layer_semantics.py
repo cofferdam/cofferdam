@@ -2,17 +2,22 @@
 
 The M2A registries were first written the wrong way round: they shipped named
 displays and personal browser labels, which read as though Cofferdam had already
-looked at the machine and found them. It had not, and it still does not — there
-is no runtime discovery in this build at all.
+looked at the machine and found them. It had not.
 
 `DECISIONS.md` D-2026-08-04-6 splits the world into three layers:
 
 * **definitions** — code-owned, not configurable (which applications exist as a
   concept, which launch adapters are permitted);
 * **runtime resources** — what is actually here right now: connected displays,
-  running processes, application instances, windows. **Not implemented yet**;
+  running processes, application instances, windows. Implemented in M2B, in
+  ``cofferdam/workstation/runtime/``;
 * **user overlays** — optional labels, aliases, preferences, policy metadata.
   This is all a registry file is.
+
+M2B makes these tests *more* necessary, not less. Now that the product really
+does discover displays and running applications, the pressure to let a
+configured entry stand in for a discovered one — or to render the two in the
+same list — is real rather than hypothetical.
 
 These tests pin the consequences of that split, because every one of them is a
 property a future change could quietly break while every other test stayed
@@ -341,11 +346,36 @@ class UserInterfaceHonestyTests(unittest.TestCase):
 
         The badge is a fact about the *definition* — the executable was found,
         so a launch would work. Whether an instance is running is runtime
-        inventory, which does not exist yet, so the badge must not imply it.
+        inventory, which lives in ``live.js`` and is rendered somewhere else
+        entirely. The configuration view must never borrow its vocabulary.
         """
         self.assertIn("installed — can launch", self.app_js)
         self.assertNotIn('badge("available"', self.app_js)
         self.assertNotIn('badge("running"', self.app_js)
+
+    def test_the_two_views_are_separate_files_with_separate_vocabularies(self) -> None:
+        """The separation is structural, so neither guard can drift into the other.
+
+        ``app.js`` renders configuration and may not say "running". ``live.js``
+        renders runtime resources and may not say "installed — can launch".
+        Keeping them in one file would make both assertions unenforceable.
+        Comments are stripped first: each file's header legitimately explains
+        the other's vocabulary, and a guard that punished that explanation
+        would get the explanation deleted rather than the rule kept.
+        """
+        from ._runtime_doubles import code_only
+
+        live_js = code_only((WEB_DIR / "live.js").read_text(encoding="utf-8"))
+        app_js = code_only(self.app_js)
+
+        self.assertIn('badge("running")', live_js)
+        self.assertNotIn("installed — can launch", live_js)
+        self.assertNotIn("/api/runtime", app_js)
+        self.assertNotIn("/api/registries", live_js)
+
+    def test_the_configuration_panel_points_at_the_live_view(self) -> None:
+        """"Not what is connected" is more useful when it says where that is."""
+        self.assertIn("live system", self.index_html.lower())
 
     def test_the_ui_never_pre_names_a_resource(self) -> None:
         combined = (self.app_js + self.index_html).lower()
