@@ -107,6 +107,21 @@ class HostAdapter(abc.ABC):
         """Subset of :data:`APPLICATION_KEYS` this host can actually launch."""
         return list(APPLICATION_KEYS)
 
+    def application_executables(self) -> Dict[str, tuple]:
+        """Logical key -> executable **basenames** this host would run for it.
+
+        Runtime inventory (M2B) uses this to decide whether a discovered group
+        of processes belongs to an application Cofferdam already knows about.
+        It is a read-only view of the adapter's own fixed table, exposed so the
+        discovery layer never has to hardcode a program name or reach into a
+        private mapping — the adapter stays the single owner of the
+        logical-key-to-program relationship.
+
+        The default is empty: an adapter that cannot say leaves every
+        discovered instance honestly unmapped.
+        """
+        return {}
+
 
 # ---------------------------------------------------------------------------
 # helpers shared by the real (non-stub) adapters

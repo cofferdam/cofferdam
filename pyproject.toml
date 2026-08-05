@@ -46,6 +46,7 @@ packages = [
     "cofferdam.workstation",
     "cofferdam.workstation.adapters",
     "cofferdam.workstation.registries",
+    "cofferdam.workstation.runtime",
 ]
 
 [tool.setuptools.dynamic]
