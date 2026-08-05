@@ -33,6 +33,15 @@ CODE_APPLICATION_UNAVAILABLE = "application_unavailable"
 CODE_MEDIA_PROVIDER_UNKNOWN = "media_provider_unknown"
 CODE_MEDIA_SEARCH_UNSUPPORTED = "media_search_unsupported"
 CODE_MEDIA_QUERY_INVALID = "media_query_invalid"
+# M2C: the audio control boundary. Each of these is a refusal to act on a
+# device reference that can no longer be trusted to name what the client meant.
+CODE_AUDIO_RESOURCE_UNKNOWN = "audio_resource_unknown"
+CODE_AUDIO_RESOURCE_CHANGED = "audio_resource_changed"
+CODE_AUDIO_GRAPH_CHANGED = "audio_graph_changed"
+CODE_AUDIO_UNAVAILABLE = "audio_unavailable"
+CODE_AUDIO_VOLUME_INVALID = "audio_volume_invalid"
+CODE_AUDIO_MUTE_INVALID = "audio_mute_invalid"
+CODE_AUDIO_ACTION_UNSUPPORTED = "audio_action_unsupported"
 
 
 def bounded_detail(value: Any) -> Optional[str]:
