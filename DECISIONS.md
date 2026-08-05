@@ -247,6 +247,146 @@ Consequences to keep true:
 - No secrets, tokens, browser profiles, screenshots, hostnames, or Tailscale addresses in any
   tracked file. This is now a publication guarantee, not a tidiness preference.
 
+## D-2026-08-04-3 — Cofferdam is a local, permission-bounded control plane (EFE DECISION, ACTIVE)
+
+Cofferdam's scope is a control plane for one person's computing environment: the Ubuntu
+workstation, future Raspberry Pi guardian/controller nodes, named displays and the human aliases
+for them ("büyük monitör"), allowlisted applications and browser profiles, future Claude Code and
+other agent sessions, and — later — routing a conversation from a browser to an agent and back to
+its originating conversation.
+
+**M2A is the foundation only** (registries, a read-only API, browser-profile-aware `open_url`,
+and the architecture documents). It implements none of: Raspberry Pi control, Wake-on-LAN or
+physical power actions, window movement or display placement, browser DOM access, ChatGPT/Claude
+web automation, browser extensions, agent execution, Claude Code session execution, message
+sending, natural-language action planning, desktop application scaffolding, or any reboot
+behaviour change. No arbitrary shell execution, at any layer.
+
+The fourteen decisions below are recorded together because they only make sense as a set: each
+one is load-bearing for the others. Full rationale is in [`docs/CONTROL_PLANE.md`](docs/CONTROL_PLANE.md).
+
+1. **The Python daemon owns authorization, action validation, state, routing records, and
+   adapters.** Clients are views and input surfaces. They may ask; they never decide. The daemon
+   is the only component that runs unattended and is supervised.
+2. **The PWA remains independently usable** even when a future desktop companion is closed,
+   crashed, uninstalled, or never installed.
+3. **The future desktop companion is a thin UI** for tray status, local approvals, settings, and
+   deep links — not a second daemon.
+4. **Opera is the preferred personal browser profile; Firefox remains a fallback.** Both are
+   selectable through the browser-profile registry.
+5. **Opera integration may later use a permission-bounded extension** — as *input* to the daemon,
+   never as a place where decisions move to. No extension is built in M2A.
+6. **Browser DOM automation is a replaceable adapter and never the core architecture.**
+7. **Displays, devices, applications, browser profiles, agent profiles, and route templates use
+   stable IDs** — ASCII kebab-case, immutable once referenced, compared exactly.
+8. **Human phrases such as "büyük monitör" are aliases resolved through registries** — normalized
+   with Unicode case folding plus a Turkish dotted/dotless-I tailoring, never fuzzy-matched, and
+   never silently resolved when ambiguous.
+9. **Semantic machine configuration belongs in validated registry files, not environment
+   variables.** Environment variables stay for runtime knobs (bind address, port, adapter).
+10. **Secrets, tokens, credentials, cookies, and browser profile data never belong in these
+    registries.** Not by convention — by construction: no schema field can hold them, unknown
+    fields fail validation, and a code-owned denylist refuses the obvious attempts by name.
+11. **Every future routed task will have an origin, target, correlation ID, return route, status,
+    and result.** Recorded now; not implemented in M2A.
+12. **Live browser tab IDs and conversation IDs are runtime task state, not static registry
+    configuration.** Configuration must not become a session store.
+13. **Sending messages, merging code, shutdown, reboot, destructive actions, and physical power
+    control require policy-driven confirmation** — driven by policy, not by whichever UI is in
+    front of the user. M2A implements none of these actions, and records the rule so the first one
+    cannot arrive without a confirmation path.
+14. **The post-reboot M1 validation gate remains open and must not be represented as passed.**
+    M2A changes nothing about it. See [`STATUS.md`](STATUS.md).
+
+## D-2026-08-04-4 — Thin Tauri desktop companion, not now (EFE DECISION, ACTIVE)
+
+An ADR comparing an installed PWA, a Tauri 2 thin shell, and Electron is recorded in
+[`docs/DESKTOP_APP.md`](docs/DESKTOP_APP.md). Decision: **recommend a thin Tauri 2 companion**
+(tray status, local approvals, settings, deep links, autostart), keep the Python daemon
+authoritative and independent, **add no Rust, Node, or Tauri scaffolding in M2A**, and revisit
+implementation in M2B after the registry/API foundation is merged.
+
+The installed PWA is otherwise attractive but cannot provide a tray icon, autostart, or desktop
+deep links — and a local approval prompt that only appears when a browser tab happens to be open
+is not an approval mechanism. Electron buys predictability with a bundled Chromium and an adjacent
+Node runtime, which is a large recurring cost and a standing temptation to move logic out of the
+daemon.
+
+## D-2026-08-04-5 — Registries are stdlib-only and read-only in M2A (RECORDED, ACTIVE)
+
+The registry loader (`cofferdam/workstation/registries/`) uses the standard library rather than
+pydantic, which the action schemas do use. Two reasons: configuration failures must produce
+messages provably free of file content (a registry file could contain anything, and its errors
+are returned over the API), which is easier to guarantee with explicit validation than with a
+framework's own error text; and it keeps configuration loading importable without the workstation
+extras. No database and no YAML parsing is added, and no new third-party dependency.
+
+M2A exposes **no registry write API** — no `POST`, `PUT`, `PATCH`, or `DELETE`. Nothing reachable
+over the network can change which applications exist or which domains a browser profile may open.
+An atomic writer utility exists with tests, unwired, for the milestone that adds editing.
+
+## D-2026-08-04-6 — Definitions, runtime resources, and user overlays are three layers (EFE DECISION, ACTIVE)
+
+Cofferdam's world separates into three layers, and conflating them makes configuration lie about
+the machine:
+
+- **A. Definitions** — code-owned and not configurable: allowlisted application definitions such
+  as `opera` and `firefox`, the safe launch adapters, and the bounded executable and desktop-entry
+  candidates.
+- **B. Runtime resources** — what is actually here right now: connected displays, running
+  processes, application instances, windows, later browser tabs, later agent task instances.
+- **C. User overlays** — optional names, aliases, preferences, and policy metadata. This is all a
+  registry file is.
+
+**Cofferdam must ultimately discover real runtime resources first; registries act only as optional
+semantic overlays.** Discover the resource, *then* attach the label — never the reverse.
+
+Consequences, corrected in M2A after the registries were first written the wrong way round:
+
+- **Registries must not pretend to be runtime discovery.** Writing `displays.json` does not make a
+  display exist; a browser profile is a launch preference, not an open browser window or process.
+- **Nothing ships pre-named.** No `large-monitor`, "main monitor", "small monitor", "laptop
+  display", `personal-opera`, "main browser", or "backup browser" in the repository or in a
+  default installation. Committed examples are format illustrations whose every id and name begins
+  with `example`, and nothing copies them into `$COFFERDAM_HOME`.
+- **A machine with no registry files is a fully working machine.** The UI shows honest empty and
+  configuration states rather than sample data.
+- A discovered display or application instance arrives with **no** user label; one may be added at
+  discovery time or at any point later.
+
+### Runtime resource identity rules (recorded now, implemented in the inventory milestone)
+
+- A **PID is visible and usable only with process start-time verification.**
+- **PID alone is never a stable resource identity** — PIDs are reused, and a stale PID plus an
+  action is how the wrong process gets terminated.
+- **Application instance identity** = host/boot identity + PID + start time.
+- **Display identity prefers a hardware fingerprint** (EDID, or its hash) plus the owning device.
+  **Connector names such as `DP-1` are runtime hints, not identity.**
+- **Browser tabs will receive browser-extension tab IDs** and must never be inferred from Chromium
+  PIDs.
+- **User labels are overlays** and may be attached at creation time or later.
+
+## D-2026-08-04-7 — Semantic interfaces only; no pixel-coordinate automation (EFE DECISION, ACTIVE)
+
+For all later work, prefer: official APIs · CLI protocols · MCP · browser extension APIs · D-Bus ·
+systemd · desktop portals · semantic accessibility interfaces.
+
+**Mouse-coordinate and screen-pixel automation is not an accepted core mechanism**, and none
+exists in the product. Clicking at (x, y) is unverifiable, breaks silently on any layout or
+resolution change, and reproduces exactly the class of false success that M1 was spent
+eliminating. Where a semantic interface genuinely does not exist, the correct answer is to report
+the capability as unavailable.
+
+Related, recorded so the inventory milestone does not adopt a wrong assumption:
+
+- **Cursor is not a way to access or continue an existing ChatGPT consumer conversation.**
+- **Cursor CLI is a future target-agent adapter**, in the same category as Claude Code.
+- Existing ChatGPT conversations will connect to Cofferdam through **a ChatGPT App/MCP tool** for
+  explicit task dispatch and result retrieval, and/or **a permission-bounded Opera companion
+  extension** that associates a tab/conversation with a task and prepares the returned result in
+  the same conversation for a human to confirm.
+- None of Cursor, MCP, or the Opera companion is implemented in M2A.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

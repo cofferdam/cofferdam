@@ -1,7 +1,7 @@
 # Status
 
-Accurate as of **2026-08-01** (the personal-AI-workstation pivot, [`DECISIONS.md`](DECISIONS.md)
-D-2026-08-01-1). Update this file when a category changes, not on every commit.
+Accurate as of **2026-08-04** (M2A control plane foundation, [`DECISIONS.md`](DECISIONS.md)
+D-2026-08-04-3). Update this file when a category changes, not on every commit.
 
 ## Merged (on `main`)
 
@@ -28,21 +28,104 @@ Trust Core module, PR0 → PR3c1:
 
 ## In progress
 
-- **M1 — remote control skeleton.** Branch `feat/m1-remote-control-skeleton` (`80df242`).
-  Backend service (auth, status, typed actions, screenshot/open-application/open-URL, WebSocket
-  events), host adapter layer (Linux/X11 + Windows dev implementations), PWA, JSON persistence,
-  systemd unit, Ubuntu host-setup runbook and validation checklist.
+- **M1 — remote control skeleton.** Merged to `main` (PR #6, PR #7, PR #8). Backend service
+  (auth, status, typed actions, screenshot/open-application/open-URL, WebSocket events), host
+  adapter layer (Linux + Windows dev implementations), PWA, JSON persistence, systemd user unit,
+  Ubuntu host-setup runbook and validation checklist.
 
   **Validated on Windows (development host only):** 476 tests pass; the running service returned
   live host status, captured a real 3840×1716 PNG, launched a browser, opened a URL, streamed
   action events over WebSocket, and rendered correctly at phone (375×812) and tablet (768×1024)
   viewports. This proves the architecture and the typed-action path — nothing more.
 
-  **NOT validated on Ubuntu — the milestone is not complete.** Unverified: every Linux adapter
-  path (`gnome-screenshot`/`maim`/`scrot`/`import`, `xdg-open`, `xrandr`), X11-vs-Wayland
-  behaviour, snap-packaged browser binary names, the systemd user unit, `loginctl enable-linger`,
-  reboot survival, Tailscale binding, and real phone-over-tailnet access. Run
-  `docs/checklists/m1-ubuntu-validation.md` on the real host; stub-adapter results do not count.
+  **Validated on the real Ubuntu host — in the current logged-in session only** (2026-08-03,
+  Ubuntu 26.04, GNOME/Wayland): 506 tests pass; the systemd user service runs and is `enabled`;
+  the listener is bound only to the Tailscale address; `/healthz` returns 200; `/api/status`
+  rejects an unauthenticated request with 401 and serves an authenticated one with 200; the phone
+  reaches the host over the tailnet and authenticates; `open_application` and `open_url` launch a
+  real snap-packaged Firefox and fetch a real URL, each confirmed by evidence rather than a
+  launcher exit code (PR #8); the Wayland session is reported honestly with `screenshot: false`
+  and GUI capabilities gated on a live graphical-session check.
+
+### OPEN RELEASE GATE — M1 post-reboot auto-start is NOT validated
+
+**M1 must not be described as fully validated, reboot-validated, or complete while this gate is
+open.** Everything recorded above was observed in a single continuously logged-in session. The
+host has not been rebooted since the service was installed, so the following remain **unverified
+by observation**:
+
+- the systemd user service starting automatically after a cold boot, through lingering, with no
+  human logging in first;
+- `tailscaled` coming up before the service needs its address (the service previously died in a
+  restart loop with `cannot assign requested address` when the Tailscale address was absent);
+- the listener re-binding to the Tailscale address unattended;
+- phone-over-tailnet access working after an unattended reboot;
+- graphical-session detection reporting `open_application`/`open_url` as **false** before login
+  and **true** once a desktop session exists — the linger-before-login path is covered by tests,
+  not yet by a real boot.
+
+Known factor: automatic login is **not** enabled on this host (`/etc/gdm3/custom.conf` has no
+`AutomaticLoginEnable`), so after a reboot the API is expected to return while GUI capabilities
+correctly report unavailable until someone logs in at the desktop. That expectation is untested.
+
+**How to close it:** reboot the host without logging in, run the reboot section of
+`docs/checklists/m1-ubuntu-validation.md`, then record the observed result here and in
+[`ROADMAP.md`](ROADMAP.md). The reboot is deferred at the user's request because the workstation
+is in active use; it is not blocked or waived.
+
+**M2A does not change this gate.** It alters no boot behaviour, no systemd unit, and no bind
+logic; the gate stays open and unaffected, and no M2A document may describe M1 as validated.
+
+### M2A — control plane foundation
+
+- **M2A — control plane foundation.** On branch `feat/m2-control-plane-foundation`, not merged.
+  Six versioned registries (devices, displays, applications, browser profiles, agent profiles,
+  conversation routes) under `$COFFERDAM_HOME/config/registries/` with strict typed models,
+  cross-registry reference validation, normalized Unicode/Turkish alias indexes, an atomic writer
+  utility, and bounded structured errors; authenticated **read-only** `GET /api/registries` and
+  `GET /api/registries/{registry_name}`; `open_url` extended with an optional `browser_profile_id`
+  and domain-policy enforcement; bounded Opera detection; read-only registry sections and a
+  browser-profile selector in the PWA; architecture documents and the desktop-companion ADR.
+
+  **Validated on the real Ubuntu host** (2026-08-04, Ubuntu 26.04, GNOME/Wayland): 663 tests
+  pass; the systemd user service runs the M2A build and is still bound only to the Tailscale
+  address; `/api/registries` returns 401 unauthenticated and serves all six registries
+  authenticated from `~/cofferdam/config/registries/`; `/api/status` reports
+  `applications: ["firefox", "opera"]` — Opera detected live through the bounded code-owned
+  candidates (`/snap/bin/opera`, snap 133); an unknown `browser_profile_id` fails closed with
+  `browser_profile_invalid` and launches nothing; a malformed one is rejected with 422 before
+  execution; and `open_url` with `browser_profile_id: "personal-opera"` on `https://example.com`
+  returned `succeeded` with `selection: "explicit-profile"`, `application: "opera"`.
+
+  Evidence that the URL reached the browser: Opera printed *"Opening in existing browser
+  session."* and exited 24 (`CHROME_RESULT_CODE_NORMAL_EXIT_PROCESS_NOTIFIED`), and the
+  pre-existing Opera main process was still the same PID afterwards — the request went to the
+  session already in use, and no second browser was started and no window was closed. Visual
+  confirmation of the tab itself is the user's to make: screen capture is unavailable on this
+  Wayland session (`screenshot: false`), and reading Opera's profile directory is out of bounds.
+
+  This validation found and fixed a real defect: a URL handed to an already-running Opera was
+  being reported as a failed action (see the CHANGELOG entry on Opera's delegation exit code).
+
+  **What M2A is not:** **no runtime discovery of any kind**, no Raspberry Pi control, Wake-on-LAN
+  or power actions, window movement, browser DOM access, web automation, browser extension, agent
+  execution, message sending, natural-language planning, desktop application scaffolding, or
+  registry write API. Agent profiles are placeholders (`execution_status: not-implemented`) and
+  conversation routes are templates; the PWA labels both as such and offers no control that would
+  suggest otherwise.
+
+  **Registry semantics corrected before merge.** The registries were first written as though they
+  described the machine — they shipped a `large-monitor` named "Büyük monitör", a
+  `personal-opera`, and a `fallback-firefox`. Nothing had been discovered: those were labels for
+  resources no code had ever looked for, presented in the PWA under "Machine registries". The
+  world is now split into three layers (`DECISIONS.md` D-2026-08-04-6) — code-owned
+  **definitions**, **runtime resources** (discovered; *not implemented*, milestone M2B), and
+  **user overlays** (all a registry file is). Every committed *overlay* example id and name now
+  begins with `example`; application **definitions** deliberately keep neutral concept ids
+  (`opera`, `firefox`) because those name real code-owned concepts; nothing copies examples into
+  `$COFFERDAM_HOME`; and the PWA panel is "Configuration & templates" whose empty state says
+  empty is normal and everything still works. Pinned by
+  `tests/test_registry_layer_semantics.py`.
 
 - **M1.1 — service lifecycle correction.** Branch
   `fix/workstation-service-login-lifecycle`. Fixes a **login-blocking regression**: the M1 unit's

@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "example-manual-route",
+      "name": "Example — manual hand-off, manual return",
+      "aliases": [],
+      "enabled": true,
+      "source_kind": "manual",
+      "target_agent_profile_id": "example-claude-code",
+      "return_mode": "manual-copy"
+    },
+    {
+      "id": "example-connector-route",
+      "name": "Example — connector hand-off, prepared reply needs confirming",
+      "aliases": [],
+      "enabled": true,
+      "source_kind": "future-connector",
+      "target_agent_profile_id": "example-claude-code",
+      "return_mode": "prepare-then-confirm"
+    }
+  ]
+}

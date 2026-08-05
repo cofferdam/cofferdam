@@ -107,12 +107,70 @@ sees the host *and can make the host do things*.
   updates; screenshots require authentication; adapter failures surface as bounded structured
   errors; no committed secrets in config. Host validation — the Ubuntu checklist in
   `docs/checklists/m1-ubuntu-validation.md`, run **without stubs**, ending in a reboot test.
+- **OPEN RELEASE GATE — post-reboot automatic startup is not validated.** The Ubuntu host
+  validation above passed on 2026-08-03 (Ubuntu 26.04, GNOME/Wayland) **within a single
+  continuously logged-in session**. The reboot test that ends the checklist has **not** been run:
+  the host has not been cold-booted since the service was installed, so unattended auto-start
+  through lingering, `tailscaled` ordering versus the service's bind, unattended re-binding to the
+  Tailscale address, phone access after reboot, and the linger-before-graphical-login capability
+  behaviour are all unobserved. M1 therefore **stays "in progress"** and must not be reported as
+  reboot-validated or complete. The reboot is deferred at the user's request (the workstation is in
+  active use) — deferred, not waived. Closing it means rebooting without logging in, running the
+  reboot section of the checklist, and recording the result here and in [`STATUS.md`](STATUS.md).
+  Later milestones may proceed while this gate is open only where they neither depend on nor alter
+  boot behaviour.
 - **Dependencies:** none.
 - **Review depth:** low-risk — tests + self-review, no council. (The device-token middleware
   gets one focused look at M5, when activation control starts riding on it.)
 - **Deferred to M2+:** second-display placement, process management/kill, window control,
   fullscreen, media/volume, YouTube search, Guardian and A/B, Wayland, HTTPS hardening beyond
   the tailnet.
+
+## M2A — Control plane foundation: registries, IDs, aliases, browser profiles
+
+- **Objective:** give the product a vocabulary. Before Cofferdam can move a window to "büyük
+  monitör", open a URL in "kişisel tarayıcı", or hand a conversation to "cofferdam claude", those
+  names have to exist somewhere validated, stable, and free of secrets. M2A is that layer and
+  nothing more.
+- **Visible result:** from the phone: read-only cards listing this machine's devices, named
+  displays, applications, browser profiles, agent-profile placeholders, and conversation-route
+  templates — with honest loading, empty, invalid and unavailable states — plus a browser-profile
+  selector on Open URL that actually changes which browser opens the page.
+- **Minimum components:**
+  - Six versioned JSON registries under `$COFFERDAM_HOME/config/registries/`, never in Git;
+    committed placeholders in `examples/registries/`.
+  - Strict typed models, readers, cross-registry reference validation, normalized alias indexes,
+    lookup by stable ID and by alias, an atomic writer utility, safe empty defaults, and bounded
+    structured errors suitable for API responses.
+  - `GET /api/registries` and `GET /api/registries/{registry_name}` — authenticated, **read-only**.
+  - `open_url` gains an optional `browser_profile_id`; domain policy enforced before launch;
+    bounded Opera detection; unchanged legacy behaviour for URL-only requests.
+  - PWA: read-only registry sections, browser-profile selector, no fake Start/Send/Run/Route.
+  - Architecture documents: `docs/CONTROL_PLANE.md`, `docs/DEVICE_REGISTRY.md`,
+    `docs/APPLICATION_PROFILES.md`, `docs/AGENT_ROUTING.md`, `docs/DESKTOP_APP.md`.
+- **Implementation notes:** registries are declarative — a registry selects among capabilities the
+  code already has and can never introduce one. No executable path, argv, command string, shell
+  fragment, desktop-file path, environment override, credential, cookie, or live tab/conversation
+  ID is representable in any schema. Alias matching folds Unicode case plus a Turkish
+  dotted/dotless-I tailoring; ambiguity is a validation failure, never a guess. Launching still
+  goes through the M1 verified Wayland graphical-session launcher.
+- **Acceptance tests:** empty/missing/malformed registries; unknown schema version; unknown and
+  forbidden fields; duplicate IDs and duplicate normalized aliases; Turkish normalization;
+  ambiguous alias rejection; cross-registry dangling references; invalid EDID hash; atomic
+  persistence including a failed write preserving the original; browser-profile default
+  uniqueness; disabled profiles; domain allow-all, allow-list exact host, subdomain, and
+  `badexample.com` boundary rejection; bounded Opera candidate detection and unavailable result;
+  explicit and invalid `browser_profile_id`; backward-compatible URL-only `open_url`;
+  authenticated/unauthenticated/unknown registry endpoints and error redaction; agent profiles
+  remaining placeholders; routes remaining templates; local registries staying untracked.
+- **Dependencies:** M1 (code merged; its reboot gate is orthogonal and stays open).
+- **Review depth:** low-risk — tests + self-review. (The domain-policy boundary is the one part
+  worth a second look when profile editing arrives.)
+- **Explicitly not in M2A:** Raspberry Pi control, Wake-on-LAN or physical power actions, window
+  movement or display placement, browser DOM access, ChatGPT/Claude web automation, browser
+  extensions, agent execution, Claude Code session execution, message sending, natural-language
+  action planning, desktop application scaffolding, registry write APIs, and any reboot behaviour
+  change.
 
 ## M1.1 — Service lifecycle correction (unplanned; forced by a regression)
 
@@ -133,9 +191,82 @@ sees the host *and can make the host do things*.
   Revisit if Cofferdam ever needs to hold live session-scoped resources itself.
 - **Dependencies:** none. Blocks completion of M1's Ubuntu validation.
 
+## M1.2 — Truthful screenshot capability (unplanned; forced by a finding)
+
+- **Objective:** a reported capability must describe the live session, not this process. A daemon
+  started at boot advertised `screenshot: true` on a Wayland host because `scrot` was on `PATH`.
+- **Binding constraint (D-2026-08-05-1):** graphical state is read from the verified session, never
+  from the daemon's own frozen environment; absence of a variable is not evidence of the opposite
+  value; capabilities are recomputed per request and never cached across a logout.
+- **Status:** merged and validated live. Screen capture under Wayland is still **not implemented**
+  — `screenshot: false` is the truthful answer, not a placeholder for a bug.
+
+### Deferred from M1.2 (non-blocking)
+
+- **Wayland-compatible remote screen capture.** One-shot capture that actually works under
+  Wayland, and later live remote viewing, plus **named-display selection** so a capture can target
+  a chosen display rather than "the screen". Constraints already established on this host:
+  `scrot`/`maim`/`import` return a black frame under Wayland;
+  `org.gnome.Shell.Screenshot.Screenshot` returns `AccessDenied` to a non-portal caller; and
+  `org.freedesktop.portal.Screenshot.Screenshot` never emits a `Response` even with
+  `interactive: false`. `gnome-screenshot` is the adapter's preferred tool and remains
+  uninstalled and unvalidated here. **The current truthful `screenshot: false` is acceptable until
+  this is implemented**, and named-display selection depends on M2B display discovery.
+
+## M2B — Runtime inventory: what is actually here right now
+
+- **Objective:** the layer M2A deliberately does not have. M2A knows what the code can do
+  (definitions) and what the user chose to call things (overlays); M2B discovers the **runtime
+  resources** that actually exist. Until it lands, Cofferdam performs no runtime discovery at all.
+- **Scope:** connected displays · running processes · application instances · windows. Later, and
+  not in the first pass: browser tabs (through a browser companion) and agent task instances.
+- **Binding constraint (D-2026-08-04-6):** discover the resource first, *then* attach a label.
+  A registry entry is an optional overlay and never evidence that a resource exists.
+- **Identity rules this milestone must implement** (recorded now so the implementation cannot
+  quietly pick something weaker):
+  - A **PID is visible and usable, but is never a stable identity on its own** — PIDs are reused,
+    and a stale PID plus an action is how the wrong process gets terminated.
+  - **Application instance identity** = host/device identity + boot identity + PID + process
+    start time. Before controlling or terminating a process, Cofferdam re-verifies that the PID
+    *and* start time still identify the same process.
+  - **Never terminate an application on a broad command-name match.**
+  - **Display identity prefers a hardware fingerprint** — EDID (or its hash) plus the owning
+    device. Connector names such as `HDMI-1` or `eDP-1` are runtime *hints*, not identities.
+  - **Browser tabs use browser-extension/browser-API tab and conversation IDs**, and are never
+    inferred from Chromium process PIDs.
+  - **User labels are overlays**, attachable at creation where creation is Cofferdam-owned, or
+    after discovery, or later through the desktop or mobile UI. A label is never the identity.
+- **Honest-empty rule:** a machine with no registry files stays fully working, and the UI shows
+  empty/configuration states rather than sample data.
+- **"Available" is not "running" — the UI must say which it means.** Observed during PR #9's live
+  validation: the M2A card reads *Firefox available*, and that is true only in the definition
+  sense — the application is installed and launchable. It says nothing about whether Firefox is
+  running right now, and a reader can easily take it the other way. M2B must present these as
+  four distinct things and never let one stand in for another:
+  1. **application definition** — the concept exists and Cofferdam knows how to launch it;
+  2. **available to launch** — a definition whose executable was found on this host;
+  3. **running application instance** — an actual process, with verified PID **and** start time;
+  4. **current windows** — belonging to an instance.
+- **Display discovery behaviour** (approved; implement in this milestone):
+  - Discover **all currently connected displays** live, including the laptop panel and every
+    external display. Discovery is the source of truth; a registry entry never conjures one.
+  - Show each display's **real system/hardware identity first** — connector, model, resolution,
+    and an EDID-derived fingerprint where the system exposes them. Report only what was actually
+    read; absent fields stay absent rather than being guessed.
+  - Let the user **select a discovered display and add or edit a label/alias** for it, from the
+    desktop or mobile UI.
+  - The label is an **optional overlay layered on top of** the hardware identity. It never
+    replaces, renames, or becomes that identity, and removing it must leave the display fully
+    identified.
+- **Dependencies:** M2A (vocabulary and IDs). Blocks the useful parts of M2 and M3, and blocks
+  named-display selection for Wayland capture.
+
 ## M2 — Desktop hands: processes, windows, displays
 
 - **Objective:** the rest of semantic desktop control — beyond M1's launch/screenshot/URL.
+- **Now builds on M2A:** the display registry supplies the stable IDs and human aliases that
+  `move_window_to_display` and per-display screenshots target, so "büyük monitör" resolves to
+  `large-monitor` rather than to a positional index that changes when a cable moves.
 - **Visible result:** from the phone: see running applications and relevant processes; close an
   application; move a browser or media window to display 2; screenshot a chosen display.
 - **Minimum components:** process adapter (`psutil` list + terminate); window adapter
@@ -205,6 +336,38 @@ sees the host *and can make the host do things*.
   if it turns out subtle.
 - **Deferred:** multi-agent orchestration, ChatGPT automation (the media profile from M3
   already allows "open ChatGPT logged in"; pasting externally prepared prompts already works).
+
+### Required later: per-task resource audit (recorded now, not implemented)
+
+Every task card should expose an expandable **resource audit** — what the task actually touched,
+where evidence exists for it:
+
+files read · files modified · files created · files deleted · applications accessed · browser
+profiles or tabs accessed · URLs and domains opened · processes with **verified** PIDs and start
+times · external connectors used · approvals granted · artifacts, commits, and outputs produced.
+
+Each resource event correlates to: task ID · originating request · actor/agent · operation type ·
+timestamp · resource identity · **evidence source** · result.
+
+Evidence source is one of: an agent-reported tool event · a Git diff · an OS-observed process
+event · a browser-extension event · a Cofferdam-owned action execution.
+
+**The honesty rule that makes this worth having:** Cofferdam must not claim complete visibility
+into file reads or resource access when the adapter or the operating system did not provide that
+evidence. An unobserved read is reported as unknown, never as "did not happen". Process entries
+follow the M2B identity rule — PID plus start time, verified.
+
+### Card and UI architecture (recorded now; no visual redesign in this milestone)
+
+- Desktop and mobile consume the **same backend resource/task model**. The model is the contract;
+  the clients are views of it.
+- Cards may have **compact and expanded** forms; mobile cards may expand on selection.
+- Cards may later be connected in a Lego-like or graph-like representation, where **visual edges
+  represent real task/routing relationships** — never decoration.
+- **UI position must never become business logic.** Where a card sits on screen carries no
+  meaning the backend does not already hold.
+- The final design language is decided separately. Until then, **truthful functionality outranks
+  visual polish**.
 
 ## M5 — Guardian and A/B slots
 
@@ -329,6 +492,23 @@ sees the host *and can make the host do things*.
   OpenClaw replacement decisions (revisit the register below here).
 
 ---
+
+## Remote wake and unattended login (future; approved direction, not scheduled)
+
+Recorded so the shape is not re-litigated later. **None of this is implemented, and none of it
+may be started before the milestones above.**
+
+- A **Raspberry Pi 3 B+** becomes the always-on Wake-on-LAN controller for the workstation.
+- A **Raspberry Pi Pico (RP2040)** connects directly to the laptop as a bounded USB command
+  interface plus HID keyboard.
+- **The Raspberry Pi never receives or forwards the Ubuntu password.** It wakes the machine and
+  nothing more.
+- Once the laptop is reachable, the **phone** sends an ephemeral credential to the Ubuntu
+  headless daemon. The daemon issues **one bounded credential-entry request** to the Pico.
+- Success is confirmed by a **fresh graphical-session agent registration** — not by a screenshot,
+  and not by assuming the keystrokes landed.
+- **No permanent password storage.** No HDMI capture is required for the first version. **No
+  pixel automation** (D-2026-08-04-7).
 
 ## After M7 (later milestones, unordered)
 

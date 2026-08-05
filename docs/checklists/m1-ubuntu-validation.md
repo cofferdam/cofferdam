@@ -25,10 +25,30 @@ this milestone, and they feed the M2 window/display work.
 | 10 | Request a screenshot | real desktop image appears on the phone within a few seconds | |
 | 11 | Open Firefox (or Chromium) | browser window appears on the host | |
 | 12 | Open a supplied URL | the URL loads on the host | |
-| 13 | Reboot Ubuntu (`sudo reboot`) — do not touch keyboard/monitor afterwards | host comes back and auto-logs-in | |
-| 14 | Confirm Cofferdam starts automatically | `systemctl --user status cofferdam-workstation` active; no manual start | |
-| 15 | Repeat steps 9–12 from the phone after the reboot | status, screenshot, open app, open URL all work | |
+Steps 13–15 were the release gate; they were closed by the M1.1 run — see the note under the table.
+
+| 13 | Reboot Ubuntu (`sudo reboot`) — do not touch keyboard/monitor afterwards | host comes back; if automatic login is enabled it reaches the desktop by itself, otherwise it stops at the login screen — record which | |
+| 14 | Confirm Cofferdam starts automatically | `systemctl --user is-active cofferdam-workstation` reports `active` with no manual start; `ss -tlnp \| grep 7101` shows the Tailscale address; the journal shows no `cannot assign requested address` restart loop | |
+| 15 | From the phone, before logging in at the desktop | status loads and authenticates; `open_application`/`open_url` report **false** and fail closed with `adapter_unsupported`; then log in at the desktop and confirm both flip to **true** and work | |
 | 16 | Record all failures and platform-specific constraints | written into `docs/host-setup.md` | |
+
+> **Gate status: steps 13–15 were closed by the M1.1 run below.** Steps 1–12 passed on
+> 2026-08-03 (Ubuntu 26.04, GNOME/Wayland) inside a single continuously logged-in session, at
+> which point the reboot was deferred at the user's request. It is no longer deferred: the
+> M1.1 service-lifecycle validation on 2026-08-04 covered the same ground and more — **two
+> consecutive reboots** (L6), automatic start after reboot, and the pre-login check from the
+> phone with GUI capabilities correctly `false` and actions refused (L7). Read L1–L10 below as
+> the authoritative result for steps 13–15.
+>
+> Automatic login is **not** enabled on this host (`/etc/gdm3/custom.conf` has no
+> `AutomaticLoginEnable`), so a reboot stops at the login screen and the API returns on its own
+> with GUI capabilities reporting unavailable until someone logs in. That expectation is now
+> tested, not assumed — see L7.
+>
+> Step 10 (screenshot) passed on 2026-08-03 but its **capability reporting** was later found
+> untruthful on Wayland and was corrected in M1.2; see
+> [`../SERVICE_LIFECYCLE.md`](../SERVICE_LIFECYCLE.md). Screen capture itself remains
+> unavailable under Wayland on this host, and `screenshot: false` is the truthful answer.
 
 ## Service lifecycle (M1.1 — added after the login-loop regression)
 
@@ -69,7 +89,10 @@ enough. Background: [`../SERVICE_LIFECYCLE.md`](../SERVICE_LIFECYCLE.md).
 ## Sign-off
 
 M1 is complete when steps 1–16 pass on the real host **and** the observed
-behaviour is written back into `docs/host-setup.md`.
+behaviour is written back into `docs/host-setup.md`. Steps 1–12 and 16 are done, and steps 13–15
+were closed by the M1.1 L-series (two reboots, automatic start, pre-login capability check).
+L9 — a full Tailscale outage end to end — remains **partial**, so record that limitation rather
+than describing this milestone as exhaustively validated.
 
 - Date run:
 - Ubuntu version:

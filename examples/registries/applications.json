@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "opera",
+      "name": "Opera",
+      "aliases": ["opera browser"],
+      "enabled": true,
+      "adapter_key": "opera"
+    },
+    {
+      "id": "firefox",
+      "name": "Firefox",
+      "aliases": ["mozilla firefox"],
+      "enabled": true,
+      "adapter_key": "firefox"
+    }
+  ]
+}

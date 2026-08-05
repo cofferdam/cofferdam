@@ -417,9 +417,19 @@ class BindingTests(unittest.TestCase):
         Checked against real string literals rather than raw text: the module
         docstring explains why a wildcard is never used, and prose that forbids
         something must not be mistaken for doing it.
+
+        ``"0.0.0.0"`` and ``"::"`` are addresses and nothing else, so they are
+        banned everywhere. A bare ``"*"`` is not — it is an ordinary character
+        in unrelated code, and the registry domain validator legitimately tests
+        ``if "*" in host`` in order to **reject** wildcard domains. Banning it
+        outside the modules that actually bind would fail on code doing the
+        right thing, so it is checked only where a bind address can be chosen.
+        The narrowing is deliberate and is itself pinned by
+        ``test_a_wildcard_bind_would_still_be_caught`` below.
         """
-        wildcards = {"0.0.0.0", "::", "*"}
+        binding_modules = {"__main__.py", "config.py", "service.py"}
         for path in _python_sources():
+            wildcards = {"0.0.0.0", "::"} | ({"*"} if path.name in binding_modules else set())
             tree = ast.parse(path.read_text(encoding="utf-8"))
             docstrings = {
                 id(node.body[0].value)
@@ -443,6 +453,45 @@ class BindingTests(unittest.TestCase):
                         f"{node.value!r}. The service binds only to its configured "
                         "private address and must never fall back to a public one.",
                     )
+
+    def test_a_wildcard_bind_would_still_be_caught(self) -> None:
+        """The guard above is narrowed for `"*"`; prove it still has teeth.
+
+        Each of these is what a real regression would look like. Every one must
+        be rejected, or the narrowing has quietly disabled the protection.
+        """
+        regressions = (
+            ('host = "0.0.0.0"', "models.py", "an IPv4 wildcard anywhere in the daemon"),
+            ('host = "::"', "models.py", "an IPv6 wildcard anywhere in the daemon"),
+            ('bind = "*"', "__main__.py", "a bare wildcard in a binding module"),
+            ('fallback = "0.0.0.0"', "__main__.py", "a wildcard fallback in the entry point"),
+        )
+        binding_modules = {"__main__.py", "config.py", "service.py"}
+
+        for source, filename, description in regressions:
+            with self.subTest(regression=description):
+                wildcards = {"0.0.0.0", "::"} | ({"*"} if filename in binding_modules else set())
+                found = {
+                    node.value
+                    for node in ast.walk(ast.parse(source))
+                    if isinstance(node, ast.Constant) and isinstance(node.value, str)
+                }
+                self.assertTrue(
+                    found & wildcards,
+                    f"the narrowed guard would not catch {description}",
+                )
+
+        # And the legitimate pattern the narrowing exists for stays accepted.
+        legitimate = 'if "*" in host or "?" in host:\n    raise Rejected("wildcards are not accepted")'
+        found = {
+            node.value
+            for node in ast.walk(ast.parse(legitimate))
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+        self.assertFalse(
+            found & {"0.0.0.0", "::"},
+            "rejecting wildcard domains must not look like configuring a wildcard bind",
+        )
 
     def test_a_missing_bind_address_is_waited_for_and_then_given_up_on(self) -> None:
         source = (PACKAGE_ROOT / "workstation" / "__main__.py").read_text(encoding="utf-8")

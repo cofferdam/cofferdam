@@ -44,11 +44,32 @@
           <select id="appSelect" aria-label="application"></select>
           <button id="btnOpenApp">Open app</button>
         </div>
-        <form class="row" id="urlForm">
-          <input type="url" id="urlInput" placeholder="https://example.com" inputmode="url" autocomplete="off">
-          <button type="submit" id="btnOpenUrl">Open URL</button>
+        <form class="url-form" id="urlForm">
+          <label class="field">
+            <span class="field-label">Browser profile</span>
+            <select id="profileSelect" aria-label="browser profile"></select>
+          </label>
+          <div class="row">
+            <input type="url" id="urlInput" placeholder="https://example.com" inputmode="url" autocomplete="off">
+            <button type="submit" id="btnOpenUrl">Open URL</button>
+          </div>
+          <p class="muted hint" id="profileHint"></p>
         </form>
       </div>
+    </section>
+
+    <section class="panel" id="registryPanel">
+      <h2>Configuration &amp; templates</h2>
+      <p class="muted">
+        What you have <em>configured</em> — optional labels, launch preferences, and templates.
+        <strong>This is not a list of what is currently connected, running, or open.</strong>
+        Cofferdam does not discover live displays, processes, windows, or tabs yet; that is the
+        runtime-inventory milestone. Nothing here proves a display exists or a browser is open.
+        <strong>Read-only in this build</strong> — edit the JSON files under
+        <code>$COFFERDAM_HOME/config/registries/</code> and reload. Empty is normal and fully
+        working.
+      </p>
+      <div id="registrySections"><p class="muted">Loading…</p></div>
     </section>
 
     <section class="panel" id="shotPanel" hidden>

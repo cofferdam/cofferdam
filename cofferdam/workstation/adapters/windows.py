@@ -43,6 +43,17 @@ _APPLICATION_COMMANDS = {
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
     ),
+    # M2A: the browser-profile registry can select Opera. Ubuntu is the
+    # supported host; this entry only keeps the development adapter able to
+    # honour the same logical key. Opera's Windows entry point is
+    # ``launcher.exe``, given as an absolute path rather than a bare name —
+    # "launcher" is generic enough that anything by that name on PATH could be
+    # started instead.
+    "opera": (
+        "opera",
+        r"C:\Program Files\Opera\launcher.exe",
+        r"C:\Program Files (x86)\Opera\launcher.exe",
+    ),
 }
 
 # Fixed capture script. The only substituted value is a path this service
@@ -131,9 +142,20 @@ class WindowsAdapter(HostAdapter):
         pid = spawn_fixed([executable])
         return ApplicationLaunch(application=application, pid=pid, detail=Path(executable).name)
 
-    def open_url(self, url: str) -> ApplicationLaunch:
+    def open_url(self, url: str, application: Optional[str] = None) -> ApplicationLaunch:
         # Prefer launching an allowlisted browser with the URL as a single argv
         # element. ``url`` was scheme-validated (http/https) by the action schema.
+        if application is not None:
+            candidates = _APPLICATION_COMMANDS.get(application)
+            if candidates is None:
+                raise AdapterUnsupported(f"application not allowlisted: {application}")
+            executable = _resolve(candidates)
+            if not executable:
+                raise AdapterUnsupported(f"application not installed: {application}")
+            pid = spawn_fixed([executable, url])
+            return ApplicationLaunch(
+                application=application, pid=pid, detail=Path(executable).name
+            )
         for key in ("firefox", "google-chrome", "chromium"):
             executable = _resolve(_APPLICATION_COMMANDS[key])
             if executable:

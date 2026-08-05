@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "example-workstation",
+      "name": "Example workstation",
+      "aliases": ["örnek bilgisayar"],
+      "enabled": true,
+      "kind": "workstation",
+      "platform": "linux",
+      "notes": "Example data. A device entry is something you declare, not something Cofferdam discovered."
+    },
+    {
+      "id": "example-pi",
+      "name": "Example Raspberry Pi",
+      "aliases": [],
+      "enabled": false,
+      "kind": "raspberry-pi",
+      "platform": "linux",
+      "notes": "Example data. M2A stores no address, credential, or power-control configuration and implements no Pi control."
+    }
+  ]
+}

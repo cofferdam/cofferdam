@@ -26,7 +26,7 @@ import os
 import socket
 import tempfile
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 from ..errors import AdapterError, AdapterUnsupported
 from .base import (
@@ -54,7 +54,57 @@ _APPLICATION_COMMANDS = {
     "firefox": ("firefox", "firefox-esr"),
     "chromium": ("chromium", "chromium-browser"),
     "google-chrome": ("google-chrome", "google-chrome-stable"),
+    # M2A. Appended last on purpose: ``_browser_key`` walks this mapping in
+    # order for the legacy no-profile URL path, so adding Opera must not change
+    # which browser an existing URL-only request opens.
+    "opera": ("opera", "opera-stable"),
 }
+
+# Non-zero exit codes that mean "an instance was already running, I handed the
+# request to it, and I am done" — *not* "I failed to start".
+#
+# 24 is Chromium's ``CHROME_RESULT_CODE_NORMAL_EXIT_PROCESS_NOTIFIED``.
+# Observed directly on this host (M2A validation, snap-packaged Opera 133):
+# launching `opera <url>` while Opera is running prints "Opening in existing
+# browser session.", opens the URL as a new tab, and exits **24**. systemd marks
+# any non-zero exit as ``failed``, so without this the adapter reported a tab
+# that visibly opened as an error.
+#
+# This does not relax the M1 rule that a launcher's exit code is never evidence
+# on its own. The code is accepted only for this application, only for this
+# exact value, and the launch still has to be corroborated by ``_confirm``
+# finding a live instance of the same application — which is precisely the
+# situation this code describes. Every other exit status still fails closed.
+#
+# Other Chromium-based browsers share the constant; they are deliberately not
+# listed until the behaviour has been observed for them here.
+_DELEGATION_EXIT_STATUS = {"opera": (24,)}
+
+# Desktop-entry basenames, used **only** to report that an application exists
+# when its executable is not on PATH — a Flatpak or an unusual snap layout.
+# Nothing is ever launched through a desktop file, and no path from a registry
+# or an API request is ever consulted: this table and the directory list below
+# are code-owned and closed. ``opera_opera.desktop`` is Ubuntu's snap naming for
+# Opera; it is listed because that is the real name on this platform, not
+# because desktop-file names are configurable.
+_APPLICATION_DESKTOP_ENTRIES = {
+    "firefox": ("firefox.desktop", "firefox-esr.desktop", "firefox_firefox.desktop"),
+    "chromium": ("chromium.desktop", "chromium-browser.desktop", "chromium_chromium.desktop"),
+    "google-chrome": ("google-chrome.desktop",),
+    "opera": ("opera.desktop", "opera-stable.desktop", "opera_opera.desktop"),
+}
+
+_DESKTOP_ENTRY_DIRECTORIES = (
+    "/usr/share/applications",
+    "/usr/local/share/applications",
+    "/var/lib/snapd/desktop/applications",
+    "/var/lib/flatpak/exports/share/applications",
+)
+
+_USER_DESKTOP_ENTRY_DIRECTORIES = (
+    ".local/share/applications",
+    ".local/share/flatpak/exports/share/applications",
+)
 
 # Logical key -> process names an already-running instance may present. Used
 # only to corroborate a fast clean exit; a browser handed a request by an
@@ -64,6 +114,7 @@ _APPLICATION_PROCESS_NAMES = {
     "firefox": ("firefox", "firefox-esr", "firefox-bin"),
     "chromium": ("chromium", "chromium-browser", "chrome"),
     "google-chrome": ("chrome", "google-chrome", "google-chrome-stable"),
+    "opera": ("opera", "opera-stable"),
 }
 
 # tool -> argv template completed with the output path the service generates.
@@ -140,6 +191,33 @@ def _capture_environment(session: GraphicalSession) -> dict:
     return environment
 
 
+def _desktop_entry_present(names: Sequence[str]) -> bool:
+    """Is one of these bounded desktop-entry basenames installed?
+
+    Searches a fixed list of XDG application directories for exact basenames
+    from the code-owned table. No pattern from configuration, no recursion, and
+    no reading of the entries themselves — presence is the only question asked.
+    """
+    if not names:
+        return False
+    directories = [Path(directory) for directory in _DESKTOP_ENTRY_DIRECTORIES]
+    try:
+        home = Path.home()
+    except (OSError, RuntimeError):  # pragma: no cover - no home directory
+        home = None
+    if home is not None:
+        directories.extend(home / relative for relative in _USER_DESKTOP_ENTRY_DIRECTORIES)
+
+    for directory in directories:
+        for name in names:
+            try:
+                if (directory / name).is_file():
+                    return True
+            except OSError:  # pragma: no cover - unreadable mount point
+                continue
+    return False
+
+
 class LinuxX11Adapter(HostAdapter):
     name = "linux-x11"
     stub = False
@@ -212,7 +290,14 @@ class LinuxX11Adapter(HostAdapter):
         return notes
 
     def _browser_key(self) -> Optional[str]:
-        """First allowlisted application that is actually installed."""
+        """First allowlisted application that is actually installed.
+
+        This is the pre-M2A URL path and must stay exactly as it was: it walks
+        ``_APPLICATION_COMMANDS`` in declaration order and takes the first
+        executable found on ``PATH``. Desktop-entry detection is deliberately
+        *not* consulted here — an application we can see but cannot launch is
+        not a browser this path may choose.
+        """
         for key, candidates in _APPLICATION_COMMANDS.items():
             if first_available(candidates):
                 return key
@@ -348,12 +433,13 @@ class LinuxX11Adapter(HostAdapter):
         launch = launch_in_session(
             [executable],
             description="Cofferdam: open " + application,
+            accept_exit_status=_DELEGATION_EXIT_STATUS.get(application, ()),
             expect_session=session.session_id,
         )
         pid = self._confirm(application, launch)
         return ApplicationLaunch(application=application, pid=pid, detail=Path(executable).name)
 
-    def open_url(self, url: str) -> ApplicationLaunch:
+    def open_url(self, url: str, application: Optional[str] = None) -> ApplicationLaunch:
         """Open a validated URL in an allowlisted browser.
 
         M1 used ``xdg-open``. It was dropped because it reports nothing usable:
@@ -361,24 +447,53 @@ class LinuxX11Adapter(HostAdapter):
         ever starts, so a URL open could not be distinguished from a silent
         failure. Launching an allowlisted browser directly is verifiable, and
         keeps the same fixed-argv boundary.
+
+        ``application`` (M2A) is the logical key a browser profile resolved to,
+        or ``None`` for the legacy "first installed browser" behaviour. Passing
+        the URL to an already-running Opera hands it to that existing instance,
+        which opens a new tab in the user's session — this never starts a second,
+        isolated browser and never touches a profile directory.
         """
         session = self._require_session()
-        application = self._browser_key()
         if application is None:
-            raise AdapterUnsupported(
-                "no allowlisted browser is installed",
-                "install one of: " + ", ".join(_APPLICATION_COMMANDS),
-            )
+            application = self._browser_key()
+            if application is None:
+                raise AdapterUnsupported(
+                    "no allowlisted browser is installed",
+                    "install one of: " + ", ".join(_APPLICATION_COMMANDS),
+                )
+        elif application not in _APPLICATION_COMMANDS:
+            raise AdapterUnsupported(f"application not allowlisted: {application}")
+
         executable = first_available(_APPLICATION_COMMANDS[application])
+        if not executable:
+            raise AdapterUnsupported(f"application not installed: {application}")
         # ``url`` has already been scheme-validated (http/https) by the action
         # schema; it is passed as one argv element, never through a shell.
         launch = launch_in_session(
             [executable, url],
             description="Cofferdam: open URL",
+            accept_exit_status=_DELEGATION_EXIT_STATUS.get(application, ()),
             expect_session=session.session_id,
         )
         pid = self._confirm(application, launch)
         return ApplicationLaunch(application=application, pid=pid, detail=Path(executable).name)
 
     def available_applications(self) -> List[str]:
+        """Applications this host can actually launch — executable on ``PATH``.
+
+        Deliberately *not* widened by desktop-entry detection. Everything listed
+        here is offered as a control on the phone, so it must be launchable, not
+        merely present. Desktop metadata is consulted only to explain an absence
+        (:meth:`unavailable_detail`), where "installed but not on PATH" and "not
+        installed" call for completely different fixes.
+        """
         return [key for key, candidates in _APPLICATION_COMMANDS.items() if first_available(candidates)]
+
+    def unavailable_detail(self, application: str) -> Optional[str]:
+        if _desktop_entry_present(_APPLICATION_DESKTOP_ENTRIES.get(application, ())):
+            return (
+                "a desktop entry for this application exists on the host, but no launchable "
+                "executable was found on PATH"
+            )
+        return None

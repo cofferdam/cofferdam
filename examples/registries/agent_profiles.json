@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "example-claude-code",
+      "name": "Example — Claude Code adapter",
+      "aliases": [],
+      "enabled": true,
+      "adapter_kind": "claude-code",
+      "execution_status": "not-implemented"
+    },
+    {
+      "id": "example-ollama",
+      "name": "Example — local Ollama adapter",
+      "aliases": [],
+      "enabled": false,
+      "adapter_kind": "ollama",
+      "execution_status": "not-implemented"
+    }
+  ]
+}

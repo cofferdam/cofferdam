@@ -41,7 +41,12 @@ cofferdam = "cofferdam.cli:main"
 cofferdam-workstation = "cofferdam.workstation.__main__:main"
 
 [tool.setuptools]
-packages = ["cofferdam", "cofferdam.workstation", "cofferdam.workstation.adapters"]
+packages = [
+    "cofferdam",
+    "cofferdam.workstation",
+    "cofferdam.workstation.adapters",
+    "cofferdam.workstation.registries",
+]
 
 [tool.setuptools.dynamic]
 version = { attr = "cofferdam.__version__" }

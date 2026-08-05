@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 from .adapters.base import APPLICATION_KEYS, HostAdapter
 from .errors import CODE_INVALID_PARAMS, CODE_UNKNOWN_ACTION, ApiError, AdapterError, bounded_detail
+from .registries import is_valid_id as is_valid_registry_id
 
 ACTION_TAKE_SCREENSHOT = "take_screenshot"
 ACTION_OPEN_APPLICATION = "open_application"
@@ -69,6 +70,21 @@ class OpenApplicationParams(_Params):
 
 class OpenUrlParams(_Params):
     url: str
+    # M2A. Optional and additive: a request carrying only ``url`` keeps the
+    # pre-M2A behaviour exactly. This selects a *semantic profile* by its stable
+    # registry id — never a browser, a binary, or a profile directory.
+    browser_profile_id: Optional[str] = None
+
+    @field_validator("browser_profile_id")
+    @classmethod
+    def _known_shape(cls, value: Optional[str]) -> Optional[str]:
+        # Shape only; existence is checked against the registry at execution
+        # time, where a missing or disabled profile fails closed.
+        if value is None:
+            return None
+        if not is_valid_registry_id(value):
+            raise ValueError("browser_profile_id must be a registry id (lowercase kebab-case)")
+        return value
 
     @field_validator("url")
     @classmethod
@@ -244,12 +260,26 @@ class ActionExecutor:
             return {"application": launch.application, "pid": launch.pid, "detail": launch.detail}
 
         if action == ACTION_OPEN_URL:
-            launch = self._adapter.open_url(params.url)  # type: ignore[attr-defined]
-            return {
+            from .browser_selection import select_browser
+
+            # Profile resolution and domain policy are settled *before* any
+            # launch, so a refused URL never reaches a browser at all.
+            choice = select_browser(
+                self._config,
+                params.url,  # type: ignore[attr-defined]
+                params.browser_profile_id,  # type: ignore[attr-defined]
+                self._adapter.available_applications(),
+            )
+            launch = self._adapter.open_url(  # type: ignore[attr-defined]
+                params.url, application=choice.application_key  # type: ignore[attr-defined]
+            )
+            result = {
                 "url": params.url,  # type: ignore[attr-defined]
                 "application": launch.application,
                 "pid": launch.pid,
                 "detail": launch.detail,
             }
+            result.update(choice.to_result())
+            return result
 
         raise ApiError(code=CODE_UNKNOWN_ACTION, message=f"unknown action: {action}", status_code=400)

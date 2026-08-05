@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "example-display",
+      "device_id": "example-workstation",
+      "name": "Example display",
+      "aliases": ["örnek ekran"],
+      "enabled": true,
+      "match": {
+        "connector_hint": null,
+        "manufacturer": null,
+        "model": null,
+        "serial": null,
+        "edid_sha256": null
+      }
+    }
+  ]
+}
