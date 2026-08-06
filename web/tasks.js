@@ -263,6 +263,16 @@
           "</code> to choose what it does.</p>";
       }
     }
+    /* An adapter that runs a real program says what it will refuse to do, on
+       the screen where somebody is about to write a prompt asking for it. The
+       sentences come from the server: this panel does not know what "Claude
+       Code" is, and must not start guessing on its behalf. */
+    if (adapter.limitations && adapter.limitations.length) {
+      html += '<ul class="task-limitations">' +
+        adapter.limitations.slice(0, 8).map(function (item) {
+          return "<li>" + esc(item) + "</li>";
+        }).join("") + "</ul>";
+    }
     return html;
   }
 
@@ -337,9 +347,37 @@
       "</li>";
   }
 
+  /* Waiting reasons whose answer is a secret, and which therefore must never be
+     given a text box.
+
+     The foundation named these in `SECRET_BEARING_WAITING_REASONS` and this
+     panel did not read the list, because the only adapter that existed never
+     produced one. An adapter that runs Claude Code does: an expired login puts
+     a task in `waiting_for_user(authentication)`, and a textarea labelled "Your
+     answer" under that heading is an invitation to type a password into a task
+     history.
+
+     So the box is withheld and a sentence is shown instead. The answer to an
+     authentication wait is an action at the workstation — Cofferdam does not
+     want the secret, has nowhere to put it, and says so. */
+  var SECRET_WAITING_REASONS = ["authentication", "privileged_action"];
+
+  function waitingForSecret(task) {
+    return task.state === "waiting_for_user" &&
+      SECRET_WAITING_REASONS.indexOf(task.waiting_reason) !== -1;
+  }
+
   function detailActions(task) {
     var buttons = [];
-    if (task.state === "waiting_for_user" && capabilityOf(task, "followup")) {
+    if (waitingForSecret(task)) {
+      buttons.push(
+        '<p class="media-note warn task-secret-wait">' +
+        "<strong>Cofferdam will not ask you for this here.</strong> " +
+        "Finish this on the workstation itself. Never type a password, " +
+        "one-time code, passkey or token into a task." +
+        "</p>"
+      );
+    } else if (task.state === "waiting_for_user" && capabilityOf(task, "followup")) {
       buttons.push(
         '<div class="task-followup">' +
         '<label class="field"><span class="field-label">Your answer</span>' +
