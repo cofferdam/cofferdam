@@ -39,6 +39,14 @@ route                                        auth  purpose
 ``DEL  /api/youtube/player/queue/{id}``      yes   remove one queued video
 ``POST /api/media/searches/{sid}/results/{rid}/youtube/play``   yes  play it here
 ``POST /api/media/searches/{sid}/results/{rid}/youtube/queue``  yes  queue it here
+``GET  /api/tasks``                          yes   agent task list, bounded
+``POST /api/tasks``                          yes   create one task
+``GET  /api/tasks/{task_id}``                yes   one task, with its prompt
+``GET  /api/tasks/{task_id}/events``         yes   append-only history, paged
+``POST /api/tasks/{task_id}/followups``      yes   answer a waiting task
+``POST /api/tasks/{task_id}/cancel``         yes   ask that task's adapter to stop
+``GET  /api/task-adapters``                  yes   registered adapters + capabilities
+``GET  /api/task-projects``                  yes   configured projects, names only
 ``WS   /ws``                                 yes   live events
 ``GET  /`` and static assets                 no    the PWA shell itself
 ===========================================  ====  =============================
@@ -99,6 +107,20 @@ second loopback-only listener that binds lazily, serves two fixed paths, carries
 no token, and is unreachable from the tailnet. See
 :mod:`cofferdam.workstation.youtubeplayer.endpoint` for that trust boundary and
 what it is worth.
+
+**The task routes (M2F) are the first that could run something on request**, and
+their vocabulary is accordingly the most deliberate in this file. A client may
+send a project id, an adapter id, a prompt, a short title, and an opaque retry
+key. There is no field for a working directory, a filesystem path, an
+executable, argv, an environment, a shell string, a pid, a systemd unit, an API
+key, a callback URL, or an origin — none of those are validated and rejected,
+they are simply absent, and a body carrying one is refused rather than filtered.
+
+The prompt is *content for an adapter*, never an OS command: Task Core runs no
+shell, no process and no model, and what a task actually does is entirely the
+adapter's business. Where it runs is resolved server-side from a host-owned
+project registry, so a phone names a project and never a path. See
+:mod:`cofferdam.workstation.tasks` and ``docs/AGENT_TASK_CORE.md``.
 """
 
 from __future__ import annotations
@@ -234,6 +256,37 @@ from .runtime.overlay_writes import (
     OverlayWriteRejected,
 )
 from .store import ActionStore, screenshot_path
+from .tasks import TaskService, TaskStore, build_registry as build_task_adapters
+from .tasks.errors import (
+    CODE_ADAPTER_FAILED as CODE_TASK_ADAPTER_FAILED,
+    CODE_ADAPTER_NOT_PERMITTED,
+    CODE_ADAPTER_UNKNOWN as CODE_TASK_ADAPTER_UNKNOWN,
+    CODE_CANCEL_UNSUPPORTED,
+    CODE_FOLLOWUP_INVALID,
+    CODE_FOLLOWUP_NOT_WAITING,
+    CODE_FOLLOWUP_UNSUPPORTED,
+    CODE_IDEMPOTENCY_CONFLICT,
+    CODE_ILLEGAL_TRANSITION as CODE_TASK_ILLEGAL_TRANSITION,
+    CODE_PROJECT_DISABLED,
+    CODE_PROJECT_ROOT_INVALID,
+    CODE_PROJECT_UNKNOWN,
+    CODE_PROMPT_INVALID,
+    CODE_REQUEST_ID_INVALID,
+    CODE_STORE_UNAVAILABLE,
+    CODE_TASK_TERMINAL,
+    CODE_TASK_UNKNOWN,
+    TaskError,
+)
+from .tasks.lifecycle import IllegalTransition
+from .tasks.models import (
+    BUCKETS,
+    DEFAULT_EVENT_PAGE,
+    DEFAULT_TASK_PAGE,
+    MAX_EVENT_PAGE,
+    MAX_TASK_PAGE,
+    ORIGIN_PWA,
+    TASK_API_VERSION,
+)
 
 WEB_ROOT = Path(__file__).resolve().parents[2] / "web"
 
@@ -364,6 +417,41 @@ _MEDIA_SEARCH_STATUS = {
     CODE_RESULT_NOT_FOUND: 404,
 }
 
+# A task request body is a project id, an adapter id, a prompt and two short
+# opaque strings. The prompt bound is 8000 characters, so 32 KB leaves generous
+# room for multi-byte text without leaving room for anything else.
+MAX_TASK_BODY_BYTES = 32 * 1024
+
+# Refusal code -> HTTP status for Task Core.
+#
+# The split that matters here is 404/409/422. 404 is "there is no such thing".
+# 409 is "the world is not in a state where this can happen" — a task that has
+# finished, a follow-up to something that is not waiting, a transition the graph
+# refuses. 422 is "the request itself was wrong", which is where every content
+# and identifier problem lands. A client can distinguish "try again later" from
+# "send something different" without reading the message.
+_TASK_STATUS = {
+    CODE_TASK_UNKNOWN: 404,
+    CODE_PROJECT_UNKNOWN: 404,
+    CODE_TASK_ADAPTER_UNKNOWN: 404,
+    CODE_PROJECT_DISABLED: 409,
+    CODE_PROJECT_ROOT_INVALID: 409,
+    CODE_ADAPTER_NOT_PERMITTED: 422,
+    CODE_PROMPT_INVALID: 422,
+    CODE_FOLLOWUP_INVALID: 422,
+    CODE_REQUEST_ID_INVALID: 422,
+    # Same key, different payload. 409, because both answers a server could
+    # invent — the old task, or a second one — would be wrong.
+    CODE_IDEMPOTENCY_CONFLICT: 409,
+    CODE_TASK_ILLEGAL_TRANSITION: 409,
+    CODE_TASK_TERMINAL: 409,
+    CODE_FOLLOWUP_NOT_WAITING: 409,
+    CODE_FOLLOWUP_UNSUPPORTED: 422,
+    CODE_CANCEL_UNSUPPORTED: 422,
+    CODE_TASK_ADAPTER_FAILED: 502,
+    CODE_STORE_UNAVAILABLE: 503,
+}
+
 
 def _error_response(error: ApiError) -> JSONResponse:
     return JSONResponse(status_code=error.status_code, content=error.to_payload())
@@ -378,6 +466,7 @@ def create_app(
     audio=None,
     spotify=None,
     youtube_player=None,
+    tasks=None,
 ) -> FastAPI:
     """Build the application. Arguments are injectable for tests."""
     config = config or load_config()
@@ -432,6 +521,28 @@ def create_app(
     youtube_player = youtube_player or PlayerService(adapter)
     youtube_actions = YouTubeActionExecutor(youtube_player, media_search.sessions)
 
+    # Agent Task Core (M2F). The adapter table is built from *server-side*
+    # configuration and nothing else: on a default install it is empty, so the
+    # task system is fully present with nothing registered to run in it. The
+    # validation adapter appears only when the host was explicitly configured to
+    # allow it, and there is no route that changes that.
+    if tasks is None:
+        tasks = TaskService(
+            config,
+            TaskStore(config),
+            build_task_adapters(
+                enable_validation_adapter=config.enable_validation_task_adapter
+            ),
+            # The audit hook takes ids and outcome words only — see
+            # store.record_task_event for why there is no content parameter.
+            audit=store.record_task_event,
+        )
+        # Settle anything the database still believes is unfinished, before the
+        # first request can read it. Nothing is resumed: a row saying "running"
+        # describes a process that no longer exists, and reporting it as running
+        # would be the first lie the whole milestone exists to prevent.
+        tasks.recover_after_restart()
+
     executor = ActionExecutor(
         adapter, store, config, on_event=_on_event, media_search=media_search
     )
@@ -470,6 +581,7 @@ def create_app(
     app.state.spotify_recovery = spotify_recovery
     app.state.youtube_player = youtube_player
     app.state.youtube_actions = youtube_actions
+    app.state.tasks = tasks
     overlays = DisplayOverlayStore(config, inventory)
     app.state.display_overlays = overlays
 
@@ -525,6 +637,11 @@ def create_app(
                 "milestone": "M2B",
                 "actions": list(ACTION_NAMES),
                 "event_clients": hub.client_count,
+                # Task health is deliberately *not* here. It would be a second
+                # place to ask "which adapters exist", and /api/task-adapters
+                # already answers that authoritatively — a status payload that
+                # duplicates another route's answer is one that can disagree
+                # with it. See TaskService.health for what is available.
             },
             "host": host.to_dict(),
             "applications": await run_in_threadpool(adapter.available_applications),
@@ -1623,6 +1740,225 @@ def create_app(
             search_id,
             result_id,
         )
+
+    # -- agent tasks (M2F) ---------------------------------------------------
+
+    async def _task_body(request: Request, allowed: set) -> Dict[str, Any]:
+        """Read one bounded task request body, refusing anything unexpected.
+
+        The allowlist is the surface. There is deliberately no field for a
+        working directory, an executable, argv, an environment, a token, a
+        callback URL, a pid or a unit name — those are not validated and
+        rejected, they are *absent*, and this check is what turns sending one
+        into a refusal rather than a silently ignored key.
+        """
+        content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if content_type and content_type != "application/json":
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="this endpoint accepts application/json only",
+                status_code=415,
+            )
+        declared = request.headers.get("content-length")
+        if declared is not None:
+            try:
+                too_big = int(declared) > MAX_TASK_BODY_BYTES
+            except ValueError:
+                raise ApiError(
+                    code=CODE_INVALID_PARAMS, message="invalid Content-Length", status_code=400
+                )
+            if too_big:
+                raise ApiError(
+                    code=CODE_INVALID_PARAMS,
+                    message="the request body is too large",
+                    status_code=413,
+                )
+        raw = await request.body()
+        # Checked again after reading: Content-Length is a claim, not a fact.
+        if len(raw) > MAX_TASK_BODY_BYTES:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS, message="the request body is too large", status_code=413
+            )
+        if not raw:
+            payload: Any = {}
+        else:
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                raise ApiError(
+                    code=CODE_INVALID_PARAMS,
+                    message="the request body is not valid JSON",
+                    status_code=400,
+                )
+        if not isinstance(payload, dict):
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="the request body must be a JSON object",
+                status_code=400,
+            )
+        unexpected = sorted(set(payload) - allowed)
+        if unexpected:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="unexpected field: " + unexpected[0],
+                status_code=422,
+                detail=(
+                    "this endpoint accepts only: " + ", ".join(sorted(allowed))
+                    if allowed
+                    else "this endpoint accepts no fields"
+                ),
+            )
+        return payload
+
+    async def _run_task(operation, *args, **kwargs) -> Any:
+        try:
+            return await run_in_threadpool(operation, *args, **kwargs)
+        except TaskError as rejection:
+            raise ApiError(
+                code=rejection.code,
+                message=rejection.message,
+                status_code=_TASK_STATUS.get(rejection.code, 422),
+                detail=rejection.detail,
+            )
+        except IllegalTransition as rejection:
+            # The graph refused a move. 409 rather than 422: the request was
+            # well formed and the *world* is not in a state where it can happen.
+            raise ApiError(
+                code=CODE_TASK_ILLEGAL_TRANSITION,
+                message="that is not something this task can do now",
+                status_code=409,
+                detail=rejection.reason,
+            )
+
+    @app.get("/api/tasks", dependencies=[Depends(require_token)])
+    async def list_tasks(
+        bucket: Optional[str] = None, limit: int = DEFAULT_TASK_PAGE
+    ) -> Dict[str, Any]:
+        """The task list. Bounded, newest first, and without task content.
+
+        ``include_content=False`` on every row: a list is a list of rows, and
+        carrying each task's full result so a phone can render one line of
+        activity would put every answer on the wire on every poll.
+        """
+        if bucket is not None and bucket not in BUCKETS:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="unknown task filter",
+                status_code=422,
+                detail="expected one of: " + ", ".join(BUCKETS),
+            )
+        rows = await run_in_threadpool(
+            tasks.list_tasks,
+            bucket=bucket,
+            limit=max(1, min(int(limit), MAX_TASK_PAGE)),
+        )
+        counts = await run_in_threadpool(tasks.store.counts_by_state)
+        return {
+            "version": TASK_API_VERSION,
+            "tasks": [
+                tasks.snapshot(row).to_dict(include_content=False) for row in rows
+            ],
+            "counts": counts,
+        }
+
+    @app.post("/api/tasks", dependencies=[Depends(require_token)])
+    async def create_task(request: Request) -> JSONResponse:
+        """Start one task. The whole client vocabulary is five bounded fields.
+
+        ``origin`` is **not** among them: it is assigned here from the
+        authenticated request context, because a client choosing how its own
+        request is later attributed is the opposite of what that field is for.
+        """
+        payload = await _task_body(
+            request,
+            allowed={"project_id", "adapter_id", "prompt", "client_request_id", "title"},
+        )
+        row, created = await _run_task(
+            tasks.create_task,
+            project_id=payload.get("project_id"),
+            adapter_id=payload.get("adapter_id"),
+            prompt=payload.get("prompt"),
+            client_request_id=payload.get("client_request_id"),
+            title=payload.get("title"),
+            origin=ORIGIN_PWA,
+        )
+        return JSONResponse(
+            # 200 rather than 201 when an idempotency key matched: nothing was
+            # created, and the status line is the cheapest place to say so.
+            status_code=201 if created else 200,
+            content={"task": tasks.snapshot(row).to_dict(), "created": created},
+        )
+
+    @app.get("/api/tasks/{task_id}", dependencies=[Depends(require_token)])
+    async def get_task(task_id: str) -> Dict[str, Any]:
+        row = await _run_task(tasks.get_task, task_id)
+        payload = tasks.snapshot(row).to_dict()
+        # The detail view is the one place the prompt is published, and only to
+        # the authenticated client that already sent it.
+        payload["prompt"] = row.prompt
+        return {"task": payload}
+
+    @app.get("/api/tasks/{task_id}/events", dependencies=[Depends(require_token)])
+    async def get_task_events(
+        task_id: str, after: int = 0, limit: int = DEFAULT_EVENT_PAGE
+    ) -> Dict[str, Any]:
+        """Events after a sequence cursor. Bounded, and never an offset scan."""
+        if after < 0:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="after must not be negative",
+                status_code=422,
+            )
+        row = await _run_task(tasks.get_task, task_id)
+        events = await run_in_threadpool(
+            tasks.store.events,
+            row.task_id,
+            after=after,
+            limit=max(1, min(int(limit), MAX_EVENT_PAGE)),
+        )
+        return {
+            "task_id": row.task_id,
+            "events": [event.to_dict() for event in events],
+            "cursor": events[-1].sequence if events else after,
+            "event_cursor": row.event_cursor,
+        }
+
+    @app.post("/api/tasks/{task_id}/followups", dependencies=[Depends(require_token)])
+    async def send_task_followup(task_id: str, request: Request) -> Dict[str, Any]:
+        payload = await _task_body(request, allowed={"followup", "client_request_id"})
+        row = await _run_task(
+            tasks.send_followup,
+            task_id,
+            payload.get("followup"),
+            client_request_id=payload.get("client_request_id"),
+        )
+        return {"task": tasks.snapshot(row).to_dict()}
+
+    @app.post("/api/tasks/{task_id}/cancel", dependencies=[Depends(require_token)])
+    async def cancel_task(task_id: str, request: Request) -> Dict[str, Any]:
+        """Ask this task's own adapter to stop it.
+
+        Nothing here signals a process, matches one by name, or touches any task
+        but the one named in the path — see ``TaskService.cancel_task``.
+        """
+        await _task_body(request, allowed=set())
+        row = await _run_task(tasks.cancel_task, task_id)
+        return {"task": tasks.snapshot(row).to_dict()}
+
+    @app.get("/api/task-adapters", dependencies=[Depends(require_token)])
+    async def list_task_adapters() -> Dict[str, Any]:
+        """Which adapters this build has, and what each one can do.
+
+        On a default install this is an empty list, and that is the honest state
+        of a foundation milestone rather than a fault: the adapter that does real
+        work is the next one.
+        """
+        return {"adapters": tasks.adapters.describe()}
+
+    @app.get("/api/task-projects", dependencies=[Depends(require_token)])
+    async def list_task_projects() -> Dict[str, Any]:
+        """Where tasks may run, by name. **No filesystem path is published.**"""
+        return tasks.projects.to_dict()
 
     # -- live events ---------------------------------------------------------
 

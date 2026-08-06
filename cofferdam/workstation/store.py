@@ -223,6 +223,52 @@ class ActionStore:
             }
         )
 
+    def record_task_event(
+        self,
+        operation: str,
+        result: str,
+        task_id: Optional[str] = None,
+        adapter_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+    ) -> None:
+        """Audit one Task Core operation — created, started, refused, finished.
+
+        The narrowest audit in this file, and the one where the reasoning is
+        least optional: a task's *prompt* is somebody thinking out loud, its
+        follow-ups are a conversation, and its result is the answer. An action
+        log carrying any of the three would become a transcript — kept on disk,
+        shown in a list beside the volume changes, and never asked for.
+
+        So this records six things, and every one is either an id Cofferdam
+        minted or a word from a closed vocabulary: which operation, how it
+        turned out, which task, which adapter, which project, and the
+        correlation id. There is **no parameter for content**, which is what
+        makes "the audit cannot carry a prompt" a property of the signature
+        rather than a habit every caller has to keep.
+
+        The task id is safe here for the same reason the correlation id is: it
+        is minted from a timestamp and randomness, and derived from nothing
+        about what the task says.
+        """
+        self.add(
+            {
+                "action_id": uuid.uuid4().hex,
+                "action": operation,
+                "status": "succeeded" if result in ("ok", "requested") else "failed",
+                "started_at": _utc_now(),
+                "finished_at": _utc_now(),
+                "params": {"adapter_id": adapter_id, "project_id": project_id},
+                "result": {
+                    "outcome": result,
+                    "task_id": task_id,
+                    "correlation_id": correlation_id,
+                },
+                "error": None if result in ("ok", "requested") else {"code": result},
+                "stub": False,
+            }
+        )
+
     def recent(self, limit: int = 20) -> List[dict]:
         with self._lock:
             return list(self._records[: max(0, limit)])
