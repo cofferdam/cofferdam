@@ -64,15 +64,24 @@ Task store metadata, without content:
 sqlite3 ~/cofferdam/state/tasks.db "select state, count(*) from tasks group by state;"
 ```
 
-Adapter-owned processes now, which should be none:
+Adapter-owned processes now, which should be none. **Ask the cgroup, not
+`pgrep`:**
 
 ```bash
-pgrep -a -f 'cofferdam.workstation' | head
+systemctl --user status cofferdam-workstation.service --no-pager | sed -n '/CGroup/,/^$/p'
 ```
 
-`pgrep` is fine here — a human reading a terminal. Cofferdam itself never
-matches a process by name, which is the point of the identity checks in
-`process.py`.
+This matters more than it looks. A name-based search finds Claude processes that
+have nothing to do with Cofferdam — an editor integration, the desktop app, a
+session somebody is running in their own terminal. During development on this
+host, `pgrep -f 'claude -p'` matched a live unrelated Claude session whose
+command line also contains `--input-format stream-json`; a checklist that told
+somebody to look for strays that way would produce a false alarm at best and an
+invitation to kill somebody else's work at worst.
+
+The cgroup listing answers the question that is actually being asked — *which
+processes does this service own* — and it is the same reasoning that keeps
+`pkill` and process-name matching out of the adapter.
 
 ## 2. Install the 97 layer
 
@@ -138,10 +147,13 @@ defect found here belongs to the foundation, not to the adapter.
     then add a short Usage section to it describing how to run the test."*
     Do not ask it to inspect other directories, and never ask it for secrets,
     browser data or account content.
-14. Exactly one task and one process:
+14. Exactly one task and exactly one adapter-owned process. Read it from the
+    service's own cgroup, for the reason given in step 1:
     ```bash
-    pgrep -a -f 'claude' | grep -v grep
+    systemctl --user status cofferdam-workstation.service --no-pager | sed -n '/CGroup/,/^$/p'
     ```
+    One `python -m cofferdam.workstation` and one `claude` beneath it. The
+    listing also shows the full argv, which is where step 20 is answered.
 15. The task passes `queued → starting → running`.
 16. Meaningful activity appears — tool activity, assistant text — without raw
     terminal output.
@@ -152,11 +164,22 @@ defect found here belongs to the foundation, not to the adapter.
 18. Evidence is labelled by source: what Claude *said* reads as its claim, and
     what Cofferdam observed reads as observed.
 19. The final result is visible.
-20. The prompt is in neither argv nor the journal:
-    ```bash
-    tr '\0' ' ' < /proc/$(pgrep -f 'claude -p' | head -1)/cmdline; echo
+20. The prompt is in neither argv nor the journal. The cgroup listing from step
+    14 already prints the child's full command line: it must be the fixed
+    template and nothing else —
+
     ```
-    Run this *while the task is running*. It must show only the fixed template.
+    claude -p --input-format stream-json --output-format stream-json --verbose
+      --session-id <uuid> --permission-mode acceptEdits
+      --tools Read,Write,Edit,Glob,Grep --strict-mcp-config --setting-sources ""
+      --disable-slash-commands --no-session-persistence --max-turns 24
+      --max-budget-usd 2.00
+    ```
+
+    Then the journal:
+    ```bash
+    journalctl --user -u cofferdam-workstation --since '15 min ago' | grep -i -c 'your prompt words here' || echo "clean"
+    ```
 
 ## D. Follow-up
 
@@ -181,10 +204,18 @@ defect found here belongs to the foundation, not to the adapter.
 33. Restart only the 97 runtime.
 34. The task becomes `interrupted`.
 35. It is never shown as running afterwards.
-36. No uncontrolled Claude child remains:
+36. No uncontrolled Claude child remains. Again by cgroup, and again because a
+    name search would report an unrelated Claude session as an orphan:
     ```bash
-    pgrep -a -f 'claude -p' || echo "none"
+    systemctl --user status cofferdam-workstation.service --no-pager | sed -n '/CGroup/,/^$/p'
     ```
+    The service's cgroup must contain the daemon and no `claude` process.
+
+    This was verified on this host before the 97 layer was written, using a
+    throwaway transient unit with the same `KillMode=control-group`: a Claude
+    child appeared inside the unit's cgroup, `systemctl stop` removed it, and
+    the task came back `interrupted` after the runtime was started again. An
+    unrelated Claude session running at the same time was untouched.
 37. Completed and cancelled tasks are unchanged.
 
 ## G. Compatibility

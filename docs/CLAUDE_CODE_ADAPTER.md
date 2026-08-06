@@ -425,6 +425,23 @@ already recorded are preserved; terminal tasks are untouched.
 The adapter also stops its own children on `shutdown()`, so a clean stop does not
 depend on the cgroup alone.
 
+**Verified on this host**, before the validation runtime was written, using a
+throwaway transient unit carrying the same `KillMode=control-group`: a Claude
+child appeared inside the unit's cgroup, `systemctl stop` removed it, the same
+runtime started again reported the task `interrupted` and terminal, and an
+unrelated Claude session running at the same moment was untouched.
+
+### Do not look for orphans by name
+
+That last clause is the reason the validation checklist reads the service's
+cgroup rather than running `pgrep`. On this workstation, `pgrep -f 'claude -p'`
+matched a live Claude session that had nothing to do with Cofferdam — its
+command line also contains `--input-format stream-json`. A name search cannot
+tell an adapter's child from somebody's editor integration or their own terminal
+session, which is the same reason `process.py` never matches by name either.
+Asking the cgroup answers the question actually being asked: *which processes
+does this service own*.
+
 ## The parser
 
 Four properties, enforced in `frames.py` rather than downstream:
