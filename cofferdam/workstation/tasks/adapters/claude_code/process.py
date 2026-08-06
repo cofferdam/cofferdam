@@ -141,6 +141,13 @@ class ClaudeRun:
         self._stdin_closed = False
         self.cancel_requested = False
         self.signals_sent: List[str] = []
+        #: The turn waiting to be sent, held only so it can be written to stdin
+        #: by :meth:`send_turn`. It exists as an attribute rather than a local
+        #: so that "does task content ever reach the command line" is a question
+        #: a mutation test can actually ask — the mutation appends this to the
+        #: argv, and `test_the_launched_argv_is_exactly_the_template` fails.
+        self.pending_prompt: str = ""
+
 
     # -- launching -----------------------------------------------------------
 
@@ -267,6 +274,7 @@ class ClaudeRun:
 
         if self.process is None or self.process.stdin is None or self._stdin_closed:
             return False
+        self.pending_prompt = text
         message = {
             "type": "user",
             "message": {"role": "user", "content": text},

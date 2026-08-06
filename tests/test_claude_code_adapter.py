@@ -117,6 +117,39 @@ class Enablement(unittest.TestCase):
                 # The only mention is reading it off the server's own config.
                 self.assertIn("config.enable_claude_code_adapter", line)
 
+    def test_the_registry_constructs_the_adapter_with_no_arguments(self):
+        """4. The executable is *found*, never handed in.
+
+        ``build_registry`` must call ``ClaudeCodeAdapter()`` with nothing at
+        all, so there is no argument for a caller — any caller — to reach. A
+        mutation that made the registry pass an executable path fails here.
+        """
+        import ast
+
+        source = (
+            REPO_ROOT
+            / "cofferdam"
+            / "workstation"
+            / "tasks"
+            / "adapters"
+            / "__init__.py"
+        ).read_text("utf-8")
+        tree = ast.parse(source)
+        constructions = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", None) == "ClaudeCodeAdapter"
+        ]
+        self.assertEqual(len(constructions), 1, "the adapter is constructed elsewhere")
+        self.assertEqual(constructions[0].args, [])
+        self.assertEqual(constructions[0].keywords, [])
+
+    def test_the_adapter_finds_its_own_executable(self):
+        """4. And with no argument, it goes and looks rather than defaulting."""
+        adapter = ClaudeCodeAdapter(auth_probe=always_authenticated)
+        self.assertEqual(adapter._executable, cli.find_executable())
+
     def test_adapter_id_is_not_constructible_from_a_string(self):
         """A registry miss is a refusal, never an import."""
         registry = build_registry()
@@ -229,7 +262,16 @@ class NoShellAnywhere(unittest.TestCase):
             ):
                 self.assertNotIn(forbidden, source, str(path) + " uses " + forbidden)
 
-    def test_every_subprocess_call_passes_shell_false(self):
+    def test_every_shell_argument_is_false(self):
+        """17. Every call that has a ``shell=`` at all passes ``False``.
+
+        Matched on the *keyword*, not on the callee's name. An earlier version
+        of this test looked for calls named ``run`` or ``Popen`` and therefore
+        skipped ``self._popen(...)`` — the injectable indirection the process
+        module actually uses — so mutating that call to ``shell=True`` passed
+        the suite. A mutation run caught it. Asking "does any call anywhere pass
+        a truthy shell" cannot be dodged by renaming the callee.
+        """
         import ast
 
         found = 0
@@ -238,15 +280,42 @@ class NoShellAnywhere(unittest.TestCase):
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):
                     continue
-                target = node.func
-                name = target.attr if isinstance(target, ast.Attribute) else None
-                if name not in ("run", "Popen"):
+                for keyword in node.keywords:
+                    if keyword.arg != "shell":
+                        continue
+                    found += 1
+                    self.assertIsInstance(
+                        keyword.value, ast.Constant, str(path) + " computes shell="
+                    )
+                    self.assertIs(
+                        keyword.value.value,
+                        False,
+                        str(path) + ":" + str(node.lineno) + " passes a truthy shell=",
+                    )
+        self.assertGreater(found, 0, "no call with a shell= argument was inspected")
+
+    def test_every_process_launch_passes_shell_explicitly(self):
+        """17. And no launch may simply omit it and inherit a default."""
+        import ast
+
+        for path in package_sources():
+            tree = ast.parse(path.read_text("utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
                     continue
-                keywords = {k.arg: k.value for k in node.keywords}
-                self.assertIn("shell", keywords, str(path) + " omits shell=")
-                self.assertIs(keywords["shell"].value, False)
-                found += 1
-        self.assertGreater(found, 0, "no subprocess call was inspected")
+                target = node.func
+                name = (
+                    target.attr
+                    if isinstance(target, ast.Attribute)
+                    else getattr(target, "id", None)
+                )
+                if name not in ("run", "Popen", "_popen"):
+                    continue
+                self.assertIn(
+                    "shell",
+                    {keyword.arg for keyword in node.keywords},
+                    str(path) + ":" + str(node.lineno) + " launches without shell=",
+                )
 
     def test_adapter_never_matches_a_process_by_name(self):
         """The replacement for the broad guard this package is excepted from."""
@@ -356,6 +425,23 @@ class PromptTransport(ClaudeRunTestCase):
         result = self.result_of(run)
         self.assertIsNotNone(result)
         self.assertIn("line one", result.text)
+
+    def test_the_launched_argv_is_exactly_the_template(self):
+        """13, 52. The argv the process saw equals the one built from constants.
+
+        Stronger than "the prompt is not in it": *nothing* is in it that this
+        repository did not put there. A mutation that appended task content to
+        the command line fails here even if the content happens not to contain
+        the sentinel the other test looks for.
+        """
+        run = self.launch()
+        self.assertTrue(run.start())
+        run.send_turn("some prompt text nobody should see in a command line")
+        self.assertIsNotNone(self.result_of(run))
+
+        record = self.fake.launch_record()
+        expected = cli.build_argv(self.fake.path, run.session_id)
+        self.assertEqual([str(self.fake.path)] + record["argv"], expected)
 
     def test_the_process_runs_in_the_project_root(self):
         """The cwd is the verified root, and comes from nowhere else."""
@@ -1186,6 +1272,92 @@ class FollowUp(ClaudeTaskTestCase):
         first_after = self.service.get_task(first.task_id)
         self.assertEqual(first_after.state, STATE_CANCELLED)
         self.assertNotIn("for task two only", first_after.final_result or "")
+
+
+class FollowUpRouting(ClaudeTaskTestCase):
+    """Two live runs at once, so "the right one" is a question with an answer.
+
+    Every other follow-up test runs under the shipped limit of one concurrent
+    task, where any lookup — by task id, by "the first one", by "the only one" —
+    returns the same object. That made those tests unable to fail: a mutation
+    replacing the task-id lookup with ``next(iter(self._runs.values()))`` passed
+    the whole suite, and a mutation run is what revealed it.
+
+    So this class raises the limit to two. The limit is a server-side number in
+    source; raising it here is a test configuring its own fixture, not a client
+    reaching a setting.
+    """
+
+    max_concurrent = 2
+
+    def test_a_follow_up_reaches_its_own_task_and_no_other(self):
+        """31, 32, 37."""
+        first, _ = self.create("first task prompt")
+        second, _ = self.create("second task prompt")
+        first = self.settle(first.task_id)
+        second = self.settle(second.task_id)
+        self.assertEqual(first.state, STATE_WAITING_FOR_USER)
+        self.assertEqual(second.state, STATE_WAITING_FOR_USER)
+
+        first_run = self.adapter._runs[first.task_id]
+        second_run = self.adapter._runs[second.task_id]
+        self.assertNotEqual(first_run.pid, second_run.pid)
+        with first_run.lock:
+            first_turns_before = first_run.state.turns
+
+        self.service.send_followup(second.task_id, "SENTINEL-FOR-SECOND-ONLY")
+        second = self.settle(
+            second.task_id, until=lambda row: "SENTINEL" in (row.final_result or "")
+        )
+
+        with first_run.lock:
+            self.assertEqual(
+                first_run.state.turns,
+                first_turns_before,
+                "the follow-up was delivered to the wrong task's process",
+            )
+            self.assertNotIn(
+                "SENTINEL-FOR-SECOND-ONLY", first_run.state.last_result.text or ""
+            )
+        with second_run.lock:
+            self.assertIn(
+                "SENTINEL-FOR-SECOND-ONLY", second_run.state.last_result.text or ""
+            )
+
+        # And the first task's own record is untouched by it.
+        first_after = self.service.get_task(first.task_id)
+        self.assertNotIn("SENTINEL-FOR-SECOND-ONLY", first_after.final_result or "")
+
+    def test_each_task_keeps_its_own_session_while_both_are_live(self):
+        """37. Two sessions, two process groups, at the same moment."""
+        first, _ = self.create("one")
+        second, _ = self.create("two")
+        self.settle(first.task_id)
+        self.settle(second.task_id)
+
+        first_run = self.adapter._runs[first.task_id]
+        second_run = self.adapter._runs[second.task_id]
+        self.assertNotEqual(first_run.session_id, second_run.session_id)
+        self.assertNotEqual(first_run.pgid, second_run.pgid)
+        self.assertNotEqual(first_run.run_id, second_run.run_id)
+        self.assertEqual(len(self.adapter.active_task_ids()), 2)
+
+    def test_cancelling_one_of_two_live_tasks_leaves_the_other_alone(self):
+        """41. The isolation claim, with a real second process to lose."""
+        first, _ = self.create("one")
+        second, _ = self.create("two")
+        self.settle(first.task_id)
+        self.settle(second.task_id)
+        second_run = self.adapter._runs[second.task_id]
+
+        cancelled = self.service.cancel_task(first.task_id)
+        self.assertEqual(cancelled.state, STATE_CANCELLED)
+
+        self.assertIsNone(second_run.poll(), "cancelling one task stopped the other")
+        self.assertTrue(second_run.still_ours())
+        self.assertEqual(
+            self.service.get_task(second.task_id).state, STATE_WAITING_FOR_USER
+        )
 
 
 class ConcurrencyAndIsolation(ClaudeTaskTestCase):
