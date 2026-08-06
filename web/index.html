@@ -46,6 +46,35 @@
       <ul class="notes" id="hostNotes"></ul>
     </section>
 
+    <!-- Agent tasks (M2F). First among the panels because it is the thing this
+         product is actually for: asking the workstation to do a piece of work
+         and being told truthfully how it went.
+
+         What it is not is as important as what it is. This is not a terminal,
+         and the default view is deliberately not a log: a task is a piece of
+         work with a state, and reading a scrollback to find out whether it
+         worked is the failure mode this milestone exists to avoid. There is no
+         field here for a folder, a command or a program — a task names a
+         project the workstation already knows and an adapter that already
+         exists, and the prompt is content for that adapter rather than
+         something this machine runs. -->
+    <section class="panel" id="tasksPanel">
+      <div class="panel-head">
+        <h2>Tasks</h2>
+        <div class="row tight">
+          <span class="muted" id="tasksObserved"></span>
+          <button id="tasksRefresh" class="ghost">Refresh</button>
+        </div>
+      </div>
+      <p class="muted">
+        Ask the workstation to do something, and watch it truthfully.
+        <strong>You choose the project, the adapter and the words</strong> — nothing here routes,
+        plans or decides for you. A task that stops because the service restarted is reported as
+        <strong>interrupted</strong>, never as failed and never as still running.
+      </p>
+      <div id="tasksSections"><p class="muted">Loading…</p></div>
+    </section>
+
     <section class="panel">
       <h2>Control</h2>
       <div class="controls">
@@ -207,6 +236,7 @@
 <script src="/audio.js"></script>
 <script src="/spotify.js"></script>
 <script src="/youtube.js"></script>
+<script src="/tasks.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

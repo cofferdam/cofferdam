@@ -1334,6 +1334,9 @@
     // the token, and its polling stops so a signed-out device makes no further
     // requests.
     if (global.CofferdamYouTube) { global.CofferdamYouTube.stop(); }
+    // And the tasks panel, which holds the most personal content in the
+    // product: what somebody asked the workstation to do, and what it answered.
+    if (global.CofferdamTasks) { global.CofferdamTasks.stop(); }
     el("registrySections").innerHTML = '<p class="muted">Loading…</p>';
     el("app").hidden = true;
     el("setup").hidden = false;
@@ -1399,6 +1402,13 @@
         global.CofferdamSpotify.mount({ api: api, escapeHtml: escapeHtml, el: el })
           .then(function () { renderMedia(); })
           .catch(function () { /* spotify.js renders its own failure state */ });
+      }
+      // Tasks (M2F). Same isolation as every panel here: a task store that
+      // cannot be opened, or a build with no adapters registered, is a state
+      // tasks.js renders itself rather than throwing into this chain.
+      if (global.CofferdamTasks) {
+        global.CofferdamTasks.mount({ api: api, escapeHtml: escapeHtml, el: el })
+          .catch(function () { /* tasks.js renders its own failure state */ });
       }
       // Same again for the YouTube player: a host with no browser to open one
       // in, or a player that is simply not open yet, is a state youtube.js
