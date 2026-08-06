@@ -126,6 +126,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--host", help="bind address (default: COFFERDAM_BIND_HOST or 127.0.0.1)")
     parser.add_argument("--port", type=int, help="bind port (default: COFFERDAM_BIND_PORT or 7101)")
     parser.add_argument("--print-token", action="store_true", help="print the device token to stderr and exit")
+    parser.add_argument(
+        "--enable-validation-task-adapter",
+        action="store_true",
+        help=(
+            "register the deterministic validation task adapter. It runs no "
+            "program and calls no model; it exists to exercise the task "
+            "lifecycle on a validation runtime. Off unless this flag is given."
+        ),
+    )
     args = parser.parse_args(argv)
 
     config = load_config()
@@ -133,6 +142,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         config = type(config)(**{**config.__dict__, "bind_host": args.host})
     if args.port:
         config = type(config)(**{**config.__dict__, "bind_port": args.port})
+    if args.enable_validation_task_adapter:
+        # One direction only. The flag can turn the validation adapter *on*; its
+        # absence never turns off something the host's own config.json or
+        # environment enabled, because a switch that silently disabled a
+        # configured surface would be as surprising as one that enabled an
+        # unconfigured one.
+        config = type(config)(
+            **{**config.__dict__, "enable_validation_task_adapter": True}
+        )
     config.ensure_dirs()
 
     token_existed = config.token_path.is_file()
@@ -146,6 +164,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"[cofferdam] device token generated at {config.token_path}", file=sys.stderr)
         print(f"[cofferdam] token: {token}", file=sys.stderr)
         print("[cofferdam] enter this token once in the phone UI; it is not shown again.", file=sys.stderr)
+
+    if config.enable_validation_task_adapter:
+        # Said out loud on every start, not only when the flag was passed on the
+        # command line. A validation surface that is on because of a config file
+        # written months ago is exactly the one worth announcing.
+        print(
+            "[cofferdam] the validation task adapter is enabled. It runs no program "
+            "and calls no model; it exists to exercise the task lifecycle. Do not "
+            "leave it enabled on a normal runtime.",
+            file=sys.stderr,
+        )
 
     if not _is_loopback(config.bind_host):
         print(

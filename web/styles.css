@@ -573,6 +573,111 @@ button.danger { color: var(--err); }
 .yt-queue-title { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
 .yt-queue-remove { flex: 0 0 auto; min-height: 40px; }
 
+/* -- tasks (M2F) ----------------------------------------------------------
+   Same layout discipline as the panels above: every flex or grid container
+   carries `min-width: 0` so a long task title wraps instead of pushing the page
+   sideways, and every control is at least a fingertip tall. A task's own text —
+   prompt and result — is the one place `pre` is used, and it scrolls inside its
+   own box rather than widening the page. */
+
+.task-new { margin-top: 12px; min-width: 0; }
+.task-new-open {
+  background: #0c141c; border: 1px solid var(--line); border-radius: 10px;
+  padding: 12px; display: grid; gap: 10px; min-width: 0;
+}
+.task-new h3 { margin: 0; font-size: 15px; }
+.task-new textarea, .task-followup textarea {
+  width: 100%; min-width: 0; box-sizing: border-box; resize: vertical;
+  font: inherit; padding: 8px; border-radius: 8px;
+  border: 1px solid var(--line); background: #0a1119; color: inherit;
+}
+.task-new select {
+  width: 100%; min-width: 0; box-sizing: border-box; min-height: 44px;
+  font: inherit; padding: 6px 8px; border-radius: 8px;
+  border: 1px solid var(--line); background: #0a1119; color: inherit;
+}
+.task-new-actions { display: flex; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.task-new-actions button { flex: 1 1 10em; min-width: 0; min-height: 44px; }
+
+/* The one label that must never be mistaken for a real agent. Given a border
+   and its own colour so it reads as a warning rather than as a description. */
+.task-validation-note {
+  margin: 0; padding: 8px 10px; border-radius: 8px;
+  border: 1px solid var(--warn, #d0a53c); color: var(--warn, #d0a53c);
+  font-size: 13px; overflow-wrap: anywhere; min-width: 0;
+}
+
+.task-group { margin-top: 14px; min-width: 0; }
+.task-group h3 {
+  margin: 0 0 6px; font-size: 14px; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--muted);
+}
+.task-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; min-width: 0; }
+.task-row { min-width: 0; }
+.task-open {
+  width: 100%; min-width: 0; text-align: left; display: grid; gap: 4px;
+  background: #0c141c; border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px; min-height: 56px; color: inherit; font: inherit; cursor: pointer;
+}
+/* Terminal tasks recede; a task that needs a person does not. This is the one
+   visual distinction the panel must get right, because it is what makes a
+   waiting task findable without opening every row. */
+.task-row.terminal .task-open { opacity: 0.78; }
+.task-row.needs-you .task-open { border-color: var(--warn, #d0a53c); }
+.task-line {
+  display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; min-width: 0;
+}
+.task-title { font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
+.task-meta { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; min-width: 0; }
+.task-activity { font-size: 13px; overflow-wrap: anywhere; min-width: 0; }
+
+.task-detail { margin-top: 12px; display: grid; gap: 10px; min-width: 0; }
+.task-detail-head {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap; min-width: 0;
+}
+.task-detail h3 { margin: 0; font-size: 16px; overflow-wrap: anywhere; min-width: 0; }
+.task-facts {
+  margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 10px;
+  font-size: 13px; min-width: 0;
+}
+.task-facts dt { color: var(--muted); }
+.task-facts dd { margin: 0; overflow-wrap: anywhere; min-width: 0; }
+.task-block { display: grid; gap: 4px; min-width: 0; }
+.task-block h4 { margin: 0; font-size: 13px; color: var(--muted); }
+.task-text {
+  margin: 0; padding: 10px; border-radius: 8px; background: #0a1119;
+  border: 1px solid var(--line); font-size: 13px; white-space: pre-wrap;
+  overflow-wrap: anywhere; overflow-x: auto; min-width: 0; max-height: 22em;
+}
+.task-actions { display: flex; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.task-actions button { flex: 1 1 10em; min-width: 0; min-height: 44px; }
+.task-followup { flex: 1 1 100%; display: grid; gap: 8px; min-width: 0; }
+
+.task-advanced { min-width: 0; }
+.task-advanced summary { cursor: pointer; font-size: 13px; color: var(--muted); min-height: 40px; }
+.task-events {
+  list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; min-width: 0;
+}
+.task-event {
+  display: grid; gap: 2px; padding: 8px; border-radius: 8px;
+  background: #0a1119; border: 1px solid var(--line); font-size: 13px; min-width: 0;
+}
+.task-event-head {
+  display: flex; gap: 8px; justify-content: space-between; flex-wrap: wrap; min-width: 0;
+}
+.task-event-type { font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
+.task-event-text { overflow-wrap: anywhere; min-width: 0; white-space: pre-wrap; }
+.task-evidence-row { display: flex; gap: 6px; flex-wrap: wrap; min-width: 0; }
+/* Adapter-reported and observed evidence look different on purpose: the border
+   is the difference between a claim and a fact, and collapsing them visually
+   would undo the distinction the data model exists to preserve. */
+.task-evidence {
+  font-size: 12px; padding: 1px 6px; border-radius: 6px;
+  border: 1px dashed var(--line); color: var(--muted);
+  overflow-wrap: anywhere; min-width: 0;
+}
+.task-evidence.verified { border-style: solid; color: inherit; }
+
 @media (max-width: 480px) {
   /* On a phone the slider takes its own line and the mute button sits beside
      the readout, so neither is ever a thumb-width target squeezed to nothing. */
@@ -580,4 +685,8 @@ button.danger { color: var(--err); }
   .yt-volume-value { order: 2; margin-left: 0; }
   .yt-volume button { order: 3; margin-left: auto; }
   .yt-queue-remove { flex: 1 1 100%; }
+  /* Task facts stack rather than squeezing a value into half a phone's width. */
+  .task-facts { grid-template-columns: 1fr; }
+  .task-facts dt { margin-top: 4px; }
+  .task-actions button { flex: 1 1 100%; }
 }

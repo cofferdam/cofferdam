@@ -795,6 +795,72 @@ page), and never a success. The phone explains it and offers exactly two things 
 dedicated player **once**, or Open in YouTube. The retry is bounded because a configuration state is
 not a race, and a button that can only fail again is worse than no button.
 
+## D-2026-08-06-2 — Task Core is provider-neutral, and adapters are the only place an agent exists (EFE DECISION, ACTIVE)
+
+**Decision.** Agent work is modelled as a **task**: a durable, server-identified unit with a strict
+state machine, an append-only event history, an authenticated API and a phone UI. Everything
+specific to a *particular* agent — Claude Code, Cursor, a local model, a remote provider — lives
+behind a provider-neutral **adapter** interface and nowhere else. Recorded in
+[`docs/AGENT_TASK_CORE.md`](docs/AGENT_TASK_CORE.md).
+
+**Why the foundation comes before the integration.** The boundary between "what a task is" and "how
+Claude Code runs one" is much easier to draw before a real integration's process handling has grown
+roots through the middle of it. Every previous milestone that mixed the two — a tab per video
+standing in for playback state, a Spotify device id standing in for an identity — had to be
+untangled later. So this milestone ships a complete task system and deliberately **no way to run a
+real agent in it**, and a test scans Task Core for the name of any specific integration and fails if
+one appears.
+
+**A task is not a process, and the client cannot name one.** There is no field for a working
+directory, an executable, argv, an environment, a shell string, a pid or a unit name — not validated
+and rejected, *absent*. A request names a **project id**, and the server resolves it to a verified
+root from a host-owned registry, re-checking for symlink escapes immediately before use. The most
+dangerous field an agent API could have is a path, so it does not have one. The prompt is content
+for an adapter, never an OS command, and no text produced by a model is authority for anything on
+this machine.
+
+**The state machine is enforced in one place, transactionally with its event.** A snapshot that says
+`completed` with no completion event is a history that disagrees with itself, so both are one write.
+That requirement is what made SQLite the honest choice here, after four milestones where an
+atomically-replaced JSON file genuinely was — `store.py` had already written down that tasks would
+be where that stopped being true. It adds no dependency: SQLite is in the standard library, so the
+stdlib-only CI path is unchanged.
+
+**A row that says `running` is not evidence that anything is running.** After a restart, every
+non-terminal task becomes `interrupted` — never resumed, never left claiming to run, previous output
+preserved, terminal tasks untouched. Not because resuming is hard, but because resuming something
+whose state nobody observed is how a task system starts lying. `interrupted` is deliberately a
+different word from `failed`: the task did not go wrong, Cofferdam went away underneath it, and
+telling somebody their work failed when it was never given a chance would send them debugging
+nothing.
+
+**Manual-first, and meant permanently.** A person chooses the project, the adapter, the prompt, and
+every follow-up and cancellation. There is no routing, no planning, no autonomous loop and no model
+call anywhere in Task Core. Cancellation is a message to *one* adapter about *one* task — there is
+no `pkill`, no signal, no process-name matching anywhere in the package — and an operation an
+adapter cannot do is a truthful refusal rather than a silent success.
+
+**The validation adapter is not an agent, and is off by default.** Validating a lifecycle end to end
+on a real host needs something to drive it, and driving it with a real model would mean the first
+run of this system did something nobody asked for. So a deterministic adapter emits a fixed
+code-owned sequence and reaches a fixed state; it runs no program, calls no model, writes nothing,
+and imports nothing that could. It is registered **only** when the host was explicitly configured to
+allow it — a flag, a config key or an environment variable, never a client — and when it is off the
+object is never constructed. A default install after this merge has an empty adapter list, which is
+the honest state of a foundation milestone rather than a fault.
+
+**Secrets are reserved in vocabulary and absent in mechanism.** Waiting for a password, a one-time
+code, a push approval or a passkey are named now so that the day an adapter needs to say one there
+is a truthful word for it. None is implemented, and there is no secret-input form to misuse: when
+they are supported they must use a dedicated ephemeral channel and must never reach a prompt, a task
+history, an event or an audit record.
+
+**What a task says is somebody's private thinking.** Prompts, follow-ups and results are stored,
+shown to one authenticated client, and kept out of everything else: Task Core contains no logging
+call at all, the panel contains no `console` call, content never enters a URL, an argv, a unit name,
+a task id or an audit record — and the audit function has no parameter for content, which makes that
+a property of the signature rather than a habit every caller has to keep.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

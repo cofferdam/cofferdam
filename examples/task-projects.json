@@ -1,0 +1,35 @@
+{
+  "_comment": [
+    "Example task project registry. Copy to $COFFERDAM_HOME/config/task-projects.json",
+    "and edit on the workstation — this file is an example and is never read by the",
+    "service.",
+    "",
+    "A project says WHERE a task may run. It never says what to run: there is no",
+    "field for a command, argv, an environment, a shell string or a script, and an",
+    "entry carrying one is refused by name rather than ignored.",
+    "",
+    "'root' must be a plain absolute path — no ~, no $VAR, no '..'. It is verified",
+    "again immediately before every task starts: each component is checked for a",
+    "symlink, the resolved path must equal the configured one, and it must be a",
+    "readable directory. A root reached through a link is refused.",
+    "",
+    "'adapters' is an allowlist, and an empty list means NONE rather than all — so a",
+    "future adapter never silently gains access to an existing project. Names this",
+    "build does not know are dropped rather than failing the entry.",
+    "",
+    "Nothing is auto-registered. A registry that scanned your home directory and",
+    "offered what it found would grant access by accident.",
+    "",
+    "See docs/AGENT_TASK_CORE.md."
+  ],
+  "projects": [
+    {
+      "project_id": "cofferdam",
+      "display_name": "Cofferdam",
+      "root": "/home/CHANGE-ME/cofferdam",
+      "adapters": ["validation"],
+      "enabled": true,
+      "notes": "the main repository"
+    }
+  ]
+}

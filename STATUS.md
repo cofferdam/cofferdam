@@ -30,6 +30,45 @@ Trust Core module, PR0 → PR3c1:
 
 ## In progress
 
+- **M2F — Agent Task Core foundation.** On branch `feat/agent-task-core-foundation`, not merged.
+  Cofferdam needs a provider-neutral, durable task model *before* Claude Code, ChatGPT, Cursor or
+  any other agent is integrated, so this ships the whole task system and deliberately no way to run
+  a real agent in it. Adds `cofferdam/workstation/tasks/` — identity, an eleven-state machine, a
+  SQLite store, an append-only event stream, a host-owned project registry, a provider-neutral
+  adapter protocol and a deterministic validation adapter — plus eight authenticated routes and a
+  **Tasks** panel in the PWA. Documented in
+  [`docs/AGENT_TASK_CORE.md`](docs/AGENT_TASK_CORE.md) and decided in D-2026-08-06-2.
+
+  **The client cannot name a path, a program or a process.** A request carries a project id, an
+  adapter id, a prompt, an optional title and an optional retry key — and nothing else. There is no
+  field for a working directory, an executable, argv, an environment, a callback URL, a pid or a
+  unit name; they are absent rather than validated, and a body carrying one is refused. The server
+  resolves the project to a verified root from a host-owned file, re-checking every path component
+  for symlinks immediately before use rather than trusting a check made at start-up.
+
+  **A row that says `running` is not evidence that anything is running.** On start-up every
+  non-terminal task becomes `interrupted` — never resumed, never left claiming to run, previous
+  output preserved, terminal tasks untouched — and `interrupted` is deliberately a different word
+  from `failed`, because the task did not go wrong.
+
+  **State and event are one write.** Every transition is validated against a single graph and
+  committed in the same transaction as its event, so a snapshot cannot disagree with the history it
+  is supposed to summarise. That requirement is what made SQLite the honest choice here, which
+  `store.py` had already anticipated in writing; it is standard library, so the stdlib-only CI path
+  is unchanged.
+
+  **The validation adapter is not an agent.** It runs no program, calls no model, writes nothing,
+  and imports nothing that could — asserted by a test. It is registered only when the host was
+  explicitly configured to allow it, and a default install after merge has an empty adapter list.
+
+  2,070 tests pass on both CI paths (1,860 before), including eight mutation checks — illegal
+  transition acceptance, non-transactional snapshot/event update, client-enabled validation adapter,
+  arbitrary working-directory acceptance, idempotency bypass, restart leaving a task falsely
+  running, cancellation reaching the wrong task, and prompt content entering the audit path.
+
+  **Not yet validated on the real host.** The `96-agent-task-core-validation` drop-in is prepared
+  and not applied; the live service still runs the M2E build under the unchanged `95` drop-in.
+
 - **M1 — remote control skeleton.** Merged to `main` (PR #6, PR #7, PR #8). Backend service
   (auth, status, typed actions, screenshot/open-application/open-URL, WebSocket events), host
   adapter layer (Linux + Windows dev implementations), PWA, JSON persistence, systemd user unit,
