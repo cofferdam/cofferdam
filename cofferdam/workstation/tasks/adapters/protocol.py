@@ -140,6 +140,26 @@ class AdapterOutcome:
     failure_code: Optional[str] = None
     failure_message: Optional[str] = None
     accepted: bool = True
+    #: Evidence the adapter **observed for itself**, as opposed to relayed.
+    #:
+    #: This is the "unless the core observed the thing itself" case named in the
+    #: docstring of :class:`AdapterEvent`, which the foundation described and
+    #: left unimplemented because its only adapter observed nothing. It is a
+    #: separate field rather than a flag on an event for one reason: the
+    #: distinction it carries is not *is this true*, it is **who looked**.
+    #:
+    #: Anything in ``events[].evidence`` came out of the thing being adapted —
+    #: an agent's own account of what it did — and the core stamps all of it
+    #: ``adapter_reported`` regardless of the source it arrived with. That rule
+    #: does not bend, and an agent saying "I made a commit" is a claim forever.
+    #:
+    #: What belongs here is the result of an operation *Cofferdam* ran: a fixed
+    #: Git observation inside an approved root, or a pid its own ``Popen``
+    #: returned. The core still checks each ``source`` against
+    #: :data:`~..models.VERIFIED_EVIDENCE_SOURCES` and demotes anything else, so
+    #: an adapter cannot launder a claim by moving it into this field — it can
+    #: only fail to be believed.
+    observations: Sequence[EvidenceReference] = ()
 
     @property
     def actor(self) -> str:

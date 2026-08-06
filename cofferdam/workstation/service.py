@@ -531,7 +531,8 @@ def create_app(
             config,
             TaskStore(config),
             build_task_adapters(
-                enable_validation_adapter=config.enable_validation_task_adapter
+                enable_validation_adapter=config.enable_validation_task_adapter,
+                enable_claude_code_adapter=config.enable_claude_code_adapter,
             ),
             # The audit hook takes ids and outcome words only — see
             # store.record_task_event for why there is no content parameter.
@@ -1891,7 +1892,11 @@ def create_app(
 
     @app.get("/api/tasks/{task_id}", dependencies=[Depends(require_token)])
     async def get_task(task_id: str) -> Dict[str, Any]:
-        row = await _run_task(tasks.get_task, task_id)
+        # `refresh_task`, not `get_task`. An adapter whose work happens inside a
+        # process has to be *asked* what it saw, and opening the detail view is
+        # when Cofferdam asks. For a synchronous adapter it is a no-op returning
+        # the same row.
+        row = await _run_task(tasks.refresh_task, task_id)
         payload = tasks.snapshot(row).to_dict()
         # The detail view is the one place the prompt is published, and only to
         # the authenticated client that already sent it.

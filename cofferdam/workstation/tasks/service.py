@@ -75,8 +75,10 @@ from .models import (
     EVENT_TASK_QUEUED,
     EVENT_TASK_STARTED,
     EVENT_WAITING_FOR_USER,
+    EVENT_PROGRESS,
     EVIDENCE_ADAPTER_REPORTED,
     MAX_CLIENT_REQUEST_ID_CHARS,
+    MAX_EVIDENCE_ITEMS,
     MAX_FOLLOWUP_CHARS,
     MAX_LABEL_CHARS,
     MAX_PROMPT_CHARS,
@@ -94,6 +96,7 @@ from .models import (
     STATE_STARTING,
     STATE_WAITING_FOR_USER,
     TERMINAL_STATES,
+    VERIFIED_EVIDENCE_SOURCES,
     WAITING_REASONS,
     WAITING_UNKNOWN,
     EvidenceReference,
@@ -235,6 +238,67 @@ class TaskService:
         if not valid_task_id(task_id):
             raise TaskUnknown()
         return self._store.get(task_id)
+
+    def refresh_task(self, task_id: object) -> TaskRow:
+        """Ask a task's adapter what has happened, then apply it. Read path only.
+
+        The foundation declared :meth:`~.adapters.protocol.TaskAdapter.inspect`
+        and never called it, because the only adapter it shipped was synchronous
+        — a validation adapter finishes inside ``start``, so there was never
+        anything to ask about afterwards. A real agent is not like that: its
+        work happens over minutes, in a process, while nothing is calling the
+        adapter at all.
+
+        This is that missing call, and it is deliberately the *whole* mechanism
+        rather than one of several. There is no callback from an adapter into
+        the service, no work queue, no background sweep — each of those would be
+        a second path that writes task state, and the most valuable property of
+        this package is that :meth:`_apply` is the only one.
+
+        An adapter with nothing to say returns an empty outcome and nothing
+        happens. What it does say goes through the same transition graph as
+        every other report, so a Claude adapter cannot move a task anywhere the
+        validation adapter could not.
+        """
+        row = self.get_task(task_id)
+        if row.state in TERMINAL_STATES:
+            # Never ask about a finished task. Its history is closed, and an
+            # adapter that answered would be answering about a record that is
+            # not open to change.
+            return row
+        adapter = self._adapters.find(row.adapter_id)
+        if adapter is None or not adapter.capabilities().structured_progress:
+            return row
+
+        try:
+            project = self._projects.get(row.project_id)
+            root = verify_root(project.root)
+        except TaskError:
+            return row
+
+        with self._lock:
+            row = self._store.get(row.task_id)
+            if row.state in TERMINAL_STATES:
+                return row
+            context = self._context(row, root, adapter)
+            try:
+                outcome = adapter.inspect(context)
+            except AdapterRefusal:
+                # "Nothing to report" must never be able to fail a task
+                # somebody is merely looking at.
+                return row
+            except Exception as exc:
+                return self._fail(
+                    row,
+                    "task_adapter_error",
+                    "the task adapter stopped unexpectedly",
+                    type(exc).__name__,
+                )
+            if not outcome.events and outcome.requested_state is None:
+                return row
+            return self._apply(
+                row, outcome, cancelling=row.state == STATE_CANCELLING
+            )
 
     def list_tasks(self, *, bucket: Optional[str] = None, limit: int = 50) -> List[TaskRow]:
         from .models import ACTIVE_STATES, BUCKET_ACTIVE, BUCKET_FINISHED, BUCKET_WAITING
@@ -669,6 +733,43 @@ class TaskService:
                         observed_at=reference.observed_at or now_iso(),
                     )
                     for reference in bounded.evidence
+                ),
+            )
+
+        # Observations, if any: things Cofferdam ran and saw for itself. They
+        # are appended as their own event so the history keeps the two kinds of
+        # statement visibly apart — an agent's account of the work, and the
+        # result of Cofferdam going and looking.
+        observations = tuple(
+            reference
+            for reference in getattr(outcome, "observations", ())
+            if isinstance(reference, EvidenceReference)
+        )
+        if observations:
+            self._store.append_event(
+                row.task_id,
+                EVENT_PROGRESS,
+                actor=ACTOR_SYSTEM,
+                source=SOURCE_COFFERDAM,
+                text="Cofferdam checked the project itself.",
+                evidence=tuple(
+                    EvidenceReference(
+                        evidence_type=reference.evidence_type,
+                        # Checked, not accepted. An adapter that put a claim in
+                        # this field gets it demoted to a claim rather than
+                        # promoted to an observation — the field is a place to
+                        # be believed, not a way to become believable.
+                        source=(
+                            reference.source
+                            if reference.source in VERIFIED_EVIDENCE_SOURCES
+                            else EVIDENCE_ADAPTER_REPORTED
+                        ),
+                        identifier=reference.identifier,
+                        operation=reference.operation,
+                        result=reference.result,
+                        observed_at=reference.observed_at or now_iso(),
+                    )
+                    for reference in observations[:MAX_EVIDENCE_ITEMS]
                 ),
             )
 
