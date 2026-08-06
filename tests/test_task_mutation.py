@@ -472,9 +472,19 @@ class CancellationGuard(TaskTestCase):
         self.assertNotEqual(self.store.get(second.task_id).state, STATE_CANCELLED)
 
     def test_no_broad_process_vocabulary_exists_in_task_core(self):
-        """Structural: there is nothing here that *could* kill by name."""
+        """Structural: there is nothing here that *could* kill by name.
+
+        The adapter package is excepted for the reason given on the matching
+        guard in ``tests/test_task_core.py``, and the two words that make this
+        guard about *breadth* rather than about processes — ``pkill`` and
+        ``killall`` — are still forbidden there too, by
+        ``test_adapter_never_matches_a_process_by_name``. Nothing in this
+        repository may kill by name, in any directory.
+        """
         package = REPO_ROOT / "cofferdam" / "workstation" / "tasks"
         for path in sorted(package.rglob("*.py")):
+            if "claude_code" in path.parts:
+                continue
             source = python_code_only(path.read_text("utf-8"))
             for forbidden in ("pkill", "killall", "os.kill", "signal", "subprocess"):
                 self.assertNotIn(forbidden, source, str(path) + " uses " + forbidden)
@@ -521,7 +531,17 @@ class ContentLeakGuard(TaskTestCase):
         package = REPO_ROOT / "cofferdam" / "workstation" / "tasks"
         for path in sorted(package.rglob("*.py")):
             source = python_code_only(path.read_text("utf-8"))
-            for forbidden in ("logging", "logger", "print(", "stdout", "stderr"):
+            # `stdout` and `stderr` are forbidden everywhere except the adapter
+            # that launches a process, where they are the names of that
+            # process's pipes rather than anywhere output could be written.
+            # `logging`, `logger` and `print(` stay forbidden in every file,
+            # including the adapter — those are the words that would actually
+            # put a prompt or a result somewhere it must never appear, and the
+            # property this test is named for is untouched.
+            forbidden_here = ("logging", "logger", "print(")
+            if "claude_code" not in path.parts:
+                forbidden_here += ("stdout", "stderr")
+            for forbidden in forbidden_here:
                 self.assertNotIn(forbidden, source, str(path) + " uses " + forbidden)
 
     def test_no_api_response_carries_the_prompt_except_the_detail_view(self):

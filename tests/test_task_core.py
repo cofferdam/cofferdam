@@ -903,9 +903,24 @@ class Cancellation(TaskTestCase):
         self.assertEqual(scripted.cancelled, [row.task_id])
 
     def test_no_task_module_signals_or_enumerates_processes(self):
-        """37. Structural: there is no process-killing vocabulary in Task Core."""
+        """37. Structural: there is no process-killing vocabulary in Task Core.
+
+        One directory is excepted, and only because owning a process is its
+        entire job. An adapter that launches a program has to be able to stop
+        it; a rule forbidding that here would not make anything safer, it would
+        push the process handling somewhere this scan does not look.
+
+        What replaces the rule for that directory is stricter than what it
+        gives up, and it lives in ``tests/test_claude_code_adapter.py``: the
+        adapter may signal, but only a process group it created itself, only
+        after pid *and* start time *and* group ownership have been re-verified,
+        and never by matching a process name. This scan could not have
+        expressed any of that.
+        """
         package = REPO_ROOT / "cofferdam" / "workstation" / "tasks"
         for path in sorted(package.rglob("*.py")):
+            if "claude_code" in path.parts:
+                continue
             source = python_code_only(path.read_text("utf-8"))
             for forbidden in (
                 "pkill",
@@ -1218,7 +1233,7 @@ class LayerSeparation(unittest.TestCase):
         """
         package = REPO_ROOT / "cofferdam" / "workstation" / "tasks"
         for path in sorted(package.rglob("*.py")):
-            if path.parent.name == "adapters" and path.name != "__init__.py":
+            if "adapters" in path.parts:
                 continue  # adapters are where integration names belong
             source = python_code_only(path.read_text("utf-8")).lower()
             # "cursor" is deliberately absent from this list. It is the ordinary
@@ -1232,6 +1247,27 @@ class LayerSeparation(unittest.TestCase):
                     re.search(r"\b" + forbidden + r"\b", source),
                     str(path) + " names " + forbidden,
                 )
+
+    def test_task_core_imports_no_agent_specific_module(self):
+        """The boundary that survives the registry naming an agent.
+
+        ``adapters/__init__.py`` has to name Claude Code — it is a code-owned
+        table, and a table with no names in it is not a table. So the name scan
+        above stops at ``adapters/``, and this is the property that keeps the
+        architecture real: nothing in Task Core *outside* that directory may
+        import from an agent-specific package.
+
+        That is the rule the milestone actually cares about. A name in a
+        registry is bookkeeping; an import in ``service.py`` would mean the
+        core had grown a dependency on one vendor's process handling, which is
+        the thing the adapter boundary exists to prevent.
+        """
+        package = REPO_ROOT / "cofferdam" / "workstation" / "tasks"
+        for path in sorted(package.rglob("*.py")):
+            if path.parent.name == "adapters" or "claude_code" in path.parts:
+                continue
+            source = python_code_only(path.read_text("utf-8"))
+            self.assertNotIn("claude_code", source, str(path) + " imports claude_code")
 
     def test_task_core_registers_no_agent_specific_adapter(self):
         """The other half: the code-owned table names no integration either.
