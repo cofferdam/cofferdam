@@ -92,6 +92,17 @@ if behaviour == "exit_zero_no_result":
     init()
     sys.exit(0)
 
+if behaviour == "finish_then_exit":
+    # Answers the first turn and then leaves. Reproduces the completion/cancel
+    # race deterministically: by the time a cancel arrives the process is gone
+    # and a valid result is already in the reader's state.
+    init()
+    emit({"type": "result", "subtype": "success", "is_error": False,
+          "result": "the work was finished", "session_id": session,
+          "uuid": "r", "permission_denials": [], "stop_reason": "end_turn"})
+    sys.stdout.flush()
+    sys.exit(0)
+
 init()
 
 def handle(line):

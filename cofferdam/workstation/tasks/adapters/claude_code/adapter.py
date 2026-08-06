@@ -72,6 +72,12 @@ DESCRIPTION = (
 #: raise it in source; a client cannot see it, let alone set it.
 DEFAULT_MAX_CONCURRENT_TASKS = 1
 
+#: How long a finished turn waits for its process to prove it is staying alive
+#: before the task is reported as able to take a follow-up. See :meth:`_settle`
+#: — a `result` frame is parsed before stdout reaches EOF, so this is the only
+#: way to tell "waiting for you" from "about to exit".
+TURN_SETTLE_GRACE_SECONDS = 0.75
+
 #: How long a follow-up waits for the current turn to finish before it is
 #: refused. Long enough for a normal turn boundary, short enough that a phone is
 #: not left holding a request.
@@ -292,11 +298,43 @@ class ClaudeCodeAdapter(TaskAdapter):
         )
 
     def cancel(self, context: TaskContext) -> AdapterOutcome:
-        """Stop this task's process, and nothing else."""
+        """Stop this task's process, and nothing else.
+
+        **Precedence, for the race this method is most likely to lose.** A cancel
+        can arrive in the gap between a process finishing its work and Cofferdam
+        noticing it: the reader thread has the ``result`` frame, the process has
+        exited, and the read that would have settled the task has not happened
+        yet. Reporting ``cancelled`` there would be a false claim in the
+        direction that matters most to an audit — the work *was* done, and the
+        record would say it was stopped.
+
+        So a result that already arrived wins over a cancel that arrived after
+        it. Task Core's graph permits ``cancelling → completed`` for exactly this
+        reason, and the request is not lost: the core has already written
+        ``cancellation_requested`` into the history, so what a person sees is
+        that they asked and that it had already finished.
+
+        The condition is narrow on purpose. It applies only when the process is
+        **gone** and **no turn was in flight**, because a ``last_result`` left
+        over from an earlier turn while a new one is running is not an answer to
+        anything. That is an ordinary cancel, and it reports ``cancelled``.
+        """
         with self._lock:
             run = self._runs.get(context.task_id)
         if run is None:
             raise AdapterRefusal("there is no running Claude process for this task")
+
+        if run.poll() is not None and not run.turn_in_progress():
+            with run.lock:
+                finished = run.state.last_result
+            if finished is not None:
+                already: List[AdapterEvent] = [
+                    AdapterEvent(
+                        event_type=EVENT_PROGRESS,
+                        text="This task had already finished when the cancel arrived.",
+                    )
+                ]
+                return self._settle(run, finished, already, exit_code=run.exit_code)
 
         outcome = run.stop(reason="user_cancelled")
         run.reap()
@@ -463,9 +501,32 @@ class ClaudeCodeAdapter(TaskAdapter):
         observations = self._observe(run)
 
         if exit_code is None:
-            # The turn finished but the process is alive and can take another
-            # message. That is `waiting_for_user`, and it is what makes
-            # follow-up possible without inventing a state for it.
+            # Before claiming this process can take another message, give it a
+            # brief moment to prove it is staying. A `result` frame is parsed
+            # before stdout reaches EOF, so at this instant a process that is
+            # about to exit and one that will wait for years look identical.
+            #
+            # This matters more than it looks. `waiting_for_user → completed` is
+            # absent from Task Core's graph on purpose — receiving an answer must
+            # not be able to finish a task — so a task that entered
+            # `waiting_for_user` a fraction of a second before its process died
+            # could never reach a terminal state again. It would sit there
+            # offering a follow-up with nowhere to send it. Waiting on EOF closes
+            # that window without touching the graph.
+            #
+            # The cost is one short wait at each turn boundary, and only there.
+            # A CLI that stays open — which is the normal case, and the whole
+            # reason this adapter holds one process per task — pays it once per
+            # turn and nothing else.
+            if run.stream_finished.wait(TURN_SETTLE_GRACE_SECONDS):
+                reaped = run.reap(timeout=2.0)
+                if reaped is not None:
+                    exit_code = reaped
+
+        if exit_code is None:
+            # The turn finished, the process is alive, and it can take another
+            # message. That is `waiting_for_user`, and it is what makes follow-up
+            # possible without inventing a state for it.
             return AdapterOutcome(
                 events=tuple(events),
                 observations=observations,

@@ -1452,6 +1452,81 @@ class CancellationThroughTaskCore(ClaudeTaskTestCase):
         self.assertTrue(found, "no cancellation evidence was recorded")
 
 
+class CompletionCancelRace(ClaudeTaskTestCase):
+    """44. What happens when a cancel arrives after the work already finished."""
+
+    behaviour = "finish_then_exit"
+
+    def _wait_until_process_gone(self, task_id, timeout=20.0):
+        run = self.adapter._runs[task_id]
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if run.poll() is not None:
+                with run.lock:
+                    if run.state.last_result is not None:
+                        return run
+            time.sleep(0.02)
+        return run
+
+    def test_a_cancel_after_the_work_finished_reports_completed(self):
+        """The result that already arrived wins. Reporting `cancelled` would say
+        the work was stopped when it was in fact done."""
+        row, _ = self.create("do the thing")
+        self.assertEqual(row.state, STATE_RUNNING)
+        self._wait_until_process_gone(row.task_id)
+
+        # The core has not settled the task yet — no read has happened.
+        self.assertEqual(self.service.get_task(row.task_id).state, STATE_RUNNING)
+
+        row = self.service.cancel_task(row.task_id)
+        self.assertEqual(row.state, STATE_COMPLETED)
+        self.assertIn("the work was finished", row.final_result or "")
+
+    def test_the_cancellation_request_is_still_recorded(self):
+        """Precedence decides the terminal state, not whether somebody asked."""
+        row, _ = self.create("do the thing")
+        self._wait_until_process_gone(row.task_id)
+        row = self.service.cancel_task(row.task_id)
+
+        types = [event.event_type for event in self.store.events(row.task_id)]
+        self.assertIn("cancellation_requested", types)
+        self.assertIn("task_completed", types)
+        texts = " ".join(event.text or "" for event in self.store.events(row.task_id))
+        self.assertIn("already finished when the cancel arrived", texts)
+
+    def test_a_process_that_exits_after_its_turn_reaches_completed(self):
+        """The window that `waiting_for_user → completed` being absent creates.
+
+        A turn finishes, the task is a fraction of a second from
+        `waiting_for_user`, and the process exits. Entering that state would
+        strand the task: the graph forbids leaving it for `completed`, so it
+        would sit offering a follow-up with nowhere to send it. The adapter
+        checks for stdout EOF before claiming the process can take another
+        message.
+        """
+        row, _ = self.create("do the thing")
+        row = self.settle(row.task_id)
+        self.assertEqual(row.state, STATE_COMPLETED)
+        self.assertIn("the work was finished", row.final_result or "")
+
+    def test_a_completed_task_cannot_then_be_cancelled(self):
+        """No terminal task is resurrected, in either direction."""
+        from cofferdam.workstation.tasks.errors import TaskAlreadyFinished
+
+        row, _ = self.create("do the thing")
+        row = self.settle(row.task_id)
+        self.assertEqual(row.state, STATE_COMPLETED)
+        with self.assertRaises(TaskAlreadyFinished):
+            self.service.cancel_task(row.task_id)
+        self.assertEqual(self.service.get_task(row.task_id).state, STATE_COMPLETED)
+
+    def test_the_slot_is_freed_either_way(self):
+        row, _ = self.create("do the thing")
+        self._wait_until_process_gone(row.task_id)
+        self.service.cancel_task(row.task_id)
+        self.assertEqual(self.adapter.active_task_ids(), ())
+
+
 class NoFalseSuccess(ClaudeTaskTestCase):
     behaviour = "exit_zero_no_result"
 

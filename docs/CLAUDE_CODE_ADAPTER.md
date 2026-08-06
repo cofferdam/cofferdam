@@ -410,6 +410,38 @@ Claude session somebody is running in their own terminal. A test starts a
 bystander process with the same program name in a different process group and
 asserts it survives.
 
+## Races, and which side wins
+
+Two of these are reachable in normal use, and both are decided in favour of what
+actually happened rather than what was asked for.
+
+**A cancel that arrives after the work finished reports `completed`.** There is a
+gap between a process finishing and Cofferdam noticing: the reader thread has the
+`result` frame, the process has exited, and the read that would have settled the
+task has not happened. Reporting `cancelled` there would say the work was stopped
+when it was done — a false claim in the direction that matters most to an audit.
+Task Core's graph permits `cancelling → completed` for exactly this reason, and
+the request is not lost: `cancellation_requested` is already in the history, so a
+person sees that they asked and that it had already finished. The condition is
+narrow — the process must be **gone** and no turn in flight, because a stale
+`last_result` from an earlier turn is not an answer to anything.
+
+**A finished turn waits to see whether its process is staying.** A `result` frame
+is parsed before stdout reaches EOF, so at that instant a process about to exit
+and one that will wait indefinitely look identical. Guessing wrong strands the
+task: `waiting_for_user → completed` is absent from the graph on purpose —
+receiving an answer must not finish a task — so a task that entered
+`waiting_for_user` a moment before its process died could never reach a terminal
+state, and would sit offering a follow-up with nowhere to send it. So the adapter
+waits up to `TURN_SETTLE_GRACE_SECONDS` on stdout EOF before claiming the process
+can take another message. A CLI that stays open — the normal case, and the whole
+reason this adapter holds one process per task — pays that once per turn.
+
+Nothing else moves a terminal task. `completed → cancelled`, `cancelled →
+completed`, `failed → running` and every other exit from a terminal state are
+absent from the graph and refused by the store inside the same transaction that
+would have written them.
+
 ## Restart and orphans
 
 The unit runs with `KillMode=control-group` and `KillSignal=15`, so a restart
