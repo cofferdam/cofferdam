@@ -71,6 +71,9 @@
   var polling = false;
   var apiReady = false;
   var pendingVideoId = null;
+  /* The embedding origin, supplied by the server at registration. Never derived
+     here, and never accepted from anywhere else. */
+  var playerOrigin = null;
 
   var dot = document.getElementById("dot");
   var statusText = document.getElementById("status");
@@ -96,8 +99,13 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body || {}),
       cache: "no-store",
-      credentials: "omit",
-      referrerPolicy: "no-referrer"
+      credentials: "omit"
+      /* No `referrerPolicy` override here either. These are same-origin POSTs
+         to this page's own loopback channel, so the document policy applies and
+         nothing leaves the machine. Pinning `no-referrer` here would be
+         harmless in itself, but this file must contain no `no-referrer` at all:
+         it is the exact string that caused error 153, and leaving one in place
+         invites the next reader to copy it back onto the iframe. */
     });
   }
 
@@ -111,18 +119,34 @@
   }
 
   function embedUrl(videoId) {
-    /* Built from constants and one validated id. `enablejsapi` is what makes
-       the player controllable; `origin` is the documented security parameter
-       and is this page's own origin, never anything from a message. */
+    /* Built from constants, one validated id, and the origin the *server* gave
+       us at registration.
+
+       `enablejsapi` is what makes the player controllable. `origin` is the
+       documented security parameter and must be the complete embedding origin
+       including the port — `http://127.0.0.1:40187`, not `http://127.0.0.1` —
+       because a different port is a different origin to a browser.
+
+       It comes from the register response rather than from
+       `window.location.origin` so the value has exactly one author. The two
+       agree, and a mismatch means something is wrong enough not to guess
+       through: `createPlayer` refuses rather than falling back. */
     return EMBED_ORIGIN + "/embed/" + videoId +
       "?enablejsapi=1" +
-      "&origin=" + encodeURIComponent(window.location.origin) +
+      "&origin=" + encodeURIComponent(playerOrigin) +
       "&playsinline=1" +
       "&rel=0" +          /* keep the end screen to this channel's videos */
       "&autoplay=1";
   }
 
   function createPlayer(videoId, onCreated) {
+    if (!playerOrigin) {
+      /* No server-supplied origin means no truthful `origin` parameter, and an
+         embed that lies about its origin is refused by YouTube anyway. Saying
+         so is better than building a player that cannot work. */
+      setStatus("Cofferdam did not supply the player origin", "off");
+      return;
+    }
     var frame = document.createElement("iframe");
     frame.id = "cofferdam-youtube-frame";
     frame.src = embedUrl(videoId);
@@ -133,7 +157,13 @@
        would still refuse to start. */
     frame.setAttribute("allow", "autoplay; encrypted-media; picture-in-picture; fullscreen");
     frame.setAttribute("allowfullscreen", "");
-    frame.setAttribute("referrerpolicy", "no-referrer");
+    /* The second half of the error-153 fix, and the half that is easy to miss.
+       A per-iframe `referrerpolicy` **overrides** the document's policy in both
+       directions — measured, not assumed — so a `no-referrer` here would strip
+       the Referer even though the response header now permits it, and YouTube
+       would go on refusing the embed. Set explicitly rather than inherited, so
+       the value is visible at the one place it matters. */
+    frame.setAttribute("referrerpolicy", "strict-origin-when-cross-origin");
     stage.appendChild(frame);
     idle.hidden = true;
 
@@ -321,6 +351,16 @@
           return;
         }
         instanceId = payload.instance_id;
+        /* Taken from the server, then checked against what this document
+           actually is. They must agree; if they do not, something has gone
+           wrong that guessing would only hide, so the page says so and builds
+           no player. */
+        if (typeof payload.player_origin === "string" &&
+            payload.player_origin === window.location.origin) {
+          playerOrigin = payload.player_origin;
+        } else {
+          setStatus("Cofferdam and this page disagree about the player origin", "off");
+        }
         if (typeof payload.heartbeat_seconds === "number" && payload.heartbeat_seconds > 0) {
           heartbeatMs = payload.heartbeat_seconds * 1000;
         }

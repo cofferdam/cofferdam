@@ -3,7 +3,6 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="referrer" content="no-referrer">
 <title>Cofferdam YouTube player</title>
 <!--
   The Cofferdam-owned YouTube player document.
@@ -22,6 +21,14 @@
 
   There is no token on this page, in its URL, or in its storage. See the
   endpoint module for why, and for what the same-user trust boundary is worth.
+
+  There is deliberately **no** `<meta name="referrer" content="no-referrer">`
+  here. It used to be, and it broke playback: YouTube answered every embed with
+  error 153 — "request missing HTTP Referer or API Client identification" —
+  because an embedded player must be able to say which page is embedding it.
+  The referrer policy is served as a response header instead, and it is
+  `strict-origin-when-cross-origin`, which sends the loopback origin and nothing
+  more. See cofferdam/workstation/youtubeplayer/endpoint.py.
 -->
 <style>
   :root { color-scheme: dark; }

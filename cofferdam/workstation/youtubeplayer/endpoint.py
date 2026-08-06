@@ -120,6 +120,17 @@ _DOCUMENT_FILE = _WEB_ROOT / "player.html"
 _SCRIPT_FILE = _WEB_ROOT / "player.js"
 
 
+def build_player_origin(port: int) -> str:
+    """The player page's origin: scheme, loopback host, and the real port.
+
+    One function, so the ``origin`` player parameter and the URL Opera is pointed
+    at can never disagree about which port the player is on. The port is always
+    included: an origin without it is a *different* origin to a browser, and the
+    IFrame Player API's ``origin`` check would reject it.
+    """
+    return "http://" + LOOPBACK_HOST + ":" + str(int(port))
+
+
 def _read_asset(path: Path) -> bytes:
     try:
         return path.read_bytes()
@@ -233,7 +244,25 @@ class _Handler(BaseHTTPRequestHandler):
                 "base-uri 'none'; "
                 "form-action 'none'",
             )
-        self.send_header("Referrer-Policy", "no-referrer")
+        # `strict-origin-when-cross-origin`, and this is load-bearing rather
+        # than a default.
+        #
+        # This page previously sent `no-referrer`, which looked like good
+        # hygiene and broke playback outright: YouTube answered every embed with
+        # **error 153** — "request missing HTTP Referer or API Client
+        # identification". An embedded player has to be able to say which page
+        # is embedding it, and a page that refuses to identify itself is refused
+        # in turn.
+        #
+        # Measured, not assumed. With a local echo server and a real browser, a
+        # cross-origin subresource load from a page carrying this policy sends
+        # `Referer: http://127.0.0.1:<port>/` — the origin, with the port, and
+        # nothing else. No path, no query, and nothing about what is playing.
+        #
+        # Going from `http://127.0.0.1` to `https://www.youtube.com` is not a
+        # downgrade: loopback is a potentially-trustworthy origin and so is
+        # HTTPS, so the policy's "strip on downgrade" rule does not apply here.
+        self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
         self.end_headers()
         try:
             self.wfile.write(body)
@@ -303,6 +332,17 @@ class _Handler(BaseHTTPRequestHandler):
                 200,
                 {
                     "instance_id": instance_id,
+                    # The embedding origin the player page must declare to
+                    # YouTube, built **here** from the module's own loopback
+                    # constant and the port this socket is actually bound to.
+                    #
+                    # The page could read `window.location.origin` and get the
+                    # same string. It is sent from the server anyway so that the
+                    # value has exactly one author: nothing a client sends can
+                    # influence it, and there is no request field it could
+                    # arrive in. The page refuses to build a player without it
+                    # rather than falling back to its own guess.
+                    "player_origin": self.server.player_origin(),  # type: ignore[attr-defined]
                     "heartbeat_seconds": HEARTBEAT_SECONDS,
                     "poll_seconds": POLL_WAIT_SECONDS,
                     "command_ttl_seconds": COMMAND_TTL_SECONDS,
@@ -357,6 +397,16 @@ class _Server(ThreadingHTTPServer):
         super().__init__(address, _Handler)
         self.channel = channel
         self.timeout = SOCKET_TIMEOUT_SECONDS
+
+    def player_origin(self) -> str:
+        """This listener's own origin, with the port it is actually bound on.
+
+        The port is ephemeral — the kernel chooses it — so this is read from the
+        live socket rather than from configuration. A hard-coded port here would
+        produce an ``origin`` parameter that silently stopped matching the next
+        time the service restarted.
+        """
+        return build_player_origin(self.server_address[1])
 
     def get_request(self):  # pragma: no cover - exercised through real sockets
         connection, address = super().get_request()
@@ -421,8 +471,11 @@ class PlayerEndpoint:
         it to leak into browser history, and nothing a person reading it over
         someone's shoulder could reuse from another machine.
         """
-        port = self.start()
-        return "http://" + LOOPBACK_HOST + ":" + str(port) + PATH_PLAYER
+        return self.player_origin() + PATH_PLAYER
+
+    def player_origin(self) -> str:
+        """The origin the player page declares to YouTube. Binds if needed."""
+        return build_player_origin(self.start())
 
 
 __all__ = [
@@ -438,4 +491,5 @@ __all__ = [
     "PATH_RELEASE",
     "PATH_STATE",
     "PlayerEndpoint",
+    "build_player_origin",
 ]
