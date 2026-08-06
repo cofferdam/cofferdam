@@ -17,6 +17,12 @@ the state it asked for. They exist because the product's rule is that a
 requested value is never echoed as an observed one: a volume that was set and
 never confirmed is ``youtube_volume_not_observed``, not success.
 
+**Identity codes** describe an embed YouTube refused to load because the player
+page did not say which page was doing the embedding. There is exactly one —
+:class:`EmbedIdentityRejected` — and it exists because the alternative was to
+report a configuration error as an autoplay problem, which sends someone to
+click a window that will never help.
+
 ``autoplay_blocked`` is deliberately **not** an error class here. The browser
 refusing to start audio without a gesture is a normal, documented outcome of a
 correct command — the video is loaded and cued, and one click on the workstation
@@ -70,6 +76,14 @@ CODE_BUSY = "youtube_player_busy"
 CODE_VIDEO_UNAVAILABLE = "youtube_video_unavailable"
 CODE_EMBEDDING_REFUSED = "youtube_embedding_refused"
 CODE_PLAYER_ERROR = "youtube_player_error"
+
+#: YouTube refused the *embed*, not the video: the request did not identify the
+#: page doing the embedding. Its own screen says "Video player configuration
+#: error / Error 153". Deliberately its own code rather than a shade of
+#: ``youtube_video_unavailable``, because the video is fine, and rather than
+#: ``autoplay_blocked``, because nothing is loaded and clicking the workstation
+#: would achieve nothing. See :class:`EmbedIdentityRejected`.
+CODE_EMBED_IDENTITY_REJECTED = "youtube_embed_client_identity_rejected"
 
 
 class YouTubePlayerError(Exception):
@@ -281,6 +295,41 @@ class TransportNotObserved(YouTubePlayerError):
         )
 
 
+class EmbedIdentityRejected(YouTubePlayerError):
+    """YouTube refused the embed because the page did not identify itself.
+
+    The one refusal in this module that is Cofferdam's fault rather than the
+    video's, the browser's or the user's, which is why it is worth its own class
+    and its own sentence.
+
+    An embedded player has to tell YouTube which page is embedding it — through
+    the ``Referer`` header, matched against the ``origin`` player parameter. A
+    player page that suppresses its referrer, or declares an origin that is not
+    the origin it is actually served from, gets **error 153** and a "Video player
+    configuration error" screen instead of a video.
+
+    What it must never be reported as:
+
+    * ``autoplay_blocked`` — nothing is loaded and no click will start it;
+    * "video unavailable" — the video is fine and plays on the normal page;
+    * playing, or any other success.
+
+    The honest answer is that the dedicated player could not identify itself, so
+    the phone can offer the two things that actually help: try the dedicated
+    player once more, or open the video in YouTube.
+    """
+
+    def __init__(self, detail: Optional[str] = None) -> None:
+        super().__init__(
+            CODE_EMBED_IDENTITY_REJECTED,
+            "the Cofferdam player could not identify itself to YouTube",
+            detail
+            or "YouTube refused the embed because the player page did not send "
+            "the embedding page's identity; reload the player, or use Open in "
+            "YouTube",
+        )
+
+
 class PlayerBusy(YouTubePlayerError):
     """Another write is already in flight for this player.
 
@@ -308,6 +357,20 @@ ERROR_NOT_FOUND = 100
 ERROR_NOT_EMBEDDABLE = 101
 ERROR_NOT_EMBEDDABLE_ALT = 150
 
+#: **Not** in the published ``onError`` table, and carried here anyway.
+#:
+#: This is the code the player itself reports — on screen as "Video player
+#: configuration error / Error 153" — when the embed request carries no usable
+#: identification of the embedding page. It was observed on this workstation on
+#: 2026-08-06 against a player page that suppressed its ``Referer``, and it is
+#: the reason the page now sends ``strict-origin-when-cross-origin``.
+#:
+#: It is listed because a number that reaches Cofferdam and is dropped becomes
+#: "no error reported", and "no error reported" is exactly the wrong thing to say
+#: about a player showing a configuration error. Adding it is what lets the phone
+#: name the real problem instead of guessing at autoplay.
+ERROR_EMBED_IDENTITY = 153
+
 #: The complete set the player page is allowed to forward. Anything else is
 #: dropped at the channel rather than carried into a snapshot.
 PLAYER_ERROR_CODES: Sequence[int] = (
@@ -316,6 +379,7 @@ PLAYER_ERROR_CODES: Sequence[int] = (
     ERROR_NOT_FOUND,
     ERROR_NOT_EMBEDDABLE,
     ERROR_NOT_EMBEDDABLE_ALT,
+    ERROR_EMBED_IDENTITY,
 )
 
 
@@ -330,6 +394,16 @@ def describe_player_error(code: object) -> Optional[dict]:
         return None
     if code not in PLAYER_ERROR_CODES:
         return None
+    if code == ERROR_EMBED_IDENTITY:
+        # Deliberately not phrased as a problem with the video: it is a problem
+        # with *this player page*, and saying otherwise would send someone
+        # looking for another video when the one they picked is fine.
+        return {
+            "code": CODE_EMBED_IDENTITY_REJECTED,
+            "message": "the Cofferdam player could not identify itself to YouTube",
+            "detail": "YouTube refused to load the embedded player; reload the "
+            "player on the workstation, or use Open in YouTube",
+        }
     if code == ERROR_NOT_FOUND:
         return {
             "code": CODE_VIDEO_UNAVAILABLE,
@@ -359,6 +433,7 @@ __all__ = [
     "CODE_BUSY",
     "CODE_COMMAND_NOT_ACKNOWLEDGED",
     "CODE_EMBEDDING_REFUSED",
+    "CODE_EMBED_IDENTITY_REJECTED",
     "CODE_INVALID_MUTE",
     "CODE_INVALID_VOLUME",
     "CODE_LAUNCH_FAILED",
@@ -379,8 +454,10 @@ __all__ = [
     "CODE_VIDEO_UNAVAILABLE",
     "CODE_VOLUME_NOT_OBSERVED",
     "CODE_WRONG_PROVIDER",
+    "ERROR_EMBED_IDENTITY",
     "PLAYER_ERROR_CODES",
     "CommandNotAcknowledged",
+    "EmbedIdentityRejected",
     "InvalidMute",
     "InvalidVolume",
     "LaunchFailed",

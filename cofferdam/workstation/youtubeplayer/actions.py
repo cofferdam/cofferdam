@@ -43,6 +43,8 @@ from ..mediasearch.results import RESULT_TYPE_VIDEO
 from ..mediasearch.youtube import PROVIDER_ID as YOUTUBE_PROVIDER_ID
 from ..mediasearch.youtube import valid_video_id
 from .errors import (
+    CODE_EMBED_IDENTITY_REJECTED,
+    EmbedIdentityRejected,
     InvalidMute,
     InvalidVolume,
     MuteNotObserved,
@@ -229,17 +231,20 @@ class YouTubeActionExecutor:
         browser that refused to start audio without a gesture is a normal,
         documented outcome, and it is reported as ``autoplay_blocked`` with the
         video still cued, so one click on the workstation resolves it.
+
+        A reported *error* outranks both, and is checked twice: before the
+        transport wait and again after it. Twice, because the two failures arrive
+        at different moments — an embed YouTube refuses outright never loads at
+        all, while one it refuses a moment later can satisfy the identity check
+        first and then produce nothing to play. Either way the answer is the
+        error the player reported, not "loaded but not playing", which would read
+        as a slow video rather than a broken one.
         """
         loaded = self._service.confirm(
             lambda: self._service.observed_video_matches(item.video_id), LOAD_WINDOW
         )
+        self._refuse_reported_error()
         if not loaded:
-            observation = self._service.channel.observation()
-            if observation is not None and observation.error:
-                # YouTube itself refused this video — not embeddable, removed,
-                # or region-blocked. Its own words, from the documented code.
-                self._service.note_error(observation.error)
-                raise VideoNotObserved(observation.error.get("detail"))
             raise VideoNotObserved()
 
         progress.enter(PHASE_STARTING)
@@ -252,6 +257,7 @@ class YouTubeActionExecutor:
             return self._envelope(
                 progress, OUTCOME_APPLIED, "Playing on the workstation player."
             )
+        self._refuse_reported_error()
         if state == PLAYBACK_AUTOPLAY_BLOCKED:
             return self._envelope(
                 progress,
@@ -278,6 +284,33 @@ class YouTubeActionExecutor:
     def _playback_state(self) -> Optional[str]:
         observation = self._service.channel.observation()
         return observation.playback_state if observation is not None else None
+
+    def _refuse_reported_error(self) -> None:
+        """Raise the refusal the *player* reported, if it reported one.
+
+        The mapping from YouTube's numeric code to a Cofferdam state already
+        happened in :mod:`.errors`; this is only about which refusal a caller
+        gets, and the distinction that matters is between "that video will not
+        play here" and "this player could not identify itself".
+
+        **Error 153 is the second kind**, and is the reason this is a branch and
+        not a single ``VideoNotObserved``. Nothing is wrong with the video, no
+        click on the workstation will help, and telling someone their video is
+        unavailable — or that autoplay was blocked — would send them looking in
+        the wrong place entirely. It gets its own code so the phone can say what
+        actually happened and offer the two things that help.
+        """
+        observation = self._service.channel.observation()
+        error = observation.error if observation is not None else None
+        if not error:
+            return
+        self._service.note_error(error)
+        if error.get("code") == CODE_EMBED_IDENTITY_REJECTED:
+            raise EmbedIdentityRejected(error.get("detail"))
+        # Everything else YouTube refuses is about the video itself — removed,
+        # private, or not embeddable — and the player genuinely did not load what
+        # was asked for. Its own words, from the documented code.
+        raise VideoNotObserved(error.get("detail"))
 
     # -- queueing ------------------------------------------------------------
 
@@ -381,6 +414,10 @@ class YouTubeActionExecutor:
             )
             if settled:
                 return self._envelope(progress, OUTCOME_APPLIED, "Playing.")
+            # Before the autoplay branch, because a player YouTube refused to
+            # load reports neither playing nor blocked, and "press play on the
+            # workstation" is useless advice when there is no player to press.
+            self._refuse_reported_error()
             if self._playback_state() == PLAYBACK_AUTOPLAY_BLOCKED:
                 # One play request, one truthful answer. There is deliberately no
                 # retry loop here: the browser is not going to change its mind

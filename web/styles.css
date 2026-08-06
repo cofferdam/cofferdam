@@ -528,6 +528,17 @@ button.danger { color: var(--err); }
 .yt-meta { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; min-width: 0; }
 .yt-time { font-variant-numeric: tabular-nums; }
 
+/* The embed-identity refusal: an explanation and the two things that help.
+   Given its own block rather than a line of red text because it is the one
+   failure whose answer is a choice, and a choice needs somewhere to be made. */
+.yt-identity {
+  margin-top: 12px; display: grid; gap: 6px; min-width: 0;
+}
+.yt-identity-actions {
+  display: flex; gap: 8px; flex-wrap: wrap; min-width: 0;
+}
+.yt-identity-actions button { flex: 1 1 12em; min-width: 0; min-height: 44px; }
+
 .yt-transport { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; min-width: 0; }
 .yt-transport button { flex: 1 1 5em; min-width: 0; min-height: 44px; }
 

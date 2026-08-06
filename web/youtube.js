@@ -66,6 +66,20 @@
      player nor the network, so watching a slow launch cannot slow it down. */
   var ACTIVITY_POLL_MS = 700;
 
+  /* The refusal that means YouTube would not load the embedded player because
+     the player page did not identify the page doing the embedding. It is the
+     one failure a phone cannot act on by pressing harder, so it gets its own
+     explanation and its own two buttons rather than a red line of server text. */
+  var IDENTITY_REJECTED = "youtube_embed_client_identity_rejected";
+
+  /* One retry, and then the panel stops offering it.
+     A rejected embed is a configuration state, not a race: if the player page
+     still cannot identify itself on the second attempt, a third will fail the
+     same way. Offering it forever would be a button whose only function is to
+     waste somebody's evening — so after the bound the panel says so plainly and
+     leaves Open in YouTube, which works. */
+  var MAX_IDENTITY_RETRIES = 1;
+
   var snapshot = null;
   var loadError = null;
   var timer = null;
@@ -77,6 +91,12 @@
   var draftVolume = null;   /* slider position while dragging; never truth */
   var queueOpen = false;
   var stopped = false;
+
+  /* The two handles behind the last Play now, kept so Retry and Open in YouTube
+     have something to act on. Handles the *server* issued, and nothing else —
+     this is not a video id and cannot be turned into one. */
+  var lastPlayAttempt = null;
+  var identityRetries = 0;
 
   /* Response ordering. `refreshGeneration` is stamped on a request when it is
      issued; `appliedGeneration` is the newest one whose payload has been
@@ -287,9 +307,55 @@
     return '<p class="media-note" id="youtubeActivity">' + esc(activity.label) + "</p>";
   }
 
+  function identityRejected() {
+    return !!(actionError && actionError.code === IDENTITY_REJECTED);
+  }
+
+  function identityNotice() {
+    /* The one failure state that needs more than a sentence.
+     *
+     * What it is not, said explicitly, because both wrong guesses send somebody
+     * to the wrong place: it is not the video (that video plays fine on the
+     * normal page) and it is not autoplay (there is no loaded player to click).
+     *
+     * What it offers is bounded: one retry, then the button is gone and the
+     * remaining honest option stays. */
+    if (!identityRejected()) { return ""; }
+
+    var canRetry = identityRetries < MAX_IDENTITY_RETRIES &&
+      lastPlayAttempt !== null;
+    var canOpen = lastPlayAttempt !== null &&
+      typeof deps.openInYouTube === "function";
+    var off = locked() ? " disabled" : "";
+
+    return '<div class="yt-identity" id="youtubeIdentityNotice">' +
+      '<p class="media-note err"><strong>The Cofferdam player could not tell ' +
+      "YouTube which page was embedding it, so YouTube would not load the " +
+      "video.</strong> This is a problem with the player window on the " +
+      "workstation, not with the video you chose and not with sound being " +
+      "blocked.</p>" +
+      (canRetry
+        ? ""
+        : '<p class="muted hint">Retrying the dedicated player did not help. ' +
+          "Open in YouTube plays this video on the normal page.</p>") +
+      '<div class="yt-identity-actions">' +
+      (canRetry
+        ? '<button id="youtubeRetryPlayer" class="primary"' + off + ">" +
+          (busy("play-" + lastPlayAttempt.resultId) ? "…" : "Retry dedicated player") +
+          "</button>"
+        : "") +
+      (canOpen
+        ? '<button id="youtubeOpenInYouTube"' + off + ">Open in YouTube</button>"
+        : "") +
+      "</div></div>";
+  }
+
   function messages() {
     var html = "";
-    if (actionError) {
+    /* The identity rejection is rendered by `identityNotice` instead, in full
+       and with what to do about it. Repeating the server's one-line refusal
+       here as well would be the same fact twice, in a worse form. */
+    if (actionError && !identityRejected()) {
       html += '<p class="media-note err">' + esc(actionError.message) +
         (actionError.detail ? " " + esc(actionError.detail) : "") + "</p>";
     }
@@ -327,6 +393,7 @@
       '<div class="yt-status">' + connectionLine() + openButton() + "</div>" +
       activityLine() +
       messages() +
+      identityNotice() +
       autoplayNotice() +
       nowPlayingSection() +
       transportSection() +
@@ -569,11 +636,19 @@
   /* Play now / Add to queue, called by the result cards in app.js.
    *
    * The only things that travel are the two handles the server issued. There is
-   * no video id and no URL in this function, because there is no field for one
+   * no video id and no URL in these functions, because there is no field for one
    * at the other end. Play now gets the long timeout: with no player open it
-   * launches one, waits for it, and continues the same request. */
-  function playResult(searchId, resultId) {
-    if (!searchId || !resultId) { return Promise.resolve(null); }
+   * launches one, waits for it, and continues the same request.
+   *
+   * Split into three because a play can arrive three ways — a card press, the
+   * Retry button, and neither of those wanting to duplicate the request. The one
+   * that actually sends is `sendPlay`; the other two differ only in what they do
+   * to the retry count. */
+  function sendPlay(searchId, resultId) {
+    /* Remembered so Retry and Open in YouTube have something to act on after a
+       failure. Two server-issued handles, held in memory for this page's
+       lifetime and cleared on sign-out. */
+    lastPlayAttempt = { searchId: searchId, resultId: resultId };
     return send(
       "play-" + resultId,
       "/api/media/searches/" + encodeURIComponent(searchId) +
@@ -581,6 +656,39 @@
       { body: {} },
       OPEN_TIMEOUT_MS
     );
+  }
+
+  function playResult(searchId, resultId) {
+    if (!searchId || !resultId) { return Promise.resolve(null); }
+    /* A deliberate press is a fresh start: whatever the last video did, this one
+       is allowed its own retry. The bound exists to stop an automatic loop, not
+       to punish somebody for choosing a second video. */
+    identityRetries = 0;
+    return sendPlay(searchId, resultId);
+  }
+
+  function retryDedicatedPlayer() {
+    /* Bounded, and counted before the request rather than after it, so a retry
+       that hangs still consumes its attempt. There is no timer here and nothing
+       reschedules this: the only thing that can retry is a person pressing the
+       button, at most `MAX_IDENTITY_RETRIES` times per chosen video. */
+    if (!lastPlayAttempt || identityRetries >= MAX_IDENTITY_RETRIES) {
+      return Promise.resolve(null);
+    }
+    identityRetries += 1;
+    return sendPlay(lastPlayAttempt.searchId, lastPlayAttempt.resultId);
+  }
+
+  function openInYouTube() {
+    /* The explicit fallback, and only ever explicit: nothing in this file opens
+       a normal watch page on its own, and this runs because somebody pressed a
+       button labelled with exactly what it does. The card's own Open in YouTube
+       is the same path — this is the panel's route to it, so the two agree
+       about what "open" means. */
+    if (!lastPlayAttempt || typeof deps.openInYouTube !== "function") {
+      return null;
+    }
+    return deps.openInYouTube(lastPlayAttempt.resultId);
   }
 
   function queueResult(searchId, resultId) {
@@ -649,6 +757,8 @@
         switch (target.id) {
           case "youtubeRefresh": load(); return;
           case "youtubeOpenPlayer": openPlayer(); return;
+          case "youtubeRetryPlayer": retryDedicatedPlayer(); return;
+          case "youtubeOpenInYouTube": openInYouTube(); return;
           case "youtubePlayPause": playPause(); return;
           case "youtubeNext": transport("next"); return;
           case "youtubePrevious": transport("previous"); return;
@@ -699,6 +809,9 @@
     actionNote = null;
     draftVolume = null;
     queueOpen = false;
+    /* Which video somebody last pressed play on goes with the token too. */
+    lastPlayAttempt = null;
+    identityRetries = 0;
     render();
   }
 

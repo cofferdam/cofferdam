@@ -171,6 +171,7 @@ from .youtubeplayer.errors import (
     CODE_BUSY as CODE_YOUTUBE_BUSY,
     CODE_COMMAND_NOT_ACKNOWLEDGED,
     CODE_EMBEDDING_REFUSED,
+    CODE_EMBED_IDENTITY_REJECTED,
     CODE_INVALID_MUTE as CODE_YOUTUBE_INVALID_MUTE,
     CODE_INVALID_VOLUME as CODE_YOUTUBE_INVALID_VOLUME,
     CODE_LAUNCH_FAILED as CODE_YOUTUBE_LAUNCH_FAILED,
@@ -335,6 +336,13 @@ _YOUTUBE_STATUS = {
     CODE_VIDEO_UNAVAILABLE: 422,
     CODE_EMBEDDING_REFUSED: 422,
     CODE_PLAYER_ERROR: 422,
+    # YouTube refused the embed because the player page did not identify itself
+    # — error 153. 409 rather than 422, because the request was not wrong and the
+    # video is fine: the *player* is in a state this cannot happen from, and a
+    # reloaded player answers the same request successfully. It is deliberately
+    # not grouped with the three above, whose answer is "this video will never
+    # play here".
+    CODE_EMBED_IDENTITY_REJECTED: 409,
     # Queue and authority.
     CODE_QUEUE_FULL: 409,
     CODE_QUEUE_ITEM_UNKNOWN: 404,

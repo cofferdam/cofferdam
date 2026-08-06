@@ -1404,7 +1404,20 @@
       // in, or a player that is simply not open yet, is a state youtube.js
       // renders itself. It must never take the control panel down with it.
       if (global.CofferdamYouTube) {
-        global.CofferdamYouTube.mount({ api: api, escapeHtml: escapeHtml, el: el })
+        global.CofferdamYouTube.mount({
+          api: api,
+          escapeHtml: escapeHtml,
+          el: el,
+          // The panel's Open in YouTube fallback, routed back through the *same*
+          // explicit open path the result card uses. It takes a result id and
+          // nothing else — the search id comes from this module's own state and
+          // the URL is built by the server — so the panel gains a fallback
+          // without gaining any way to name a video. Nothing calls it
+          // automatically: it runs when somebody presses a button that says so.
+          openInYouTube: function (resultId) {
+            openResult(YOUTUBE_PROVIDER_ID, resultId, false);
+          }
+        })
           .then(function () { renderMedia(); })
           .catch(function () { /* youtube.js renders its own failure state */ });
       }
