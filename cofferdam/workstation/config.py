@@ -46,6 +46,13 @@ ENV_BIND_HOST = "COFFERDAM_BIND_HOST"
 ENV_BIND_PORT = "COFFERDAM_BIND_PORT"
 ENV_ADAPTER = "COFFERDAM_ADAPTER"
 ENV_TOKEN = "COFFERDAM_TOKEN"
+ENV_VALIDATION_TASK_ADAPTER = "COFFERDAM_ENABLE_VALIDATION_TASK_ADAPTER"
+
+#: Off, and it stays off unless somebody with access to this machine turns it
+#: on. The validation task adapter is a lifecycle exerciser for a validation
+#: runtime; a default-on test adapter would be a surface nobody asked for on
+#: every install. See ``docs/AGENT_TASK_CORE.md``.
+DEFAULT_ENABLE_VALIDATION_TASK_ADAPTER = False
 
 
 @dataclass(frozen=True)
@@ -56,6 +63,10 @@ class Config:
     adapter_name: str
     max_action_records: int
     max_screenshots: int
+    #: Server-side only. There is no route, header or request body that reaches
+    #: this field: it is set by a command-line flag, by ``config.json`` on the
+    #: host, or by an environment variable in the unit file.
+    enable_validation_task_adapter: bool = DEFAULT_ENABLE_VALIDATION_TASK_ADAPTER
 
     @property
     def secrets_dir(self) -> Path:
@@ -98,6 +109,17 @@ class Config:
     @property
     def actions_path(self) -> Path:
         return self.state_dir / "actions.json"
+
+    @property
+    def tasks_dir(self) -> Path:
+        """Where the durable task database lives.
+
+        Its own directory under ``state/`` rather than a bare file, so the
+        database and its WAL/shm siblings stay together and can be permissioned
+        as a unit. It holds task content — prompts, follow-ups, results — and no
+        secrets; see ``docs/AGENT_TASK_CORE.md`` for the privacy treatment.
+        """
+        return self.state_dir / "tasks"
 
     def ensure_dirs(self) -> None:
         for path in (
@@ -142,6 +164,20 @@ def _pick(env_name: str, file_values: dict, key: str, default: Any) -> Any:
     return default
 
 
+def _as_bool(value: Any, default: bool) -> bool:
+    """Strict truthiness for a switch that turns on a validation surface.
+
+    Only the obvious affirmatives count. Anything else — including an empty
+    string, a typo, or a JSON ``null`` — leaves the switch off, because the
+    direction a misreading should fall is the one where less exists.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 def _as_int(value: Any, default: int) -> int:
     try:
         parsed = int(value)
@@ -164,6 +200,15 @@ def load_config(home: Optional[Path] = None) -> Config:
         adapter_name=str(_pick(ENV_ADAPTER, overrides, "adapter", DEFAULT_ADAPTER)),
         max_action_records=_as_int(overrides.get("max_action_records"), DEFAULT_MAX_ACTION_RECORDS),
         max_screenshots=_as_int(overrides.get("max_screenshots"), DEFAULT_MAX_SCREENSHOTS),
+        enable_validation_task_adapter=_as_bool(
+            _pick(
+                ENV_VALIDATION_TASK_ADAPTER,
+                overrides,
+                "enable_validation_task_adapter",
+                DEFAULT_ENABLE_VALIDATION_TASK_ADAPTER,
+            ),
+            DEFAULT_ENABLE_VALIDATION_TASK_ADAPTER,
+        ),
     )
 
 

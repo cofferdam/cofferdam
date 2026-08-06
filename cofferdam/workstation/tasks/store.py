@@ -1,0 +1,930 @@
+"""Durable task state: SQLite, transactional, append-only where it matters.
+
+Why a database, when every other store in this service is a JSON file
+---------------------------------------------------------------------
+
+``store.py`` for actions says it plainly: a capped list of recent records is
+honestly served by an atomically-replaced JSON file, and "if task/update records
+outgrow it, they get SQLite". This is that moment, and the reasons are specific
+rather than a preference for databases:
+
+* **A state change and its event must land together or not at all.** A snapshot
+  that says ``completed`` with no completion event, or an event with no snapshot
+  change, is a history that disagrees with itself. Rewriting a whole JSON file
+  cannot express "these two facts are one write"; a transaction can, and every
+  state change in this module goes through :meth:`TaskStore.transition`.
+* **Event sequence numbers must be monotonic under concurrency.** Two adapter
+  callbacks arriving together must not both become sequence 7. The sequence is
+  allocated inside the same transaction as the insert.
+* **Restart must find non-terminal tasks cheaply**, by state, without loading
+  every task that ever ran.
+* **Idempotency records need lookup by key**, not a scan.
+
+SQLite is in the standard library, which keeps the stdlib-only CI path intact —
+Task Core adds no dependency.
+
+What is *not* in here
+---------------------
+
+No secrets, ever. No tokens, no credentials, no adapter authentication state.
+The database holds task content — prompts, follow-ups, results — which is
+private but is not a credential, and it is stored under ``$COFFERDAM_HOME`` with
+owner-only permissions on both the file and its directory.
+
+Journaling and durability
+-------------------------
+
+WAL, ``synchronous=FULL``, and ``foreign_keys=ON``. WAL because a reader (the
+list view polling) must not block a writer (an adapter reporting progress).
+FULL rather than NORMAL because the failure this milestone cares most about is
+losing the *last* write before a crash — that write is usually the one that says
+a task stopped, and losing it is exactly the false "still running" the restart
+semantics exist to prevent.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import stat
+import threading
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+
+from ..runtime.identity import now_iso
+from .errors import IdempotencyConflict, StoreUnavailable, TaskUnknown
+from .identity import new_correlation_id, new_task_id
+from .lifecycle import IllegalTransition, check_transition
+from .models import (
+    EVENT_TASK_CREATED,
+    MAX_ACTIVITY_CHARS,
+    MAX_EVENT_PAGE,
+    MAX_EVIDENCE_IDENTIFIER_CHARS,
+    MAX_EVIDENCE_ITEMS,
+    MAX_FAILURE_CHARS,
+    MAX_OUTPUT_CHARS,
+    MAX_RESULT_CHARS,
+    MAX_TASK_PAGE,
+    MEANINGFUL_EVENT_TYPES,
+    SOURCE_COFFERDAM,
+    STATE_CREATED,
+    TERMINAL_STATES,
+    EvidenceReference,
+    TaskEvent,
+    TaskFailure,
+    bounded_line,
+    bounded_text,
+)
+
+#: Bumped whenever the schema below changes shape. A database written by a newer
+#: build than the one reading it is refused rather than migrated backwards: a
+#: rollback that silently dropped columns would lose task history.
+SCHEMA_VERSION = 1
+
+#: Where the database lives, under COFFERDAM_HOME. Its own directory so the file
+#: and its WAL/shm siblings stay together and can be permissioned as a unit.
+TASKS_DIRNAME = "tasks"
+DATABASE_FILENAME = "tasks.sqlite3"
+
+#: How long a writer waits for the lock before giving up. Long enough for a slow
+#: local disk, short enough that a stuck writer surfaces as an error instead of
+#: an API request that never answers.
+BUSY_TIMEOUT_MS = 5000
+
+#: Idempotency records older than this are pruned. A retry that arrives a day
+#: later is not a retry; it is a new intention that happens to reuse a string.
+IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS schema_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    task_id            TEXT PRIMARY KEY,
+    correlation_id     TEXT NOT NULL,
+    parent_task_id     TEXT,
+    origin             TEXT NOT NULL,
+    adapter_id         TEXT NOT NULL,
+    project_id         TEXT NOT NULL,
+    state              TEXT NOT NULL,
+    waiting_reason     TEXT,
+    lifecycle_revision INTEGER NOT NULL DEFAULT 0,
+    created_at         TEXT NOT NULL,
+    started_at         TEXT,
+    updated_at         TEXT NOT NULL,
+    completed_at       TEXT,
+    title              TEXT,
+    prompt             TEXT NOT NULL,
+    latest_activity    TEXT,
+    latest_output      TEXT,
+    final_result       TEXT,
+    failure_json       TEXT,
+    cancellation_json  TEXT,
+    event_cursor       INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS tasks_by_state   ON tasks (state, created_at DESC);
+CREATE INDEX IF NOT EXISTS tasks_by_created ON tasks (created_at DESC);
+
+CREATE TABLE IF NOT EXISTS task_events (
+    task_id            TEXT NOT NULL,
+    sequence           INTEGER NOT NULL,
+    event_type         TEXT NOT NULL,
+    created_at         TEXT NOT NULL,
+    actor              TEXT NOT NULL,
+    source             TEXT NOT NULL,
+    lifecycle_revision INTEGER NOT NULL,
+    correlation_id     TEXT,
+    state              TEXT,
+    text               TEXT,
+    detail             TEXT,
+    evidence_json      TEXT,
+    PRIMARY KEY (task_id, sequence),
+    FOREIGN KEY (task_id) REFERENCES tasks (task_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS idempotency (
+    scope        TEXT NOT NULL,
+    request_key  TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    task_id      TEXT NOT NULL,
+    result_json  TEXT,
+    created_at   TEXT NOT NULL,
+    created_ts   REAL NOT NULL,
+    PRIMARY KEY (scope, request_key)
+);
+
+CREATE INDEX IF NOT EXISTS idempotency_by_age ON idempotency (created_ts);
+"""
+
+
+@dataclass(frozen=True)
+class TaskRow:
+    """One durable task, as stored. Not the published shape.
+
+    Holds ``prompt``, which :class:`~.models.TaskSnapshot` deliberately does not:
+    the prompt is needed to run a task and is shown in the task detail view, but
+    it is not part of the snapshot every list response carries.
+    """
+
+    task_id: str
+    correlation_id: str
+    parent_task_id: Optional[str]
+    origin: str
+    adapter_id: str
+    project_id: str
+    state: str
+    waiting_reason: Optional[str]
+    lifecycle_revision: int
+    created_at: str
+    started_at: Optional[str]
+    updated_at: str
+    completed_at: Optional[str]
+    title: Optional[str]
+    prompt: str
+    latest_activity: Optional[str]
+    latest_output: Optional[str]
+    final_result: Optional[str]
+    failure: Optional[TaskFailure]
+    cancellation: Optional[Dict[str, Any]]
+    event_cursor: int
+
+
+def _row_to_task(row: sqlite3.Row) -> TaskRow:
+    failure_json = row["failure_json"]
+    cancellation_json = row["cancellation_json"]
+    failure = None
+    if failure_json:
+        try:
+            data = json.loads(failure_json)
+            failure = TaskFailure(
+                code=str(data.get("code") or "task_failed"),
+                message=str(data.get("message") or "the task failed"),
+                detail=data.get("detail"),
+            )
+        except ValueError:  # pragma: no cover - written by this module only
+            failure = None
+    cancellation = None
+    if cancellation_json:
+        try:
+            parsed = json.loads(cancellation_json)
+            cancellation = parsed if isinstance(parsed, dict) else None
+        except ValueError:  # pragma: no cover
+            cancellation = None
+    return TaskRow(
+        task_id=row["task_id"],
+        correlation_id=row["correlation_id"],
+        parent_task_id=row["parent_task_id"],
+        origin=row["origin"],
+        adapter_id=row["adapter_id"],
+        project_id=row["project_id"],
+        state=row["state"],
+        waiting_reason=row["waiting_reason"],
+        lifecycle_revision=row["lifecycle_revision"],
+        created_at=row["created_at"],
+        started_at=row["started_at"],
+        updated_at=row["updated_at"],
+        completed_at=row["completed_at"],
+        title=row["title"],
+        prompt=row["prompt"],
+        latest_activity=row["latest_activity"],
+        latest_output=row["latest_output"],
+        final_result=row["final_result"],
+        failure=failure,
+        cancellation=cancellation,
+        event_cursor=row["event_cursor"],
+    )
+
+
+def _bounded_evidence(evidence: Sequence[EvidenceReference]) -> Optional[str]:
+    """Evidence, capped and normalized field by field.
+
+    Never ``json.dumps`` of whatever an adapter handed over. An adapter that
+    returned a large nested object would otherwise put it in the database and
+    then in every event response — the unbounded-payload problem the models
+    module exists to prevent.
+    """
+    if not evidence:
+        return None
+    items: List[Dict[str, Any]] = []
+    for reference in list(evidence)[:MAX_EVIDENCE_ITEMS]:
+        items.append(
+            {
+                "evidence_type": reference.evidence_type,
+                "source": reference.source,
+                "identifier": bounded_line(
+                    reference.identifier, MAX_EVIDENCE_IDENTIFIER_CHARS
+                ),
+                "operation": bounded_line(reference.operation, 60),
+                "result": bounded_line(reference.result, 60),
+                "observed_at": bounded_line(reference.observed_at, 40),
+            }
+        )
+    return json.dumps(items, ensure_ascii=False)
+
+
+def _evidence_from_json(raw: Optional[str]) -> Tuple[EvidenceReference, ...]:
+    if not raw:
+        return ()
+    try:
+        parsed = json.loads(raw)
+    except ValueError:  # pragma: no cover
+        return ()
+    if not isinstance(parsed, list):  # pragma: no cover
+        return ()
+    return tuple(
+        EvidenceReference(
+            evidence_type=str(item.get("evidence_type") or "artifact"),
+            source=str(item.get("source") or "adapter_reported"),
+            identifier=item.get("identifier"),
+            operation=item.get("operation"),
+            result=item.get("result"),
+            observed_at=item.get("observed_at"),
+        )
+        for item in parsed
+        if isinstance(item, dict)
+    )
+
+
+class TaskStore:
+    """The durable home of every task, and the only thing that changes a state.
+
+    One connection, guarded by one lock. That is not a performance compromise
+    to apologise for: this is a single-user workstation service, the write rate
+    is a handful of events per second at most, and one connection makes "was
+    this state change transactional with its event" answerable by reading a
+    single method rather than by reasoning about a pool.
+    """
+
+    def __init__(self, config, *, path: Optional[Path] = None) -> None:
+        self._config = config
+        self._path = Path(path) if path is not None else self._default_path(config)
+        self._lock = threading.RLock()
+        self._connection: Optional[sqlite3.Connection] = None
+
+    @staticmethod
+    def _default_path(config) -> Path:
+        return Path(config.state_dir) / TASKS_DIRNAME / DATABASE_FILENAME
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    # -- connection ----------------------------------------------------------
+
+    def _connect(self) -> sqlite3.Connection:
+        if self._connection is not None:
+            return self._connection
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            # Owner-only on the directory *before* the file is created, so the
+            # database is never briefly world-readable on a fresh install.
+            try:
+                self._path.parent.chmod(stat.S_IRWXU)
+            except OSError:  # pragma: no cover - platform dependent
+                pass
+            connection = sqlite3.connect(
+                str(self._path),
+                timeout=BUSY_TIMEOUT_MS / 1000.0,
+                isolation_level=None,  # explicit BEGIN, so transactions are ours
+                check_same_thread=False,
+            )
+        except sqlite3.Error as exc:
+            raise StoreUnavailable(type(exc).__name__) from None
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA synchronous=FULL")
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA busy_timeout=" + str(BUSY_TIMEOUT_MS))
+        connection.executescript(_SCHEMA)
+        self._apply_schema_version(connection)
+        try:
+            self._path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:  # pragma: no cover - platform dependent
+            pass
+        self._connection = connection
+        return connection
+
+    def _apply_schema_version(self, connection: sqlite3.Connection) -> None:
+        row = connection.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()
+        if row is None:
+            connection.execute(
+                "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)",
+                (str(SCHEMA_VERSION),),
+            )
+            return
+        try:
+            found = int(row["value"])
+        except (TypeError, ValueError):
+            raise StoreUnavailable("the task database records an unreadable schema version")
+        if found > SCHEMA_VERSION:
+            # Forward-only. A newer database opened by an older build is a
+            # rollback, and the safe answer is to refuse rather than to write
+            # rows the newer schema will not understand.
+            raise StoreUnavailable(
+                "the task database was written by a newer version of Cofferdam"
+            )
+
+    @contextmanager
+    def _write(self) -> Iterator[sqlite3.Connection]:
+        """One transaction, committed on success and rolled back on anything else.
+
+        ``IMMEDIATE`` so the write lock is taken at BEGIN rather than at the
+        first write: with a deferred transaction, two writers can both start,
+        both read, and one can then fail at commit — which for a state machine
+        means the losing transition has already been decided against stale state.
+        """
+        with self._lock:
+            connection = self._connect()
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                yield connection
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
+            connection.execute("COMMIT")
+
+    @contextmanager
+    def _read(self) -> Iterator[sqlite3.Connection]:
+        with self._lock:
+            yield self._connect()
+
+    def close(self) -> None:
+        with self._lock:
+            if self._connection is not None:
+                self._connection.close()
+                self._connection = None
+
+    # -- creating ------------------------------------------------------------
+
+    def create_task(
+        self,
+        *,
+        origin: str,
+        adapter_id: str,
+        project_id: str,
+        prompt: str,
+        title: Optional[str] = None,
+        parent_task_id: Optional[str] = None,
+        idempotency_scope: Optional[str] = None,
+        request_key: Optional[str] = None,
+        payload_hash: Optional[str] = None,
+    ) -> Tuple[TaskRow, bool]:
+        """Insert one task and its ``task_created`` event, atomically.
+
+        Returns ``(task, created)``. ``created`` is ``False`` when an
+        idempotency key matched an earlier identical request, in which case the
+        *existing* task is returned and nothing was written — which is what makes
+        a double tap produce one task rather than two.
+        """
+        with self._write() as connection:
+            if request_key is not None:
+                existing = self._lookup_idempotent(
+                    connection, idempotency_scope or "task_create", request_key, payload_hash
+                )
+                if existing is not None:
+                    row = connection.execute(
+                        "SELECT * FROM tasks WHERE task_id = ?", (existing,)
+                    ).fetchone()
+                    if row is not None:
+                        return _row_to_task(row), False
+                    # The key survived its task, which can only happen if a
+                    # database was edited by hand. Treat the key as spent rather
+                    # than resurrecting a task that no longer exists.
+                    connection.execute(
+                        "DELETE FROM idempotency WHERE scope = ? AND request_key = ?",
+                        (idempotency_scope or "task_create", request_key),
+                    )
+
+            task_id = new_task_id()
+            correlation_id = new_correlation_id()
+            timestamp = now_iso()
+            connection.execute(
+                """
+                INSERT INTO tasks (
+                    task_id, correlation_id, parent_task_id, origin, adapter_id,
+                    project_id, state, waiting_reason, lifecycle_revision,
+                    created_at, started_at, updated_at, completed_at, title,
+                    prompt, latest_activity, latest_output, final_result,
+                    failure_json, cancellation_json, event_cursor
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, NULL, ?, NULL, ?, ?,
+                          NULL, NULL, NULL, NULL, NULL, 0)
+                """,
+                (
+                    task_id,
+                    correlation_id,
+                    parent_task_id,
+                    origin,
+                    adapter_id,
+                    project_id,
+                    STATE_CREATED,
+                    timestamp,
+                    timestamp,
+                    title,
+                    prompt,
+                ),
+            )
+            self._append_event_locked(
+                connection,
+                task_id=task_id,
+                event_type=EVENT_TASK_CREATED,
+                actor="user",
+                source=SOURCE_COFFERDAM,
+                lifecycle_revision=0,
+                correlation_id=correlation_id,
+                state=STATE_CREATED,
+                # No prompt here, and none anywhere in the event stream's text
+                # fields for creation: the prompt is stored once, on the task,
+                # and shown once, in the detail view.
+                text=None,
+            )
+            if request_key is not None:
+                self._record_idempotent(
+                    connection,
+                    idempotency_scope or "task_create",
+                    request_key,
+                    payload_hash or "",
+                    task_id,
+                )
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            return _row_to_task(row), True
+
+    # -- idempotency ---------------------------------------------------------
+
+    def _lookup_idempotent(
+        self,
+        connection: sqlite3.Connection,
+        scope: str,
+        request_key: str,
+        payload_hash: Optional[str],
+    ) -> Optional[str]:
+        self._prune_idempotency(connection)
+        row = connection.execute(
+            "SELECT payload_hash, task_id FROM idempotency WHERE scope = ? AND request_key = ?",
+            (scope, request_key),
+        ).fetchone()
+        if row is None:
+            return None
+        if payload_hash is not None and row["payload_hash"] != payload_hash:
+            # Same key, different request. Neither answer is safe to guess at.
+            raise IdempotencyConflict()
+        return row["task_id"]
+
+    def _record_idempotent(
+        self,
+        connection: sqlite3.Connection,
+        scope: str,
+        request_key: str,
+        payload_hash: str,
+        task_id: str,
+        result: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO idempotency
+                (scope, request_key, payload_hash, task_id, result_json, created_at, created_ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                scope,
+                request_key,
+                payload_hash,
+                task_id,
+                json.dumps(result, ensure_ascii=False) if result else None,
+                now_iso(),
+                _monotonic_wall(),
+            ),
+        )
+
+    def _prune_idempotency(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "DELETE FROM idempotency WHERE created_ts < ?",
+            (_monotonic_wall() - IDEMPOTENCY_TTL_SECONDS,),
+        )
+
+    def remember_followup(
+        self, task_id: str, scope: str, request_key: str, payload_hash: str
+    ) -> Optional[str]:
+        """Record a follow-up idempotency key, or report the earlier match.
+
+        Returns ``None`` when this is the first time the key has been seen, and
+        the task id it belongs to when it is a repeat. Raises
+        :class:`~.errors.IdempotencyConflict` for the same key with different
+        content — the case where guessing would either lose a message or send it
+        twice.
+        """
+        with self._write() as connection:
+            existing = self._lookup_idempotent(connection, scope, request_key, payload_hash)
+            if existing is not None:
+                return existing
+            self._record_idempotent(connection, scope, request_key, payload_hash, task_id)
+            return None
+
+    # -- events --------------------------------------------------------------
+
+    def _append_event_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        task_id: str,
+        event_type: str,
+        actor: str,
+        source: str,
+        lifecycle_revision: int,
+        correlation_id: Optional[str] = None,
+        state: Optional[str] = None,
+        text: Optional[str] = None,
+        detail: Optional[str] = None,
+        evidence: Sequence[EvidenceReference] = (),
+    ) -> int:
+        """Append one event and return its sequence. Caller holds the transaction.
+
+        The sequence is allocated from the task row inside the same transaction
+        as the insert, so two concurrent appends cannot both read 6 and both
+        write 7.
+        """
+        row = connection.execute(
+            "SELECT event_cursor FROM tasks WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        if row is None:
+            raise TaskUnknown()
+        sequence = int(row["event_cursor"]) + 1
+        connection.execute(
+            """
+            INSERT INTO task_events (
+                task_id, sequence, event_type, created_at, actor, source,
+                lifecycle_revision, correlation_id, state, text, detail, evidence_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                sequence,
+                event_type,
+                now_iso(),
+                actor,
+                source,
+                lifecycle_revision,
+                correlation_id,
+                state,
+                bounded_text(text, MAX_OUTPUT_CHARS),
+                bounded_line(detail, MAX_FAILURE_CHARS),
+                _bounded_evidence(evidence),
+            ),
+        )
+        connection.execute(
+            "UPDATE tasks SET event_cursor = ?, updated_at = ? WHERE task_id = ?",
+            (sequence, now_iso(), task_id),
+        )
+        return sequence
+
+    def append_event(
+        self,
+        task_id: str,
+        event_type: str,
+        *,
+        actor: str,
+        source: str,
+        text: Optional[str] = None,
+        detail: Optional[str] = None,
+        evidence: Sequence[EvidenceReference] = (),
+    ) -> int:
+        """Append an event that changes no state — progress, output, a rejection."""
+        with self._write() as connection:
+            row = connection.execute(
+                "SELECT state, lifecycle_revision, correlation_id FROM tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise TaskUnknown()
+            sequence = self._append_event_locked(
+                connection,
+                task_id=task_id,
+                event_type=event_type,
+                actor=actor,
+                source=source,
+                lifecycle_revision=row["lifecycle_revision"],
+                correlation_id=row["correlation_id"],
+                state=row["state"],
+                text=text,
+                detail=detail,
+                evidence=evidence,
+            )
+            self._refresh_activity_locked(connection, task_id, event_type, text)
+            return sequence
+
+    def _refresh_activity_locked(
+        self,
+        connection: sqlite3.Connection,
+        task_id: str,
+        event_type: str,
+        text: Optional[str],
+    ) -> None:
+        """Keep the two "latest" columns current.
+
+        They are denormalized on purpose: the list view would otherwise need a
+        correlated subquery over the event table for every row, which is a lot of
+        work to render one line of text a phone reads at a glance.
+        """
+        activity = bounded_line(text, MAX_ACTIVITY_CHARS)
+        if activity is None:
+            return
+        if event_type in MEANINGFUL_EVENT_TYPES:
+            connection.execute(
+                "UPDATE tasks SET latest_activity = ?, latest_output = ? WHERE task_id = ?",
+                (activity, bounded_text(text, MAX_OUTPUT_CHARS), task_id),
+            )
+        else:
+            connection.execute(
+                "UPDATE tasks SET latest_activity = ? WHERE task_id = ?",
+                (activity, task_id),
+            )
+
+    # -- transitions ---------------------------------------------------------
+
+    def transition(
+        self,
+        task_id: str,
+        new_state: str,
+        *,
+        event_type: str,
+        actor: str,
+        source: str,
+        expected_state: Optional[str] = None,
+        waiting_reason: Optional[str] = None,
+        text: Optional[str] = None,
+        detail: Optional[str] = None,
+        final_result: Optional[str] = None,
+        failure: Optional[TaskFailure] = None,
+        cancellation: Optional[Dict[str, Any]] = None,
+        evidence: Sequence[EvidenceReference] = (),
+    ) -> "TaskRow":
+        """Move a task to ``new_state`` and record the event. One transaction.
+
+        This is the only method in the codebase that writes ``tasks.state``, and
+        it never writes it without appending an event in the same transaction —
+        which is what makes "the snapshot and the history cannot disagree" a
+        property of the schema rather than a convention callers follow.
+
+        ``expected_state`` gives a caller optimistic concurrency: a cancel that
+        was decided against ``running`` will not apply to a task that has since
+        completed.
+        """
+        with self._write() as connection:
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise TaskUnknown()
+            current = row["state"]
+            if expected_state is not None and current != expected_state:
+                raise IllegalTransition(
+                    current,
+                    new_state,
+                    "the task changed to " + current + " while this was being decided",
+                )
+            check_transition(current, new_state)
+
+            revision = int(row["lifecycle_revision"]) + 1
+            timestamp = now_iso()
+            started_at = row["started_at"]
+            if new_state == "running" and started_at is None:
+                started_at = timestamp
+            completed_at = row["completed_at"]
+            if new_state in TERMINAL_STATES and completed_at is None:
+                completed_at = timestamp
+
+            connection.execute(
+                """
+                UPDATE tasks
+                   SET state = ?, waiting_reason = ?, lifecycle_revision = ?,
+                       started_at = ?, completed_at = ?, updated_at = ?,
+                       final_result = COALESCE(?, final_result),
+                       failure_json = COALESCE(?, failure_json),
+                       cancellation_json = COALESCE(?, cancellation_json)
+                 WHERE task_id = ?
+                """,
+                (
+                    new_state,
+                    waiting_reason,
+                    revision,
+                    started_at,
+                    completed_at,
+                    timestamp,
+                    bounded_text(final_result, MAX_RESULT_CHARS),
+                    json.dumps(failure.to_dict(), ensure_ascii=False) if failure else None,
+                    json.dumps(cancellation, ensure_ascii=False) if cancellation else None,
+                    task_id,
+                ),
+            )
+            self._append_event_locked(
+                connection,
+                task_id=task_id,
+                event_type=event_type,
+                actor=actor,
+                source=source,
+                lifecycle_revision=revision,
+                correlation_id=row["correlation_id"],
+                state=new_state,
+                text=text,
+                detail=detail,
+                evidence=evidence,
+            )
+            self._refresh_activity_locked(connection, task_id, event_type, text)
+            updated = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            return _row_to_task(updated)
+
+    # -- reading -------------------------------------------------------------
+
+    def get(self, task_id: object) -> TaskRow:
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise TaskUnknown()
+            return _row_to_task(row)
+
+    def find(self, task_id: object) -> Optional[TaskRow]:
+        try:
+            return self.get(task_id)
+        except TaskUnknown:
+            return None
+
+    def list_tasks(
+        self, *, states: Optional[Sequence[str]] = None, limit: int = MAX_TASK_PAGE
+    ) -> List[TaskRow]:
+        """Newest first, bounded. There is no "all"."""
+        bounded = max(1, min(int(limit), MAX_TASK_PAGE))
+        with self._read() as connection:
+            if states:
+                placeholders = ",".join("?" for _ in states)
+                rows = connection.execute(
+                    "SELECT * FROM tasks WHERE state IN (" + placeholders + ")"
+                    " ORDER BY created_at DESC, task_id DESC LIMIT ?",
+                    (*states, bounded),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM tasks ORDER BY created_at DESC, task_id DESC LIMIT ?",
+                    (bounded,),
+                ).fetchall()
+            return [_row_to_task(row) for row in rows]
+
+    def events(
+        self, task_id: str, *, after: int = 0, limit: int = MAX_EVENT_PAGE
+    ) -> List[TaskEvent]:
+        """Events after a cursor, bounded.
+
+        ``after`` is a sequence number, so the query is an index range scan
+        rather than an offset. That is the difference between a phone asking
+        "what is new" cheaply and asking the database to count past ten thousand
+        rows to find out.
+        """
+        bounded = max(1, min(int(limit), MAX_EVENT_PAGE))
+        cursor = max(0, int(after))
+        with self._read() as connection:
+            rows = connection.execute(
+                "SELECT * FROM task_events WHERE task_id = ? AND sequence > ?"
+                " ORDER BY sequence ASC LIMIT ?",
+                (task_id, cursor, bounded),
+            ).fetchall()
+            return [
+                TaskEvent(
+                    task_id=row["task_id"],
+                    sequence=row["sequence"],
+                    event_type=row["event_type"],
+                    created_at=row["created_at"],
+                    actor=row["actor"],
+                    source=row["source"],
+                    lifecycle_revision=row["lifecycle_revision"],
+                    correlation_id=row["correlation_id"],
+                    state=row["state"],
+                    text=row["text"],
+                    detail=row["detail"],
+                    evidence=_evidence_from_json(row["evidence_json"]),
+                )
+                for row in rows
+            ]
+
+    def non_terminal_tasks(self) -> List[TaskRow]:
+        """Every task the database believes is unfinished.
+
+        Used by restart recovery, and its whole point is that the answer is
+        *not* trusted: a row saying ``running`` after a restart is a row about a
+        process that no longer exists.
+        """
+        with self._read() as connection:
+            placeholders = ",".join("?" for _ in TERMINAL_STATES)
+            rows = connection.execute(
+                "SELECT * FROM tasks WHERE state NOT IN (" + placeholders + ")"
+                " ORDER BY created_at ASC",
+                tuple(sorted(TERMINAL_STATES)),
+            ).fetchall()
+            return [_row_to_task(row) for row in rows]
+
+    def counts_by_state(self) -> Dict[str, int]:
+        with self._read() as connection:
+            rows = connection.execute(
+                "SELECT state, COUNT(*) AS total FROM tasks GROUP BY state"
+            ).fetchall()
+            return {row["state"]: int(row["total"]) for row in rows}
+
+    def storage_health(self) -> Dict[str, Any]:
+        """Non-content facts about the store, for the status surface.
+
+        Deliberately without the path: the database location is host detail, and
+        publishing it would put a filesystem path in an authenticated response
+        for no operational gain a count does not already give.
+        """
+        counts = self.counts_by_state()
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "task_count": sum(counts.values()),
+            "counts_by_state": counts,
+        }
+
+
+def _monotonic_wall() -> float:
+    """Wall-clock seconds, for TTL arithmetic only.
+
+    Not ``time.monotonic``: these values are persisted, and a monotonic clock
+    means nothing across a restart.
+    """
+    import time
+
+    return time.time()
+
+
+def database_permissions(path: Path) -> Optional[int]:
+    """The database file's mode bits, or ``None`` if it does not exist yet.
+
+    Exposed for the tests that assert the store is not world-readable, so that
+    assertion does not have to reach into private state.
+    """
+    try:
+        return stat.S_IMODE(os.stat(path).st_mode)
+    except OSError:
+        return None
+
+
+__all__ = [
+    "BUSY_TIMEOUT_MS",
+    "DATABASE_FILENAME",
+    "IDEMPOTENCY_TTL_SECONDS",
+    "SCHEMA_VERSION",
+    "TASKS_DIRNAME",
+    "TaskRow",
+    "TaskStore",
+    "database_permissions",
+]
