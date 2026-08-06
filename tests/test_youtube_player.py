@@ -31,6 +31,7 @@ from cofferdam.workstation.youtubeplayer.actions import (
 from cofferdam.workstation.youtubeplayer.channel import COMMANDS, PlayerChannel
 from cofferdam.workstation.youtubeplayer.errors import (
     CODE_BUSY,
+    CODE_EMBED_IDENTITY_REJECTED,
     CODE_INVALID_MUTE,
     CODE_INVALID_VOLUME,
     CODE_NO_NEXT_ITEM,
@@ -41,7 +42,9 @@ from cofferdam.workstation.youtubeplayer.errors import (
     CODE_REGISTRATION_TIMEOUT,
     CODE_RESULT_NOT_PLAYABLE,
     CODE_VIDEO_NOT_OBSERVED,
+    CODE_VIDEO_UNAVAILABLE,
     CODE_VOLUME_NOT_OBSERVED,
+    ERROR_EMBED_IDENTITY,
     YouTubePlayerError,
     describe_player_error,
 )
@@ -50,6 +53,7 @@ from cofferdam.workstation.youtubeplayer.models import (
     CONNECTION_READY,
     MAX_QUEUE_ITEMS,
     PLAYBACK_AUTOPLAY_BLOCKED,
+    PLAYBACK_ERROR,
     PLAYBACK_PAUSED,
     PLAYBACK_PLAYING,
 )
@@ -401,6 +405,129 @@ class PlayNow(PlayerTestCase):
         for url in self.launcher.urls:
             self.assertNotIn("youtube.com", url)
             self.assertNotIn("watch", url)
+
+
+# -- error 153: the embed YouTube would not identify -------------------------
+
+
+class EmbedIdentityRejection(PlayerTestCase):
+    """What a player YouTube refused to load is allowed to be called.
+
+    From real-host validation: the player page opened, connected to Cofferdam,
+    and YouTube answered the embed with "Video player configuration error /
+    Error 153" — the embed request carried no identification of the embedding
+    page. The referrer fix is what stops it happening; this class is about what
+    Cofferdam says on the day it happens anyway.
+
+    Four sentences it must never be:
+
+    * ``autoplay_blocked`` — there is no loaded player to click;
+    * "that video is unavailable" — the video is fine on the normal page;
+    * ``applied`` / playing;
+    * a bare "loaded but not playing", which reads as a slow video.
+    """
+
+    def reject_embed(self):
+        self.player.error_on_load = ERROR_EMBED_IDENTITY
+
+    def test_error_153_is_its_own_refusal(self):
+        self.reject_embed()
+        with self.assertRaises(YouTubePlayerError) as raised:
+            self.play(self.session())
+        self.assertEqual(raised.exception.code, CODE_EMBED_IDENTITY_REJECTED)
+
+    def test_error_153_is_not_reported_as_autoplay_blocked(self):
+        """The wrong answer sends someone to click a window that cannot help."""
+        self.reject_embed()
+        with self.assertRaises(YouTubePlayerError) as raised:
+            self.play(self.session())
+        self.assertNotEqual(raised.exception.code, "autoplay_blocked")
+        self.assertNotIn("click", raised.exception.message.lower())
+        state = self.service.snapshot().to_dict()["current"]["playback_state"]
+        self.assertNotEqual(state, PLAYBACK_AUTOPLAY_BLOCKED)
+        self.assertEqual(state, PLAYBACK_ERROR)
+
+    def test_error_153_is_never_a_success(self):
+        """No outcome at all: it raises, so there is no envelope to misread."""
+        self.reject_embed()
+        with self.assertRaises(YouTubePlayerError):
+            self.play(self.session())
+        snapshot = self.service.snapshot().to_dict()
+        self.assertNotEqual(snapshot["current"]["playback_state"], "playing")
+        self.assertEqual(
+            snapshot["last_error"]["code"], CODE_EMBED_IDENTITY_REJECTED
+        )
+
+    def test_error_153_is_not_reported_as_the_video_being_unavailable(self):
+        """Two different problems, two different things to do about them."""
+        self.reject_embed()
+        with self.assertRaises(YouTubePlayerError) as raised:
+            self.play(self.session())
+        self.assertNotEqual(raised.exception.code, CODE_VIDEO_UNAVAILABLE)
+        self.assertNotEqual(raised.exception.code, CODE_VIDEO_NOT_OBSERVED)
+
+    def test_the_refusal_names_the_player_rather_than_the_video(self):
+        """The sentence a person reads has to point at the right thing."""
+        self.reject_embed()
+        with self.assertRaises(YouTubePlayerError) as raised:
+            self.play(self.session())
+        self.assertIn("identify", raised.exception.message.lower())
+        self.assertIn("youtube", (raised.exception.detail or "").lower())
+
+    def test_a_video_that_is_genuinely_unavailable_still_says_so(self):
+        """The new branch did not swallow the errors that were already mapped."""
+        self.player.error_on_load = 100
+        with self.assertRaises(YouTubePlayerError) as raised:
+            self.play(self.session())
+        self.assertEqual(raised.exception.code, CODE_VIDEO_NOT_OBSERVED)
+        self.assertEqual(
+            self.service.snapshot().to_dict()["last_error"]["code"],
+            CODE_VIDEO_UNAVAILABLE,
+        )
+
+    def test_an_error_outranks_a_blocked_autoplay_in_the_state_report(self):
+        """A player reporting both is a player YouTube refused, not one waiting."""
+        channel = PlayerChannel()
+        instance = channel.register()
+        channel.submit_state(
+            instance,
+            {
+                "player_state": 5,
+                "video_id": VIDEO_ID,
+                "error_code": ERROR_EMBED_IDENTITY,
+                "autoplay_blocked": True,
+            },
+        )
+        observation = channel.observation()
+        self.assertEqual(observation.playback_state, PLAYBACK_ERROR)
+        self.assertEqual(observation.error["code"], CODE_EMBED_IDENTITY_REJECTED)
+
+    def test_resume_against_a_rejected_embed_is_not_autoplay_blocked(self):
+        """Pressing play again must not turn a config error into a click prompt."""
+        self.reject_embed()
+        with self.assertRaises(YouTubePlayerError):
+            self.play(self.session())
+        self.player.refuse_autoplay = True   # the wrong answer, if it were taken
+        with self.assertRaises(YouTubePlayerError) as raised:
+            self.actions.resume()
+        self.assertEqual(raised.exception.code, CODE_EMBED_IDENTITY_REJECTED)
+
+    def test_153_maps_to_cofferdam_words(self):
+        described = describe_player_error(ERROR_EMBED_IDENTITY)
+        self.assertEqual(described["code"], CODE_EMBED_IDENTITY_REJECTED)
+        # Cofferdam's own sentence, not YouTube's, and no bare number on a phone.
+        self.assertNotIn("153", described["message"])
+        self.assertNotIn("153", described["detail"])
+
+    def test_the_next_load_clears_the_rejection(self):
+        """A stale error must not make the following video look broken too."""
+        self.reject_embed()
+        with self.assertRaises(YouTubePlayerError):
+            self.play(self.session())
+        self.player.error_on_load = None
+        result = self.play(self.session((OTHER_VIDEO_ID,)))
+        self.assertEqual(result["outcome"], OUTCOME_APPLIED)
+        self.assertIsNone(result["player"]["last_error"])
 
 
 # -- 19-27: the Cofferdam queue ----------------------------------------------

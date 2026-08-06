@@ -769,6 +769,32 @@ access log, whose request lines would otherwise become a timestamped record of w
 watching something. The authenticated PWA may show the current video and the queue; nothing else
 may, and nothing is stored.
 
+**The player page identifies itself, and privacy hygiene is not free** *(added 2026-08-06 after
+real-host validation)*. The first shipped player sent `Referrer-Policy: no-referrer`, carried a
+matching `<meta name="referrer">`, and set `referrerpolicy="no-referrer"` on its iframe. Each of
+those looked like good hygiene. Together they broke playback outright: an embedded player must be
+able to say **which page is embedding it**, and YouTube answered every embed with error `153` —
+"Video player configuration error" — while the page itself reported connected and healthy.
+
+The correction is `strict-origin-when-cross-origin` on the response, no meta tag at all, and the
+same policy named explicitly on the iframe, because a per-iframe policy overrides the document's in
+both directions. The `origin` player parameter is built **server-side** from the loopback constant
+and the port actually bound — a different port is a different origin — and no client can supply or
+influence it, because there is no request field it could arrive in.
+
+What this actually discloses is one line: that a page on this machine's loopback interface embedded
+a player. Not the video, not who, not from where. Set against a feature that does not work at all,
+that is the right trade — and it is worth recording that the wrong one was chosen first, looked
+principled, and was caught only by running the thing on a real host.
+
+**Error 153 gets its own state.** Before the mapping existed, a rejected embed reached the phone as
+"the video is loaded and has not started" — a sentence that reads as a slow video and invites
+waiting. It is now `youtube_embed_client_identity_rejected`: deliberately not `autoplay_blocked`
+(there is no loaded player to click), not "video unavailable" (the video is fine on the normal
+page), and never a success. The phone explains it and offers exactly two things — retry the
+dedicated player **once**, or Open in YouTube. The retry is bounded because a configuration state is
+not a race, and a button that can only fail again is worse than no button.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

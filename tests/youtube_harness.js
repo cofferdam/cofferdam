@@ -81,7 +81,16 @@ function advance(ms) {
 
 /* ---------------------------------------------------------------------- DOM */
 
-const record = { requests: [], timerErrors: [], consoleOutput: [], uncaught: null };
+const record = {
+  requests: [],
+  timerErrors: [],
+  consoleOutput: [],
+  uncaught: null,
+  /* Every result id the panel asked app.js to open on the normal YouTube page.
+     Recorded rather than performed, so a scenario can assert both that the
+     explicit fallback works and that nothing reaches it automatically. */
+  openedInYouTube: []
+};
 
 function makeElement(id) {
   const listeners = {};
@@ -298,8 +307,20 @@ function run() {
 
   const youtube = sandbox.CofferdamYouTube;
 
+  /* The same four dependencies app.js injects. `openInYouTube` is the panel's
+     route to the card's existing explicit open action; here it only records,
+     because what matters is *whether* and *with what* it was called. */
+  function deps(behaviour) {
+    return {
+      api: makeApi(behaviour),
+      el,
+      escapeHtml,
+      openInYouTube: function (resultId) { record.openedInYouTube.push(resultId); }
+    };
+  }
+
   function mount(behaviour) {
-    return youtube.mount({ api: makeApi(behaviour), el, escapeHtml });
+    return youtube.mount(deps(behaviour));
   }
   function html() { return el("youtubeSections").innerHTML; }
   function writes() { return record.requests.filter((r) => r.method !== "GET"); }
@@ -388,6 +409,94 @@ function run() {
     }).then(function () {
       fire("click", button("youtubePlayPause"));
       return drain().then(function () { return { html: html() }; });
+    });
+  }
+
+  /* -- the embed YouTube would not identify (error 153) -------------------- */
+
+  /* The refusal a rejected embed produces, exactly as the route returns it. */
+  const IDENTITY_REFUSAL = {
+    refuse: "the Cofferdam player could not identify itself to YouTube",
+    refuseCode: "youtube_embed_client_identity_rejected",
+    refuseStatus: 409,
+    refuseDetail: "YouTube refused to load the embedded player; reload the " +
+      "player on the workstation, or use Open in YouTube",
+    result: () => ({ payload: {} })
+  };
+
+  if (scenario === "identity-rejection-explains-and-offers-both") {
+    return mount(IDENTITY_REFUSAL).then(function () {
+      return youtube.playResult("search-abc", "r2").then(function () {
+        return drain().then(function () {
+          return { html: html(), writes: writes() };
+        });
+      });
+    });
+  }
+
+  if (scenario === "identity-retry-is-bounded") {
+    return mount(IDENTITY_REFUSAL).then(function () {
+      return youtube.playResult("search-abc", "r2").then(function () {
+        return drain().then(function () {
+          const afterFirst = writes().length;
+          const offered = html();
+          /* Press Retry, which fails the same way... */
+          fire("click", button("youtubeRetryPlayer"));
+          return drain(60).then(function () {
+            const afterRetry = writes().length;
+            const afterRetryHtml = html();
+            /* ...and press it again, and again. Neither may send anything. */
+            fire("click", button("youtubeRetryPlayer"));
+            fire("click", button("youtubeRetryPlayer"));
+            return drain(60).then(function () {
+              return {
+                afterFirst,
+                afterRetry,
+                afterExtraPresses: writes().length,
+                offered,
+                afterRetryHtml
+              };
+            });
+          });
+        });
+      });
+    });
+  }
+
+  if (scenario === "identity-open-in-youtube-is-explicit") {
+    return mount(IDENTITY_REFUSAL).then(function () {
+      return youtube.playResult("search-abc", "r2").then(function () {
+        return drain().then(function () {
+          /* Nothing has been opened by the failure itself. */
+          const beforePress = record.openedInYouTube.slice();
+          fire("click", button("youtubeOpenInYouTube"));
+          return drain().then(function () {
+            return {
+              beforePress,
+              afterPress: record.openedInYouTube.slice(),
+              writes: writes()
+            };
+          });
+        });
+      });
+    });
+  }
+
+  if (scenario === "identity-rejection-is-not-autoplay-blocked") {
+    /* The player reports the error state, not a blocked autoplay, and the panel
+       must not render the "click the window once" instruction for it. */
+    const errored = playerPayload({
+      playback_state: "error",
+      last_error: {
+        code: "youtube_embed_client_identity_rejected",
+        message: "the Cofferdam player could not identify itself to YouTube",
+        detail: "reload the player on the workstation, or use Open in YouTube"
+      }
+    });
+    return mount(Object.assign({ initial: errored }, IDENTITY_REFUSAL)).then(function () {
+      return youtube.playResult("search-abc", "r2").then(function () {
+        return drain().then(function () { return { html: html() }; });
+      });
     });
   }
 
@@ -609,6 +718,7 @@ function run() {
 run().then(function (result) {
   result.timerErrors = record.timerErrors;
   result.consoleOutput = record.consoleOutput;
+  result.openedInYouTube = record.openedInYouTube;
   process.stdout.write(JSON.stringify(result));
 }).catch(function (error) {
   process.stdout.write(JSON.stringify({

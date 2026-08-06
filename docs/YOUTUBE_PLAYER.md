@@ -57,12 +57,50 @@ The findings that shaped this design:
 | Position | `getCurrentTime()`, `getDuration()` | Reported as observed, and dated |
 | Video ids | No formal published grammar; every documented id is 11 URL-safe base-64 characters | Enforced as a defensive bound, re-checked at every step |
 | Autoplay | `onAutoplayBlocked` fires "any time the browser blocks autoplay or scripted video playback" | Surfaced as its own state — see "Autoplay" below |
-| `origin` | "you should always specify your domain as the `origin` parameter value" | Set to the player page's own loopback origin |
+| `origin` | "you should always specify your domain as the `origin` parameter value" | Built **server-side** from the loopback host and the port actually bound — see "Identifying the embedding page" |
 | Errors | `2` bad parameter, `5` HTML5 error, `100` not found/private, `101`/`150` embedding disallowed | Mapped to Cofferdam sentences; anything else becomes "no error reported" |
+| Error `153` | **Not** in the published table. Reported by the player itself — "Video player configuration error" — when the embed request carries no usable identification of the embedding page | Carried deliberately, and mapped to its own state. Never autoplay, never success |
 
 Nothing above is from memory. If YouTube changes any of it, the place to fix is
 `cofferdam/workstation/youtubeplayer/channel.py` (state and error mapping) and
 `web/player.js` (the calls themselves).
+
+### Identifying the embedding page
+
+An embedded player has to be able to say **which page is embedding it**. A page
+that refuses to identify itself is refused in turn: YouTube answers the embed
+with error `153` and a "Video player configuration error" screen, and no video
+ever loads.
+
+This was found in real-host validation, not in review. The first shipped player
+suppressed its referrer three separate ways — a `Referrer-Policy: no-referrer`
+response header, a `<meta name="referrer" content="no-referrer">` in the
+document, and `referrerpolicy="no-referrer"` on the generated iframe — each
+enough on its own. The measured outgoing `Referer` was `null`.
+
+What the player does now, and why each part matters:
+
+| Piece | Value | Why |
+| --- | --- | --- |
+| Response header | `Referrer-Policy: strict-origin-when-cross-origin` | Sends the origin — scheme, host, port — and nothing else. No path, no query, nothing about what is playing |
+| Document | **no** `<meta name="referrer">` at all | A meta tag would silently override the header. The decision has one place to live |
+| Iframe | `referrerpolicy="strict-origin-when-cross-origin"` | A per-iframe policy overrides the document's **in both directions**. This is the half that is easiest to miss |
+| `origin` parameter | `http://127.0.0.1:<bound port>` | A different port is a *different origin* to a browser, so the port is never omitted and never hard-coded |
+
+The `origin` parameter is constructed by the server from its own loopback
+constant and the port the listener is actually bound on, and sent to the page at
+registration. **No client can supply or influence it** — there is no request
+field it could arrive in, and the page refuses to build a player rather than
+guessing one. The page checks the value against its own origin and says so if
+they disagree.
+
+Going from `http://127.0.0.1` to `https://www.youtube.com` is not a downgrade —
+loopback is a potentially-trustworthy origin, as HTTPS is — so the policy's
+"strip on downgrade" rule does not apply, and the origin really is sent.
+
+What YouTube learns from this: that a page on this machine's loopback interface
+embedded a player. Not which video, not who, not from where. The video id was
+already in the embed URL it is serving.
 
 ### Why the API's own queue is not used
 
@@ -381,6 +419,23 @@ it — the uploader has disabled embedding. Use **Open in YouTube**.
 
 **"That video is unavailable."**
 YouTube error `100`: removed, private, or not available in this region.
+
+**"The Cofferdam player could not identify itself to YouTube."**
+YouTube error `153`, shown in the player window as *Video player configuration
+error*. The embed was refused because the player page did not send the identity
+of the page embedding it — see "Identifying the embedding page" above. This is
+**not** the video (it plays fine on the normal page) and **not** autoplay (there
+is no loaded player to click). The phone offers two things:
+
+* **Retry dedicated player** — once. A rejected embed is a configuration state,
+  not a race, so a third attempt would fail the same way and the button is
+  withdrawn rather than left to be pressed forever.
+* **Open in YouTube** — the normal watch page, which works.
+
+If it persists, the player page is reaching YouTube without a referrer. Check
+that nothing between the browser and YouTube is stripping it: a privacy
+extension set to "always block referrers", or an Opera setting doing the same,
+will reproduce this exactly.
 
 **Search returns nothing / quota errors.**
 That is the catalogue, not the player. See

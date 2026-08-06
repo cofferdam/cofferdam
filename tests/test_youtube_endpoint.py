@@ -14,6 +14,11 @@ The four defences, each with a test:
 * a channel request without ``application/json`` is refused, which is what forces
   a cross-origin caller into a preflight;
 * no CORS header is ever sent, on any path, on any status, including ``OPTIONS``.
+
+And one property that is not a defence but a requirement, added after real-host
+validation found it broken: the page must be able to tell YouTube **which page
+is embedding it**, or the embed is refused with error 153. See
+:class:`EmbeddingIdentity`.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ import socket
 import unittest
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 from cofferdam.workstation.youtubeplayer.channel import PlayerChannel
 from cofferdam.workstation.youtubeplayer.endpoint import (
@@ -328,6 +334,129 @@ class Paths(EndpointTestCase):
 
         _, _, script = self.request("/player.js", method="GET")
         self.assertNotIn("console.", code_only(script.decode("utf-8")))
+
+
+class EmbeddingIdentity(EndpointTestCase):
+    """The player page must be able to say which page is embedding YouTube.
+
+    Real-host validation found the opposite: three independent suppressions —
+    a ``no-referrer`` response header, a ``no-referrer`` meta tag, and a
+    ``referrerpolicy="no-referrer"`` on the iframe — each enough on its own to
+    strip the ``Referer``. The measured outgoing header was ``null`` and YouTube
+    answered every embed with **error 153**.
+
+    Each of the three has a test here, because removing two of three would have
+    left the bug in place and a suite that never noticed.
+    """
+
+    def test_the_player_response_permits_the_origin_to_be_sent(self):
+        """The policy allows the origin cross-origin, and is not `no-referrer`."""
+        _, headers, _ = self.request(PATH_PLAYER, method="GET")
+        policy = (headers.get("Referrer-Policy") or "").strip().lower()
+        self.assertEqual(policy, "strict-origin-when-cross-origin")
+
+    def test_no_response_suppresses_the_referrer(self):
+        """Not on the document, not on the script, not on the channel.
+
+        The script matters as much as the document: it is same-origin, so it
+        inherits nothing useful from a stricter header, and a suppressing policy
+        served here would be one refactor away from applying to the page.
+        """
+        for path, method in (
+            (PATH_PLAYER, "GET"),
+            ("/player.js", "GET"),
+            (PATH_REGISTER, "POST"),
+        ):
+            _, headers, _ = self.request(path, {} if method == "POST" else None, method=method)
+            policy = (headers.get("Referrer-Policy") or "").strip().lower()
+            self.assertNotIn("no-referrer", policy, path + " suppresses the referrer")
+
+    def test_the_document_carries_no_suppressing_meta_tag(self):
+        """A meta tag would override the header, silently and invisibly."""
+        _, _, document = self.request(PATH_PLAYER, method="GET")
+        markup = _html_code_only(document.decode("utf-8")).lower()
+        self.assertNotIn("no-referrer", markup)
+        # Asserted as the absence of the mechanism, not just of one value: a
+        # `<meta name="referrer">` with any value is a second author for a
+        # decision that has one place to live.
+        self.assertNotIn('name="referrer"', markup)
+
+    def test_the_iframe_does_not_suppress_the_referrer(self):
+        """The half that is easiest to miss: a per-iframe policy overrides the page."""
+        from ._runtime_doubles import code_only
+
+        _, _, script = self.request("/player.js", method="GET")
+        source = code_only(script.decode("utf-8"))
+        self.assertNotIn("no-referrer", source)
+        self.assertIn('"referrerpolicy", "strict-origin-when-cross-origin"', source)
+
+    def test_no_launch_uses_the_noreferrer_window_feature(self):
+        """`noreferrer` on an opener strips it too, from a different direction.
+
+        Scanned across the whole player package and the player page rather than
+        one file: the launch path runs through the existing ``open_url`` adapter
+        today, and this is what would notice if it were ever replaced with a
+        ``window.open`` carrying the feature.
+        """
+        from ._runtime_doubles import code_only
+
+        package = Path(__file__).resolve().parents[1] / "cofferdam" / "workstation"
+        sources = [package / "youtubeplayer" / name for name in (
+            "launcher.py", "endpoint.py", "service.py", "actions.py", "channel.py"
+        )]
+        for path in sources:
+            self.assertNotIn(
+                "noreferrer", _python_code_only(path.read_text("utf-8")), str(path)
+            )
+        _, _, script = self.request("/player.js", method="GET")
+        self.assertNotIn("noreferrer", code_only(script.decode("utf-8")))
+
+    def test_the_origin_is_the_complete_loopback_origin_with_the_real_port(self):
+        """Scheme, loopback host and the port this socket is actually bound on.
+
+        A different port is a different origin to a browser, so an ``origin``
+        parameter without one would be a lie the IFrame Player API checks.
+        """
+        _, _, body = self.request(PATH_REGISTER, {})
+        origin = json.loads(body)["player_origin"]
+        self.assertEqual(origin, "http://127.0.0.1:" + str(self.port))
+        self.assertTrue(origin.startswith("http://127.0.0.1:"))
+        self.assertEqual(origin, self.endpoint.player_origin())
+        # And the page Opera is pointed at is served from that same origin.
+        self.assertEqual(self.endpoint.player_url(), origin + PATH_PLAYER)
+
+    def test_a_different_dynamic_port_produces_a_different_origin(self):
+        """The port is read from the live socket, never remembered or assumed."""
+        other = PlayerEndpoint(PlayerChannel())
+        other_port = other.start()
+        self.addCleanup(other.stop)
+        self.assertNotEqual(other_port, self.port)
+        self.assertNotEqual(other.player_origin(), self.endpoint.player_origin())
+        self.assertEqual(other.player_origin(), "http://127.0.0.1:" + str(other_port))
+
+    def test_a_client_cannot_supply_or_override_the_origin(self):
+        """There is no field an origin could arrive in, and sending one changes nothing."""
+        for hostile in (
+            "https://evil.example.com",
+            "http://127.0.0.1:1",
+            "http://localhost:" + str(self.port),
+            None,
+        ):
+            _, _, body = self.request(
+                PATH_REGISTER, {"player_origin": hostile, "origin": hostile}
+            )
+            self.assertEqual(
+                json.loads(body)["player_origin"],
+                "http://127.0.0.1:" + str(self.port),
+                "a client-supplied origin reached the response",
+            )
+
+    def test_the_origin_is_built_from_the_module_constant(self):
+        """Structural: one builder, and it names the loopback constant."""
+        from cofferdam.workstation.youtubeplayer.endpoint import build_player_origin
+
+        self.assertEqual(build_player_origin(40187), "http://127.0.0.1:40187")
+        self.assertEqual(build_player_origin(1), "http://127.0.0.1:1")
 
 
 class RegistrationFlow(EndpointTestCase):

@@ -17,6 +17,15 @@ These are the seven guards the milestone brief calls out by name:
 5. the stale-response generation guard (in the PWA)
 6. loopback-only binding
 7. arbitrary player-command rejection
+
+And four more the **error 153** validation failure earned, each of which was
+either absent or actively wrong on the shipped player and produced a page that
+looked correct while playing nothing:
+
+8. the referrer policy that lets the page identify itself
+9. the dynamic port in the embedding origin
+10. the origin having exactly one author — the server
+11. error 153 mapping to its own state rather than to autoplay or success
 """
 
 from __future__ import annotations
@@ -444,6 +453,361 @@ class CommandVocabularyGuard(unittest.TestCase):
         # a lookup keyed on message content.
         for command in COMMANDS:
             self.assertIn(command, source)
+
+
+# -- 8. the referrer policy that lets the page identify itself ---------------
+
+
+class ReferrerPolicyGuard(unittest.TestCase):
+    """The guard that did not exist, which is why validation failed.
+
+    Every mutation here reproduces one of the three suppressions found on the
+    real host, and each is asserted to be *observable* — otherwise a future
+    change could reintroduce one and leave this suite just as green.
+    """
+
+    def endpoint(self):
+        from cofferdam.workstation.youtubeplayer.endpoint import PlayerEndpoint
+
+        endpoint = PlayerEndpoint(PlayerChannel())
+        endpoint.start()
+        self.addCleanup(endpoint.stop)
+        return endpoint
+
+    def fetch(self, endpoint, path):
+        import urllib.request
+
+        url = "http://127.0.0.1:" + str(endpoint.port) + path
+        with urllib.request.urlopen(url, timeout=5) as response:
+            return dict(response.headers), response.read()
+
+    def test_the_guard_holds(self):
+        headers, _ = self.fetch(self.endpoint(), "/player")
+        self.assertEqual(
+            headers.get("Referrer-Policy"), "strict-origin-when-cross-origin"
+        )
+
+    def test_reintroducing_no_referrer_is_visible(self):
+        """Mutation: the response header goes back to suppressing the referrer.
+
+        Patched at the one place the header is written, so the mutation is the
+        exact regression — not a rewrite of the file — and the assertion is that
+        the served response changes. A test that only read the source would pass
+        against a page that had been mutated at runtime.
+        """
+        from cofferdam.workstation.youtubeplayer import endpoint as module
+
+        endpoint = self.endpoint()
+        original = module._Handler._respond
+
+        def suppressing(self, status, body, content_type):
+            # The old behaviour: the referrer is stripped before it can identify
+            # the embedding page, which is what produced error 153.
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.end_headers()
+            self.wfile.write(body)
+
+        module._Handler._respond = suppressing
+        try:
+            headers, _ = self.fetch(endpoint, "/player")
+        finally:
+            module._Handler._respond = original
+
+        self.assertEqual(
+            headers.get("Referrer-Policy"),
+            "no-referrer",
+            "the mutation changed nothing — the policy header is not load-bearing",
+        )
+        # And the unmutated listener still identifies itself.
+        headers, _ = self.fetch(endpoint, "/player")
+        self.assertEqual(headers.get("Referrer-Policy"), "strict-origin-when-cross-origin")
+
+    def test_a_suppressing_meta_tag_would_be_caught(self):
+        """Mutation: the document regains `<meta name="referrer">`.
+
+        The scan is over the served bytes with HTML comments stripped, so it sees
+        a tag and not the paragraph explaining why there is not one.
+        """
+        import re
+
+        document = (REPO_ROOT / "web" / "player.html").read_text("utf-8")
+        stripped = re.sub(r"<!--.*?-->", " ", document, flags=re.DOTALL).lower()
+        self.assertNotIn('name="referrer"', stripped)
+
+        mutated = document.replace(
+            "<title>", '<meta name="referrer" content="no-referrer">\n<title>'
+        )
+        mutated_stripped = re.sub(r"<!--.*?-->", " ", mutated, flags=re.DOTALL).lower()
+        self.assertIn(
+            'name="referrer"',
+            mutated_stripped,
+            "the scan would not notice a reintroduced meta tag",
+        )
+
+    def test_a_suppressing_iframe_attribute_would_be_caught(self):
+        """Mutation: the generated iframe goes back to `no-referrer`."""
+        source = code_only((REPO_ROOT / "web" / "player.js").read_text("utf-8"))
+        self.assertIn('"referrerpolicy", "strict-origin-when-cross-origin"', source)
+        self.assertNotIn("no-referrer", source)
+
+        mutated = source.replace(
+            '"referrerpolicy", "strict-origin-when-cross-origin"',
+            '"referrerpolicy", "no-referrer"',
+        )
+        self.assertIn(
+            "no-referrer", mutated, "the scan would not notice a reintroduced attribute"
+        )
+
+
+# -- 9-10. the embedding origin ----------------------------------------------
+
+
+class PlayerOriginGuard(unittest.TestCase):
+    def endpoint(self):
+        from cofferdam.workstation.youtubeplayer.endpoint import PlayerEndpoint
+
+        endpoint = PlayerEndpoint(PlayerChannel())
+        endpoint.start()
+        self.addCleanup(endpoint.stop)
+        return endpoint
+
+    def register(self, endpoint, body=None):
+        import json as _json
+        import urllib.request
+
+        request = urllib.request.Request(
+            "http://127.0.0.1:" + str(endpoint.port) + "/channel/register",
+            data=_json.dumps(body or {}).encode(),
+            method="POST",
+        )
+        request.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return _json.loads(response.read())
+
+    def test_the_guard_holds(self):
+        endpoint = self.endpoint()
+        payload = self.register(endpoint)
+        self.assertEqual(
+            payload["player_origin"], "http://127.0.0.1:" + str(endpoint.port)
+        )
+
+    def test_dropping_the_dynamic_port_is_visible(self):
+        """Mutation: the origin is built without the port.
+
+        The failure this prevents is quiet: `http://127.0.0.1` is a *different*
+        origin to `http://127.0.0.1:40187`, so the embed would be refused with
+        nothing in the page to suggest why.
+        """
+        from cofferdam.workstation.youtubeplayer import endpoint as module
+
+        endpoint = self.endpoint()
+        original = module.build_player_origin
+        module.build_player_origin = lambda _port: "http://" + module.LOOPBACK_HOST
+        try:
+            mutated = self.register(endpoint)["player_origin"]
+        finally:
+            module.build_player_origin = original
+
+        self.assertEqual(
+            mutated,
+            "http://127.0.0.1",
+            "the mutation changed nothing — the port is not actually read",
+        )
+        self.assertNotIn(str(endpoint.port), mutated)
+        # And the unmutated endpoint carries it.
+        self.assertIn(str(endpoint.port), self.register(endpoint)["player_origin"])
+
+    def test_a_hardcoded_port_would_stop_matching(self):
+        """Mutation: the port becomes a constant instead of the bound one.
+
+        40187 is the port the failing validation run happened to get. Hard-coding
+        it would pass on that one run and be wrong on every restart after it.
+        """
+        from cofferdam.workstation.youtubeplayer.endpoint import build_player_origin
+
+        endpoint = self.endpoint()
+        self.assertNotEqual(
+            build_player_origin(40187),
+            endpoint.player_origin(),
+            "the bound port happened to be 40187; rerun for a meaningful result",
+        )
+
+    def test_a_client_supplied_origin_is_structurally_impossible(self):
+        """Mutation: the client tries every field an origin could arrive in.
+
+        Not a check that could be deleted — there is no parameter. The register
+        handler reads nothing from the body at all, which is what this asserts by
+        sending hostile values and getting the same answer.
+        """
+        endpoint = self.endpoint()
+        honest = self.register(endpoint)["player_origin"]
+        for hostile in (
+            {"player_origin": "https://evil.example.com"},
+            {"origin": "https://evil.example.com"},
+            {"player_origin": "http://127.0.0.1:1", "port": 1},
+            {"instance_id": "x", "player_origin": None},
+        ):
+            self.assertEqual(
+                self.register(endpoint, hostile)["player_origin"],
+                honest,
+                "a client-supplied origin reached the response: " + str(hostile),
+            )
+
+    def test_accepting_a_client_origin_would_be_visible(self):
+        """Mutation: the handler starts honouring a body field.
+
+        Proves the assertion above is not vacuous — if the code did trust the
+        client, these tests would fail rather than pass on an unread field.
+        """
+        from cofferdam.workstation.youtubeplayer import endpoint as module
+
+        endpoint = self.endpoint()
+        original = module._Server.player_origin
+        module._Server.player_origin = lambda self: "https://evil.example.com"
+        try:
+            mutated = self.register(
+                endpoint, {"player_origin": "https://evil.example.com"}
+            )["player_origin"]
+        finally:
+            module._Server.player_origin = original
+
+        self.assertEqual(mutated, "https://evil.example.com")
+        self.assertTrue(
+            self.register(endpoint)["player_origin"].startswith("http://127.0.0.1:")
+        )
+
+
+# -- 11. error 153 mapping ---------------------------------------------------
+
+
+class EmbedIdentityMappingGuard(MutationTestCase):
+    """The 153 mapping, and the two wrong answers it exists to prevent."""
+
+    def reject(self):
+        from cofferdam.workstation.youtubeplayer.errors import ERROR_EMBED_IDENTITY
+
+        self.service.launcher.player.error_on_load = ERROR_EMBED_IDENTITY
+
+    def test_the_guard_holds(self):
+        self.reject()
+        session = self.session()
+        with self.assertRaises(YouTubePlayerError) as raised:
+            self.actions.play_search_result(session.search_id, "r0")
+        self.assertEqual(
+            raised.exception.code, "youtube_embed_client_identity_rejected"
+        )
+
+    def test_dropping_153_from_the_documented_set_reports_it_as_nothing(self):
+        """Mutation: 153 goes back to being an unrecognised number.
+
+        This is the pre-patch behaviour, and it is worth seeing exactly what it
+        produced, because it is why the failure was hard to place: the code is
+        dropped at the channel, the observation carries **no error at all**, and
+        the phone is told the video is *loaded and not yet playing*. Nothing
+        raises. Somebody reads that and waits for a video that is never coming.
+        """
+        from cofferdam.workstation.youtubeplayer import errors as module
+
+        self.reject()
+        session = self.session((VIDEO_ID, OTHER_VIDEO_ID))
+        original = module.PLAYER_ERROR_CODES
+        module.PLAYER_ERROR_CODES = tuple(
+            code for code in original if code != module.ERROR_EMBED_IDENTITY
+        )
+        try:
+            mutated = self.actions.play_search_result(session.search_id, "r0")
+        finally:
+            module.PLAYER_ERROR_CODES = original
+
+        self.assertEqual(
+            mutated["outcome"],
+            "partially_applied",
+            "the mutation raised anyway — the mapping is not what produces the "
+            "refusal",
+        )
+        self.assertIsNone(mutated["player"]["last_error"])
+        self.assertIn("loaded", mutated["note"])
+
+        # Unmutated, the same player state refuses, and names the real problem.
+        with self.assertRaises(YouTubePlayerError) as raised:
+            self.actions.play_search_result(session.search_id, "r1")
+        self.assertEqual(
+            raised.exception.code, "youtube_embed_client_identity_rejected"
+        )
+
+    def test_mapping_153_to_autoplay_blocked_would_be_visible(self):
+        """Mutation: the state report calls a rejected embed a blocked autoplay.
+
+        The worst of the wrong answers, because it is *actionable* and the action
+        does not exist: it sends somebody to click a player window that YouTube
+        never loaded.
+        """
+        from cofferdam.workstation.youtubeplayer import channel as module
+        from cofferdam.workstation.youtubeplayer.models import (
+            PLAYBACK_AUTOPLAY_BLOCKED,
+            PLAYBACK_ERROR,
+        )
+
+        channel = module.PlayerChannel()
+        instance = channel.register()
+        report = {
+            "player_state": 5,
+            "video_id": VIDEO_ID,
+            "error_code": 153,
+            "autoplay_blocked": True,
+        }
+
+        channel.submit_state(instance, report)
+        self.assertEqual(channel.observation().playback_state, PLAYBACK_ERROR)
+
+        original = module.describe_player_error
+        module.describe_player_error = lambda _code: None
+        try:
+            channel.submit_state(instance, report)
+            mutated = channel.observation().playback_state
+        finally:
+            module.describe_player_error = original
+
+        self.assertEqual(
+            mutated,
+            PLAYBACK_AUTOPLAY_BLOCKED,
+            "the mutation changed nothing — the error does not actually outrank "
+            "the autoplay flag",
+        )
+
+    def test_mapping_153_to_success_would_be_visible(self):
+        """Mutation: the refusal is skipped and the outcome is assembled anyway.
+
+        A rejected embed must never produce an envelope at all, so the assertion
+        is that removing the refusal is what makes one appear.
+        """
+        from cofferdam.workstation.youtubeplayer.actions import OUTCOME_APPLIED
+
+        self.reject()
+        # The fake player reports the id it was asked for and then an error, so
+        # with the refusal removed the identity check passes and the executor
+        # has nothing left to stop it.
+        self.service.launcher.player.load_video_id_override = None
+        session = self.session()
+
+        original = self.actions._refuse_reported_error
+        self.actions._refuse_reported_error = lambda: None
+        try:
+            result = self.actions.play_search_result(session.search_id, "r0")
+        finally:
+            self.actions._refuse_reported_error = original
+
+        self.assertIn(
+            result["outcome"],
+            (OUTCOME_APPLIED, "partially_applied"),
+            "the mutation produced no false answer — the refusal is decorative",
+        )
+        # And unmutated, the same situation raises rather than answering.
+        with self.assertRaises(YouTubePlayerError):
+            self.actions.play_search_result(session.search_id, "r0")
 
 
 if __name__ == "__main__":  # pragma: no cover

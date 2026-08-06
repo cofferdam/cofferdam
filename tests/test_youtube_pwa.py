@@ -155,6 +155,89 @@ class NoFalseSuccess(unittest.TestCase):
         self.assertIn("appliedGeneration", adopt_body)
 
 
+# -- error 153: the embed YouTube would not identify -------------------------
+
+
+class EmbedIdentityRejection(unittest.TestCase):
+    """What the phone shows when the player could not identify itself.
+
+    The failure real-host validation produced. The panel's job is to name the
+    real problem — the *player page*, not the video and not autoplay — and to
+    offer the only two things that help, one of them at most once.
+    """
+
+    def test_it_explains_the_rejection_in_the_product_s_own_words(self):
+        html = panel("identity-rejection-explains-and-offers-both")["html"]
+        self.assertIn("could not tell YouTube which page was embedding it", html)
+        # And rules out both wrong guesses explicitly, because each sends
+        # somebody somewhere that cannot help.
+        self.assertIn("not with the video you chose", html)
+        self.assertIn("not with sound being blocked", html)
+
+    def test_it_offers_retry_and_open_in_youtube(self):
+        html = panel("identity-rejection-explains-and-offers-both")["html"]
+        self.assertIn("Retry dedicated player", html)
+        self.assertIn("Open in YouTube", html)
+
+    def test_it_is_not_rendered_as_autoplay_blocked(self):
+        """The autoplay instruction must not appear for a rejected embed."""
+        html = panel("identity-rejection-is-not-autoplay-blocked")["html"]
+        self.assertNotIn("will not start sound until the player window", html)
+        self.assertNotIn("Enable playback", html)
+        self.assertNotIn("browser rule, not a Cofferdam setting", html)
+
+    def test_it_is_not_rendered_as_success(self):
+        result = panel("identity-rejection-explains-and-offers-both")
+        html = result["html"]
+        self.assertNotIn("Playing on the workstation player", html)
+        self.assertNotIn("Added to the Cofferdam queue", html)
+        # One write was attempted, and it is not being described as having worked.
+        self.assertEqual(len(result["writes"]), 1)
+
+    def test_the_retry_is_bounded(self):
+        """One retry. A third and fourth press send nothing at all."""
+        result = panel("identity-retry-is-bounded")
+        self.assertEqual(result["afterFirst"], 1)
+        self.assertEqual(result["afterRetry"], 2, "the retry sent no request")
+        self.assertEqual(
+            result["afterExtraPresses"],
+            2,
+            "the panel kept retrying after its bound",
+        )
+        # The button is offered once and then withdrawn, with a reason.
+        self.assertIn("Retry dedicated player", result["offered"])
+        self.assertNotIn("Retry dedicated player", result["afterRetryHtml"])
+        self.assertIn("Retrying the dedicated player did not help", result["afterRetryHtml"])
+        # Open in YouTube survives the bound, because it still works.
+        self.assertIn("Open in YouTube", result["afterRetryHtml"])
+
+    def test_open_in_youtube_is_explicit_and_never_automatic(self):
+        """13 of the play-now contract, at the UI: no watch tab opens itself."""
+        result = panel("identity-open-in-youtube-is-explicit")
+        self.assertEqual(
+            result["beforePress"], [], "a watch page was opened without being asked"
+        )
+        # And pressing it opens the video that was actually chosen, by handle.
+        self.assertEqual(result["afterPress"], ["r2"])
+        # Through the existing open path, not by sending a second player write.
+        self.assertEqual(len(result["writes"]), 1)
+
+    def test_the_panel_names_no_url_for_the_fallback(self):
+        """The fallback is a callback into app.js, not a URL this file knows."""
+        source = youtube_code()
+        block = source.split("function openInYouTube")[1][:600]
+        self.assertIn("deps.openInYouTube", block)
+        for forbidden in ("youtube.com", "watch?v=", "http"):
+            self.assertNotIn(forbidden, block)
+
+    def test_the_card_fallback_is_wired_to_the_existing_open_path(self):
+        """app.js hands the panel its own explicit open action, unchanged."""
+        source = app_code()
+        block = source.split("global.CofferdamYouTube.mount")[1][:600]
+        self.assertIn("openInYouTube", block)
+        self.assertIn("openResult(YOUTUBE_PROVIDER_ID", block)
+
+
 # -- 42: one action at a time ------------------------------------------------
 
 
@@ -418,7 +501,9 @@ class PanelSeparation(unittest.TestCase):
     def test_the_panel_is_mounted_independently_of_the_others(self):
         """A player that cannot be reached must not take the page down."""
         source = app_code()
-        block = source.split("global.CofferdamYouTube.mount")[1][:300]
+        # Wide enough to cover the whole mount call, which now also injects the
+        # panel's Open in YouTube fallback.
+        block = source.split("global.CofferdamYouTube.mount")[1][:700]
         self.assertIn(".catch(", block)
 
 

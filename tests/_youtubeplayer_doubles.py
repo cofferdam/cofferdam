@@ -426,13 +426,23 @@ def build_service(launcher_factory=ImmediateLauncher, adapter=None, **kwargs) ->
 
 
 class _StubEndpoint:
-    """Stands in for the loopback listener without binding anything."""
+    """Stands in for the loopback listener without binding anything.
+
+    Carries ``player_origin`` as well as ``player_url`` because the real endpoint
+    does, and the two must agree: the origin the page declares to YouTube and the
+    address Opera is pointed at are the same origin or the embed is refused.
+    """
+
+    PORT = 45999
 
     def __init__(self) -> None:
         self.stopped = False
 
+    def player_origin(self) -> str:
+        return "http://127.0.0.1:" + str(self.PORT)
+
     def player_url(self) -> str:
-        return "http://127.0.0.1:45999/player"
+        return self.player_origin() + "/player"
 
     def stop(self) -> None:
         self.stopped = True

@@ -320,6 +320,30 @@ class Behaviour(YouTubeApiTestCase):
         cleared = self.client.delete("/api/youtube/player/queue", headers=self.auth)
         self.assertEqual(cleared.status_code, 200)
 
+    def test_a_rejected_embed_reaches_the_phone_as_its_own_code(self):
+        """Error 153, as a client sees it: a distinct code and a truthful status.
+
+        409 rather than 422: nothing about the request was wrong and the video is
+        fine — the *player* is in a state this cannot happen from, and the same
+        request works once the page can identify itself. The code has to be its
+        own so the panel can render the explanation and the two buttons that
+        help, rather than a red line of provider text.
+        """
+        from cofferdam.workstation.youtubeplayer.errors import ERROR_EMBED_IDENTITY
+
+        self.service.launcher.player.error_on_load = ERROR_EMBED_IDENTITY
+        session = self.session()
+        response = self.client.post(self.play_path(session), json={}, headers=self.auth)
+
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(
+            response.json()["error"]["code"], "youtube_embed_client_identity_rejected"
+        )
+        # And none of the answers it must never be.
+        blob = response.text.lower()
+        for forbidden in ("autoplay", "applied", "playing", "unavailable"):
+            self.assertNotIn(forbidden, blob, "a rejected embed was called " + forbidden)
+
     def test_the_audit_record_carries_no_content(self):
         session = self.session()
         self.client.post(self.play_path(session), json={}, headers=self.auth)
