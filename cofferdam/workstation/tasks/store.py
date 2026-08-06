@@ -343,12 +343,30 @@ class TaskStore:
         connection.execute("PRAGMA busy_timeout=" + str(BUSY_TIMEOUT_MS))
         connection.executescript(_SCHEMA)
         self._apply_schema_version(connection)
-        try:
-            self._path.chmod(stat.S_IRUSR | stat.S_IWUSR)
-        except OSError:  # pragma: no cover - platform dependent
-            pass
+        self._restrict_files()
         self._connection = connection
         return connection
+
+    def _restrict_files(self) -> None:
+        """Owner-only on the database **and its WAL/shm siblings**.
+
+        The siblings matter and are easy to miss: SQLite creates them with the
+        process umask, which on an ordinary Ubuntu account means ``0644`` — and
+        the write-ahead log holds recently written task content, which is
+        somebody's prompts and results.
+
+        The directory is ``0700``, so nothing else can traverse into them and
+        this is defence in depth rather than the boundary. It is still worth
+        doing: a directory permission is easy to lose when a file is copied,
+        moved, or restored from a backup, and a mode on the file itself travels
+        with it.
+        """
+        for suffix in ("", "-wal", "-shm"):
+            sibling = self._path.with_name(self._path.name + suffix)
+            try:
+                sibling.chmod(stat.S_IRUSR | stat.S_IWUSR)
+            except OSError:  # pragma: no cover - absent, or a platform without modes
+                continue
 
     def _apply_schema_version(self, connection: sqlite3.Connection) -> None:
         row = connection.execute(
@@ -372,6 +390,16 @@ class TaskStore:
                 "the task database was written by a newer version of Cofferdam"
             )
 
+    def _tighten_new_siblings(self) -> None:
+        """Re-apply the file modes after a write that may have created a sibling.
+
+        The WAL and shm files appear on the first write rather than at connect
+        time, so restricting once at open is not enough on a fresh database.
+        Cheap — three ``chmod`` calls on already-open paths — and it runs where
+        it can see the files exist.
+        """
+        self._restrict_files()
+
     @contextmanager
     def _write(self) -> Iterator[sqlite3.Connection]:
         """One transaction, committed on success and rolled back on anything else.
@@ -390,6 +418,7 @@ class TaskStore:
                 connection.execute("ROLLBACK")
                 raise
             connection.execute("COMMIT")
+            self._tighten_new_siblings()
 
     @contextmanager
     def _read(self) -> Iterator[sqlite3.Connection]:

@@ -558,6 +558,29 @@ class TransactionalStorage(TaskTestCase):
         self.assertIsNotNone(mode)
         self.assertEqual(mode & (stat.S_IRWXG | stat.S_IRWXO), 0)
 
+    def test_the_wal_and_shm_siblings_are_not_world_readable_either(self):
+        """The easy one to miss: the write-ahead log holds task content.
+
+        SQLite creates the siblings with the process umask, which on an ordinary
+        account is 0644. The directory is 0700 so nothing else can reach them,
+        but a mode on the file travels with the file when it is copied or
+        restored and a directory permission does not.
+        """
+        self.create()
+        for suffix in ("-wal", "-shm"):
+            sibling = self.store.path.with_name(self.store.path.name + suffix)
+            if not sibling.exists():
+                continue
+            mode = database_permissions(sibling)
+            self.assertEqual(
+                mode & (stat.S_IRWXG | stat.S_IRWXO), 0, str(sibling) + " is readable"
+            )
+
+    def test_the_task_directory_is_owner_only(self):
+        self.create()
+        mode = database_permissions(self.store.path.parent)
+        self.assertEqual(mode & (stat.S_IRWXG | stat.S_IRWXO), 0)
+
     def test_the_schema_version_is_recorded(self):
         self.create()
         connection = sqlite3.connect(str(self.store.path))
