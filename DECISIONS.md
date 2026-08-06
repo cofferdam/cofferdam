@@ -861,6 +861,63 @@ call at all, the panel contains no `console` call, content never enters a URL, a
 a task id or an audit record — and the audit function has no parameter for content, which makes that
 a property of the signature rather than a habit every caller has to keep.
 
+## M2G — Claude Code adapter (2026-08-06)
+
+**A prompt is content, not authority.** The phone sends a project id, an adapter id and text.
+Everything that decides what actually runs — the executable, every argument, the permission
+profile, the tool set, the environment, the session id, the working directory — is a constant in
+one file. There is no request field for any of them, and a test reads the route's own allowlist to
+prove the client vocabulary is five keys long.
+
+**The architecture came from the installed CLI, not from memory.** Two probes against a disposable
+sandbox settled it: one `claude -p` with `--input-format stream-json --output-format stream-json`
+took a second user message on the same stdin and answered with the same `session_id`, staying alive
+between turns; and SIGTERM to its process group ended a run in 0.4s with exit 143. So one bounded
+long-lived process per task. `--resume` also works and was rejected: continuity would then rest on
+a session store Cofferdam does not own, and "cancel" would have to mean "remember not to start the
+next turn", which is a weaker promise wearing the same word.
+
+**Bash is not in the tool set, and that is the containment argument.** Not gated behind an approval
+— absent. A Bash tool inside an approved project root is still a general shell on the workstation,
+reachable by writing English into a phone. The probe confirmed the CLI answers "no Bash tool is
+available" rather than prompting, so the refusal happens before anyone has to decide anything.
+`--strict-mcp-config` with no config and `--setting-sources ""` mean no file on this machine can
+widen the profile afterwards, which is also why Cofferdam never writes a Claude settings file.
+
+**Cofferdam grants reachability, never possession.** The child gets a thirteen-name environment
+allowlist built by selection rather than copy-and-delete. `HOME` is in it because the CLI's
+subscription login lives under the home directory; Cofferdam does not read those credentials, does
+not know their format and does not name their path. No `ANTHROPIC_*` variable, no key, no token.
+The auth probe is one fixed command and reads exactly two fields — the email address and
+organisation id in the same response are never assigned to anything, so there is no attribute for a
+later refactor to log by accident.
+
+**A pid is not an identity.** A run is a pid *and* a `/proc` start time *and* a process group *and*
+an adapter run id, re-verified before every signal — including between SIGTERM and SIGKILL, because
+a process can exit and its pid be reused in that gap. Nothing matches a process by name. If
+identity is lost, nothing is sent and the task says so; if the process will not stop, the task stays
+`cancelling` rather than being promoted to `cancelled`.
+
+**Exit code zero is not success.** Completion needs a `result` frame with `is_error` false and text
+in it. A process that ran and reported nothing is a failure that says exactly that. `approvals` is
+`False` because this version cannot answer a permission request, and `recover_after_restart` is
+`False` because no recovery is implemented — neither is "possible later" written as true today.
+
+**Two things the foundation declared and left unbuilt are now built, generically.** `inspect()` had
+no caller, which was fine for an adapter that finishes inside `start()` and unworkable for one whose
+work happens in a process; `TaskService.refresh_task` is that call, and it is deliberately the only
+mechanism, because a callback or a background sweep would be a second path that writes task state.
+And `AdapterEvent` promised evidence is a claim "unless the core observed the thing itself" with no
+way to say so; `AdapterOutcome.observations` is that channel, still checked against
+`VERIFIED_EVIDENCE_SOURCES`, so an adapter cannot launder a claim by moving it — only fail to be
+believed.
+
+**The authentication wait shows a sentence, not a field.** The foundation named
+`SECRET_BEARING_WAITING_REASONS` and the panel never read the list, because no adapter had produced
+one. This one does, and a textarea labelled "Your answer" under "waiting for sign-in" is an
+invitation to type a password into a task history. Cofferdam does not want the secret and has
+nowhere to put it, so it says so and points at the workstation.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when
