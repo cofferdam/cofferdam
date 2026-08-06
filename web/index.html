@@ -115,6 +115,31 @@
       <div id="spotifySections"><p class="muted">Loading…</p></div>
     </section>
 
+    <!-- YouTube player (M2E). Beside the Spotify panel and above Media, for the
+         same reason that one is: the search results in Media are where a video
+         is chosen and this is where it plays. The volume here is the *video
+         player's own* level inside one browser window on the workstation. It is
+         not this computer's speaker (that is Audio) and it is not Spotify's
+         player (that is the panel above). Three panels with three headings,
+         because three sliders all called "volume" is a trap. -->
+    <section class="panel" id="youtubePanel">
+      <div class="panel-head">
+        <h2>YouTube player</h2>
+        <div class="row tight">
+          <span class="muted" id="youtubeObserved"></span>
+          <button id="youtubeRefresh" class="ghost">Refresh</button>
+        </div>
+      </div>
+      <p class="muted">
+        Controls <strong>one Cofferdam player window</strong> that stays open on the workstation.
+        Choosing another video replaces what is playing in that same window — it does not open
+        another tab. <strong>Next and Previous move through Cofferdam's own queue</strong>, never
+        YouTube's suggestions. The volume here belongs to the video player, not to this
+        computer's speaker.
+      </p>
+      <div id="youtubeSections"><p class="muted">Loading…</p></div>
+    </section>
+
     <!-- Media launch profiles (M2B3A). Deliberately its own panel and not part
          of "Live system": every card here is a *definition* — something
          Cofferdam can open — and none of them says anything about what is
@@ -181,6 +206,7 @@
 <script src="/live.js"></script>
 <script src="/audio.js"></script>
 <script src="/spotify.js"></script>
+<script src="/youtube.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

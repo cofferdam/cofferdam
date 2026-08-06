@@ -102,6 +102,12 @@ Google account is linked, no OAuth consent happens, and no user data is
 reachable. OAuth would only be required for `forContentOwner`, `forDeveloper`
 and `forMine`, none of which Cofferdam uses.
 
+This one key is also all the YouTube Dedicated Player (M2E) needs. Playing a
+video uses the official IFrame Player API, which is embedded in a page and
+requires no credential of its own — so there is nothing further to set up here
+to play, queue, pause or change the volume of a video. See
+[`YOUTUBE_PLAYER.md`](YOUTUBE_PLAYER.md).
+
 ### 2.1 Create a Google Cloud project
 
 1. Sign in at <https://console.cloud.google.com/>.

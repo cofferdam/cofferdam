@@ -240,6 +240,14 @@ from a constant prefix, then routed through Opera by Cofferdam's default browser
 selection. Explicit Firefox selection remains available through the existing
 `browser_id` model. No tracking parameters, no playlist context.
 
+Since M2E, opening a YouTube result in a normal watch tab is the **explicit
+*Open in YouTube* action** rather than the default. A YouTube video result also
+offers *Play now* and *Add to queue*, which send it to the one persistent
+Cofferdam player instead of opening a tab — see
+[`YOUTUBE_PLAYER.md`](YOUTUBE_PLAYER.md). The resolution path described here is
+unchanged and is what both of those routes reuse: the client still names a
+result, never a video.
+
 **Neither claims playback.** Success means the launch was accepted and confirmed
 to the M1 standard, and every media result carries `playback: not_started` and
 `playback_started: false` — on success. The phone repeats that wording rather

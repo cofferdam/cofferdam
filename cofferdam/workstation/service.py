@@ -29,6 +29,16 @@ route                                        auth  purpose
 ``PUT  /api/audio/outputs/{id}/volume``      yes   set that output's volume
 ``PUT  /api/audio/outputs/{id}/mute``        yes   mute or unmute that output
 ``PUT  /api/audio/streams/{id}/output``      yes   always refused on this host
+``GET  /api/youtube/player``                 yes   dedicated player + queue state
+``GET  /api/youtube/activity``               yes   phase of a slow player operation
+``POST /api/youtube/player/open``            yes   open the one player on the host
+``POST /api/youtube/player/{operation}``     yes   pause/resume/next/previous
+``PUT  /api/youtube/player/volume``          yes   the *player's* volume, 0-100
+``PUT  /api/youtube/player/mute``            yes   the *player's* mute
+``DEL  /api/youtube/player/queue``           yes   clear the Cofferdam queue
+``DEL  /api/youtube/player/queue/{id}``      yes   remove one queued video
+``POST /api/media/searches/{sid}/results/{rid}/youtube/play``   yes  play it here
+``POST /api/media/searches/{sid}/results/{rid}/youtube/queue``  yes  queue it here
 ``WS   /ws``                                 yes   live events
 ``GET  /`` and static assets                 no    the PWA shell itself
 ===========================================  ====  =============================
@@ -75,6 +85,20 @@ its own session. The OAuth callback is **not** served by this application: it is
 a separate loopback-only listener that exists for a few minutes during
 authorization and is unreachable from the tailnet. See
 :mod:`cofferdam.workstation.spotifyplayer.callback`.
+
+**The YouTube player routes (M2E) control a browser tab on this machine**, and
+their vocabulary is narrower still: a search id, a result id, a queue item
+handle, an integer and a boolean. There is no field for a YouTube URL, a watch
+URL, a video id, an iframe source, a player command string, JavaScript, a
+browser tab id, or an executable path. A video is named by *which search result
+it was*, exactly as a Spotify track is, and Next is named by *which item of
+Cofferdam's own queue it is* — never by anything YouTube suggested.
+
+The player document is **not** served by this application either. It lives on a
+second loopback-only listener that binds lazily, serves two fixed paths, carries
+no token, and is unreachable from the tailnet. See
+:mod:`cofferdam.workstation.youtubeplayer.endpoint` for that trust boundary and
+what it is worth.
 """
 
 from __future__ import annotations
@@ -141,6 +165,33 @@ from .spotifyplayer.errors import (
     CODE_UNMUTE_UNKNOWN,
     CODE_VOLUME_UNSUPPORTED,
     SpotifyPlayerError,
+)
+from .youtubeplayer import PlayerService, YouTubeActionExecutor
+from .youtubeplayer.errors import (
+    CODE_BUSY as CODE_YOUTUBE_BUSY,
+    CODE_COMMAND_NOT_ACKNOWLEDGED,
+    CODE_EMBEDDING_REFUSED,
+    CODE_EMBED_IDENTITY_REJECTED,
+    CODE_INVALID_MUTE as CODE_YOUTUBE_INVALID_MUTE,
+    CODE_INVALID_VOLUME as CODE_YOUTUBE_INVALID_VOLUME,
+    CODE_LAUNCH_FAILED as CODE_YOUTUBE_LAUNCH_FAILED,
+    CODE_MUTE_NOT_OBSERVED,
+    CODE_NO_NEXT_ITEM,
+    CODE_NO_PLAYER,
+    CODE_NO_PREVIOUS_ITEM,
+    CODE_PLAYER_ERROR,
+    CODE_PLAYER_GONE,
+    CODE_QUEUE_FULL,
+    CODE_QUEUE_ITEM_UNKNOWN,
+    CODE_REGISTRATION_TIMEOUT,
+    CODE_RESULT_NOT_PLAYABLE as CODE_YOUTUBE_RESULT_NOT_PLAYABLE,
+    CODE_TRANSPORT_NOT_OBSERVED,
+    CODE_UNAVAILABLE as CODE_YOUTUBE_UNAVAILABLE,
+    CODE_VIDEO_NOT_OBSERVED,
+    CODE_VIDEO_UNAVAILABLE,
+    CODE_VOLUME_NOT_OBSERVED,
+    CODE_WRONG_PROVIDER,
+    YouTubePlayerError,
 )
 from .media import KIND_NATIVE_APP, MAX_QUERY_LENGTH
 from .media import catalogue as media_catalogue
@@ -257,6 +308,52 @@ _SPOTIFY_STATUS = {
     CODE_PROVIDER_UNAVAILABLE: 503,
 }
 
+# A YouTube player request body is a queue handle, an integer, or a boolean.
+MAX_YOUTUBE_BODY_BYTES = 2 * 1024
+
+# Refusal code -> HTTP status. 409 dominates for the same reason it does in the
+# Spotify table: most of these mean "the world is not in a state where this can
+# happen yet", which a client fixes by trying again or by opening the player —
+# not by sending a different request. 422 is reserved for a request that was
+# genuinely wrong, 501 for a host that cannot do this at all.
+_YOUTUBE_STATUS = {
+    CODE_YOUTUBE_UNAVAILABLE: 501,
+    CODE_NO_PLAYER: 409,
+    CODE_PLAYER_GONE: 409,
+    CODE_YOUTUBE_LAUNCH_FAILED: 409,
+    CODE_REGISTRATION_TIMEOUT: 504,
+    CODE_COMMAND_NOT_ACKNOWLEDGED: 504,
+    CODE_YOUTUBE_BUSY: 409,
+    # Observation failures. A command was delivered and the player did not end
+    # up in the state it asked for; retrying against fresh state is the right
+    # response, which is what 409 tells a client.
+    CODE_VIDEO_NOT_OBSERVED: 409,
+    CODE_VOLUME_NOT_OBSERVED: 409,
+    CODE_MUTE_NOT_OBSERVED: 409,
+    CODE_TRANSPORT_NOT_OBSERVED: 409,
+    # What YouTube itself refused. 422 rather than 5xx: nothing is broken, the
+    # video simply cannot play here, and the answer is Open in YouTube.
+    CODE_VIDEO_UNAVAILABLE: 422,
+    CODE_EMBEDDING_REFUSED: 422,
+    CODE_PLAYER_ERROR: 422,
+    # YouTube refused the embed because the player page did not identify itself
+    # — error 153. 409 rather than 422, because the request was not wrong and the
+    # video is fine: the *player* is in a state this cannot happen from, and a
+    # reloaded player answers the same request successfully. It is deliberately
+    # not grouped with the three above, whose answer is "this video will never
+    # play here".
+    CODE_EMBED_IDENTITY_REJECTED: 409,
+    # Queue and authority.
+    CODE_QUEUE_FULL: 409,
+    CODE_QUEUE_ITEM_UNKNOWN: 404,
+    CODE_NO_NEXT_ITEM: 409,
+    CODE_NO_PREVIOUS_ITEM: 409,
+    CODE_YOUTUBE_RESULT_NOT_PLAYABLE: 422,
+    CODE_WRONG_PROVIDER: 422,
+    CODE_YOUTUBE_INVALID_VOLUME: 422,
+    CODE_YOUTUBE_INVALID_MUTE: 422,
+}
+
 # The search-session refusals a Spotify result action can hit. Same codes the
 # existing open-result path already returns, so the PWA has one thing to branch
 # on — "that result list has expired, search again" — however the result was
@@ -280,6 +377,7 @@ def create_app(
     media_search=None,
     audio=None,
     spotify=None,
+    youtube_player=None,
 ) -> FastAPI:
     """Build the application. Arguments are injectable for tests."""
     config = config or load_config()
@@ -325,6 +423,15 @@ def create_app(
     )
     spotify_authorize = AuthorizationRunner(spotify, adapter)
 
+    # The YouTube dedicated player (M2E). It takes the *existing* search sessions
+    # as the sole authority for what a video is — no second YouTube catalogue
+    # exists — and the existing allowlisted browser launcher for opening its one
+    # player tab. Its loopback listener is not bound here: it binds lazily the
+    # first time a player is actually opened, so a host where nobody uses this
+    # never opens a socket.
+    youtube_player = youtube_player or PlayerService(adapter)
+    youtube_actions = YouTubeActionExecutor(youtube_player, media_search.sessions)
+
     executor = ActionExecutor(
         adapter, store, config, on_event=_on_event, media_search=media_search
     )
@@ -361,6 +468,8 @@ def create_app(
     app.state.spotify_actions = spotify_actions
     app.state.spotify_authorize = spotify_authorize
     app.state.spotify_recovery = spotify_recovery
+    app.state.youtube_player = youtube_player
+    app.state.youtube_actions = youtube_actions
     overlays = DisplayOverlayStore(config, inventory)
     app.state.display_overlays = overlays
 
@@ -1249,6 +1358,270 @@ def create_app(
             search_id,
             result_id,
             payload.get("device_resource_id"),
+        )
+
+    # -- YouTube dedicated player (M2E) --------------------------------------
+    #
+    # The narrowest write surface in this file. A client may send exactly four
+    # kinds of value: a search id and a result id it was given, a queue item
+    # handle it was given, one integer, and one boolean. There is no field for a
+    # YouTube URL, a watch URL, a video id, an iframe source, a player command
+    # string, JavaScript, a browser tab id, or an executable path — and those
+    # are *absent from the schemas* rather than validated and rejected.
+    #
+    # The player itself is not reachable from here. It talks to a separate
+    # loopback-only listener that is never bound to the tailnet; see
+    # cofferdam/workstation/youtubeplayer/endpoint.py for that trust boundary.
+
+    async def _youtube_body(request: Request, allowed: set) -> Dict[str, Any]:
+        """A bounded JSON body with a strict field set, or a refusal."""
+        content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if content_type != "application/json":
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="this endpoint accepts application/json only",
+                status_code=415,
+            )
+        declared = request.headers.get("content-length")
+        if declared is not None:
+            try:
+                too_big = int(declared) > MAX_YOUTUBE_BODY_BYTES
+            except ValueError:
+                raise ApiError(
+                    code=CODE_INVALID_PARAMS, message="invalid Content-Length", status_code=400
+                )
+            if too_big:
+                raise ApiError(
+                    code=CODE_INVALID_PARAMS,
+                    message="the request body is too large",
+                    status_code=413,
+                )
+        raw = await request.body()
+        # Checked again after reading: Content-Length is a claim, not a fact.
+        if len(raw) > MAX_YOUTUBE_BODY_BYTES:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS, message="the request body is too large", status_code=413
+            )
+        if not raw:
+            payload: Any = {}
+        else:
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                raise ApiError(
+                    code=CODE_INVALID_PARAMS,
+                    message="the request body is not valid JSON",
+                    status_code=400,
+                )
+        if not isinstance(payload, dict):
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="the request body must be a JSON object",
+                status_code=400,
+            )
+        unexpected = sorted(set(payload) - allowed)
+        if unexpected:
+            # Refused, not ignored. A body carrying `video_id`, `url`, `command`
+            # or `script` is a client trying to address the player directly, and
+            # dropping the field silently would teach it the attempt was fine.
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="unexpected field: " + unexpected[0],
+                status_code=422,
+                detail=(
+                    "this endpoint accepts only: " + ", ".join(sorted(allowed))
+                    if allowed
+                    else "this endpoint accepts no fields"
+                ),
+            )
+        return payload
+
+    async def _run_youtube(name: str, operation, *args) -> Dict[str, Any]:
+        """Run one player action, auditing the operation and its outcome only.
+
+        The audit deliberately records no video, title, channel or queue content
+        — see store.record_youtube_event.
+        """
+        try:
+            result = await run_in_threadpool(operation, *args)
+        except YouTubePlayerError as rejection:
+            store.record_youtube_event(name, rejection.code)
+            raise ApiError(
+                code=rejection.code,
+                message=rejection.message,
+                status_code=_YOUTUBE_STATUS.get(rejection.code, 422),
+                detail=rejection.detail,
+            )
+        except AdapterError as rejection:
+            # The search-session refusals — expired session, unknown result, and
+            # the cross-provider check that stops a Spotify result reaching the
+            # YouTube player. They come from the *existing* media-search layer
+            # and already carry the right codes, so they are mapped rather than
+            # rewritten; without this they would reach the phone as "internal
+            # error" and send someone hunting for a bug instead of searching
+            # again.
+            code = getattr(rejection, "code", CODE_ADAPTER_FAILED)
+            store.record_youtube_event(name, code)
+            raise ApiError(
+                code=code,
+                message=rejection.message,
+                status_code=_MEDIA_SEARCH_STATUS.get(code, 409),
+                detail=rejection.detail,
+            )
+        outcome = result.get("outcome")
+        store.record_youtube_event(
+            name,
+            "ok" if outcome in ("applied", "queued") else str(outcome),
+            correlation_id=result.get("correlation_id"),
+        )
+        return result
+
+    @app.get("/api/youtube/player", dependencies=[Depends(require_token)])
+    async def youtube_player_state() -> Dict[str, Any]:
+        """Connection state, current video, playback, volume and the queue.
+
+        Reads in-memory state only: no provider call, no browser inspection, no
+        process scan. It changes nothing — no GET in this group has a side
+        effect, and in particular reading this never opens a player.
+        """
+        return youtube_player.snapshot().to_dict()
+
+    @app.get("/api/youtube/activity", dependencies=[Depends(require_token)])
+    async def youtube_activity() -> Dict[str, Any]:
+        """What a long player operation is doing right now. Free to poll.
+
+        Opening the player can take twenty seconds — launch Opera, wait for the
+        tab, wait for the official API script, load the video, confirm it — and
+        a phone showing a spinner for that long is indistinguishable from a
+        phone that has hung. This is what the PWA polls meanwhile: one in-memory
+        record, a phase from a closed vocabulary, and an elapsed time. No video,
+        no title, no queue.
+        """
+        return youtube_actions.activity.snapshot()
+
+    @app.post("/api/youtube/player/open", dependencies=[Depends(require_token)])
+    async def youtube_open_player(request: Request) -> Dict[str, Any]:
+        """Open the dedicated player on the workstation, if one is not open.
+
+        Idempotent by design: with a player already connected this opens nothing
+        and says so, rather than adding a tab.
+        """
+        await _youtube_body(request, allowed=set())
+        return await _run_youtube("youtube_open_player", youtube_actions.open_player)
+
+    _YOUTUBE_TRANSPORT = {
+        "pause": lambda: youtube_actions.pause(),
+        "resume": lambda: youtube_actions.resume(),
+        "next": lambda: youtube_actions.skip(True),
+        "previous": lambda: youtube_actions.skip(False),
+    }
+
+    @app.post("/api/youtube/player/{operation}", dependencies=[Depends(require_token)])
+    async def youtube_transport(operation: str, request: Request) -> Dict[str, Any]:
+        """Pause, resume, next, previous — each re-read and verified after.
+
+        Next and Previous move through the **Cofferdam** queue. They never
+        consult YouTube's suggestions, and with nothing queued they refuse
+        rather than playing whatever would have come next.
+        """
+        if operation not in _YOUTUBE_TRANSPORT:
+            raise ApiError(
+                code=CODE_NOT_FOUND,
+                message="unknown player operation",
+                status_code=404,
+                detail="known operations: " + ", ".join(sorted(_YOUTUBE_TRANSPORT)),
+            )
+        await _youtube_body(request, allowed=set())
+        return await _run_youtube("youtube_" + operation, _YOUTUBE_TRANSPORT[operation])
+
+    @app.put("/api/youtube/player/volume", dependencies=[Depends(require_token)])
+    async def youtube_volume(request: Request) -> Dict[str, Any]:
+        """Set the YouTube player's own volume. Not this computer's speaker.
+
+        Out-of-range values are refused, never clamped, and the response carries
+        the volume the *player* reported afterwards rather than the one that was
+        asked for.
+        """
+        payload = await _youtube_body(request, allowed={"volume_percent"})
+        if "volume_percent" not in payload:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS, message="volume_percent is required", status_code=422
+            )
+        return await _run_youtube(
+            "youtube_set_volume", youtube_actions.set_volume, payload["volume_percent"]
+        )
+
+    @app.put("/api/youtube/player/mute", dependencies=[Depends(require_token)])
+    async def youtube_mute(request: Request) -> Dict[str, Any]:
+        """Mute or unmute the YouTube player through the official player API.
+
+        This is a real mute — the IFrame Player API publishes ``mute()`` and
+        ``unMute()`` and preserves the volume across them — so the field is
+        plainly ``muted``. It does not touch Computer Audio.
+        """
+        payload = await _youtube_body(request, allowed={"muted"})
+        if "muted" not in payload:
+            raise ApiError(code=CODE_INVALID_PARAMS, message="muted is required", status_code=422)
+        return await _run_youtube(
+            "youtube_set_mute", youtube_actions.set_muted, payload["muted"]
+        )
+
+    @app.delete("/api/youtube/player/queue", dependencies=[Depends(require_token)])
+    async def youtube_clear_queue() -> Dict[str, Any]:
+        """Empty the Cofferdam queue. Does not stop what is playing."""
+        return await _run_youtube("youtube_clear_queue", youtube_actions.clear_queue)
+
+    @app.delete(
+        "/api/youtube/player/queue/{queue_item_id}", dependencies=[Depends(require_token)]
+    )
+    async def youtube_remove_queue_item(queue_item_id: str) -> Dict[str, Any]:
+        """Remove one queued video by the handle the server issued."""
+        return await _run_youtube(
+            "youtube_remove_queue_item", youtube_actions.remove_queue_item, queue_item_id
+        )
+
+    @app.post(
+        "/api/media/searches/{search_id}/results/{result_id}/youtube/play",
+        dependencies=[Depends(require_token)],
+    )
+    async def youtube_play_result(
+        search_id: str, result_id: str, request: Request
+    ) -> Dict[str, Any]:
+        """Play the exact video behind a verified YouTube result.
+
+        The video is named by *which result it was*. The server resolves it from
+        its own search session, so there is no request field for a video id or a
+        URL to validate. One press is enough: with no player open this opens
+        one, waits for it, and continues — it never falls back to a normal watch
+        tab, which remains the explicit *Open in YouTube* action.
+        """
+        await _youtube_body(request, allowed=set())
+        return await _run_youtube(
+            "youtube_play_search_result",
+            youtube_actions.play_search_result,
+            search_id,
+            result_id,
+        )
+
+    @app.post(
+        "/api/media/searches/{search_id}/results/{result_id}/youtube/queue",
+        dependencies=[Depends(require_token)],
+    )
+    async def youtube_queue_result(
+        search_id: str, result_id: str, request: Request
+    ) -> Dict[str, Any]:
+        """Add the exact video behind a verified result to the Cofferdam queue.
+
+        Sends no command to the player at all, which is what makes "adding
+        something does not interrupt what is playing" structural rather than a
+        behaviour to be careful about.
+        """
+        await _youtube_body(request, allowed=set())
+        return await _run_youtube(
+            "youtube_queue_search_result",
+            youtube_actions.queue_search_result,
+            search_id,
+            result_id,
         )
 
     # -- live events ---------------------------------------------------------

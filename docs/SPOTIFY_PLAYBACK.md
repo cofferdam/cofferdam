@@ -12,12 +12,14 @@ is the first thing to get straight.
 | **Catalogue search** (M2B3A.1) | Nothing. Reads the public catalogue. | The *application's* client id and secret | No |
 | **Spotify playback** (this document) | Your account's player and its Connect devices | Your *user* authorization | **Yes** |
 | **Computer audio** (M2C) | This machine's speakers, via PipeWire | None | No |
+| **YouTube player** (M2E) | One Cofferdam player window on the workstation | The catalogue API key only | No |
 
-Two of those have a control called "volume" and they are not the same control.
-Turning Spotify down does not change this computer's level, and turning this
-computer down does not change Spotify's. The PWA keeps them in two panels with
-two headings for exactly that reason. See
-[`AUDIO_CONTROL.md`](AUDIO_CONTROL.md) for the other one.
+Three of those have a control called "volume" and they are not the same control.
+Turning Spotify down does not change this computer's level, turning this computer
+down does not change Spotify's, and neither of them touches the YouTube player.
+The PWA keeps them in three panels with three headings for exactly that reason.
+See [`AUDIO_CONTROL.md`](AUDIO_CONTROL.md) and
+[`YOUTUBE_PLAYER.md`](YOUTUBE_PLAYER.md) for the other two.
 
 ---
 
