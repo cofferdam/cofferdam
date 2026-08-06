@@ -377,6 +377,64 @@ class Layout(unittest.TestCase):
         self.assertIn(".task-actions button", narrow)
 
 
+class RealAdapterBoundaries(unittest.TestCase):
+    """What the panel does once an adapter runs an actual program.
+
+    Behavioural, through the shipped ``web/tasks.js``. The harness's adapter is
+    called "Runner" and is deliberately not named after any product: the panel
+    must render a real adapter's boundaries out of the fields the API sends,
+    without knowing what it is.
+    """
+
+    def test_an_authentication_wait_offers_no_text_field(self):
+        """A textarea under "waiting for sign-in" invites a password.
+
+        Task Core named ``SECRET_BEARING_WAITING_REASONS`` and the panel did not
+        read the list, because the only adapter that shipped never produced one.
+        The first adapter that authenticates does.
+        """
+        result = panel("authentication-wait-offers-no-text-field")
+        self.assertFalse(result["hasFollowupBox"])
+        self.assertFalse(result["hasSendButton"])
+        html = result["html"]
+        self.assertIn("task-secret-wait", html)
+        self.assertIn("Never type a password", html)
+        self.assertIn("on the workstation itself", html)
+        # No input of any kind appears in that state.
+        self.assertNotIn("<textarea", html)
+        self.assertNotIn("<input", html)
+
+    def test_cancel_is_still_offered_while_waiting_for_sign_in(self):
+        """Withholding the box must not withhold the way out of the task."""
+        result = panel("authentication-wait-offers-no-text-field")
+        self.assertTrue(result["hasCancelButton"])
+
+    def test_an_ordinary_question_still_gets_a_field(self):
+        """The control. Without this, "no box" could be satisfied by removing
+        follow-up altogether rather than by protecting one case of it."""
+        result = panel("clarification-wait-still-offers-the-box")
+        self.assertTrue(result["hasFollowupBox"])
+        self.assertNotIn("task-secret-wait", result["html"])
+
+    def test_the_composer_shows_what_a_real_adapter_will_refuse(self):
+        """Before somebody writes a prompt asking for the thing it cannot do."""
+        html = panel("composer-shows-a-real-adapter-limitations")["html"]
+        self.assertIn("task-limitations", html)
+        self.assertIn("It has no shell.", html)
+        self.assertIn("cannot leave the project folder", html)
+        self.assertIn("Never type a password", html)
+        # And it is still not a terminal: no command, path or flag field.
+        for forbidden in ("taskCommand", "taskCwd", "taskEnv", "taskFlags"):
+            self.assertNotIn(forbidden, html)
+
+    def test_the_panel_prints_nothing_to_the_console(self):
+        for name in (
+            "authentication-wait-offers-no-text-field",
+            "composer-shows-a-real-adapter-limitations",
+        ):
+            self.assertEqual(panel(name)["consoleOutput"], [], name)
+
+
 class PanelSeparation(unittest.TestCase):
     def test_the_shell_carries_the_tasks_panel(self):
         html = (WEB_DIR / "index.html").read_text(encoding="utf-8")

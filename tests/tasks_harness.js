@@ -212,6 +212,29 @@ function listPayload(tasks) {
 function adaptersPayload(options) {
   const settings = options || {};
   if (settings.empty) { return { adapters: [] }; }
+  if (settings.realAdapter) {
+    /* An adapter that runs an actual program. Shaped exactly like the payload
+       `/api/task-adapters` returns for one, and deliberately NOT named after any
+       product: the panel must render it from these fields alone. */
+    return {
+      adapters: [
+        {
+          adapter_id: "runner",
+          display_name: "Runner",
+          description: "Runs a real program inside one approved project.",
+          available: true,
+          unavailable_reason: null,
+          capabilities: CAPABILITIES,
+          limitations: [
+            "It has no shell. It can read and edit files in the chosen project.",
+            "It cannot leave the project folder.",
+            "Never type a password, one-time code or token into a prompt."
+          ],
+          max_concurrent_tasks: 1
+        }
+      ]
+    };
+  }
   return {
     adapters: [
       {
@@ -690,6 +713,74 @@ function run() {
         return drain(80).then(function () {
           return { html: html(), writes: writes() };
         });
+      });
+    });
+  }
+
+  /* -- a real adapter's boundaries, and the wait that must not offer a box -- */
+
+  if (scenario === "composer-shows-a-real-adapter-limitations") {
+    return mount({
+      realAdapter: true,
+      result: () => ({ payload: {} })
+    }).then(function () {
+      fire("click", button("taskCompose"));
+      return drain().then(function () { return { html: html() }; });
+    });
+  }
+
+  if (scenario === "authentication-wait-offers-no-text-field") {
+    /* The property: a task waiting for sign-in gets a sentence, never an input.
+       A textarea under "waiting for sign-in on the workstation" is an invitation
+       to type a password into a task history. */
+    const waiting = taskPayload({
+      task_id: "task_auth",
+      state: "waiting_for_user",
+      waiting_reason: "authentication",
+      activity: "Sign in to Claude Code on the workstation."
+    });
+    return mount({
+      realAdapter: true,
+      initial: listPayload([waiting]),
+      detail: waiting,
+      events: [eventItem(1, "waiting_for_user", "Not signed in.")],
+      result: () => ({ payload: {} })
+    }).then(function () {
+      fire("click", openButton("task_auth"));
+      return drain().then(function () {
+        /* Read the rendered markup, not `el()`: the stub resolves every id in
+           index.html whether or not the panel actually painted it, so asking
+           it "is there a follow-up box" would answer yes forever. */
+        const markup = html();
+        return {
+          html: markup,
+          hasFollowupBox: markup.indexOf("taskFollowupText") !== -1,
+          hasSendButton: markup.indexOf("taskFollowupSend") !== -1,
+          hasCancelButton: markup.indexOf("taskCancel") !== -1
+        };
+      });
+    });
+  }
+
+  if (scenario === "clarification-wait-still-offers-the-box") {
+    /* The control for the scenario above: an ordinary question must still get a
+       field, or the fix would have removed follow-up rather than protected it. */
+    const waiting = taskPayload({
+      task_id: "task_q",
+      state: "waiting_for_user",
+      waiting_reason: "clarification"
+    });
+    return mount({
+      realAdapter: true,
+      initial: listPayload([waiting]),
+      detail: waiting,
+      events: [eventItem(1, "waiting_for_user", "Which file?")],
+      result: () => ({ payload: {} })
+    }).then(function () {
+      fire("click", openButton("task_q"));
+      return drain().then(function () {
+        const markup = html();
+        return { html: markup, hasFollowupBox: markup.indexOf("taskFollowupText") !== -1 };
       });
     });
   }
