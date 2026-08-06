@@ -151,14 +151,28 @@ class ClaudeRun:
 
     # -- launching -----------------------------------------------------------
 
-    def start(self) -> bool:
-        """Launch the process and wait for evidence it is genuinely running.
+    def start(self, first_turn: str) -> bool:
+        """Launch, deliver the first turn, and wait for evidence it is running.
 
         Returns ``True`` only when a ``system/init`` frame arrived carrying the
         session id Cofferdam chose. Everything else — including a process that
         started and then said nothing — is a failed launch, because a task
         reported as ``running`` on the strength of a successful ``fork`` would
         be a claim about work that may never have begun.
+
+        **The first turn is sent before the wait, and that ordering is the
+        whole method.** The installed CLI does not emit ``system/init`` when it
+        starts; it emits it when it receives its first user message. An earlier
+        version of this method launched, waited for init, and only then sent the
+        prompt — a deadlock that resolved ninety seconds later as "started but
+        never reported a ready session".
+
+        Every test passed, because the fake CLI in ``tests/_claude_doubles.py``
+        emitted init eagerly and so encoded the assumption rather than the
+        behaviour. Running against the real binary is what found it, and the
+        fake now waits for stdin exactly as the real one does. It is the reason
+        this milestone was told to verify the installed CLI instead of
+        remembering it.
         """
         argv = cli.build_argv(self.executable, self.session_id)
         env = (
@@ -206,6 +220,12 @@ class ClaudeRun:
             daemon=True,
         )
         self._reader.start()
+
+        # Before the wait. See the docstring.
+        if not self.send_turn(first_turn):
+            self.launch_error = "prompt_not_delivered"
+            self.stop(reason="launch_failed")
+            return False
 
         if not self._session_ready.wait(START_EVIDENCE_TIMEOUT_SECONDS):
             self.launch_error = "no_session_evidence"

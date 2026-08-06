@@ -12,8 +12,15 @@ So this writes a small Python script to a temporary directory and the adapter
 launches it exactly the way it would launch ``claude``. The script speaks the
 subset of the stream-json protocol the adapter reads, verified against the
 installed CLI 2.1.221 during development: a ``system/init`` frame carrying the
-session id from ``--session-id``, then one ``result`` frame per user message
-read from stdin.
+session id from ``--session-id`` once the first user message arrives, then one
+``result`` frame per user message read from stdin.
+
+One behaviour is worth stating because it was learned the hard way: the real CLI
+emits ``system/init`` **when it receives its first user message**, not when the
+process starts. This fake does the same. The version that emitted it eagerly let
+the whole suite pass while the adapter deadlocked against the real binary — a
+double that is wrong in the same direction as the code under test is worse than
+having no double at all.
 
 It calls no model, reaches no network, and imports nothing but the standard
 library.
@@ -74,22 +81,29 @@ if behaviour == "silent_start":
     time.sleep(30)
     sys.exit(0)
 
+# The init frame is emitted on the FIRST USER MESSAGE, not at startup, because
+# that is what the installed CLI does. An earlier version of this fake emitted
+# it eagerly; every test passed and the adapter deadlocked against the real
+# binary for ninety seconds. A double that is wrong in the same direction as the
+# code is worse than no double at all.
+first = sys.stdin.readline()
+
 if behaviour == "exit_zero_no_result":
     init()
-    sys.stdin.readline()
     sys.exit(0)
 
 init()
 
-turn = 0
-for line in sys.stdin:
+def handle(line):
+    """One user message in, the frames for one turn out."""
+    global turn
     line = line.strip()
     if not line:
-        continue
+        return
     try:
         message = json.loads(line)
     except ValueError:
-        continue
+        return
     turn += 1
     text = message.get("message", {}).get("content")
 
@@ -131,26 +145,39 @@ for line in sys.stdin:
         emit({"type": "result", "subtype": "error_during_execution",
               "is_error": True, "result": "something went wrong",
               "session_id": session, "uuid": "r", "permission_denials": []})
-        continue
+        return
 
     if behaviour == "denied":
         emit({"type": "result", "subtype": "success", "is_error": False,
               "result": "could not do it", "session_id": session, "uuid": "r",
               "permission_denials": [{"tool_name": "Bash",
                                       "tool_input": {"command": "rm -rf /"}}]})
-        continue
+        return
 
     if behaviour == "empty_result":
         emit({"type": "result", "subtype": "success", "is_error": False,
               "result": "", "session_id": session, "uuid": "r",
               "permission_denials": []})
-        continue
+        return
 
     emit({"type": "result", "subtype": "success", "is_error": False,
           "result": "turn " + str(turn) + " done: " + str(text),
           "session_id": session, "uuid": "r", "permission_denials": [],
           "stop_reason": "end_turn", "num_turns": turn,
           "total_cost_usd": 0.01})
+
+
+turn = 0
+handle(first)
+# One line at a time. `for line in sys.stdin` and `list(sys.stdin)` both buffer
+# until EOF, which would make this fake answer only after the adapter had
+# stopped talking to it — the opposite of a streaming protocol, and a way for a
+# test to pass against behaviour the real CLI does not have.
+while True:
+    nxt = sys.stdin.readline()
+    if not nxt:
+        break
+    handle(nxt)
 
 sys.exit(0)
 '''

@@ -89,11 +89,36 @@ on the same stdin and produced a second `result` frame carrying the same
 was closed. The prompt text appeared in no argv element, and a Turkish prompt
 (`ğüşiöç İ`) round-tripped intact.
 
+**Probe 1a — when `init` arrives, which is not when you would guess.** The CLI
+does **not** emit `system/init` at start-up. It emits it once it has received
+its first user message: a process launched and left alone produced no output at
+all for 25 s. So `ClaudeRun.start()` sends the first turn *before* waiting for
+session evidence. An earlier version waited first and deadlocked for ninety
+seconds against the real binary while every test passed, because the fake CLI in
+the test suite emitted `init` eagerly and so encoded the assumption instead of
+the behaviour. The fake now waits for stdin exactly as the real one does.
+
 **Probe 2 — containment and cancellation.** With `--tools "Read,Glob"`, a
 prompt asking Claude to run a shell command produced no shell execution and no
 approval prompt: Claude reported that no Bash tool existed in the session, and
 `permission_denials` was empty. SIGTERM to the process group ended the run in
 0.4 s with exit code 143.
+
+**Probe 3 — the profile, as the CLI itself reports it.** The `system/init`
+frame produced by the real argv confirms the containment rather than leaving it
+to be inferred from the flags:
+
+```
+tools:        ["Edit", "Glob", "Grep", "Read", "Write"]
+mcp_servers:  []
+plugins:      []
+skills:       []
+slash_commands: []
+permissionMode: "acceptEdits"
+```
+
+No Bash, no MCP server, no plugin, no skill, no slash command — reported by the
+program being constrained, not by the code doing the constraining.
 
 ### Observed frame types
 

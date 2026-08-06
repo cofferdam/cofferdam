@@ -209,7 +209,9 @@ class ClaudeCodeAdapter(TaskAdapter):
             return self._authentication_wait(auth)
 
         try:
-            launched = run.start()
+            # The prompt goes in here rather than in a second call afterwards:
+            # the CLI reports its session only once it has a turn to work on.
+            launched = run.start(context.prompt)
         except Exception:
             self._release(context.task_id)
             raise AdapterRefusal("Claude Code could not be started")
@@ -225,11 +227,11 @@ class ClaudeCodeAdapter(TaskAdapter):
                 raise AdapterRefusal(
                     "Claude Code started but never reported a ready session"
                 )
+            if reason == "prompt_not_delivered":
+                raise AdapterRefusal(
+                    "the prompt could not be delivered to Claude Code"
+                )
             raise AdapterRefusal("Claude Code could not be started")
-
-        if not run.send_turn(context.prompt):
-            self._release(context.task_id)
-            raise AdapterRefusal("the prompt could not be delivered to Claude Code")
 
         return AdapterOutcome(
             events=(

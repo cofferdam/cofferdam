@@ -376,9 +376,8 @@ class PromptTransport(ClaudeRunTestCase):
     def test_prompt_is_not_in_argv(self):
         """13, 52. Proven by the launched process, not by the launcher."""
         run = self.launch()
-        self.assertTrue(run.start())
         secret = "SENTINEL-PROMPT-Ünïcode-42"
-        self.assertTrue(run.send_turn(secret))
+        self.assertTrue(run.start(secret))
         self.assertIsNotNone(self.result_of(run))
 
         record = self.fake.launch_record()
@@ -390,8 +389,7 @@ class PromptTransport(ClaudeRunTestCase):
     def test_prompt_is_not_in_the_child_environment(self):
         """7, 52. Not smuggled in as a variable either."""
         run = self.launch()
-        self.assertTrue(run.start())
-        run.send_turn("SENTINEL-PROMPT")
+        self.assertTrue(run.start("SENTINEL-PROMPT"))
         self.assertIsNotNone(self.result_of(run))
         record = self.fake.launch_record()
         for name in record["env"]:
@@ -400,8 +398,7 @@ class PromptTransport(ClaudeRunTestCase):
     def test_prompt_is_delivered_through_the_documented_stdin_channel(self):
         """14. The turn arrives, and the fake echoes back what it read."""
         run = self.launch()
-        self.assertTrue(run.start())
-        run.send_turn("hello there")
+        self.assertTrue(run.start("hello there"))
         result = self.result_of(run)
         self.assertIsNotNone(result)
         self.assertIn("hello there", result.text)
@@ -410,8 +407,7 @@ class PromptTransport(ClaudeRunTestCase):
         """15. The characters that break naive encoding handling."""
         text = "Türkçe ğüşiöç İIı — ünlem! 日本語 🇹🇷"
         run = self.launch()
-        self.assertTrue(run.start())
-        run.send_turn(text)
+        self.assertTrue(run.start(text))
         result = self.result_of(run)
         self.assertIsNotNone(result)
         self.assertIn("Türkçe ğüşiöç İIı", result.text)
@@ -420,8 +416,7 @@ class PromptTransport(ClaudeRunTestCase):
     def test_the_turn_is_a_single_json_line(self):
         """A turn cannot be split across lines by content containing newlines."""
         run = self.launch()
-        self.assertTrue(run.start())
-        run.send_turn("line one\nline two\n{\"fake\": \"json\"}")
+        self.assertTrue(run.start("line one\nline two\n{\"fake\": \"json\"}"))
         result = self.result_of(run)
         self.assertIsNotNone(result)
         self.assertIn("line one", result.text)
@@ -435,8 +430,7 @@ class PromptTransport(ClaudeRunTestCase):
         the sentinel the other test looks for.
         """
         run = self.launch()
-        self.assertTrue(run.start())
-        run.send_turn("some prompt text nobody should see in a command line")
+        self.assertTrue(run.start("some prompt text nobody should see in a command line"))
         self.assertIsNotNone(self.result_of(run))
 
         record = self.fake.launch_record()
@@ -446,8 +440,7 @@ class PromptTransport(ClaudeRunTestCase):
     def test_the_process_runs_in_the_project_root(self):
         """The cwd is the verified root, and comes from nowhere else."""
         run = self.launch()
-        self.assertTrue(run.start())
-        run.send_turn("x")
+        self.assertTrue(run.start("x"))
         self.assertIsNotNone(self.result_of(run))
         record = self.fake.launch_record()
         self.assertEqual(
@@ -669,8 +662,7 @@ class ParserBoundsUnderLoad(ClaudeRunTestCase):
     def test_oversized_frames_are_refused_without_being_buffered(self):
         """19, 20. A 400 KB frame is dropped; the stream stays synchronised."""
         run = self.launch()
-        self.assertTrue(run.start())
-        run.send_turn("go")
+        self.assertTrue(run.start("go"))
         result = self.result_of(run, timeout=25.0)
         self.assertIsNotNone(result, "the stream desynchronised after a huge frame")
         with run.lock:
@@ -685,8 +677,7 @@ class ParserSurvivesGarbage(ClaudeRunTestCase):
     def test_unknown_and_non_json_output_does_not_break_the_run(self):
         """20, 21. Garbage in the stream is counted, and the turn still lands."""
         run = self.launch()
-        self.assertTrue(run.start())
-        run.send_turn("go")
+        self.assertTrue(run.start("go"))
         result = self.result_of(run, timeout=25.0)
         self.assertIsNotNone(result)
         self.assertFalse(result.is_error)
@@ -701,8 +692,7 @@ class ParserStripsAnsiFromRealOutput(ClaudeRunTestCase):
     def test_no_escape_sequence_reaches_the_stored_state(self):
         """22. End to end, through a real process."""
         run = self.launch()
-        self.assertTrue(run.start())
-        run.send_turn("go")
+        self.assertTrue(run.start("go"))
         self.assertIsNotNone(self.result_of(run))
         with run.lock:
             for record in run.state.records:
@@ -715,8 +705,7 @@ class ParserDropsThinking(ClaudeRunTestCase):
 
     def test_reasoning_never_reaches_the_state(self):
         run = self.launch()
-        self.assertTrue(run.start())
-        run.send_turn("go")
+        self.assertTrue(run.start("go"))
         self.assertIsNotNone(self.result_of(run))
         with run.lock:
             blob = json.dumps(
@@ -737,7 +726,7 @@ class ProcessIdentity(ClaudeRunTestCase):
     def test_start_time_is_read_from_proc(self):
         """39. The field that a recycled pid cannot reproduce."""
         run = self.launch()
-        self.assertTrue(run.start())
+        self.assertTrue(run.start("first turn"))
         self.assertIsNotNone(run.start_time)
         self.assertEqual(process.read_start_time(run.pid), run.start_time)
         self.assertIsNone(process.read_start_time(999999999))
@@ -745,28 +734,28 @@ class ProcessIdentity(ClaudeRunTestCase):
     def test_identity_requires_the_start_time_to_match(self):
         """39. A wrong start time means the pid is somebody else's."""
         run = self.launch()
-        self.assertTrue(run.start())
+        self.assertTrue(run.start("first turn"))
         self.assertTrue(run.still_ours())
         run.start_time = (run.start_time or 0) + 12345
         self.assertFalse(run.still_ours())
 
     def test_identity_requires_the_process_group_to_match(self):
         run = self.launch()
-        self.assertTrue(run.start())
+        self.assertTrue(run.start("first turn"))
         run.pgid = (run.pgid or 0) + 99999
         self.assertFalse(run.still_ours())
 
     def test_the_child_has_its_own_process_group(self):
         """40. Which is what makes a group signal targetable at one task."""
         run = self.launch()
-        self.assertTrue(run.start())
+        self.assertTrue(run.start("first turn"))
         self.assertEqual(os.getpgid(run.pid), run.pid)
         self.assertNotEqual(run.pgid, os.getpgid(os.getpid()))
 
     def test_nothing_is_signalled_when_identity_is_lost(self):
         """39, 40. No signal is sent on the strength of a stale pid."""
         run = self.launch()
-        self.assertTrue(run.start())
+        self.assertTrue(run.start("first turn"))
         run.start_time = (run.start_time or 0) + 4242
         outcome = run.stop(reason="test")
         self.assertEqual(outcome["result"], "identity_lost")
@@ -779,8 +768,7 @@ class Cancellation(ClaudeRunTestCase):
 
     def test_cancel_stops_the_process_with_a_bounded_escalation(self):
         run = self.launch()
-        self.assertTrue(run.start())
-        run.send_turn("work forever")
+        self.assertTrue(run.start("work forever"))
         time.sleep(0.4)
         self.assertIsNone(run.poll())
 
@@ -793,8 +781,7 @@ class Cancellation(ClaudeRunTestCase):
     def test_repeated_cancel_is_safe(self):
         """43. And the second one reports the truth rather than repeating."""
         run = self.launch()
-        self.assertTrue(run.start())
-        run.send_turn("work forever")
+        self.assertTrue(run.start("work forever"))
         time.sleep(0.3)
         run.stop(reason="first")
         run.reap()
@@ -806,10 +793,8 @@ class Cancellation(ClaudeRunTestCase):
         """41. Two real processes; stopping one leaves the other running."""
         first = self.launch(task_id="task-a")
         second = self.launch(task_id="task-b")
-        self.assertTrue(first.start())
-        self.assertTrue(second.start())
-        first.send_turn("a")
-        second.send_turn("b")
+        self.assertTrue(first.start("a"))
+        self.assertTrue(second.start("b"))
         time.sleep(0.4)
         self.assertNotEqual(first.pid, second.pid)
         self.assertNotEqual(first.pgid, second.pgid)
@@ -840,8 +825,7 @@ class Cancellation(ClaudeRunTestCase):
         self.addCleanup(lambda: (bystander.kill(), bystander.wait()))
 
         run = self.launch()
-        self.assertTrue(run.start())
-        run.send_turn("x")
+        self.assertTrue(run.start("x"))
         time.sleep(0.3)
         run.stop(reason="cancel")
         run.reap()
@@ -851,8 +835,7 @@ class Cancellation(ClaudeRunTestCase):
     def test_only_the_owned_group_is_signalled(self):
         """40. Assert on the call, not only on the survivors."""
         run = self.launch()
-        self.assertTrue(run.start())
-        run.send_turn("x")
+        self.assertTrue(run.start("x"))
         time.sleep(0.3)
 
         seen = []
@@ -886,7 +869,7 @@ class LaunchEvidence(ClaudeRunTestCase):
             setattr, process, "START_EVIDENCE_TIMEOUT_SECONDS", original
         )
         run = self.launch()
-        self.assertFalse(run.start())
+        self.assertFalse(run.start("first turn"))
         self.assertEqual(run.launch_error, "no_session_evidence")
 
 
@@ -896,7 +879,7 @@ class SessionMismatch(ClaudeRunTestCase):
     def test_a_different_session_is_refused_rather_than_adopted(self):
         """27. Cofferdam chose the id; a different one is not this task."""
         run = self.launch()
-        self.assertFalse(run.start())
+        self.assertFalse(run.start("first turn"))
         self.assertEqual(run.launch_error, "session_mismatch")
 
 
