@@ -40,10 +40,10 @@ from ...models import (
     STATE_CANCELLED,
     STATE_COMPLETED,
     STATE_FAILED,
+    STATE_READY_FOR_FOLLOWUP,
     STATE_WAITING_FOR_USER,
     WAITING_APPROVAL,
     WAITING_AUTHENTICATION,
-    WAITING_CLARIFICATION,
     EvidenceReference,
 )
 from ..protocol import (
@@ -124,6 +124,13 @@ class ClaudeCodeAdapter(TaskAdapter):
         self._run_factory = run_factory or ClaudeRun
         self._auth_probe = auth_probe or cli.probe_authentication
         self._runs: Dict[str, ClaudeRun] = {}
+        #: What was last reported to the core, per task. `inspect` is called on
+        #: every read of a task detail, and without this it answered the same
+        #: question with the same answer forever — 160 events for a task that
+        #: had about ten things to say. The store refuses consecutive duplicates
+        #: as well; this is the half that stops them being generated at all, and
+        #: with them the Git probes that produced the evidence.
+        self._reported: Dict[str, Dict[str, object]] = {}
         self._lock = threading.RLock()
 
     # -- what this adapter is ------------------------------------------------
@@ -372,14 +379,23 @@ class ClaudeCodeAdapter(TaskAdapter):
     # -- the asynchronous half ----------------------------------------------
 
     def inspect(self, context: TaskContext) -> AdapterOutcome:
-        """What has happened since last time, as a report the core may refuse.
+        """What has happened **since last time**, as a report the core may refuse.
 
-        Called by Task Core on read. Everything a Claude task does after its
-        first moment arrives through here: progress, the result, an
-        authentication wait, a refused tool, a process that died.
+        Called by Task Core on every read of a task detail. The words "since
+        last time" are the whole method: an earlier version answered the same
+        question with the same answer on every poll, so a task with about ten
+        things to say accumulated 160 durable events, re-ran four Git
+        subprocesses every ten seconds, and made the detail endpoint slow enough
+        that its own responses started losing races in the panel.
+
+        Only what changed is reported. What was reported is remembered per task
+        in :attr:`_reported`, and the store refuses consecutive duplicates as
+        well — two layers, because this one forgets across a restart and that
+        one does not.
         """
         with self._lock:
             run = self._runs.get(context.task_id)
+            seen = dict(self._reported.get(context.task_id) or {})
         if run is None:
             return AdapterOutcome()
 
@@ -392,13 +408,17 @@ class ClaudeCodeAdapter(TaskAdapter):
             oversized = state.oversized_frames
 
         events: List[AdapterEvent] = []
-        if activity:
+        fresh: Dict[str, object] = dict(seen)
+        if activity and activity != seen.get("activity"):
             events.append(AdapterEvent(event_type=EVENT_PROGRESS, text=activity))
-        if output:
+            fresh["activity"] = activity
+        if output and output != seen.get("output"):
             events.append(
                 AdapterEvent(event_type=EVENT_MEANINGFUL_OUTPUT, text=output)
             )
-        if truncated:
+            fresh["output"] = output
+        if truncated and not seen.get("truncated"):
+            fresh["truncated"] = True
             events.append(
                 AdapterEvent(
                     event_type=EVENT_PROGRESS,
@@ -406,7 +426,7 @@ class ClaudeCodeAdapter(TaskAdapter):
                     "the rest was not recorded.",
                 )
             )
-        if oversized:
+        if oversized and oversized != seen.get("oversized"):
             events.append(
                 AdapterEvent(
                     event_type=EVENT_PROGRESS,
@@ -414,6 +434,11 @@ class ClaudeCodeAdapter(TaskAdapter):
                     detail=str(oversized) + " frames",
                 )
             )
+            fresh["oversized"] = oversized
+
+        with self._lock:
+            if context.task_id in self._runs:
+                self._reported[context.task_id] = fresh
 
         exit_code = run.poll()
 
@@ -492,13 +517,31 @@ class ClaudeCodeAdapter(TaskAdapter):
         # evidence attached to an event is a claim by definition. What Cofferdam
         # ran for itself travels separately, through `observations`, which is
         # the only channel the core will label `git_observed`.
-        events.append(
-            AdapterEvent(
-                event_type=EVENT_MEANINGFUL_OUTPUT,
-                text=result.text[:MAX_RESULT_CHARS],
+        #
+        # Appended **once per distinct result**. `_settle` runs on every read of
+        # a settled task, and re-emitting the same sentence each time is how a
+        # ten-event task reached a hundred and sixty. The store also refuses
+        # consecutive duplicates, but the lifecycle event that ends the turn
+        # sits between two of these and stops them being consecutive — so the
+        # suppression has to happen here too.
+        settled_text = result.text[:MAX_RESULT_CHARS]
+        with self._lock:
+            already = (self._reported.get(run.task_id) or {}).get("settled")
+        if settled_text != already:
+            events.append(
+                AdapterEvent(
+                    event_type=EVENT_MEANINGFUL_OUTPUT,
+                    text=settled_text,
+                )
             )
-        )
-        observations = self._observe(run)
+            with self._lock:
+                if run.task_id in self._runs:
+                    self._reported.setdefault(run.task_id, {})["settled"] = settled_text
+        # Cofferdam's own Git probes are four subprocesses. Running them on
+        # every read of a task detail — which is what happened — is both
+        # pointless and the reason the detail endpoint was slow enough to lose
+        # races in the panel. They run once per distinct result.
+        observations = self._observe_once(run, result.text)
 
         if exit_code is None:
             # Before claiming this process can take another message, give it a
@@ -524,15 +567,16 @@ class ClaudeCodeAdapter(TaskAdapter):
                     exit_code = reaped
 
         if exit_code is None:
-            # The turn finished, the process is alive, and it can take another
-            # message. That is `waiting_for_user`, and it is what makes follow-up
-            # possible without inventing a state for it.
+            # The turn finished and the process is alive. **Not**
+            # `waiting_for_user`: nobody has been asked anything, and saying so
+            # put "NEEDS YOU / waiting for an answer" on a phone about a task
+            # that had done exactly what it was told. `ready_for_followup` says
+            # the true thing — the work is done and the session is still open.
             return AdapterOutcome(
                 events=tuple(events),
                 observations=observations,
-                requested_state=STATE_WAITING_FOR_USER,
-                waiting_reason=WAITING_CLARIFICATION,
-                final_result=result.text[:MAX_RESULT_CHARS],
+                requested_state=STATE_READY_FOR_FOLLOWUP,
+                final_result=settled_text,
             )
 
         self._release(run.task_id)
@@ -540,15 +584,29 @@ class ClaudeCodeAdapter(TaskAdapter):
             events=tuple(events),
             observations=observations,
             requested_state=STATE_COMPLETED,
-            final_result=result.text[:MAX_RESULT_CHARS],
+            final_result=settled_text,
         )
 
-    def _observe(self, run: ClaudeRun):
-        """Run Cofferdam's own Git probes and label what they found."""
+    def _observe_once(self, run: ClaudeRun, marker: Optional[str]):
+        """Run Cofferdam's own Git probes, once per distinct turn result.
+
+        The probes are the only thing in this adapter that can turn a claim into
+        an observation, so they must run — but they are four subprocesses, and
+        an earlier version ran them every time anybody opened the task. The
+        marker is the result text: a new result means new work to look at, and
+        the same result means the same repository state was already recorded.
+        """
+        key = "observed:" + (marker or "")
+        with self._lock:
+            if self._reported.get(run.task_id, {}).get("observed_for") == key:
+                return ()
         try:
             observation = observe_git(run.project_root)
         except Exception:
             return ()
+        with self._lock:
+            entry = self._reported.setdefault(run.task_id, {})
+            entry["observed_for"] = key
         return git_evidence(observation)
 
     # -- bookkeeping ---------------------------------------------------------
@@ -580,6 +638,27 @@ class ClaudeCodeAdapter(TaskAdapter):
             failure_message=message,
         )
 
+    def release_session(self, task_id: str) -> None:
+        """Close the retained session on purpose, because a person is finished.
+
+        Closing stdin is how the CLI is told there are no more turns; it exits
+        on its own, which is a cleaner ending than a signal. If it will not go,
+        the escalation is the same verified one cancellation uses — and if even
+        that fails, this raises, so the core leaves the task where it is rather
+        than recording a completion over a process that is still running.
+        """
+        with self._lock:
+            run = self._runs.get(task_id)
+        if run is None:
+            return
+        run.close_input()
+        if run.reap(timeout=5.0) is None:
+            outcome = run.stop(reason="session_finished")
+            run.reap(timeout=2.0)
+            if str(outcome.get("result")) == "still_running":
+                raise AdapterRefusal("the Claude process did not close")
+        self._release(task_id)
+
     def _release(self, task_id: str) -> None:
         """Free the concurrency slot, once the process is actually gone.
 
@@ -595,6 +674,7 @@ class ClaudeCodeAdapter(TaskAdapter):
             if run.poll() is None and run.still_ours():
                 return
             self._runs.pop(task_id, None)
+            self._reported.pop(task_id, None)
 
     def _forget_finished(self) -> None:
         for task_id in [

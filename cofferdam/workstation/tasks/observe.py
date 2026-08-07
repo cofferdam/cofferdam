@@ -59,6 +59,11 @@ MAX_EVENTS_PER_POLL = 200
 
 TERMINAL_STATES = frozenset({"completed", "failed", "cancelled", "interrupted"})
 
+#: Evidence sources that mean *Cofferdam looked*, as opposed to *something told
+#: Cofferdam*. Kept as literals rather than imported so this stays a standalone
+#: reader of a database, but asserted against the model by a test.
+VERIFIED_SOURCES = frozenset({"cofferdam_action", "os_observed", "git_observed"})
+
 
 def database_path(home: Optional[str] = None) -> Path:
     """Where the task store lives, derived the same way the daemon derives it.
@@ -123,7 +128,11 @@ def _evidence(raw: object) -> str:
         if not isinstance(item, dict):
             continue
         source = str(item.get("source") or "?")
-        mark = "observed" if item.get("verified") else "claimed"
+        # Derived, not read. `verified` is a *property* of EvidenceReference and
+        # is not part of what the store serialises, so asking the JSON for it
+        # got None every time and labelled genuine `git_observed` findings as
+        # "claimed" — the exact distinction this line exists to draw.
+        mark = "observed" if source in VERIFIED_SOURCES else "claimed"
         label = str(item.get("identifier") or item.get("operation") or "-")
         parts.append(label[:80] + " [" + source + "/" + mark + "]")
     return "; ".join(parts)

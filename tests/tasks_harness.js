@@ -785,6 +785,115 @@ function run() {
     });
   }
 
+  /* -- the detail view must follow the backend on its own ------------------ */
+
+  if (scenario === "detail-updates-without-a-page-reload") {
+    /* The reported defect: the phone sat on `running` while the backend had
+       already moved on, and only a manual browser refresh showed the truth.
+
+       The detail endpoint is deliberately made SLOWER than the list endpoint
+       here, because that is what production does — reading a task detail asks
+       the adapter what it saw, which for the Claude adapter runs Git probes.
+       A detail response that always arrives second is what turns a race into a
+       certainty. */
+    let state = "running";
+    const taskOf = () => taskPayload({
+      task_id: "task_live",
+      state: state,
+      activity: state === "running" ? "Working." : null,
+      result: state === "running" ? null : "Bitti."
+    });
+
+    let slowDetail = 0;
+    return mount({
+      initial: listPayload([taskOf()]),
+      onGet(pathname) {
+        if (pathname.indexOf("/api/tasks/") === 0 && pathname.indexOf("/events") === -1) {
+          /* Resolve after a few extra microtasks, so the list response for the
+             same tick is applied first. */
+          slowDetail += 1;
+          let chain = Promise.resolve();
+          for (let i = 0; i < 12; i += 1) { chain = chain.then(() => {}); }
+          return chain.then(() => ({ ok: true, status: 200, payload: { task: taskOf() } }));
+        }
+        if (pathname === "/api/tasks") {
+          return Promise.resolve({ ok: true, status: 200, payload: listPayload([taskOf()]) });
+        }
+        return null;
+      },
+      events: [eventItem(1, "task_started", "Running.")],
+      result: () => ({ payload: {} })
+    }).then(function () {
+      fire("click", openButton("task_live"));
+      return drain(60).then(function () {
+        const whileRunning = html();
+        /* The backend moves on. No page reload happens after this point. */
+        state = "ready_for_followup";
+        advance(5000);
+        return drain(120).then(function () {
+          advance(5000);
+          return drain(120).then(function () {
+            return {
+              whileRunning: whileRunning,
+              html: html(),
+              detailRequests: slowDetail,
+              listRequests: record.requests.filter((r) => r.path === "/api/tasks").length
+            };
+          });
+        });
+      });
+    });
+  }
+
+  if (scenario === "turn-complete-does-not-say-needs-you") {
+    const done = taskPayload({
+      task_id: "task_done",
+      state: "ready_for_followup",
+      activity: null,
+      result: "NOTES.md olusturuldu."
+    });
+    return mount({
+      realAdapter: true,
+      initial: listPayload([done]),
+      detail: done,
+      events: [eventItem(1, "meaningful_output", "NOTES.md olusturuldu.")],
+      result: () => ({ payload: {} })
+    }).then(function () {
+      fire("click", openButton("task_done"));
+      return drain().then(function () {
+        const markup = html();
+        return {
+          html: markup,
+          hasFollowupBox: markup.indexOf("taskFollowupText") !== -1,
+          hasFinishButton: markup.indexOf("taskFinish") !== -1,
+          hasCancelButton: markup.indexOf("taskCancel") !== -1
+        };
+      });
+    });
+  }
+
+  if (scenario === "finish-closes-the-session") {
+    const done = taskPayload({ task_id: "task_done", state: "ready_for_followup",
+                               activity: null, result: "Bitti." });
+    const completed = taskPayload({ task_id: "task_done", state: "completed",
+                                    activity: null, result: "Bitti." });
+    return mount({
+      realAdapter: true,
+      initial: listPayload([done]),
+      detail: done,
+      events: [eventItem(1, "meaningful_output", "Bitti.")],
+      result: () => ({ payload: { task: completed }, detail: completed })
+    }).then(function () {
+      fire("click", openButton("task_done"));
+      return drain().then(function () {
+        fire("click", button("taskFinish"));
+        return drain(80).then(function () {
+          return { html: html(), writes: writes() };
+        });
+      });
+    });
+  }
+
   return Promise.resolve({ error: "unknown scenario: " + scenario });
 }
 

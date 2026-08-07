@@ -76,9 +76,30 @@
   var actionNote = null;
   var stopped = false;
 
-  /* Response ordering, exactly as the Spotify and YouTube panels do it. */
+  /* Response ordering, exactly as the Spotify and YouTube panels do it — but
+     with **one counter per resource**, which those panels did not need because
+     they only ever fetch one thing.
+
+     The list and the open task detail are refreshed together on every tick, and
+     they are different resources. A newer *list* response says nothing about
+     whether a *detail* response is stale. Sharing one counter made it say
+     exactly that: the poll issues the detail request first and the list request
+     second, so the list holds the higher generation, and whenever the list
+     response landed first the detail response was discarded as "old".
+
+     That was not an occasional race. Reading a task detail asks the adapter
+     what it saw, which for the Claude adapter runs Git probes, so the detail
+     response is reliably the slower of the two — and the detail view sat on
+     `running` through every poll while the backend had long since moved on.
+     A manual page reload fixed it because a fresh mount has no competing list
+     response in flight.
+
+     Two counters. Each resource can still refuse a response older than the one
+     it has already applied, which is the property that actually matters. */
   var refreshGeneration = 0;
   var appliedGeneration = 0;
+  var detailGeneration = 0;
+  var appliedDetailGeneration = 0;
   var inflightRefresh = null;
 
   /* One key per created task, minted here and sent with the request, so a
@@ -136,6 +157,11 @@
       case "starting": return { text: "starting…", tone: "warn" };
       case "running": return { text: "running", tone: "ok" };
       case "waiting_for_user": return { text: "needs you", tone: "warn" };
+      /* Deliberately not "needs you". A finished turn needs nobody — the
+         session is simply still open if the person wants it. Saying "needs you"
+         here is what made the panel state a falsehood about a task that had
+         done exactly what it was asked. */
+      case "ready_for_followup": return { text: "turn complete", tone: "ok" };
       case "cancelling": return { text: "cancelling…", tone: "warn" };
       case "completed": return { text: "completed", tone: "ok" };
       case "failed": return { text: "failed", tone: "err" };
@@ -378,6 +404,8 @@
         "</p>"
       );
     } else if (task.state === "waiting_for_user" && capabilityOf(task, "followup")) {
+      /* Claude actually asked something. "Your answer" is true here and only
+         here. */
       buttons.push(
         '<div class="task-followup">' +
         '<label class="field"><span class="field-label">Your answer</span>' +
@@ -385,6 +413,22 @@
         (locked() ? " disabled" : "") + "></textarea></label>" +
         '<button id="taskFollowupSend" class="primary"' + (locked() ? " disabled" : "") + ">" +
         (busy("followup") ? "Sending…" : "Send answer") + "</button></div>"
+      );
+    } else if (task.state === "ready_for_followup" && capabilityOf(task, "followup")) {
+      /* The turn is done and nothing was asked. Different words, a different
+         field label, and a way out that is not cancellation. */
+      buttons.push(
+        '<p class="media-note task-turn-complete"><strong>Turn complete.</strong> ' +
+        "You can send an optional follow-up in the same session, " +
+        "or finish the task.</p>" +
+        '<div class="task-followup">' +
+        '<label class="field"><span class="field-label">Follow-up (optional)</span>' +
+        '<textarea id="taskFollowupText" rows="3" maxlength="' + MAX_FOLLOWUP_CHARS + '"' +
+        (locked() ? " disabled" : "") + "></textarea></label>" +
+        '<button id="taskFollowupSend" class="primary"' + (locked() ? " disabled" : "") + ">" +
+        (busy("followup") ? "Sending…" : "Send follow-up") + "</button>" +
+        '<button id="taskFinish" class="ghost"' + (locked() ? " disabled" : "") + ">" +
+        (busy("finish") ? "Finishing…" : "Finish task") + "</button></div>"
       );
     }
     /* Cancel is offered only where it can work: a finished task has nothing to
@@ -529,6 +573,11 @@
     return refreshGeneration;
   }
 
+  function nextDetailGeneration() {
+    detailGeneration += 1;
+    return detailGeneration;
+  }
+
   function adopt(payload, generation) {
     if (generation < appliedGeneration) { return false; }
     appliedGeneration = generation;
@@ -605,21 +654,27 @@
   }
 
   function loadDetail(taskId) {
-    var generation = nextGeneration();
+    var generation = nextDetailGeneration();
+    var requested = taskId;
     return deps.api("/api/tasks/" + encodeURIComponent(taskId)).then(function (response) {
       if (!response.ok) {
         loadError = "That task could not be read.";
         render();
         return null;
       }
-      if (generation < appliedGeneration) { return null; }
-      appliedGeneration = generation;
+      /* Two guards, and they are different questions. The generation keeps an
+         older detail response from painting over a newer one. The id check
+         keeps a response for a task the person has since navigated away from
+         out of the view entirely. */
+      if (generation < appliedDetailGeneration) { return null; }
+      if (openTaskId !== requested) { return null; }
+      appliedDetailGeneration = generation;
       detail = response.payload.task;
       return deps.api(
         "/api/tasks/" + encodeURIComponent(taskId) + "/events?after=0&limit=200"
       );
     }).then(function (response) {
-      if (response && response.ok) {
+      if (response && response.ok && openTaskId === requested) {
         detailEvents = response.payload.events || [];
       }
       render();
@@ -780,6 +835,36 @@
     });
   }
 
+  function finishTask() {
+    if (!openTaskId) { return Promise.resolve(null); }
+    if (!beginPending("finish")) { return Promise.resolve(null); }
+    var taskId = openTaskId;
+    return deps.api("/api/tasks/" + encodeURIComponent(taskId) + "/finish", {
+      body: {}
+    }).then(function (response) {
+      endPending();
+      if (!response.ok) {
+        actionError = failureOf(response);
+        render();
+        return loadDetail(taskId);
+      }
+      detail = response.payload.task;
+      /* Repeated, not upgraded, for the same reason cancel repeats: the
+         server's observed state is the only one worth showing. */
+      actionNote = detail.state === "completed"
+        ? "Task finished. The session was closed."
+        : "The task is " + detail.state + ".";
+      render();
+      return loadDetail(taskId).then(function () { return load(); });
+    }).catch(function (error) {
+      endPending();
+      if (error && error.message === "unauthorized") { return null; }
+      actionError = { message: "Cofferdam could not reach the workstation.", detail: null };
+      render();
+      return null;
+    });
+  }
+
   function cancelTask() {
     if (!openTaskId) { return Promise.resolve(null); }
     if (!beginPending("cancel")) { return Promise.resolve(null); }
@@ -889,6 +974,7 @@
             load();
             return;
           case "taskFollowupSend": sendFollowup(); return;
+          case "taskFinish": finishTask(); return;
           case "taskCancel": cancelTask(); return;
           case "taskCopyResult": copyResult(); return;
           default: return;

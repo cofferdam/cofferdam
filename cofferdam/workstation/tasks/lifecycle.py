@@ -33,6 +33,7 @@ from .models import (
     STATE_FAILED,
     STATE_INTERRUPTED,
     STATE_QUEUED,
+    STATE_READY_FOR_FOLLOWUP,
     STATE_RECOVERY_REQUIRED,
     STATE_RUNNING,
     STATE_STARTING,
@@ -65,6 +66,26 @@ ALLOWED_TRANSITIONS: Dict[str, FrozenSet[str]] = {
     ),
     STATE_RUNNING: frozenset(
         {
+            STATE_WAITING_FOR_USER,
+            STATE_READY_FOR_FOLLOWUP,
+            STATE_COMPLETED,
+            STATE_FAILED,
+            STATE_CANCELLING,
+            STATE_INTERRUPTED,
+            STATE_RECOVERY_REQUIRED,
+        }
+    ),
+    # A finished turn with a live session. It can take another message, be
+    # finished on purpose, or end the way anything else ends.
+    #
+    # `ready_for_followup → completed` is present and `waiting_for_user →
+    # completed` is still absent, and the difference is the point: an *answer*
+    # to a question must not finish a task, because what happens after the
+    # answer is the adapter's to report. Choosing "I am done with this" is not
+    # an answer to anything — it is a person closing a session they own.
+    STATE_READY_FOR_FOLLOWUP: frozenset(
+        {
+            STATE_RUNNING,
             STATE_WAITING_FOR_USER,
             STATE_COMPLETED,
             STATE_FAILED,

@@ -74,6 +74,7 @@ from .models import (
     EVENT_TASK_INTERRUPTED,
     EVENT_TASK_QUEUED,
     EVENT_TASK_STARTED,
+    EVENT_TURN_COMPLETE,
     EVENT_WAITING_FOR_USER,
     EVENT_PROGRESS,
     EVIDENCE_ADAPTER_REPORTED,
@@ -91,6 +92,7 @@ from .models import (
     STATE_FAILED,
     STATE_INTERRUPTED,
     STATE_QUEUED,
+    STATE_READY_FOR_FOLLOWUP,
     STATE_RECOVERY_REQUIRED,
     STATE_RUNNING,
     STATE_STARTING,
@@ -112,6 +114,14 @@ from .store import TaskRow, TaskStore
 #: correlation_id)``. Content never travels through it — see
 #: :meth:`TaskService._audit`.
 AuditHook = Callable[[str, str, Optional[str], Optional[str], Optional[str], Optional[str]], None]
+
+#: The two non-terminal states in which a follow-up is a sensible thing to send.
+#:
+#: They are different sentences and must stay different — ``waiting_for_user``
+#: means somebody was asked something, ``ready_for_followup`` means a turn ended
+#: and the session is still open — but from the service's point of view both are
+#: "the task can take another message from a person".
+FOLLOWUP_STATES = frozenset({STATE_WAITING_FOR_USER, STATE_READY_FOR_FOLLOWUP})
 
 
 def _payload_hash(*parts: object) -> str:
@@ -484,7 +494,7 @@ class TaskService:
         if row.state in TERMINAL_STATES:
             self._reject(row, "followup", "task is " + row.state)
             raise TaskAlreadyFinished(row.state)
-        if row.state != STATE_WAITING_FOR_USER:
+        if row.state not in FOLLOWUP_STATES:
             self._reject(row, "followup", "task is " + row.state)
             raise FollowupNotWaiting(row.state)
 
@@ -496,8 +506,9 @@ class TaskService:
             # request was being validated, and a follow-up applied to a
             # completed task would be a write against a closed history.
             row = self._store.get(row.task_id)
-            if row.state != STATE_WAITING_FOR_USER:
+            if row.state not in FOLLOWUP_STATES:
                 raise FollowupNotWaiting(row.state)
+            previous = row.state
 
             row = self._store.transition(
                 row.task_id,
@@ -505,7 +516,7 @@ class TaskService:
                 event_type=EVENT_FOLLOWUP_RECEIVED,
                 actor=ACTOR_USER,
                 source=SOURCE_COFFERDAM,
-                expected_state=STATE_WAITING_FOR_USER,
+                expected_state=previous,
                 # The event says one arrived and how long it was. The text
                 # itself is user content: it lives on the task, is shown in the
                 # detail view, and is not copied into the history.
@@ -533,6 +544,71 @@ class TaskService:
                     type(exc).__name__,
                 )
             return self._apply(row, outcome)
+
+    def finish_task(self, task_id: object) -> TaskRow:
+        """Close a retained session on purpose, and complete the task.
+
+        The way out of a successfully finished turn that is not cancellation.
+        Cancelling a task whose work is done would record it as stopped, which
+        is false and is the sort of falsehood an audit is least able to
+        recover from — so a person who is simply finished says so, and the task
+        completes with the result it already produced.
+
+        Valid only from :data:`~.models.STATE_READY_FOR_FOLLOWUP`. A task that
+        is *waiting for an answer* cannot be finished this way: something was
+        asked and pretending otherwise would lose the question.
+        """
+        row = self.get_task(task_id)
+        if row.state in TERMINAL_STATES:
+            self._reject(row, "finish", "task is " + row.state)
+            raise TaskAlreadyFinished(row.state)
+        if row.state != STATE_READY_FOR_FOLLOWUP:
+            self._reject(row, "finish", "task is " + row.state)
+            raise FollowupNotWaiting(row.state)
+
+        adapter = self._adapters.get(row.adapter_id)
+
+        with self._lock:
+            row = self._store.get(row.task_id)
+            if row.state != STATE_READY_FOR_FOLLOWUP:
+                raise FollowupNotWaiting(row.state)
+
+            # Tell the adapter first. If it cannot let go of the session, the
+            # task stays where it is rather than being marked complete over
+            # something that is still running.
+            release = getattr(adapter, "release_session", None)
+            if callable(release):
+                try:
+                    release(row.task_id)
+                except AdapterRefusal as refusal:
+                    self._reject(row, "finish", refusal.message)
+                    raise
+                except Exception as exc:
+                    return self._fail(
+                        row,
+                        "task_adapter_error",
+                        "the task adapter stopped unexpectedly",
+                        type(exc).__name__,
+                    )
+
+            row = self._store.transition(
+                row.task_id,
+                STATE_COMPLETED,
+                event_type=EVENT_TASK_COMPLETED,
+                actor=ACTOR_USER,
+                source=SOURCE_COFFERDAM,
+                expected_state=STATE_READY_FOR_FOLLOWUP,
+                text="Finished by you. The adapter's session was closed.",
+            )
+            self._audit(
+                "task_finish",
+                "ok",
+                task_id=row.task_id,
+                adapter_id=row.adapter_id,
+                project_id=row.project_id,
+                correlation_id=row.correlation_id,
+            )
+            return row
 
     # -- cancellation --------------------------------------------------------
 
@@ -807,6 +883,7 @@ class TaskService:
             STATE_FAILED: EVENT_TASK_FAILED,
             STATE_CANCELLED: EVENT_TASK_CANCELLED,
             STATE_WAITING_FOR_USER: EVENT_WAITING_FOR_USER,
+            STATE_READY_FOR_FOLLOWUP: EVENT_TURN_COMPLETE,
             STATE_RUNNING: EVENT_TASK_STARTED,
         }.get(requested, EVENT_TASK_STARTED)
 

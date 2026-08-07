@@ -435,6 +435,76 @@ class RealAdapterBoundaries(unittest.TestCase):
             self.assertEqual(panel(name)["consoleOutput"], [], name)
 
 
+class DetailFollowsTheBackend(unittest.TestCase):
+    """Defect 1: the open task detail did not update on its own.
+
+    The phone sat on `running` while the backend had moved on, and only a manual
+    browser reload showed the truth.
+    """
+
+    def test_the_detail_updates_without_a_page_reload(self):
+        """The regression test for the reported defect.
+
+        Detail polling was never absent — the requests went out on every tick
+        and their responses were thrown away. The list and the detail shared one
+        response-ordering counter, the poll issues the detail request first and
+        the list second, so the list held the higher generation; whenever the
+        list response landed first, the detail was discarded as stale. Reading a
+        task detail asks the adapter what it saw, so it is reliably the slower
+        of the two, which turned a race into a certainty.
+        """
+        result = panel("detail-updates-without-a-page-reload")
+        self.assertIn("running", result["whileRunning"])
+        self.assertGreaterEqual(result["detailRequests"], 2, "detail was not polled")
+        self.assertNotIn("running", result["html"])
+        self.assertIn("turn complete", result["html"].lower())
+
+    def test_polling_does_not_storm(self):
+        """Conservative: one detail read and one list read per tick, not more."""
+        result = panel("detail-updates-without-a-page-reload")
+        self.assertLessEqual(result["detailRequests"], result["listRequests"] + 1)
+        self.assertLessEqual(result["detailRequests"], 6)
+
+
+class FinishedTurnWording(unittest.TestCase):
+    """Defect 2: a completed turn was labelled as waiting for an answer."""
+
+    def test_a_finished_turn_does_not_say_needs_you(self):
+        result = panel("turn-complete-does-not-say-needs-you")
+        html = result["html"]
+        self.assertNotIn("needs you", html)
+        self.assertNotIn("waiting for an answer", html)
+        self.assertIn("Turn complete", html)
+        self.assertIn("optional follow-up", html)
+
+    def test_the_field_is_not_called_your_answer(self):
+        """Nothing was asked, so nothing is an answer."""
+        html = panel("turn-complete-does-not-say-needs-you")["html"]
+        self.assertNotIn("Your answer", html)
+        self.assertIn("Follow-up (optional)", html)
+
+    def test_a_follow_up_is_still_offered(self):
+        self.assertTrue(panel("turn-complete-does-not-say-needs-you")["hasFollowupBox"])
+
+    def test_finishing_is_offered_so_cancel_is_not_the_only_way_out(self):
+        result = panel("turn-complete-does-not-say-needs-you")
+        self.assertTrue(result["hasFinishButton"])
+        self.assertTrue(result["hasCancelButton"])
+
+    def test_finishing_posts_to_the_finish_route(self):
+        result = panel("finish-closes-the-session")
+        writes = [(w["method"], w["path"]) for w in result["writes"]]
+        self.assertIn(("POST", "/api/tasks/task_done/finish"), writes)
+        self.assertNotIn(("POST", "/api/tasks/task_done/cancel"), writes)
+
+    def test_a_real_question_still_says_your_answer(self):
+        """The control: the distinction is only worth anything if both sides
+        still work."""
+        html = panel("clarification-wait-still-offers-the-box")["html"]
+        self.assertIn("Your answer", html)
+        self.assertNotIn("Turn complete", html)
+
+
 class PanelSeparation(unittest.TestCase):
     def test_the_shell_carries_the_tasks_panel(self):
         html = (WEB_DIR / "index.html").read_text(encoding="utf-8")

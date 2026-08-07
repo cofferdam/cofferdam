@@ -410,6 +410,75 @@ Claude session somebody is running in their own terminal. A test starts a
 bystander process with the same program name in a different process group and
 asserts it survives.
 
+## A finished turn is not a question
+
+When a turn ends and the process is still alive, the task becomes
+**`ready_for_followup`** — a Task Core state added by this milestone — and the
+panel says:
+
+> **Turn complete.** You can send an optional follow-up in the same session, or
+> finish the task.
+
+The first version reported that as `waiting_for_user(clarification)`, so a phone
+said **"NEEDS YOU — waiting for an answer"** about a task that had done exactly
+what it was asked and had asked nothing back. Overloading a real waiting reason
+to mean "an optional follow-up is possible" made the one word that has to stay
+trustworthy — *waiting* — untrustworthy.
+
+The two cases are now separate and stay separate:
+
+| What happened | State | What the panel says | Field label |
+| --- | --- | --- | --- |
+| The agent asked a question | `waiting_for_user` + reason | "needs you" | **Your answer** |
+| A turn finished, session open | `ready_for_followup` | "turn complete" | **Follow-up (optional)** |
+
+`ready_for_followup` is non-terminal and is **not** in the waiting bucket — that
+bucket means "what needs me", and a finished turn needs nobody. It sits with the
+live tasks because it is one: it still holds a process and, at a concurrency
+limit of one, still holds the slot.
+
+`ready_for_followup → completed` exists in the graph and
+`waiting_for_user → completed` still does not, and the difference is deliberate.
+An *answer* to a question must not finish a task, because what happens after the
+answer is the adapter's to report. Choosing "I am done with this" is not an
+answer to anything.
+
+### Finishing, so cancelling is not the only way out
+
+`POST /api/tasks/{id}/finish` closes the retained session and completes the
+task. Cancelling a turn whose work succeeded would record it as *stopped*, which
+is false — and until this route existed, cancel was the only way to leave a task
+that had finished. The adapter closes stdin, the CLI exits on its own, and if it
+will not go, the same verified escalation cancellation uses applies. If even
+that fails the task is left where it is rather than marked complete over a
+process that is still running.
+
+## Asking twice gets one answer
+
+`inspect()` is called on **every read of a task detail**, and the first version
+answered the same question with the same answer every time. A task with about
+ten things to say accumulated **160 durable events**, one batch every ten
+seconds, each with a fresh timestamp — and re-ran four Git subprocesses each
+time to produce evidence identical to the last.
+
+Two layers now, and they are different on purpose:
+
+- **The adapter reports deltas.** It remembers per task what it last said, and
+  says nothing when nothing changed. The Git probes run once per distinct turn
+  result rather than once per glance.
+- **The store refuses a consecutive duplicate**, inside the transaction that
+  would have written it, by comparing against the row that is actually there.
+  That is the half that is **restart-safe**: the adapter's memory is a
+  dictionary and is gone after a restart, and this one is not.
+
+Only `progress` and `meaningful_output` are ever suppressed. Every other type is
+a lifecycle claim — created, started, cancelled, failed, interrupted — and each
+is a distinct fact that happened at a moment, so losing one would put a hole in
+the history. A turn ending has its own type, `turn_complete`, rather than
+falling through to `task_started`: besides reading as a task *beginning*, that
+put a lifecycle event between two identical observations and stopped the store
+from seeing them as consecutive.
+
 ## Races, and which side wins
 
 Two of these are reachable in normal use, and both are decided in favour of what

@@ -621,6 +621,11 @@ button.danger { color: var(--err); }
    containing no input: the whole point is that there is nothing to type. */
 .task-secret-wait { overflow-wrap: anywhere; min-width: 0; }
 
+/* A finished turn. Deliberately NOT the warn colour the waiting states use:
+   nothing here needs the person, and colouring it like something that does is
+   the same falsehood in a different medium. */
+.task-turn-complete { overflow-wrap: anywhere; min-width: 0; }
+
 .task-group { margin-top: 14px; min-width: 0; }
 .task-group h3 {
   margin: 0 0 6px; font-size: 14px; text-transform: uppercase;

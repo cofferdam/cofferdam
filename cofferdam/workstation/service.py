@@ -1939,6 +1939,18 @@ def create_app(
         )
         return {"task": tasks.snapshot(row).to_dict()}
 
+    @app.post("/api/tasks/{task_id}/finish", dependencies=[Depends(require_token)])
+    async def finish_task(task_id: str, request: Request) -> Dict[str, Any]:
+        """Close a retained session on purpose, and complete the task.
+
+        The honest way out of a turn that succeeded. Cancelling one would record
+        it as stopped, which is false — and until this route existed, cancel was
+        the only way to leave a task whose work was done.
+        """
+        await _task_body(request, allowed=set())
+        row = await _run_task(tasks.finish_task, task_id)
+        return {"task": tasks.snapshot(row).to_dict()}
+
     @app.post("/api/tasks/{task_id}/cancel", dependencies=[Depends(require_token)])
     async def cancel_task(task_id: str, request: Request) -> Dict[str, Any]:
         """Ask this task's own adapter to stop it.

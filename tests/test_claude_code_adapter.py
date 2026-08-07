@@ -54,6 +54,7 @@ from cofferdam.workstation.tasks.models import (
     STATE_COMPLETED,
     STATE_FAILED,
     STATE_INTERRUPTED,
+    STATE_READY_FOR_FOLLOWUP,
     STATE_RUNNING,
     STATE_WAITING_FOR_USER,
     WAITING_APPROVAL,
@@ -1056,6 +1057,7 @@ class ClaudeTaskTestCase(TaskTestCase):
                     STATE_FAILED,
                     STATE_CANCELLED,
                     STATE_WAITING_FOR_USER,
+                    STATE_READY_FOR_FOLLOWUP,
                 ):
                     return row
             elif until(row):
@@ -1072,7 +1074,9 @@ class HappyPath(ClaudeTaskTestCase):
         self.assertEqual(row.state, STATE_RUNNING)
 
         row = self.settle(row.task_id)
-        self.assertEqual(row.state, STATE_WAITING_FOR_USER)
+        # A finished turn, not a question. See models.STATE_READY_FOR_FOLLOWUP.
+        self.assertEqual(row.state, STATE_READY_FOR_FOLLOWUP)
+        self.assertIsNone(row.waiting_reason)
         self.assertIn("turn 1 done", row.final_result or "")
 
     def test_the_history_records_the_lifecycle_in_order(self):
@@ -1172,7 +1176,7 @@ class FollowUp(ClaudeTaskTestCase):
         """31. Same process, same session id, second turn."""
         row, _ = self.create("first message")
         row = self.settle(row.task_id)
-        self.assertEqual(row.state, STATE_WAITING_FOR_USER)
+        self.assertEqual(row.state, STATE_READY_FOR_FOLLOWUP)
 
         run = self.adapter._runs[row.task_id]
         pid_before = run.pid
@@ -1279,8 +1283,8 @@ class FollowUpRouting(ClaudeTaskTestCase):
         second, _ = self.create("second task prompt")
         first = self.settle(first.task_id)
         second = self.settle(second.task_id)
-        self.assertEqual(first.state, STATE_WAITING_FOR_USER)
-        self.assertEqual(second.state, STATE_WAITING_FOR_USER)
+        self.assertEqual(first.state, STATE_READY_FOR_FOLLOWUP)
+        self.assertEqual(second.state, STATE_READY_FOR_FOLLOWUP)
 
         first_run = self.adapter._runs[first.task_id]
         second_run = self.adapter._runs[second.task_id]
@@ -1339,8 +1343,266 @@ class FollowUpRouting(ClaudeTaskTestCase):
         self.assertIsNone(second_run.poll(), "cancelling one task stopped the other")
         self.assertTrue(second_run.still_ours())
         self.assertEqual(
-            self.service.get_task(second.task_id).state, STATE_WAITING_FOR_USER
+            self.service.get_task(second.task_id).state, STATE_READY_FOR_FOLLOWUP
         )
+
+
+class FinishedTurnIsNotAQuestion(ClaudeTaskTestCase):
+    """Defect 2: a completed turn was reported as waiting for an answer.
+
+    Claude did what it was asked and asked nothing back, and the phone said
+    "NEEDS YOU / waiting for an answer". Overloading a real waiting reason to
+    mean "an optional follow-up is possible" made the one word that has to stay
+    trustworthy — *waiting* — untrustworthy.
+    """
+
+    def test_a_finished_turn_is_ready_for_followup_not_waiting(self):
+        row, _ = self.create("do the thing")
+        row = self.settle(row.task_id)
+        self.assertEqual(row.state, STATE_READY_FOR_FOLLOWUP)
+        self.assertIsNone(row.waiting_reason)
+
+    def test_it_is_not_in_the_waiting_bucket(self):
+        """The bucket drives "what needs me" on a phone."""
+        from cofferdam.workstation.tasks.models import BUCKET_WAITING, bucket_of
+
+        row, _ = self.create()
+        row = self.settle(row.task_id)
+        from cofferdam.workstation.tasks.models import BUCKET_ACTIVE
+
+        self.assertNotEqual(bucket_of(row.state), BUCKET_WAITING)
+        self.assertEqual(bucket_of(row.state), BUCKET_ACTIVE)
+        self.assertEqual(self.service.snapshot(row).to_dict()["bucket"], BUCKET_ACTIVE)
+
+    def test_a_real_question_still_uses_waiting_for_user(self):
+        """The distinction only means something if the other case still works."""
+        from cofferdam.workstation.tasks.models import STATE_WAITING_FOR_USER
+
+        from cofferdam.workstation.tasks.lifecycle import can_transition
+
+        self.assertTrue(can_transition(STATE_RUNNING, STATE_WAITING_FOR_USER))
+        self.assertTrue(can_transition(STATE_WAITING_FOR_USER, STATE_RUNNING))
+        # And an answer still cannot finish a task.
+        self.assertFalse(can_transition(STATE_WAITING_FOR_USER, STATE_COMPLETED))
+
+    def test_a_follow_up_works_from_the_new_state(self):
+        row, _ = self.create("first")
+        row = self.settle(row.task_id)
+        self.assertEqual(row.state, STATE_READY_FOR_FOLLOWUP)
+        pid = self.adapter._runs[row.task_id].pid
+
+        row = self.service.send_followup(row.task_id, "second")
+        row = self.settle(row.task_id)
+        self.assertEqual(self.adapter._runs[row.task_id].pid, pid)
+        self.assertIn("turn 2 done", row.final_result or "")
+
+    def test_finishing_completes_the_task_and_closes_the_session(self):
+        """The way out that is not cancellation."""
+        row, _ = self.create()
+        row = self.settle(row.task_id)
+        run = self.adapter._runs[row.task_id]
+
+        row = self.service.finish_task(row.task_id)
+        self.assertEqual(row.state, STATE_COMPLETED)
+        self.assertIsNotNone(run.poll(), "the process was left running")
+        self.assertEqual(self.adapter.active_task_ids(), ())
+
+    def test_finishing_records_who_did_it_without_calling_it_cancelled(self):
+        row, _ = self.create()
+        row = self.settle(row.task_id)
+        row = self.service.finish_task(row.task_id)
+
+        types = [e.event_type for e in self.store.events(row.task_id)]
+        self.assertIn("task_completed", types)
+        self.assertNotIn("task_cancelled", types)
+        self.assertNotIn("cancellation_requested", types)
+
+    def test_a_waiting_task_cannot_be_finished_this_way(self):
+        """Something was asked; pretending otherwise would lose the question."""
+        from cofferdam.workstation.tasks.errors import FollowupNotWaiting
+
+        row, _ = self.create()
+        self.assertEqual(row.state, STATE_RUNNING)
+        with self.assertRaises(FollowupNotWaiting):
+            self.service.finish_task(row.task_id)
+
+    def test_a_finished_task_cannot_be_finished_again(self):
+        from cofferdam.workstation.tasks.errors import TaskAlreadyFinished
+
+        row, _ = self.create()
+        row = self.settle(row.task_id)
+        self.service.finish_task(row.task_id)
+        with self.assertRaises(TaskAlreadyFinished):
+            self.service.finish_task(row.task_id)
+
+
+class RepeatedInspectionSaysNothingNew(ClaudeTaskTestCase):
+    """Defect 3: identical observations were appended forever.
+
+    A task with about ten things to say accumulated 160 durable events, one
+    batch every ten seconds, each with a fresh timestamp — and re-ran four Git
+    subprocesses each time to produce evidence identical to the last.
+    """
+
+    def _events(self, task_id):
+        return list(self.store.events(task_id))
+
+    def test_polling_a_settled_task_adds_no_events(self):
+        row, _ = self.create("do the thing")
+        row = self.settle(row.task_id)
+        before = len(self._events(row.task_id))
+        revision_before = row.lifecycle_revision
+
+        for _ in range(12):
+            row = self.service.refresh_task(row.task_id)
+
+        self.assertEqual(
+            len(self._events(row.task_id)),
+            before,
+            "repeated inspection appended events",
+        )
+        self.assertEqual(row.lifecycle_revision, revision_before)
+
+    def test_no_duplicate_output_or_evidence_survives(self):
+        row, _ = self.create()
+        row = self.settle(row.task_id)
+        for _ in range(8):
+            self.service.refresh_task(row.task_id)
+
+        events = self._events(row.task_id)
+        seen = [(e.event_type, e.text, tuple(str(r) for r in e.evidence)) for e in events]
+        self.assertEqual(len(seen), len(set(seen)), "an identical event was stored twice")
+
+    def test_the_git_probes_do_not_run_on_every_read(self):
+        """They are four subprocesses, and running them on every read made the
+        detail endpoint slow enough that its own responses lost races.
+
+        Counts the **repository reads**, not the calls to the wrapper: an
+        earlier version of this test counted the wrapper and so could not tell
+        whether the probes inside it had been skipped.
+        """
+        from cofferdam.workstation.tasks.adapters.claude_code import adapter as module
+
+        runs = []
+        real = module.observe_git
+
+        def counting(root, **kwargs):
+            runs.append(root)
+            return real(root, **kwargs)
+
+        module.observe_git = counting
+        self.addCleanup(setattr, module, "observe_git", real)
+
+        row, _ = self.create()
+        row = self.settle(row.task_id)
+        for _ in range(10):
+            self.service.refresh_task(row.task_id)
+
+        self.assertLessEqual(
+            len(runs), 1, "the Git probes ran again for an unchanged result"
+        )
+
+    def test_the_adapter_itself_reports_nothing_when_nothing_changed(self):
+        """The adapter's half, asserted without the store's help.
+
+        Two layers suppress duplicates and either one alone hides the other in
+        an end-to-end count. This looks at the outcome the adapter returns, so a
+        regression in *its* delta logic fails here even while the store is still
+        quietly saving the history.
+        """
+        from cofferdam.workstation.tasks.adapters.protocol import TaskContext
+
+        row, _ = self.create()
+        row = self.settle(row.task_id)
+
+        def context_now():
+            current = self.service.get_task(row.task_id)
+            return TaskContext(
+                task_id=current.task_id,
+                correlation_id=current.correlation_id,
+                project_id=current.project_id,
+                project_root=self.project_root,
+                adapter_id=ADAPTER_ID,
+                prompt=current.prompt,
+                state=current.state,
+                lifecycle_revision=current.lifecycle_revision,
+            )
+
+        self.adapter.inspect(context_now())
+        for _ in range(5):
+            outcome = self.adapter.inspect(context_now())
+            self.assertEqual(
+                list(outcome.events), [], "the adapter re-reported unchanged state"
+            )
+            self.assertEqual(
+                list(outcome.observations), [], "the adapter re-reported evidence"
+            )
+
+    def test_genuinely_new_output_is_still_appended_exactly_once(self):
+        row, _ = self.create("first")
+        row = self.settle(row.task_id)
+        for _ in range(5):
+            self.service.refresh_task(row.task_id)
+        first_count = len(self._events(row.task_id))
+
+        self.service.send_followup(row.task_id, "second")
+        row = self.settle(row.task_id)
+        for _ in range(5):
+            self.service.refresh_task(row.task_id)
+
+        events = self._events(row.task_id)
+        self.assertGreater(len(events), first_count, "new output was suppressed")
+        turn_two = [e for e in events if "turn 2 done" in (e.text or "")]
+        self.assertEqual(len(turn_two), 1, "new output was stored more than once")
+
+    def test_the_store_refuses_a_consecutive_duplicate_without_any_memory(self):
+        """The restart-safe half, and it is deliberately the *store's* half.
+
+        The adapter's own suppression lives in a dictionary and is forgotten
+        when the daemon restarts. This one compares against the row that is
+        actually in the database, inside the transaction that would have written
+        the duplicate — so it works for a process that has never seen the task
+        before, which is exactly what a restarted daemon is.
+        """
+        row, _ = self.create()
+        row = self.settle(row.task_id)
+
+        def append(text):
+            self.store.append_event(
+                row.task_id, "meaningful_output", actor="adapter",
+                source="adapter", text=text,
+            )
+
+        append("a repeated observation")
+        after_first = len(self._events(row.task_id))
+        for _ in range(5):
+            append("a repeated observation")
+        self.assertEqual(
+            len(self._events(row.task_id)),
+            after_first,
+            "the store stored an identical consecutive event",
+        )
+
+        # Something genuinely different is still recorded.
+        append("something new")
+        self.assertEqual(len(self._events(row.task_id)), after_first + 1)
+
+    def test_a_lifecycle_event_is_never_suppressed(self):
+        """Two identical *claims* are two things that happened."""
+        from cofferdam.workstation.tasks.store import REPEATABLE_EVENT_TYPES
+
+        self.assertEqual(
+            sorted(REPEATABLE_EVENT_TYPES), ["meaningful_output", "progress"]
+        )
+        row, _ = self.create()
+        row = self.settle(row.task_id)
+        before = len(self._events(row.task_id))
+        for _ in range(3):
+            self.store.append_event(
+                row.task_id, "action_rejected", actor="system",
+                source="cofferdam", text="the same refusal",
+            )
+        self.assertEqual(len(self._events(row.task_id)), before + 3)
 
 
 class ConcurrencyAndIsolation(ClaudeTaskTestCase):

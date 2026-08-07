@@ -59,6 +59,8 @@ from .errors import IdempotencyConflict, StoreUnavailable, TaskUnknown
 from .identity import new_correlation_id, new_task_id
 from .lifecycle import IllegalTransition, check_transition
 from .models import (
+    EVENT_MEANINGFUL_OUTPUT,
+    EVENT_PROGRESS,
     EVENT_TASK_CREATED,
     MAX_ACTIVITY_CHARS,
     MAX_EVENT_PAGE,
@@ -239,6 +241,21 @@ def _row_to_task(row: sqlite3.Row) -> TaskRow:
         cancellation=cancellation,
         event_cursor=row["event_cursor"],
     )
+
+
+#: The only event types a repeat of which is suppressed.
+#:
+#: Observations, and nothing else. ``progress`` and ``meaningful_output`` are
+#: an adapter saying "here is how things are", and asking twice and getting the
+#: same answer is not news. Every other type is a *lifecycle claim* — created,
+#: started, cancelled, failed, interrupted — and each one is a distinct fact
+#: that happened at a moment. Those are never suppressed, however alike two of
+#: them look, because losing one would put a hole in the history.
+REPEATABLE_EVENT_TYPES = frozenset({EVENT_PROGRESS, EVENT_MEANINGFUL_OUTPUT})
+
+
+def _is_repeatable(event_type: str) -> bool:
+    return event_type in REPEATABLE_EVENT_TYPES
 
 
 def _bounded_evidence(evidence: Sequence[EvidenceReference]) -> Optional[str]:
@@ -626,6 +643,29 @@ class TaskStore:
         ).fetchone()
         if row is None:
             raise TaskUnknown()
+
+        if _is_repeatable(event_type) and self._repeats_last_locked(
+            connection,
+            task_id=task_id,
+            event_type=event_type,
+            state=state,
+            text=text,
+            detail=detail,
+            evidence=evidence,
+        ):
+            # Identical to the event immediately before it, so it says nothing
+            # new and is not written. Returning the existing cursor keeps every
+            # caller's contract: a sequence number that is real, and a history
+            # that grew by nothing because nothing happened.
+            #
+            # This lives in the store rather than in an adapter because it has
+            # to be **transactional and restart-safe**. An adapter that
+            # remembered its last report in memory would forget across a restart
+            # and start duplicating again; the comparison here reads the row
+            # that is actually there, inside the transaction that would have
+            # written the duplicate.
+            return int(row["event_cursor"])
+
         sequence = int(row["event_cursor"]) + 1
         connection.execute(
             """
@@ -654,6 +694,39 @@ class TaskStore:
             (sequence, now_iso(), task_id),
         )
         return sequence
+
+    def _repeats_last_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        task_id: str,
+        event_type: str,
+        state: Optional[str],
+        text: Optional[str],
+        detail: Optional[str],
+        evidence: Sequence[EvidenceReference],
+    ) -> bool:
+        """Whether this event is byte-for-byte the previous one for this task.
+
+        Compared on what a reader would see — type, state, text, detail and
+        evidence — and deliberately **not** on the timestamp, because the
+        timestamp is the one field that always differs and is exactly what made
+        a repeated observation look like news.
+        """
+        previous = connection.execute(
+            "SELECT event_type, state, text, detail, evidence_json FROM task_events"
+            " WHERE task_id = ? ORDER BY sequence DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if previous is None:
+            return False
+        return (
+            previous["event_type"] == event_type
+            and previous["state"] == state
+            and previous["text"] == bounded_text(text, MAX_OUTPUT_CHARS)
+            and previous["detail"] == bounded_line(detail, MAX_FAILURE_CHARS)
+            and previous["evidence_json"] == _bounded_evidence(evidence)
+        )
 
     def append_event(
         self,
