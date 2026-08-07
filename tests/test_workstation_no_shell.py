@@ -91,15 +91,31 @@ class NoShellExecutionTests(unittest.TestCase):
         self.assertEqual(offenders, [], f"shell execution found: {offenders}")
 
     def test_subprocess_is_only_called_from_the_adapter_helpers(self) -> None:
-        """Subprocess use is centralized in ``adapters/base.py``."""
+        """Subprocess use is centralized in adapter code, and nowhere else.
+
+        Two locations, both of them adapters, both of them named here so that a
+        third one is a failing test rather than a review someone skims.
+
+        ``adapters/base.py`` runs the desktop's own tools. The Claude Code task
+        adapter runs the Claude Code CLI and its Git observations. The property
+        being protected is not "one file" — it is that a request handler, a
+        model, the store, or the service layer can never reach a process, and
+        that is still exactly true.
+
+        The companion guard above still applies to every one of these files:
+        ``shell=`` must be ``False``, and ``os.system``/``os.popen`` are absent
+        from the whole package.
+        """
         offenders = []
         for path in _python_sources():
             if path.name == "base.py" and path.parent.name == "adapters":
                 continue
+            if "claude_code" in path.parts:
+                continue
             source = path.read_text(encoding="utf-8")
             if "subprocess." in source:
                 offenders.append(path.name)
-        self.assertEqual(offenders, [], f"subprocess used outside adapters/base.py: {offenders}")
+        self.assertEqual(offenders, [], f"subprocess used outside adapter code: {offenders}")
 
     def test_action_schemas_expose_no_command_like_field(self) -> None:
         """The action schemas declare no command-like field, and forbid extras.

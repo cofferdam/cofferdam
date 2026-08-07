@@ -607,6 +607,25 @@ button.danger { color: var(--err); }
   font-size: 13px; overflow-wrap: anywhere; min-width: 0;
 }
 
+/* What an adapter refuses to do, listed where somebody is about to write a
+   prompt asking for it. `overflow-wrap: anywhere` and `min-width: 0` for the
+   same reason as every other block in this panel: a long sentence on a narrow
+   phone must wrap, never widen the page. */
+.task-limitations {
+  margin: 0; padding: 0 0 0 18px; min-width: 0;
+  color: var(--muted); font-size: 13px; line-height: 1.45;
+}
+.task-limitations li { overflow-wrap: anywhere; min-width: 0; margin-bottom: 3px; }
+
+/* The authentication wait. Deliberately shaped like a warning and deliberately
+   containing no input: the whole point is that there is nothing to type. */
+.task-secret-wait { overflow-wrap: anywhere; min-width: 0; }
+
+/* A finished turn. Deliberately NOT the warn colour the waiting states use:
+   nothing here needs the person, and colouring it like something that does is
+   the same falsehood in a different medium. */
+.task-turn-complete { overflow-wrap: anywhere; min-width: 0; }
+
 .task-group { margin-top: 14px; min-width: 0; }
 .task-group h3 {
   margin: 0 0 6px; font-size: 14px; text-transform: uppercase;

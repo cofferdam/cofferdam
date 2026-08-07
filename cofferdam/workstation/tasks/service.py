@@ -74,9 +74,12 @@ from .models import (
     EVENT_TASK_INTERRUPTED,
     EVENT_TASK_QUEUED,
     EVENT_TASK_STARTED,
+    EVENT_TURN_COMPLETE,
     EVENT_WAITING_FOR_USER,
+    EVENT_PROGRESS,
     EVIDENCE_ADAPTER_REPORTED,
     MAX_CLIENT_REQUEST_ID_CHARS,
+    MAX_EVIDENCE_ITEMS,
     MAX_FOLLOWUP_CHARS,
     MAX_LABEL_CHARS,
     MAX_PROMPT_CHARS,
@@ -89,11 +92,13 @@ from .models import (
     STATE_FAILED,
     STATE_INTERRUPTED,
     STATE_QUEUED,
+    STATE_READY_FOR_FOLLOWUP,
     STATE_RECOVERY_REQUIRED,
     STATE_RUNNING,
     STATE_STARTING,
     STATE_WAITING_FOR_USER,
     TERMINAL_STATES,
+    VERIFIED_EVIDENCE_SOURCES,
     WAITING_REASONS,
     WAITING_UNKNOWN,
     EvidenceReference,
@@ -109,6 +114,14 @@ from .store import TaskRow, TaskStore
 #: correlation_id)``. Content never travels through it — see
 #: :meth:`TaskService._audit`.
 AuditHook = Callable[[str, str, Optional[str], Optional[str], Optional[str], Optional[str]], None]
+
+#: The two non-terminal states in which a follow-up is a sensible thing to send.
+#:
+#: They are different sentences and must stay different — ``waiting_for_user``
+#: means somebody was asked something, ``ready_for_followup`` means a turn ended
+#: and the session is still open — but from the service's point of view both are
+#: "the task can take another message from a person".
+FOLLOWUP_STATES = frozenset({STATE_WAITING_FOR_USER, STATE_READY_FOR_FOLLOWUP})
 
 
 def _payload_hash(*parts: object) -> str:
@@ -235,6 +248,67 @@ class TaskService:
         if not valid_task_id(task_id):
             raise TaskUnknown()
         return self._store.get(task_id)
+
+    def refresh_task(self, task_id: object) -> TaskRow:
+        """Ask a task's adapter what has happened, then apply it. Read path only.
+
+        The foundation declared :meth:`~.adapters.protocol.TaskAdapter.inspect`
+        and never called it, because the only adapter it shipped was synchronous
+        — a validation adapter finishes inside ``start``, so there was never
+        anything to ask about afterwards. A real agent is not like that: its
+        work happens over minutes, in a process, while nothing is calling the
+        adapter at all.
+
+        This is that missing call, and it is deliberately the *whole* mechanism
+        rather than one of several. There is no callback from an adapter into
+        the service, no work queue, no background sweep — each of those would be
+        a second path that writes task state, and the most valuable property of
+        this package is that :meth:`_apply` is the only one.
+
+        An adapter with nothing to say returns an empty outcome and nothing
+        happens. What it does say goes through the same transition graph as
+        every other report, so a Claude adapter cannot move a task anywhere the
+        validation adapter could not.
+        """
+        row = self.get_task(task_id)
+        if row.state in TERMINAL_STATES:
+            # Never ask about a finished task. Its history is closed, and an
+            # adapter that answered would be answering about a record that is
+            # not open to change.
+            return row
+        adapter = self._adapters.find(row.adapter_id)
+        if adapter is None or not adapter.capabilities().structured_progress:
+            return row
+
+        try:
+            project = self._projects.get(row.project_id)
+            root = verify_root(project.root)
+        except TaskError:
+            return row
+
+        with self._lock:
+            row = self._store.get(row.task_id)
+            if row.state in TERMINAL_STATES:
+                return row
+            context = self._context(row, root, adapter)
+            try:
+                outcome = adapter.inspect(context)
+            except AdapterRefusal:
+                # "Nothing to report" must never be able to fail a task
+                # somebody is merely looking at.
+                return row
+            except Exception as exc:
+                return self._fail(
+                    row,
+                    "task_adapter_error",
+                    "the task adapter stopped unexpectedly",
+                    type(exc).__name__,
+                )
+            if not outcome.events and outcome.requested_state is None:
+                return row
+            return self._apply(
+                row, outcome, cancelling=row.state == STATE_CANCELLING
+            )
 
     def list_tasks(self, *, bucket: Optional[str] = None, limit: int = 50) -> List[TaskRow]:
         from .models import ACTIVE_STATES, BUCKET_ACTIVE, BUCKET_FINISHED, BUCKET_WAITING
@@ -420,7 +494,7 @@ class TaskService:
         if row.state in TERMINAL_STATES:
             self._reject(row, "followup", "task is " + row.state)
             raise TaskAlreadyFinished(row.state)
-        if row.state != STATE_WAITING_FOR_USER:
+        if row.state not in FOLLOWUP_STATES:
             self._reject(row, "followup", "task is " + row.state)
             raise FollowupNotWaiting(row.state)
 
@@ -432,8 +506,9 @@ class TaskService:
             # request was being validated, and a follow-up applied to a
             # completed task would be a write against a closed history.
             row = self._store.get(row.task_id)
-            if row.state != STATE_WAITING_FOR_USER:
+            if row.state not in FOLLOWUP_STATES:
                 raise FollowupNotWaiting(row.state)
+            previous = row.state
 
             row = self._store.transition(
                 row.task_id,
@@ -441,7 +516,7 @@ class TaskService:
                 event_type=EVENT_FOLLOWUP_RECEIVED,
                 actor=ACTOR_USER,
                 source=SOURCE_COFFERDAM,
-                expected_state=STATE_WAITING_FOR_USER,
+                expected_state=previous,
                 # The event says one arrived and how long it was. The text
                 # itself is user content: it lives on the task, is shown in the
                 # detail view, and is not copied into the history.
@@ -469,6 +544,71 @@ class TaskService:
                     type(exc).__name__,
                 )
             return self._apply(row, outcome)
+
+    def finish_task(self, task_id: object) -> TaskRow:
+        """Close a retained session on purpose, and complete the task.
+
+        The way out of a successfully finished turn that is not cancellation.
+        Cancelling a task whose work is done would record it as stopped, which
+        is false and is the sort of falsehood an audit is least able to
+        recover from — so a person who is simply finished says so, and the task
+        completes with the result it already produced.
+
+        Valid only from :data:`~.models.STATE_READY_FOR_FOLLOWUP`. A task that
+        is *waiting for an answer* cannot be finished this way: something was
+        asked and pretending otherwise would lose the question.
+        """
+        row = self.get_task(task_id)
+        if row.state in TERMINAL_STATES:
+            self._reject(row, "finish", "task is " + row.state)
+            raise TaskAlreadyFinished(row.state)
+        if row.state != STATE_READY_FOR_FOLLOWUP:
+            self._reject(row, "finish", "task is " + row.state)
+            raise FollowupNotWaiting(row.state)
+
+        adapter = self._adapters.get(row.adapter_id)
+
+        with self._lock:
+            row = self._store.get(row.task_id)
+            if row.state != STATE_READY_FOR_FOLLOWUP:
+                raise FollowupNotWaiting(row.state)
+
+            # Tell the adapter first. If it cannot let go of the session, the
+            # task stays where it is rather than being marked complete over
+            # something that is still running.
+            release = getattr(adapter, "release_session", None)
+            if callable(release):
+                try:
+                    release(row.task_id)
+                except AdapterRefusal as refusal:
+                    self._reject(row, "finish", refusal.message)
+                    raise
+                except Exception as exc:
+                    return self._fail(
+                        row,
+                        "task_adapter_error",
+                        "the task adapter stopped unexpectedly",
+                        type(exc).__name__,
+                    )
+
+            row = self._store.transition(
+                row.task_id,
+                STATE_COMPLETED,
+                event_type=EVENT_TASK_COMPLETED,
+                actor=ACTOR_USER,
+                source=SOURCE_COFFERDAM,
+                expected_state=STATE_READY_FOR_FOLLOWUP,
+                text="Finished by you. The adapter's session was closed.",
+            )
+            self._audit(
+                "task_finish",
+                "ok",
+                task_id=row.task_id,
+                adapter_id=row.adapter_id,
+                project_id=row.project_id,
+                correlation_id=row.correlation_id,
+            )
+            return row
 
     # -- cancellation --------------------------------------------------------
 
@@ -672,6 +812,43 @@ class TaskService:
                 ),
             )
 
+        # Observations, if any: things Cofferdam ran and saw for itself. They
+        # are appended as their own event so the history keeps the two kinds of
+        # statement visibly apart — an agent's account of the work, and the
+        # result of Cofferdam going and looking.
+        observations = tuple(
+            reference
+            for reference in getattr(outcome, "observations", ())
+            if isinstance(reference, EvidenceReference)
+        )
+        if observations:
+            self._store.append_event(
+                row.task_id,
+                EVENT_PROGRESS,
+                actor=ACTOR_SYSTEM,
+                source=SOURCE_COFFERDAM,
+                text="Cofferdam checked the project itself.",
+                evidence=tuple(
+                    EvidenceReference(
+                        evidence_type=reference.evidence_type,
+                        # Checked, not accepted. An adapter that put a claim in
+                        # this field gets it demoted to a claim rather than
+                        # promoted to an observation — the field is a place to
+                        # be believed, not a way to become believable.
+                        source=(
+                            reference.source
+                            if reference.source in VERIFIED_EVIDENCE_SOURCES
+                            else EVIDENCE_ADAPTER_REPORTED
+                        ),
+                        identifier=reference.identifier,
+                        operation=reference.operation,
+                        result=reference.result,
+                        observed_at=reference.observed_at or now_iso(),
+                    )
+                    for reference in observations[:MAX_EVIDENCE_ITEMS]
+                ),
+            )
+
         requested = outcome.requested_state
         if requested is None:
             return self._store.get(row.task_id)
@@ -706,6 +883,7 @@ class TaskService:
             STATE_FAILED: EVENT_TASK_FAILED,
             STATE_CANCELLED: EVENT_TASK_CANCELLED,
             STATE_WAITING_FOR_USER: EVENT_WAITING_FOR_USER,
+            STATE_READY_FOR_FOLLOWUP: EVENT_TURN_COMPLETE,
             STATE_RUNNING: EVENT_TASK_STARTED,
         }.get(requested, EVENT_TASK_STARTED)
 

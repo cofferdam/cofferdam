@@ -78,31 +78,113 @@ function advance(ms) {
 
 const record = { requests: [], timerErrors: [], consoleOutput: [], uncaught: null };
 
+/* Which element currently has focus, and how many times a node the user was
+   typing in was destroyed under them. A real browser answers both; the stub had
+   to learn to, because the defect being tested is invisible without them. */
+let activeElementId = null;
+let destroyedFocusedNodes = 0;
+
 function makeElement(id) {
   const listeners = {};
-  return {
+  const node = {
     id,
     hidden: false,
     textContent: "",
-    innerHTML: "",
     disabled: false,
     value: "",
     open: false,
+    selectionStart: 0,
+    selectionEnd: 0,
     listeners,
     addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
     removeEventListener() {},
     querySelector() { return null; },
     querySelectorAll() { return []; },
-    getAttribute() { return null; }
+    getAttribute() { return null; },
+    focus() { activeElementId = id; },
+    blur() { if (activeElementId === id) { activeElementId = null; } }
   };
+
+  /* The property this whole file exists to model honestly.
+   *
+   * Assigning `innerHTML` in a browser DESTROYS every descendant node and
+   * builds new ones. A textarea inside gets a fresh node with an empty value,
+   * whatever the user had typed into the old one, and focus goes with it.
+   *
+   * The stub used to memoise elements by id forever, so `innerHTML` assignment
+   * changed nothing and a test could type into a textarea, poll ten times, and
+   * still find the text there. That is exactly the bug it was supposed to
+   * catch: on a phone the draft vanished. A double that cannot lose data
+   * cannot test for data loss. */
+  let markup = "";
+  Object.defineProperty(node, "innerHTML", {
+    get() { return markup; },
+    set(value) {
+      /* Everything the previous markup contained is gone — including nodes the
+         new markup does not mention. Deleting only the ids that reappear would
+         leave a stale stub behind for anything that disappeared, so a follow-up
+         box that the panel stopped rendering would still answer with the text
+         somebody typed into it a minute ago. */
+      const previous = Array.from(markup.matchAll(/id="([^"]+)"/g)).map((m) => m[1]);
+      markup = String(value);
+      const current = Array.from(markup.matchAll(/id="([^"]+)"/g)).map((m) => m[1]);
+      previous.concat(current).forEach(function (childId) {
+        if (elements[childId]) {
+          if (activeElementId === childId) {
+            destroyedFocusedNodes += 1;
+            activeElementId = null;
+          }
+          delete elements[childId];
+        }
+      });
+      /* A browser builds the new nodes **now**, not when somebody first asks for
+         one. Deferring creation made a freshly rendered textarea look absent,
+         so a test could not tell "the panel rendered the draft" from "the draft
+         is gone" — and those are the two outcomes it exists to distinguish.
+         A textarea rendered with content between its tags comes back with that
+         content in `.value`. */
+      const values = {};
+      Array.from(
+        markup.matchAll(/<textarea\b[^>]*\bid="([^"]+)"[^>]*>([\s\S]*?)<\/textarea>/g)
+      ).forEach(function (match) {
+        values[match[1]] = unescapeHtml(match[2]);
+      });
+      current.forEach(function (childId) {
+        const child = makeElement(childId);
+        if (Object.prototype.hasOwnProperty.call(values, childId)) {
+          child.value = values[childId];
+        }
+        elements[childId] = child;
+      });
+    }
+  });
+  return node;
 }
 
 const elements = {};
 IDS.forEach((id) => { elements[id] = makeElement(id); });
 
+function unescapeHtml(value) {
+  return String(value)
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
 function el(id) {
   if (!elements[id]) { elements[id] = makeElement(id); }
   return elements[id];
+}
+
+/* Does an element with this id currently exist in the stub, and what is in it?
+   `el()` would create one, which would hide the very destruction being tested. */
+function existing(id) {
+  return Object.prototype.hasOwnProperty.call(elements, id) ? elements[id] : null;
+}
+
+function valueOf(id) {
+  const node = existing(id);
+  return node ? node.value : null;
 }
 
 function escapeHtml(value) {
@@ -114,7 +196,13 @@ function escapeHtml(value) {
    values are read at submit time rather than tracked per keystroke. */
 const documentStub = {
   visibilityState: "visible",
-  getElementById(id) { return elements[id] || null; }
+  getElementById(id) { return elements[id] || null; },
+  /* A browser reports which node has focus, and the panel reads it to decide
+     whether to put the caret back after a re-render. Without it here, focus
+     restoration could never be tested. */
+  get activeElement() {
+    return activeElementId ? elements[activeElementId] || null : null;
+  }
 };
 
 function AbortControllerStub() {
@@ -212,6 +300,29 @@ function listPayload(tasks) {
 function adaptersPayload(options) {
   const settings = options || {};
   if (settings.empty) { return { adapters: [] }; }
+  if (settings.realAdapter) {
+    /* An adapter that runs an actual program. Shaped exactly like the payload
+       `/api/task-adapters` returns for one, and deliberately NOT named after any
+       product: the panel must render it from these fields alone. */
+    return {
+      adapters: [
+        {
+          adapter_id: "runner",
+          display_name: "Runner",
+          description: "Runs a real program inside one approved project.",
+          available: true,
+          unavailable_reason: null,
+          capabilities: CAPABILITIES,
+          limitations: [
+            "It has no shell. It can read and edit files in the chosen project.",
+            "It cannot leave the project folder.",
+            "Never type a password, one-time code or token into a prompt."
+          ],
+          max_concurrent_tasks: 1
+        }
+      ]
+    };
+  }
   return {
     adapters: [
       {
@@ -310,6 +421,10 @@ function makeApi(behaviour) {
     }
 
     if (behaviour.hang) { return new Promise(function () { /* never settles */ }); }
+    if (behaviour.onWrite) {
+      const deferred = behaviour.onWrite(pathname, settings.body);
+      if (deferred) { return deferred; }
+    }
     if (behaviour.refuse) {
       return Promise.resolve({
         ok: false,
@@ -689,6 +804,451 @@ function run() {
         fire("click", button("taskCancel"));
         return drain(80).then(function () {
           return { html: html(), writes: writes() };
+        });
+      });
+    });
+  }
+
+  /* -- a real adapter's boundaries, and the wait that must not offer a box -- */
+
+  if (scenario === "composer-shows-a-real-adapter-limitations") {
+    return mount({
+      realAdapter: true,
+      result: () => ({ payload: {} })
+    }).then(function () {
+      fire("click", button("taskCompose"));
+      return drain().then(function () { return { html: html() }; });
+    });
+  }
+
+  if (scenario === "authentication-wait-offers-no-text-field") {
+    /* The property: a task waiting for sign-in gets a sentence, never an input.
+       A textarea under "waiting for sign-in on the workstation" is an invitation
+       to type a password into a task history. */
+    const waiting = taskPayload({
+      task_id: "task_auth",
+      state: "waiting_for_user",
+      waiting_reason: "authentication",
+      activity: "Sign in to Claude Code on the workstation."
+    });
+    return mount({
+      realAdapter: true,
+      initial: listPayload([waiting]),
+      detail: waiting,
+      events: [eventItem(1, "waiting_for_user", "Not signed in.")],
+      result: () => ({ payload: {} })
+    }).then(function () {
+      fire("click", openButton("task_auth"));
+      return drain().then(function () {
+        /* Read the rendered markup, not `el()`: the stub resolves every id in
+           index.html whether or not the panel actually painted it, so asking
+           it "is there a follow-up box" would answer yes forever. */
+        const markup = html();
+        return {
+          html: markup,
+          hasFollowupBox: markup.indexOf("taskFollowupText") !== -1,
+          hasSendButton: markup.indexOf("taskFollowupSend") !== -1,
+          hasCancelButton: markup.indexOf("taskCancel") !== -1
+        };
+      });
+    });
+  }
+
+  if (scenario === "clarification-wait-still-offers-the-box") {
+    /* The control for the scenario above: an ordinary question must still get a
+       field, or the fix would have removed follow-up rather than protected it. */
+    const waiting = taskPayload({
+      task_id: "task_q",
+      state: "waiting_for_user",
+      waiting_reason: "clarification"
+    });
+    return mount({
+      realAdapter: true,
+      initial: listPayload([waiting]),
+      detail: waiting,
+      events: [eventItem(1, "waiting_for_user", "Which file?")],
+      result: () => ({ payload: {} })
+    }).then(function () {
+      fire("click", openButton("task_q"));
+      return drain().then(function () {
+        const markup = html();
+        return { html: markup, hasFollowupBox: markup.indexOf("taskFollowupText") !== -1 };
+      });
+    });
+  }
+
+  /* -- the detail view must follow the backend on its own ------------------ */
+
+  if (scenario === "detail-updates-without-a-page-reload") {
+    /* The reported defect: the phone sat on `running` while the backend had
+       already moved on, and only a manual browser refresh showed the truth.
+
+       The detail endpoint is deliberately made SLOWER than the list endpoint
+       here, because that is what production does — reading a task detail asks
+       the adapter what it saw, which for the Claude adapter runs Git probes.
+       A detail response that always arrives second is what turns a race into a
+       certainty. */
+    let state = "running";
+    const taskOf = () => taskPayload({
+      task_id: "task_live",
+      state: state,
+      activity: state === "running" ? "Working." : null,
+      result: state === "running" ? null : "Bitti."
+    });
+
+    let slowDetail = 0;
+    return mount({
+      initial: listPayload([taskOf()]),
+      onGet(pathname) {
+        if (pathname.indexOf("/api/tasks/") === 0 && pathname.indexOf("/events") === -1) {
+          /* Resolve after a few extra microtasks, so the list response for the
+             same tick is applied first. */
+          slowDetail += 1;
+          let chain = Promise.resolve();
+          for (let i = 0; i < 12; i += 1) { chain = chain.then(() => {}); }
+          return chain.then(() => ({ ok: true, status: 200, payload: { task: taskOf() } }));
+        }
+        if (pathname === "/api/tasks") {
+          return Promise.resolve({ ok: true, status: 200, payload: listPayload([taskOf()]) });
+        }
+        return null;
+      },
+      events: [eventItem(1, "task_started", "Running.")],
+      result: () => ({ payload: {} })
+    }).then(function () {
+      fire("click", openButton("task_live"));
+      return drain(60).then(function () {
+        const whileRunning = html();
+        /* The backend moves on. No page reload happens after this point. */
+        state = "ready_for_followup";
+        advance(5000);
+        return drain(120).then(function () {
+          advance(5000);
+          return drain(120).then(function () {
+            return {
+              whileRunning: whileRunning,
+              html: html(),
+              detailRequests: slowDetail,
+              listRequests: record.requests.filter((r) => r.path === "/api/tasks").length
+            };
+          });
+        });
+      });
+    });
+  }
+
+  if (scenario === "turn-complete-does-not-say-needs-you") {
+    const done = taskPayload({
+      task_id: "task_done",
+      state: "ready_for_followup",
+      activity: null,
+      result: "NOTES.md olusturuldu."
+    });
+    return mount({
+      realAdapter: true,
+      initial: listPayload([done]),
+      detail: done,
+      events: [eventItem(1, "meaningful_output", "NOTES.md olusturuldu.")],
+      result: () => ({ payload: {} })
+    }).then(function () {
+      fire("click", openButton("task_done"));
+      return drain().then(function () {
+        const markup = html();
+        return {
+          html: markup,
+          hasFollowupBox: markup.indexOf("taskFollowupText") !== -1,
+          hasFinishButton: markup.indexOf("taskFinish") !== -1,
+          hasCancelButton: markup.indexOf("taskCancel") !== -1
+        };
+      });
+    });
+  }
+
+  if (scenario === "finish-closes-the-session") {
+    const done = taskPayload({ task_id: "task_done", state: "ready_for_followup",
+                               activity: null, result: "Bitti." });
+    const completed = taskPayload({ task_id: "task_done", state: "completed",
+                                    activity: null, result: "Bitti." });
+    return mount({
+      realAdapter: true,
+      initial: listPayload([done]),
+      detail: done,
+      events: [eventItem(1, "meaningful_output", "Bitti.")],
+      result: () => ({ payload: { task: completed }, detail: completed })
+    }).then(function () {
+      fire("click", openButton("task_done"));
+      return drain().then(function () {
+        fire("click", button("taskFinish"));
+        return drain(80).then(function () {
+          return { html: html(), writes: writes() };
+        });
+      });
+    });
+  }
+
+  if (scenario === "unauthorized-is-surfaced-as-sign-in") {
+    let reject = false;
+    return mount({
+      initial: listPayload([taskPayload({ task_id: "task_a", state: "running" })]),
+      detail: taskPayload({ task_id: "task_a", state: "running" }),
+      events: [eventItem(1, "task_started", "Running.")],
+      onGet() {
+        if (reject) { return Promise.reject(new Error("unauthorized")); }
+        return null;
+      },
+      result: () => ({ payload: {} })
+    }).then(function () {
+      fire("click", openButton("task_a"));
+      return drain().then(function () {
+        reject = true;
+        advance(5000);
+        return drain(80).then(function () {
+          const before = record.requests.length;
+          advance(30000);
+          return drain(80).then(function () {
+            return {
+              html: html(),
+              requestsAfterUnauthorized: record.requests.length - before
+            };
+          });
+        });
+      });
+    });
+  }
+
+  /* -- the follow-up draft must survive polling ---------------------------- */
+
+  if (scenario === "draft-survives-polling") {
+    /* The reported defect: text typed into the follow-up field vanished after a
+       few seconds, and pasting appeared to re-render the page. Detail polling
+       rebuilt the whole detail with `innerHTML`, which destroys the textarea
+       and everything in it. */
+    let activity = "Working.";
+    const taskOf = () => taskPayload({
+      task_id: "task_d", state: "ready_for_followup",
+      activity: activity, result: "Bitti."
+    });
+    return mount({
+      realAdapter: true,
+      initial: listPayload([taskOf()]),
+      onGet(pathname) {
+        if (pathname.indexOf("/api/tasks/") === 0 && pathname.indexOf("/events") === -1) {
+          return Promise.resolve({ ok: true, status: 200, payload: { task: taskOf() } });
+        }
+        if (pathname === "/api/tasks") {
+          return Promise.resolve({ ok: true, status: 200, payload: listPayload([taskOf()]) });
+        }
+        return null;
+      },
+      events: [eventItem(1, "meaningful_output", "Bitti.")],
+      result: () => ({ payload: {} })
+    }).then(function () {
+      fire("click", openButton("task_d"));
+      return drain().then(function () {
+        /* The user types, and focuses the field. */
+        const box = el("taskFollowupText");
+        box.value = "ikinci bir Türkçe cümle ekle";
+        box.focus();
+        fire("input", box);
+        const focusedBefore = activeElementId;
+
+        /* Several polls happen, and the backend changes something real. */
+        activity = "Still working.";
+        advance(5000);
+        return drain(80).then(function () {
+          advance(5000);
+          return drain(80).then(function () {
+            advance(5000);
+            return drain(80).then(function () {
+              return {
+                draftAfterPolling: valueOf("taskFollowupText"),
+                focusedBefore: focusedBefore,
+                focusedAfter: activeElementId,
+                destroyedFocusedNodes: destroyedFocusedNodes,
+                html: html()
+              };
+            });
+          });
+        });
+      });
+    });
+  }
+
+  if (scenario === "draft-survives-paste-and-identical-snapshots") {
+    const task = taskPayload({ task_id: "task_p", state: "ready_for_followup",
+                               activity: null, result: "Bitti." });
+    return mount({
+      realAdapter: true,
+      initial: listPayload([task]), detail: task,
+      events: [eventItem(1, "meaningful_output", "Bitti.")],
+      result: () => ({ payload: {} })
+    }).then(function () {
+      fire("click", openButton("task_p"));
+      return drain().then(function () {
+        const box = el("taskFollowupText");
+        box.value = "Birinci cümle. İkinci cümle. Üçüncü cümle.";
+        box.focus();
+        fire("paste", box);
+        /* Nothing about the task changes across these polls. */
+        advance(5000); advance(5000); advance(5000); advance(5000);
+        return drain(140).then(function () {
+          return {
+            draft: valueOf("taskFollowupText"),
+            renders: destroyedFocusedNodes,
+            focused: activeElementId
+          };
+        });
+      });
+    });
+  }
+
+  if (scenario === "failed-submit-preserves-the-draft") {
+    const task = taskPayload({ task_id: "task_f", state: "ready_for_followup",
+                               activity: null, result: "Bitti." });
+    return mount({
+      realAdapter: true,
+      initial: listPayload([task]), detail: task,
+      events: [eventItem(1, "meaningful_output", "Bitti.")],
+      refuse: "That task cannot take a follow-up right now.",
+      refuseCode: "task_conflict",
+      refuseStatus: 409,
+      result: () => ({ payload: {} })
+    }).then(function () {
+      fire("click", openButton("task_f"));
+      return drain().then(function () {
+        field("taskFollowupText", "bu metin kaybolmamalı");
+        fire("click", button("taskFollowupSend"));
+        return drain(120).then(function () {
+          return { draft: valueOf("taskFollowupText"), html: html() };
+        });
+      });
+    });
+  }
+
+  if (scenario === "accepted-submit-clears-once") {
+    const ready = taskPayload({ task_id: "task_s", state: "ready_for_followup",
+                                activity: null, result: "Bitti." });
+    const running = taskPayload({ task_id: "task_s", state: "running" });
+    return mount({
+      realAdapter: true,
+      initial: listPayload([ready]), detail: ready,
+      events: [eventItem(1, "meaningful_output", "Bitti.")],
+      result: () => ({ payload: { task: running }, detail: running })
+    }).then(function () {
+      fire("click", openButton("task_s"));
+      return drain().then(function () {
+        field("taskFollowupText", "gönderilecek metin");
+        fire("click", button("taskFollowupSend"));
+        fire("click", button("taskFollowupSend"));   /* double tap */
+        return drain(140).then(function () {
+          const posts = writes().filter((w) => w.path.indexOf("/followups") !== -1);
+          return {
+            draft: valueOf("taskFollowupText"),
+            followupPosts: posts.length,
+            requestIds: posts.map((w) => w.body && w.body.client_request_id)
+          };
+        });
+      });
+    });
+  }
+
+  if (scenario === "drafts-are-per-task") {
+    const a = taskPayload({ task_id: "task_a", state: "ready_for_followup",
+                            activity: null, result: "A." });
+    const b = taskPayload({ task_id: "task_b", state: "ready_for_followup",
+                            activity: null, result: "B." });
+    let current = a;
+    return mount({
+      realAdapter: true,
+      initial: listPayload([a, b]),
+      onGet(pathname) {
+        if (pathname.indexOf("/api/tasks/task_a") === 0 && pathname.indexOf("/events") === -1) {
+          return Promise.resolve({ ok: true, status: 200, payload: { task: a } });
+        }
+        if (pathname.indexOf("/api/tasks/task_b") === 0 && pathname.indexOf("/events") === -1) {
+          return Promise.resolve({ ok: true, status: 200, payload: { task: b } });
+        }
+        return null;
+      },
+      events: [eventItem(1, "meaningful_output", "x")],
+      result: () => ({ payload: {} })
+    }).then(function () {
+      fire("click", openButton("task_a"));
+      return drain().then(function () {
+        field("taskFollowupText", "A için taslak");
+        fire("click", button("taskBack"));
+        return drain(60).then(function () {
+          fire("click", openButton("task_b"));
+          return drain(60).then(function () {
+            const inB = valueOf("taskFollowupText");
+            fire("click", button("taskBack"));
+            return drain(60).then(function () {
+              fire("click", openButton("task_a"));
+              return drain(60).then(function () {
+                return { draftInB: inB, draftBackInA: valueOf("taskFollowupText") };
+              });
+            });
+          });
+        });
+      });
+    });
+  }
+
+  if (scenario === "finishing-does-not-submit-the-draft") {
+    const ready = taskPayload({ task_id: "task_x", state: "ready_for_followup",
+                               activity: null, result: "Bitti." });
+    const done = taskPayload({ task_id: "task_x", state: "completed", result: "Bitti." });
+    return mount({
+      realAdapter: true,
+      initial: listPayload([ready]), detail: ready,
+      events: [eventItem(1, "meaningful_output", "Bitti.")],
+      result: () => ({ payload: { task: done }, detail: done })
+    }).then(function () {
+      fire("click", openButton("task_x"));
+      return drain().then(function () {
+        field("taskFollowupText", "gönderilmemeli");
+        fire("click", button("taskFinish"));
+        return drain(140).then(function () {
+          return {
+            writes: writes().map((w) => w.path),
+            html: html()
+          };
+        });
+      });
+    });
+  }
+
+  if (scenario === "text-typed-while-sending-is-not-swallowed") {
+    /* The requirement that the clear must correspond to *this* submission.
+       Somebody sends one message and starts typing the next before the server
+       answers. Clearing unconditionally on acceptance would delete the second
+       message, which nobody sent and nobody asked to lose. */
+    const ready = taskPayload({ task_id: "task_t", state: "ready_for_followup",
+                                activity: null, result: "Bitti." });
+    const running = taskPayload({ task_id: "task_t", state: "running" });
+    let release = null;
+    return mount({
+      realAdapter: true,
+      initial: listPayload([ready]), detail: ready,
+      events: [eventItem(1, "meaningful_output", "Bitti.")],
+      onWrite() {
+        return new Promise(function (resolve) { release = resolve; });
+      },
+      result: () => ({ payload: { task: running }, detail: running })
+    }).then(function () {
+      fire("click", openButton("task_t"));
+      return drain().then(function () {
+        field("taskFollowupText", "birinci mesaj");
+        fire("click", button("taskFollowupSend"));
+        return drain(20).then(function () {
+          /* In flight. The person keeps typing. */
+          field("taskFollowupText", "ikinci mesaj");
+          if (release) {
+            release({ ok: true, status: 200, payload: { task: running } });
+          }
+          return drain(140).then(function () {
+            return { draft: valueOf("taskFollowupText") };
+          });
         });
       });
     });

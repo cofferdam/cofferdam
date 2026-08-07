@@ -52,6 +52,22 @@ STATE_QUEUED = "queued"
 STATE_STARTING = "starting"
 STATE_RUNNING = "running"
 STATE_WAITING_FOR_USER = "waiting_for_user"
+#: A turn finished, the adapter still holds the session, and **nobody is being
+#: asked anything.**
+#:
+#: This state exists because the alternative was a lie. An agent turn that ends
+#: successfully can leave a session alive and able to take another message, and
+#: the first adapter to do so reported that as
+#: ``waiting_for_user(clarification)`` — so a phone said "NEEDS YOU / waiting
+#: for an answer" about a task that had finished what it was asked and was
+#: waiting for nothing. Overloading a real waiting reason to mean "an optional
+#: follow-up is possible" made the one word that must stay trustworthy —
+#: *waiting* — untrustworthy.
+#:
+#: It is non-terminal and it is not in the waiting bucket: the work is done, the
+#: session is an affordance, and the person may send another message, finish the
+#: task, or leave it alone.
+STATE_READY_FOR_FOLLOWUP = "ready_for_followup"
 STATE_CANCELLING = "cancelling"
 STATE_COMPLETED = "completed"
 STATE_FAILED = "failed"
@@ -65,6 +81,7 @@ STATES: Tuple[str, ...] = (
     STATE_STARTING,
     STATE_RUNNING,
     STATE_WAITING_FOR_USER,
+    STATE_READY_FOR_FOLLOWUP,
     STATE_CANCELLING,
     STATE_COMPLETED,
     STATE_FAILED,
@@ -89,7 +106,14 @@ RECOVERABLE_STATES = frozenset({STATE_RECOVERY_REQUIRED})
 
 #: States in which the task is doing something, or about to.
 ACTIVE_STATES = frozenset(
-    {STATE_CREATED, STATE_QUEUED, STATE_STARTING, STATE_RUNNING, STATE_CANCELLING}
+    {
+        STATE_CREATED,
+        STATE_QUEUED,
+        STATE_STARTING,
+        STATE_RUNNING,
+        STATE_READY_FOR_FOLLOWUP,
+        STATE_CANCELLING,
+    }
 )
 
 #: What the list view groups by. Three buckets, because three is what fits on a
@@ -110,6 +134,12 @@ def bucket_of(state: str) -> str:
     """
     if state == STATE_WAITING_FOR_USER or state in RECOVERABLE_STATES:
         return BUCKET_WAITING
+    if state == STATE_READY_FOR_FOLLOWUP:
+        # Deliberately *not* the waiting bucket. That bucket means "what needs
+        # me", and a finished turn needs nobody. It is grouped with the live
+        # tasks because it is one: it still holds a process and, for an adapter
+        # with a concurrency limit of one, still holds the slot.
+        return BUCKET_ACTIVE
     if state in TERMINAL_STATES:
         return BUCKET_FINISHED
     return BUCKET_ACTIVE
@@ -157,6 +187,12 @@ EVENT_TASK_STARTED = "task_started"
 EVENT_PROGRESS = "progress"
 EVENT_MEANINGFUL_OUTPUT = "meaningful_output"
 EVENT_WAITING_FOR_USER = "waiting_for_user"
+#: A turn ended and the adapter still holds the session. Its own type, because
+#: falling through to ``task_started`` made a *finished* turn read as a task
+#: beginning — and put a lifecycle event between two identical observations,
+#: which is what stopped the store's duplicate suppression from seeing them as
+#: consecutive.
+EVENT_TURN_COMPLETE = "turn_complete"
 EVENT_FOLLOWUP_RECEIVED = "followup_received"
 EVENT_CANCELLATION_REQUESTED = "cancellation_requested"
 EVENT_TASK_CANCELLED = "task_cancelled"
@@ -174,6 +210,7 @@ EVENT_TYPES: Tuple[str, ...] = (
     EVENT_PROGRESS,
     EVENT_MEANINGFUL_OUTPUT,
     EVENT_WAITING_FOR_USER,
+    EVENT_TURN_COMPLETE,
     EVENT_FOLLOWUP_RECEIVED,
     EVENT_CANCELLATION_REQUESTED,
     EVENT_TASK_CANCELLED,
@@ -198,6 +235,7 @@ CORE_OWNED_EVENT_TYPES = frozenset(
         EVENT_TASK_CREATED,
         EVENT_TASK_QUEUED,
         EVENT_ADAPTER_STARTING,
+        EVENT_TURN_COMPLETE,
         EVENT_TASK_STARTED,
         EVENT_TASK_COMPLETED,
         EVENT_TASK_FAILED,

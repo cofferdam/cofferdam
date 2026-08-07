@@ -135,6 +135,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "lifecycle on a validation runtime. Off unless this flag is given."
         ),
     )
+    parser.add_argument(
+        "--enable-claude-code-adapter",
+        action="store_true",
+        help=(
+            "register the Claude Code task adapter. It launches the installed "
+            "Claude Code CLI inside a project from the host's project registry, "
+            "where it can read and edit files. It has no shell and cannot leave "
+            "that folder. Off unless this flag is given."
+        ),
+    )
     args = parser.parse_args(argv)
 
     config = load_config()
@@ -150,6 +160,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # unconfigured one.
         config = type(config)(
             **{**config.__dict__, "enable_validation_task_adapter": True}
+        )
+    if args.enable_claude_code_adapter:
+        # Same one-directional rule as above, for the same reason.
+        config = type(config)(
+            **{**config.__dict__, "enable_claude_code_adapter": True}
         )
     config.ensure_dirs()
 
@@ -173,6 +188,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "[cofferdam] the validation task adapter is enabled. It runs no program "
             "and calls no model; it exists to exercise the task lifecycle. Do not "
             "leave it enabled on a normal runtime.",
+            file=sys.stderr,
+        )
+
+    if config.enable_claude_code_adapter:
+        # Announced on every start, for the same reason and with more at stake:
+        # this one starts a real program that can change files.
+        print(
+            "[cofferdam] the Claude Code task adapter is enabled. Tasks can run "
+            "Claude Code inside projects listed in task-projects.json, where it "
+            "can read and edit files. It has no shell.",
             file=sys.stderr,
         )
 

@@ -47,12 +47,20 @@ ENV_BIND_PORT = "COFFERDAM_BIND_PORT"
 ENV_ADAPTER = "COFFERDAM_ADAPTER"
 ENV_TOKEN = "COFFERDAM_TOKEN"
 ENV_VALIDATION_TASK_ADAPTER = "COFFERDAM_ENABLE_VALIDATION_TASK_ADAPTER"
+ENV_CLAUDE_CODE_ADAPTER = "COFFERDAM_ENABLE_CLAUDE_CODE_ADAPTER"
 
 #: Off, and it stays off unless somebody with access to this machine turns it
 #: on. The validation task adapter is a lifecycle exerciser for a validation
 #: runtime; a default-on test adapter would be a surface nobody asked for on
 #: every install. See ``docs/AGENT_TASK_CORE.md``.
 DEFAULT_ENABLE_VALIDATION_TASK_ADAPTER = False
+
+#: Off, and this is the most consequential default in the file. The Claude
+#: Code adapter launches a real process that reads and edits real files in an
+#: approved project. It is enabled by a deliberate host-owned decision — this
+#: flag, a config key, or an environment variable in the unit — and by nothing
+#: a client can send. See ``docs/CLAUDE_CODE_ADAPTER.md``.
+DEFAULT_ENABLE_CLAUDE_CODE_ADAPTER = False
 
 
 @dataclass(frozen=True)
@@ -67,6 +75,9 @@ class Config:
     #: this field: it is set by a command-line flag, by ``config.json`` on the
     #: host, or by an environment variable in the unit file.
     enable_validation_task_adapter: bool = DEFAULT_ENABLE_VALIDATION_TASK_ADAPTER
+    #: Server-side only, exactly like the field above and for stronger
+    #: reasons. No route, header or request body reaches this.
+    enable_claude_code_adapter: bool = DEFAULT_ENABLE_CLAUDE_CODE_ADAPTER
 
     @property
     def secrets_dir(self) -> Path:
@@ -208,6 +219,15 @@ def load_config(home: Optional[Path] = None) -> Config:
                 DEFAULT_ENABLE_VALIDATION_TASK_ADAPTER,
             ),
             DEFAULT_ENABLE_VALIDATION_TASK_ADAPTER,
+        ),
+        enable_claude_code_adapter=_as_bool(
+            _pick(
+                ENV_CLAUDE_CODE_ADAPTER,
+                overrides,
+                "enable_claude_code_adapter",
+                DEFAULT_ENABLE_CLAUDE_CODE_ADAPTER,
+            ),
+            DEFAULT_ENABLE_CLAUDE_CODE_ADAPTER,
         ),
     )
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+import json
 import shutil
 import subprocess
 import unittest
@@ -234,7 +235,9 @@ class Actions(unittest.TestCase):
         self.assertEqual(
             set(writes[0]["body"]), {"followup", "client_request_id"}
         )
-        self.assertIn("Answer sent.", result["html"])
+        # "Answer sent." was wrong for a follow-up that answers nothing; the
+        # panel says "Sent." now. See FinishedTurnWording.
+        self.assertIn("Sent.", result["html"])
 
     def test_cancel_repeats_the_observed_state_rather_than_upgrading_it(self):
         """A task that is still `cancelling` is not cancelled, and says so."""
@@ -375,6 +378,259 @@ class Layout(unittest.TestCase):
         narrow = self.css.split("@media (max-width: 480px)")[-1]
         self.assertIn(".task-facts", narrow)
         self.assertIn(".task-actions button", narrow)
+
+
+class RealAdapterBoundaries(unittest.TestCase):
+    """What the panel does once an adapter runs an actual program.
+
+    Behavioural, through the shipped ``web/tasks.js``. The harness's adapter is
+    called "Runner" and is deliberately not named after any product: the panel
+    must render a real adapter's boundaries out of the fields the API sends,
+    without knowing what it is.
+    """
+
+    def test_an_authentication_wait_offers_no_text_field(self):
+        """A textarea under "waiting for sign-in" invites a password.
+
+        Task Core named ``SECRET_BEARING_WAITING_REASONS`` and the panel did not
+        read the list, because the only adapter that shipped never produced one.
+        The first adapter that authenticates does.
+        """
+        result = panel("authentication-wait-offers-no-text-field")
+        self.assertFalse(result["hasFollowupBox"])
+        self.assertFalse(result["hasSendButton"])
+        html = result["html"]
+        self.assertIn("task-secret-wait", html)
+        self.assertIn("Never type a password", html)
+        self.assertIn("on the workstation itself", html)
+        # No input of any kind appears in that state.
+        self.assertNotIn("<textarea", html)
+        self.assertNotIn("<input", html)
+
+    def test_cancel_is_still_offered_while_waiting_for_sign_in(self):
+        """Withholding the box must not withhold the way out of the task."""
+        result = panel("authentication-wait-offers-no-text-field")
+        self.assertTrue(result["hasCancelButton"])
+
+    def test_an_ordinary_question_still_gets_a_field(self):
+        """The control. Without this, "no box" could be satisfied by removing
+        follow-up altogether rather than by protecting one case of it."""
+        result = panel("clarification-wait-still-offers-the-box")
+        self.assertTrue(result["hasFollowupBox"])
+        self.assertNotIn("task-secret-wait", result["html"])
+
+    def test_the_composer_shows_what_a_real_adapter_will_refuse(self):
+        """Before somebody writes a prompt asking for the thing it cannot do."""
+        html = panel("composer-shows-a-real-adapter-limitations")["html"]
+        self.assertIn("task-limitations", html)
+        self.assertIn("It has no shell.", html)
+        self.assertIn("cannot leave the project folder", html)
+        self.assertIn("Never type a password", html)
+        # And it is still not a terminal: no command, path or flag field.
+        for forbidden in ("taskCommand", "taskCwd", "taskEnv", "taskFlags"):
+            self.assertNotIn(forbidden, html)
+
+    def test_the_panel_prints_nothing_to_the_console(self):
+        for name in (
+            "authentication-wait-offers-no-text-field",
+            "composer-shows-a-real-adapter-limitations",
+        ):
+            self.assertEqual(panel(name)["consoleOutput"], [], name)
+
+
+class DetailFollowsTheBackend(unittest.TestCase):
+    """Defect 1: the open task detail did not update on its own.
+
+    The phone sat on `running` while the backend had moved on, and only a manual
+    browser reload showed the truth.
+    """
+
+    def test_the_detail_updates_without_a_page_reload(self):
+        """The regression test for the reported defect.
+
+        Detail polling was never absent — the requests went out on every tick
+        and their responses were thrown away. The list and the detail shared one
+        response-ordering counter, the poll issues the detail request first and
+        the list second, so the list held the higher generation; whenever the
+        list response landed first, the detail was discarded as stale. Reading a
+        task detail asks the adapter what it saw, so it is reliably the slower
+        of the two, which turned a race into a certainty.
+        """
+        result = panel("detail-updates-without-a-page-reload")
+        self.assertIn("running", result["whileRunning"])
+        self.assertGreaterEqual(result["detailRequests"], 2, "detail was not polled")
+        self.assertNotIn("running", result["html"])
+        self.assertIn("turn complete", result["html"].lower())
+
+    def test_polling_does_not_storm(self):
+        """Conservative: one detail read and one list read per tick, not more."""
+        result = panel("detail-updates-without-a-page-reload")
+        self.assertLessEqual(result["detailRequests"], result["listRequests"] + 1)
+        self.assertLessEqual(result["detailRequests"], 6)
+
+
+class FinishedTurnWording(unittest.TestCase):
+    """Defect 2: a completed turn was labelled as waiting for an answer."""
+
+    def test_a_finished_turn_does_not_say_needs_you(self):
+        result = panel("turn-complete-does-not-say-needs-you")
+        html = result["html"]
+        self.assertNotIn("needs you", html)
+        self.assertNotIn("waiting for an answer", html)
+        self.assertIn("Turn complete", html)
+        self.assertIn("optional follow-up", html)
+
+    def test_the_field_is_not_called_your_answer(self):
+        """Nothing was asked, so nothing is an answer."""
+        html = panel("turn-complete-does-not-say-needs-you")["html"]
+        self.assertNotIn("Your answer", html)
+        self.assertIn("Follow-up (optional)", html)
+
+    def test_a_follow_up_is_still_offered(self):
+        self.assertTrue(panel("turn-complete-does-not-say-needs-you")["hasFollowupBox"])
+
+    def test_finishing_is_offered_so_cancel_is_not_the_only_way_out(self):
+        result = panel("turn-complete-does-not-say-needs-you")
+        self.assertTrue(result["hasFinishButton"])
+        self.assertTrue(result["hasCancelButton"])
+
+    def test_finishing_posts_to_the_finish_route(self):
+        result = panel("finish-closes-the-session")
+        writes = [(w["method"], w["path"]) for w in result["writes"]]
+        self.assertIn(("POST", "/api/tasks/task_done/finish"), writes)
+        self.assertNotIn(("POST", "/api/tasks/task_done/cancel"), writes)
+
+    def test_a_real_question_still_says_your_answer(self):
+        """The control: the distinction is only worth anything if both sides
+        still work."""
+        html = panel("clarification-wait-still-offers-the-box")["html"]
+        self.assertIn("Your answer", html)
+        self.assertNotIn("Turn complete", html)
+
+
+class UnauthorizedIsNotAGenericError(unittest.TestCase):
+    """7. A 401 means sign in again, and the panel has to say so.
+
+    The shell already clears the token and shows "token rejected". The panel
+    used to swallow the error and leave the last good detail on screen looking
+    current, which is a different way of being wrong.
+    """
+
+    def test_it_says_to_sign_in_again(self):
+        html = panel("unauthorized-is-surfaced-as-sign-in")["html"]
+        self.assertIn("Sign in again", html)
+
+    def test_it_does_not_report_a_generic_reachability_failure(self):
+        html = panel("unauthorized-is-surfaced-as-sign-in")["html"]
+        self.assertNotIn("could not reach the workstation", html)
+
+    def test_polling_stops_once_the_token_is_rejected(self):
+        """Otherwise a signed-out phone hammers a route that will keep saying no."""
+        result = panel("unauthorized-is-surfaced-as-sign-in")
+        self.assertEqual(result["requestsAfterUnauthorized"], 0)
+
+
+class FollowUpDraftSurvives(unittest.TestCase):
+    """The reported data-loss defect: typed follow-up text disappeared.
+
+    Task-detail polling rebuilt the whole detail with `innerHTML`, which in a
+    browser destroys the textarea and everything in it. The auto-refresh added
+    for the previous defect made it happen every few seconds, and pasting
+    happened to coincide with a poll, which is why the page looked like it was
+    refreshing itself mid-paste.
+
+    These run against the shipped `web/tasks.js` through a harness that now
+    models the destruction honestly — an earlier version memoised its stub
+    nodes forever, so a textarea could never lose its value and this class of
+    bug was invisible to it.
+    """
+
+    def test_a_typed_draft_survives_several_polls(self):
+        """1, 2, 3."""
+        result = panel("draft-survives-polling")
+        self.assertEqual(result["draftAfterPolling"], "ikinci bir Türkçe cümle ekle")
+
+    def test_the_backend_still_updates_while_the_draft_is_held(self):
+        """4. Preserving the draft must not mean freezing the view."""
+        result = panel("draft-survives-polling")
+        self.assertIn("turn complete", result["html"].lower())
+
+    def test_pasted_text_survives_and_identical_polls_do_not_rebuild(self):
+        """5. An unchanged snapshot renders nothing, so nothing is destroyed."""
+        result = panel("draft-survives-paste-and-identical-snapshots")
+        self.assertEqual(result["draft"], "Birinci cümle. İkinci cümle. Üçüncü cümle.")
+        self.assertEqual(
+            result["renders"], 0, "identical polls rebuilt the form anyway"
+        )
+
+    def test_focus_is_returned_after_a_render_that_had_to_happen(self):
+        """6. A real change still rebuilds; the caret goes back afterwards."""
+        result = panel("draft-survives-polling")
+        self.assertEqual(result["focusedBefore"], "taskFollowupText")
+        self.assertEqual(result["focusedAfter"], "taskFollowupText")
+
+    def test_a_failed_submission_keeps_every_character(self):
+        """8. The moment most likely to fail is the one where the text matters."""
+        result = panel("failed-submit-preserves-the-draft")
+        self.assertEqual(result["draft"], "bu metin kaybolmamalı")
+
+    def test_an_accepted_submission_clears_it_exactly_once(self):
+        """9, 10. And a double tap is still one delivery."""
+        result = panel("accepted-submit-clears-once")
+        self.assertIn(result["draft"], ("", None))
+        self.assertEqual(result["followupPosts"], 1)
+        self.assertEqual(len(set(result["requestIds"])), 1)
+
+    def test_text_typed_while_sending_is_not_swallowed(self):
+        """9. The clear must correspond to *this* submission.
+
+        Somebody sends one message and starts the next before the server
+        answers. Clearing unconditionally on acceptance deletes a message nobody
+        sent and nobody asked to lose.
+        """
+        result = panel("text-typed-while-sending-is-not-swallowed")
+        self.assertEqual(result["draft"], "ikinci mesaj")
+
+    def test_a_draft_never_leaks_between_tasks(self):
+        """11."""
+        result = panel("drafts-are-per-task")
+        self.assertEqual(result["draftInB"], "")
+
+    def test_returning_to_a_task_restores_its_draft(self):
+        """12. Session policy: drafts are kept per task while the panel lives."""
+        result = panel("drafts-are-per-task")
+        self.assertEqual(result["draftBackInA"], "A için taslak")
+
+    def test_finishing_cannot_accidentally_submit_the_draft(self):
+        """13."""
+        result = panel("finishing-does-not-submit-the-draft")
+        self.assertIn("/api/tasks/task_x/finish", result["writes"])
+        self.assertFalse(
+            [path for path in result["writes"] if "followups" in path],
+            "finishing sent the unsent draft",
+        )
+
+    def test_no_draft_reaches_the_console_or_a_cache(self):
+        """14."""
+        for name in ("draft-survives-polling", "failed-submit-preserves-the-draft"):
+            self.assertEqual(panel(name)["consoleOutput"], [], name)
+        source = (WEB_DIR / "tasks.js").read_text(encoding="utf-8")
+        self.assertNotIn("console.", source)
+        self.assertNotIn("caches.", source)
+        self.assertNotIn("localStorage", source)
+        worker = (WEB_DIR / "sw.js").read_text(encoding="utf-8")
+        self.assertNotIn("followup", worker.lower())
+
+    def test_drafts_are_keyed_by_task_rather_than_held_in_one_slot(self):
+        """A single field would carry one task's words into another's box."""
+        source = (WEB_DIR / "tasks.js").read_text(encoding="utf-8")
+        self.assertIn("followupDrafts[", source)
+        self.assertIn("draftFor(", source)
+
+    def test_the_draft_is_not_written_to_the_server_while_typing(self):
+        """A draft is not a follow-up, and a half-typed sentence is not history."""
+        result = panel("draft-survives-polling")
+        self.assertNotIn("followups", json.dumps(result.get("html", "")))
 
 
 class PanelSeparation(unittest.TestCase):

@@ -7,6 +7,8 @@ this file when a category changes, not on every commit.
 
 ## Merged (on `main`)
 
+- **M2F — Agent Task Core foundation** (PR #20, squash-merged as `9a645eb`). The provider-neutral task model that had to exist before any agent: identity, an eleven-state machine committed in one transaction with its event, a SQLite store, an append-only history, a host-owned project registry, the adapter protocol, and a deterministic validation adapter that runs no program. Eight authenticated routes and a **Tasks** panel. A default install after this merge has an empty adapter list, which is the honest state of a foundation. See [`docs/AGENT_TASK_CORE.md`](docs/AGENT_TASK_CORE.md) and D-2026-08-06-2.
+
 Trust Core module, PR0 → PR3c1:
 
 - Foundation docs, Apache-2.0 license, clean-room provenance/attestation, CI license scan (PR0).
@@ -30,41 +32,28 @@ Trust Core module, PR0 → PR3c1:
 
 ## In progress
 
-- **M2F — Agent Task Core foundation.** On branch `feat/agent-task-core-foundation`, not merged.
-  Cofferdam needs a provider-neutral, durable task model *before* Claude Code, ChatGPT, Cursor or
-  any other agent is integrated, so this ships the whole task system and deliberately no way to run
-  a real agent in it. Adds `cofferdam/workstation/tasks/` — identity, an eleven-state machine, a
-  SQLite store, an append-only event stream, a host-owned project registry, a provider-neutral
-  adapter protocol and a deterministic validation adapter — plus eight authenticated routes and a
-  **Tasks** panel in the PWA. Documented in
-  [`docs/AGENT_TASK_CORE.md`](docs/AGENT_TASK_CORE.md) and decided in D-2026-08-06-2.
+- **M2G — Claude Code adapter.** On branch `feat/claude-code-adapter`, not merged. The first
+  adapter that runs a real program, built on the merged M2F foundation. A phone picks an approved
+  project, picks Claude Code, writes a prompt, watches truthful progress, reads the result, sends a
+  follow-up to the same live session, and cancels that one task. Adds
+  `cofferdam/workstation/tasks/adapters/claude_code/` — the fixed CLI vocabulary, a bounded
+  stream-json parser, one identified process per task, and Cofferdam's own Git observations —
+  plus the `--enable-claude-code-adapter` gate. Documented in
+  [`docs/CLAUDE_CODE_ADAPTER.md`](docs/CLAUDE_CODE_ADAPTER.md) and decided in M2G.
 
-  **The client cannot name a path, a program or a process.** A request carries a project id, an
-  adapter id, a prompt, an optional title and an optional retry key — and nothing else. There is no
-  field for a working directory, an executable, argv, an environment, a callback URL, a pid or a
-  unit name; they are absent rather than validated, and a body carrying one is refused. The server
-  resolves the project to a verified root from a host-owned file, re-checking every path component
-  for symlinks immediately before use rather than trusting a check made at start-up.
+  **Off by default, and there is no shell behind it.** The adapter is registered only when the host
+  explicitly enabled it *and* a project in `task-projects.json` permits it. The tool profile omits
+  Bash entirely rather than gating it, `--strict-mcp-config` with no config ignores every MCP server
+  on the machine, and `--setting-sources ""` means no settings file can widen the profile
+  afterwards. `--dangerously-skip-permissions` is never passed.
 
-  **A row that says `running` is not evidence that anything is running.** On start-up every
-  non-terminal task becomes `interrupted` — never resumed, never left claiming to run, previous
-  output preserved, terminal tasks untouched — and `interrupted` is deliberately a different word
-  from `failed`, because the task did not go wrong.
+  **Verified against the installed CLI (2.1.221), not from memory.** Two probes chose the
+  architecture: one long-lived `-p --input-format stream-json` process per task, which is what makes
+  a follow-up provably reach the same session and a cancellation target a real pid. Process identity
+  is pid + `/proc` start time + process group + run id, re-verified before every signal. Exit code
+  zero without a result frame is a failure, not a completion. Restart marks the task `interrupted`
+  and resumes nothing. 134 focused tests, 17/17 mutations caught.
 
-  **State and event are one write.** Every transition is validated against a single graph and
-  committed in the same transaction as its event, so a snapshot cannot disagree with the history it
-  is supposed to summarise. That requirement is what made SQLite the honest choice here, which
-  `store.py` had already anticipated in writing; it is standard library, so the stdlib-only CI path
-  is unchanged.
-
-  **The validation adapter is not an agent.** It runs no program, calls no model, writes nothing,
-  and imports nothing that could — asserted by a test. It is registered only when the host was
-  explicitly configured to allow it, and a default install after merge has an empty adapter list.
-
-  2,070 tests pass on both CI paths (1,860 before), including eight mutation checks — illegal
-  transition acceptance, non-transactional snapshot/event update, client-enabled validation adapter,
-  arbitrary working-directory acceptance, idempotency bypass, restart leaving a task falsely
-  running, cancellation reaching the wrong task, and prompt content entering the audit path.
 
   **Not yet validated on the real host.** The `96-agent-task-core-validation` drop-in is prepared
   and not applied; the live service still runs the M2E build under the unchanged `95` drop-in.
