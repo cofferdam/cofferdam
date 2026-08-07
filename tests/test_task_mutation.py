@@ -538,9 +538,23 @@ class ContentLeakGuard(TaskTestCase):
             # including the adapter — those are the words that would actually
             # put a prompt or a result somewhere it must never appear, and the
             # property this test is named for is untouched.
-            forbidden_here = ("logging", "logger", "print(")
-            if "claude_code" not in path.parts:
-                forbidden_here += ("stdout", "stderr")
+            if path.name == "observe.py":
+                # The local observer is a command a person runs in their own
+                # terminal, so printing is its entire purpose. The property this
+                # test protects is that task content never reaches a *log* — a
+                # journal line, an operator's aggregator, something that outlives
+                # the task and is read by somebody who was not there. Writing to
+                # the stdout of a program somebody just typed is the opposite of
+                # that, and it is why the observer exists at all.
+                #
+                # `logging` and `logger` stay forbidden here, which is the half
+                # that matters: those are the words that would put a prompt
+                # somewhere nobody chose.
+                forbidden_here = ("logging", "logger", "journal", "syslog")
+            else:
+                forbidden_here = ("logging", "logger", "print(")
+                if "claude_code" not in path.parts:
+                    forbidden_here += ("stdout", "stderr")
             for forbidden in forbidden_here:
                 self.assertNotIn(forbidden, source, str(path) + " uses " + forbidden)
 
