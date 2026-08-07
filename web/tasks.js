@@ -102,6 +102,23 @@
   var appliedDetailGeneration = 0;
   var inflightRefresh = null;
 
+  /* Unsent follow-up text, **keyed by task id**, and local until the person
+     presses send. It is deliberately not written to the task database on every
+     keystroke: a draft is not a follow-up, and a half-typed sentence is not
+     something to persist into an append-only history.
+
+     Keyed rather than single, because a single field would carry one task's
+     draft into another task's box the moment somebody navigated — which is a
+     quieter and worse bug than losing it. */
+  var followupDrafts = {};
+  var followupFocus = null;
+
+  /* The last markup written to the panel. Re-rendering identical markup would
+     destroy and rebuild every node for no reason — including the textarea the
+     person is typing into — so an unchanged render is skipped entirely. This is
+     what makes an idle poll cost nothing visible. */
+  var lastMarkup = null;
+
   /* One key per created task, minted here and sent with the request, so a
      double tap and a retry are the same request to the server rather than two.
      The server is authoritative; this is what lets it recognise the repeat. */
@@ -544,6 +561,73 @@
       taskGroup("Finished", "finished", "Nothing has finished yet.");
   }
 
+  /* Read whatever is in the live follow-up box into the draft store.
+     
+     Called immediately before any re-render. It does not depend on `input`
+     events having fired: assigning `innerHTML` destroys the textarea whether or
+     not the browser has told us anything about it, so the value has to be taken
+     from the node while the node still exists. */
+  function captureDraft() {
+    if (!deps || !openTaskId) { return; }
+    /* Asked of the document, not of `deps.el`. That helper memoises — and
+       creates — an element for any id, which is right for the fixed shell nodes
+       it was written for and wrong for a node that only exists while the
+       follow-up form is on screen. Fabricating an empty one and storing its
+       value **erased the draft** every time the panel rendered a view without
+       the form, which is exactly what happens on the way back to a task. */
+    var box = followupBox();
+    if (!box || typeof box.value !== "string") { return; }
+    followupDrafts[openTaskId] = box.value;
+    followupFocus = null;
+    var doc = deps.doc ? deps.doc() : (global.document || null);
+    var focused = doc && doc.activeElement;
+    if (focused === box || (focused && focused.id === "taskFollowupText")) {
+      followupFocus = {
+        start: typeof box.selectionStart === "number" ? box.selectionStart : null,
+        end: typeof box.selectionEnd === "number" ? box.selectionEnd : null
+      };
+    }
+  }
+
+  /* The live follow-up box, or null when the panel is not showing one. */
+  function followupBox() {
+    var doc = global.document;
+    if (doc && typeof doc.getElementById === "function") {
+      return doc.getElementById("taskFollowupText");
+    }
+    return null;
+  }
+
+  function draftFor(taskId) {
+    return (taskId && followupDrafts[taskId]) || "";
+  }
+
+  /* Copy the stored draft into the freshly built textarea. */
+  function applyDraft() {
+    if (!openTaskId) { return; }
+    var box = followupBox();
+    if (!box || typeof box.value !== "string") { return; }
+    var draft = draftFor(openTaskId);
+    if (box.value !== draft) { box.value = draft; }
+  }
+
+  /* Put the person back where they were. The textarea is a new node after a
+     re-render, so focus and caret have to be re-applied or every poll would
+     interrupt typing even though the text survived. */
+  function restoreFocus() {
+    if (!followupFocus || !deps) { return; }
+    var box = followupBox();
+    if (!box || typeof box.focus !== "function") { followupFocus = null; return; }
+    box.focus();
+    if (followupFocus.start !== null && typeof box.setSelectionRange === "function") {
+      try { box.setSelectionRange(followupFocus.start, followupFocus.end); } catch (error) { /* not a text field */ }
+    } else if (followupFocus.start !== null) {
+      box.selectionStart = followupFocus.start;
+      box.selectionEnd = followupFocus.end;
+    }
+    followupFocus = null;
+  }
+
   function render() {
     if (!deps) { return; }
     var host = deps.el("tasksSections");
@@ -551,10 +635,36 @@
 
     if (snapshot === null && !loadError) {
       host.innerHTML = '<p class="muted">Loading…</p>';
+      lastMarkup = null;
       return;
     }
 
-    host.innerHTML = messages() + (openTaskId && detail ? detailView() : listView());
+    captureDraft();
+    var markup = messages() + (openTaskId && detail ? detailView() : listView());
+    if (markup === lastMarkup) {
+      /* Nothing a person could see has changed. Writing it anyway would throw
+         away the textarea, the caret and the focus to produce the same pixels,
+         which is precisely what made a typed draft disappear on a polling
+         tick. */
+      followupFocus = null;
+      return;
+    }
+    lastMarkup = markup;
+    host.innerHTML = markup;
+    /* The draft is applied to the node **after** the markup is written, and is
+       deliberately not part of the markup itself.
+       
+       Two reasons, and the second is the one that matters. Putting it in the
+       HTML would make the markup change on every keystroke, so the
+       identical-render skip above would never fire while somebody was typing
+       and the form would be rebuilt under them on every poll — focus restored
+       each time, but rebuilt. Keeping it out means the markup is stable while
+       typing and an idle poll writes nothing at all. It also keeps a
+       half-written sentence out of a string that gets compared, cached and
+       potentially logged. */
+    applyDraft();
+
+    restoreFocus();
 
     var observed = deps.el("tasksObserved");
     if (observed) {
@@ -817,30 +927,47 @@
   }
 
   function sendFollowup() {
-    var field = global.document && global.document.getElementById("taskFollowupText");
-    var text = field ? String(field.value || "") : "";
+    if (!openTaskId) { return Promise.resolve(null); }
+    var taskId = openTaskId;
+    /* The live box first, the stored draft second. They agree except in the
+       moment between a keystroke and the next capture. */
+    var box = followupBox();
+    var text = box && typeof box.value === "string" ? box.value : draftFor(taskId);
+    text = String(text || "");
+    followupDrafts[taskId] = text;
+
     if (!text.trim()) {
-      actionError = { message: "Write an answer first.", detail: null };
+      actionError = { message: "Write something to send first.", detail: null };
       render();
       return Promise.resolve(null);
     }
-    if (!openTaskId) { return Promise.resolve(null); }
     if (!beginPending("followup")) { return Promise.resolve(null); }
 
-    return deps.api("/api/tasks/" + encodeURIComponent(openTaskId) + "/followups", {
-      body: { followup: text, client_request_id: requestId() }
+    /* The draft is NOT cleared here. Clearing on submit means a refusal, a
+       dropped connection or a 422 loses what somebody wrote — and the moment
+       most likely to fail is the one where the text matters most. It is cleared
+       after the server accepts it, and only then. */
+    var sent = text;
+    return deps.api("/api/tasks/" + encodeURIComponent(taskId) + "/followups", {
+      body: { followup: sent, client_request_id: requestId() }
     }).then(function (response) {
       endPending();
       pendingRequestId = null;
       if (!response.ok) {
         actionError = failureOf(response);
         render();
-        return loadDetail(openTaskId);
+        return loadDetail(taskId);
       }
-      actionNote = "Answer sent.";
+      /* Accepted. Cleared once, and only if the box still holds the text that
+         was accepted — anything typed while the request was in flight is newer
+         than the answer and is somebody's next message, not a leftover. */
+      if (followupDrafts[taskId] === sent) {
+        delete followupDrafts[taskId];
+      }
+      actionNote = "Sent.";
       detail = response.payload.task;
       render();
-      return loadDetail(openTaskId).then(function () { return load(); });
+      return loadDetail(taskId).then(function () { return load(); });
     }).catch(function (error) {
       endPending();
       if (error && error.message === "unauthorized") { return null; }
@@ -964,6 +1091,9 @@
 
         var open = target.closest ? target.closest("[data-task-open]") : null;
         if (open) {
+          /* Keep whatever is in the box before leaving the current task. Drafts
+             are per task, so nothing here can carry into the one being opened. */
+          captureDraft();
           openTaskId = open.getAttribute("data-task-open");
           detail = null;
           detailEvents = [];
@@ -982,6 +1112,7 @@
           case "taskComposeCancel": composerOpen = false; formError = null; render(); return;
           case "taskStart": startTask(); return;
           case "taskBack":
+            captureDraft();
             openTaskId = null;
             detail = null;
             detailEvents = [];

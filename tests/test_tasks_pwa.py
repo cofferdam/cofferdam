@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+import json
 import shutil
 import subprocess
 import unittest
@@ -234,7 +235,9 @@ class Actions(unittest.TestCase):
         self.assertEqual(
             set(writes[0]["body"]), {"followup", "client_request_id"}
         )
-        self.assertIn("Answer sent.", result["html"])
+        # "Answer sent." was wrong for a follow-up that answers nothing; the
+        # panel says "Sent." now. See FinishedTurnWording.
+        self.assertIn("Sent.", result["html"])
 
     def test_cancel_repeats_the_observed_state_rather_than_upgrading_it(self):
         """A task that is still `cancelling` is not cancelled, and says so."""
@@ -525,6 +528,109 @@ class UnauthorizedIsNotAGenericError(unittest.TestCase):
         """Otherwise a signed-out phone hammers a route that will keep saying no."""
         result = panel("unauthorized-is-surfaced-as-sign-in")
         self.assertEqual(result["requestsAfterUnauthorized"], 0)
+
+
+class FollowUpDraftSurvives(unittest.TestCase):
+    """The reported data-loss defect: typed follow-up text disappeared.
+
+    Task-detail polling rebuilt the whole detail with `innerHTML`, which in a
+    browser destroys the textarea and everything in it. The auto-refresh added
+    for the previous defect made it happen every few seconds, and pasting
+    happened to coincide with a poll, which is why the page looked like it was
+    refreshing itself mid-paste.
+
+    These run against the shipped `web/tasks.js` through a harness that now
+    models the destruction honestly — an earlier version memoised its stub
+    nodes forever, so a textarea could never lose its value and this class of
+    bug was invisible to it.
+    """
+
+    def test_a_typed_draft_survives_several_polls(self):
+        """1, 2, 3."""
+        result = panel("draft-survives-polling")
+        self.assertEqual(result["draftAfterPolling"], "ikinci bir Türkçe cümle ekle")
+
+    def test_the_backend_still_updates_while_the_draft_is_held(self):
+        """4. Preserving the draft must not mean freezing the view."""
+        result = panel("draft-survives-polling")
+        self.assertIn("turn complete", result["html"].lower())
+
+    def test_pasted_text_survives_and_identical_polls_do_not_rebuild(self):
+        """5. An unchanged snapshot renders nothing, so nothing is destroyed."""
+        result = panel("draft-survives-paste-and-identical-snapshots")
+        self.assertEqual(result["draft"], "Birinci cümle. İkinci cümle. Üçüncü cümle.")
+        self.assertEqual(
+            result["renders"], 0, "identical polls rebuilt the form anyway"
+        )
+
+    def test_focus_is_returned_after_a_render_that_had_to_happen(self):
+        """6. A real change still rebuilds; the caret goes back afterwards."""
+        result = panel("draft-survives-polling")
+        self.assertEqual(result["focusedBefore"], "taskFollowupText")
+        self.assertEqual(result["focusedAfter"], "taskFollowupText")
+
+    def test_a_failed_submission_keeps_every_character(self):
+        """8. The moment most likely to fail is the one where the text matters."""
+        result = panel("failed-submit-preserves-the-draft")
+        self.assertEqual(result["draft"], "bu metin kaybolmamalı")
+
+    def test_an_accepted_submission_clears_it_exactly_once(self):
+        """9, 10. And a double tap is still one delivery."""
+        result = panel("accepted-submit-clears-once")
+        self.assertIn(result["draft"], ("", None))
+        self.assertEqual(result["followupPosts"], 1)
+        self.assertEqual(len(set(result["requestIds"])), 1)
+
+    def test_text_typed_while_sending_is_not_swallowed(self):
+        """9. The clear must correspond to *this* submission.
+
+        Somebody sends one message and starts the next before the server
+        answers. Clearing unconditionally on acceptance deletes a message nobody
+        sent and nobody asked to lose.
+        """
+        result = panel("text-typed-while-sending-is-not-swallowed")
+        self.assertEqual(result["draft"], "ikinci mesaj")
+
+    def test_a_draft_never_leaks_between_tasks(self):
+        """11."""
+        result = panel("drafts-are-per-task")
+        self.assertEqual(result["draftInB"], "")
+
+    def test_returning_to_a_task_restores_its_draft(self):
+        """12. Session policy: drafts are kept per task while the panel lives."""
+        result = panel("drafts-are-per-task")
+        self.assertEqual(result["draftBackInA"], "A için taslak")
+
+    def test_finishing_cannot_accidentally_submit_the_draft(self):
+        """13."""
+        result = panel("finishing-does-not-submit-the-draft")
+        self.assertIn("/api/tasks/task_x/finish", result["writes"])
+        self.assertFalse(
+            [path for path in result["writes"] if "followups" in path],
+            "finishing sent the unsent draft",
+        )
+
+    def test_no_draft_reaches_the_console_or_a_cache(self):
+        """14."""
+        for name in ("draft-survives-polling", "failed-submit-preserves-the-draft"):
+            self.assertEqual(panel(name)["consoleOutput"], [], name)
+        source = (WEB_DIR / "tasks.js").read_text(encoding="utf-8")
+        self.assertNotIn("console.", source)
+        self.assertNotIn("caches.", source)
+        self.assertNotIn("localStorage", source)
+        worker = (WEB_DIR / "sw.js").read_text(encoding="utf-8")
+        self.assertNotIn("followup", worker.lower())
+
+    def test_drafts_are_keyed_by_task_rather_than_held_in_one_slot(self):
+        """A single field would carry one task's words into another's box."""
+        source = (WEB_DIR / "tasks.js").read_text(encoding="utf-8")
+        self.assertIn("followupDrafts[", source)
+        self.assertIn("draftFor(", source)
+
+    def test_the_draft_is_not_written_to_the_server_while_typing(self):
+        """A draft is not a follow-up, and a half-typed sentence is not history."""
+        result = panel("draft-survives-polling")
+        self.assertNotIn("followups", json.dumps(result.get("html", "")))
 
 
 class PanelSeparation(unittest.TestCase):
