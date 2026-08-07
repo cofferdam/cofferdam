@@ -505,6 +505,28 @@ class FinishedTurnWording(unittest.TestCase):
         self.assertNotIn("Turn complete", html)
 
 
+class UnauthorizedIsNotAGenericError(unittest.TestCase):
+    """7. A 401 means sign in again, and the panel has to say so.
+
+    The shell already clears the token and shows "token rejected". The panel
+    used to swallow the error and leave the last good detail on screen looking
+    current, which is a different way of being wrong.
+    """
+
+    def test_it_says_to_sign_in_again(self):
+        html = panel("unauthorized-is-surfaced-as-sign-in")["html"]
+        self.assertIn("Sign in again", html)
+
+    def test_it_does_not_report_a_generic_reachability_failure(self):
+        html = panel("unauthorized-is-surfaced-as-sign-in")["html"]
+        self.assertNotIn("could not reach the workstation", html)
+
+    def test_polling_stops_once_the_token_is_rejected(self):
+        """Otherwise a signed-out phone hammers a route that will keep saying no."""
+        result = panel("unauthorized-is-surfaced-as-sign-in")
+        self.assertEqual(result["requestsAfterUnauthorized"], 0)
+
+
 class PanelSeparation(unittest.TestCase):
     def test_the_shell_carries_the_tasks_panel(self):
         html = (WEB_DIR / "index.html").read_text(encoding="utf-8")

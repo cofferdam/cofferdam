@@ -644,7 +644,13 @@
       reschedule();
     }).catch(function (error) {
       if (inflightRefresh === controller) { inflightRefresh = null; }
-      if (error && error.message === "unauthorized") { return; }
+      if (error && error.message === "unauthorized") {
+        loadError = "Sign in again — the device token was rejected.";
+        snapshot = null;
+        stopPolling();
+        render();
+        return;
+      }
       if (error && (error.name === "AbortError" || error.aborted)) { return; }
       if (generation < appliedGeneration) { return; }
       loadError = "Cofferdam could not reach the workstation to read tasks.";
@@ -681,7 +687,16 @@
       reschedule();
       return detail;
     }).catch(function (error) {
-      if (error && error.message === "unauthorized") { return null; }
+      if (error && error.message === "unauthorized") {
+        /* Not a generic failure, and not silence either. The shell has already
+           cleared the token and put the connection into "token rejected"; this
+           makes the panel say the same thing rather than leaving the last good
+           detail on screen looking current. */
+        loadError = "Sign in again — the device token was rejected.";
+        stopPolling();
+        render();
+        return null;
+      }
       loadError = "Cofferdam could not reach the workstation to read that task.";
       render();
       return null;

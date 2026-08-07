@@ -894,6 +894,36 @@ function run() {
     });
   }
 
+  if (scenario === "unauthorized-is-surfaced-as-sign-in") {
+    let reject = false;
+    return mount({
+      initial: listPayload([taskPayload({ task_id: "task_a", state: "running" })]),
+      detail: taskPayload({ task_id: "task_a", state: "running" }),
+      events: [eventItem(1, "task_started", "Running.")],
+      onGet() {
+        if (reject) { return Promise.reject(new Error("unauthorized")); }
+        return null;
+      },
+      result: () => ({ payload: {} })
+    }).then(function () {
+      fire("click", openButton("task_a"));
+      return drain().then(function () {
+        reject = true;
+        advance(5000);
+        return drain(80).then(function () {
+          const before = record.requests.length;
+          advance(30000);
+          return drain(80).then(function () {
+            return {
+              html: html(),
+              requestsAfterUnauthorized: record.requests.length - before
+            };
+          });
+        });
+      });
+    });
+  }
+
   return Promise.resolve({ error: "unknown scenario: " + scenario });
 }
 

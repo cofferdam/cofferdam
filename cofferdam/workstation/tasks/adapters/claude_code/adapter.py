@@ -98,6 +98,33 @@ LIMITATIONS = (
 )
 
 
+#: Phrases that mean the CLI could not authenticate, matched case-insensitively
+#: against the *result text it already produced*. This is not prose parsing
+#: standing in for a structured signal — the CLI offers no structured auth
+#: subtype mid-run, and the honest alternative was reporting an expired sign-in
+#: as a task failure, which sends somebody to debug their prompt. The
+#: limitation is stated in the guide.
+_AUTH_FAILURE_MARKERS = (
+    "oauth access token has expired",
+    "failed to authenticate",
+    "authentication_failed",
+    "please run /login",
+    "invalid api key",
+)
+
+
+def _is_authentication_failure(text: Optional[str]) -> bool:
+    lowered = (text or "").lower()
+    return any(marker in lowered for marker in _AUTH_FAILURE_MARKERS)
+
+
+def _failure_code(subtype: Optional[str]) -> str:
+    """A failure code that does not contradict itself."""
+    if not subtype or subtype == "success":
+        return "claude_error"
+    return "claude_" + subtype
+
+
 class ClaudeCodeAdapter(TaskAdapter):
     """One instance per process, holding every live run.
 
@@ -190,6 +217,7 @@ class ClaudeCodeAdapter(TaskAdapter):
 
         with self._lock:
             self._forget_finished()
+            self._forget_disowned()
             if context.task_id in self._runs:
                 # A second start for one task would be a second process on one
                 # session. The idempotency key in Task Core normally prevents a
@@ -479,7 +507,7 @@ class ClaudeCodeAdapter(TaskAdapter):
             # The process ended without ever producing a result frame. Exit code
             # zero does not rescue this: something ran and reported nothing, and
             # calling that a completed task would be inventing a result.
-            self._release(run.task_id)
+            self._retire(run.task_id)
             return AdapterOutcome(
                 events=tuple(events),
                 requested_state=STATE_FAILED,
@@ -492,11 +520,42 @@ class ClaudeCodeAdapter(TaskAdapter):
             )
 
         if result.is_error:
-            self._release(run.task_id)
+            # The session is finished either way: a terminal task has no use for
+            # one, and this is the exact path that leaked a live process and the
+            # concurrency slot in live validation.
+            self._retire(run.task_id)
+
+            if _is_authentication_failure(result.text):
+                # Claude's *own* credentials expired mid-run. That is not the
+                # task going wrong, and reporting it as a failure sent somebody
+                # to debug a prompt when what was needed was a sign-in at the
+                # workstation. Nothing of the CLI's message is kept — it can
+                # name an account — only the fact and what to do about it.
+                message = (
+                    "Claude Code's sign-in expired while this task was running. "
+                    "Sign in again on the workstation — never type a password "
+                    "or code into a task."
+                )
+                # As an event as well as a reason. A waiting task has no
+                # `failure`, so a message passed only as `failure_message` would
+                # be dropped and the person would see a task waiting on
+                # "authentication" with nothing telling them what to do.
+                return AdapterOutcome(
+                    events=tuple(events) + (
+                        AdapterEvent(event_type=EVENT_PROGRESS, text=message),
+                    ),
+                    requested_state=STATE_WAITING_FOR_USER,
+                    waiting_reason=WAITING_AUTHENTICATION,
+                    failure_message=message,
+                )
+
             return AdapterOutcome(
                 events=tuple(events),
                 requested_state=STATE_FAILED,
-                failure_code="claude_" + (result.subtype or "error"),
+                # `is_error` with subtype "success" is a real combination the
+                # CLI produces, and "claude_success" is a nonsense code for a
+                # failure. A contradictory subtype is not used as the code.
+                failure_code=_failure_code(result.subtype),
                 failure_message=result.text
                 or "Claude Code reported an error without explaining it.",
             )
@@ -505,7 +564,7 @@ class ClaudeCodeAdapter(TaskAdapter):
             # `is_error` false but nothing to show. Truthfully a failure: there
             # is no result to report, and an empty completion would look like
             # the work produced nothing when in fact nothing was reported.
-            self._release(run.task_id)
+            self._retire(run.task_id)
             return AdapterOutcome(
                 events=tuple(events),
                 requested_state=STATE_FAILED,
@@ -579,7 +638,7 @@ class ClaudeCodeAdapter(TaskAdapter):
                 final_result=settled_text,
             )
 
-        self._release(run.task_id)
+        self._retire(run.task_id)
         return AdapterOutcome(
             events=tuple(events),
             observations=observations,
@@ -660,12 +719,15 @@ class ClaudeCodeAdapter(TaskAdapter):
         self._release(task_id)
 
     def _release(self, task_id: str) -> None:
-        """Free the concurrency slot, once the process is actually gone.
+        """Drop the bookkeeping for a run whose process is already gone.
 
-        Called after a failed launch, after a settled task, and after a
-        cancellation that observed the process stop. It is not called on a
-        cancel that could not stop the process — the slot stays held, because
-        the process is still there.
+        Used where the process never started, or has been observed to stop. It
+        deliberately declines to drop an entry whose process is still alive:
+        forgetting a live process would mean the adapter no longer knows about
+        something it started, which is worse than holding the slot.
+
+        **This is not the right call for a task that has just become terminal.**
+        Use :meth:`_retire`, which ends the process first.
         """
         with self._lock:
             run = self._runs.get(task_id)
@@ -676,11 +738,75 @@ class ClaudeCodeAdapter(TaskAdapter):
             self._runs.pop(task_id, None)
             self._reported.pop(task_id, None)
 
+    def _retire(self, task_id: str) -> None:
+        """End the process for a task that has reached a terminal state.
+
+        The bug this exists to fix, seen in live validation: a task failed while
+        its process was still alive — Claude's own OAuth token expired mid-run,
+        the CLI reported the error and went on waiting for input — and
+        :meth:`_release` declined to drop a live run. So a *finished* task kept
+        its process and kept the single concurrency slot, and every task created
+        afterwards was refused with "another Claude Code task is already
+        running". Six in a row were, and nothing short of a daemon restart would
+        have freed it.
+
+        A terminal task has no use for a session. Closing stdin is the gentle
+        way out and the CLI exits on its own; if it does not, the same
+        identity-verified escalation cancellation uses applies. The entry is
+        dropped either way — an adapter that cannot forget a run it can no
+        longer act on is an adapter that blocks the machine forever.
+        """
+        with self._lock:
+            run = self._runs.get(task_id)
+        if run is None:
+            return
+        try:
+            run.close_input()
+            if run.reap(timeout=3.0) is None:
+                run.stop(reason="task_finished")
+                run.reap(timeout=2.0)
+        except Exception:
+            # Never let tidying up fail a task that already has its answer.
+            pass
+        with self._lock:
+            self._runs.pop(task_id, None)
+            self._reported.pop(task_id, None)
+
     def _forget_finished(self) -> None:
+        """Drop runs whose process has exited. Called before every launch.
+
+        The caller holds the lock.
+        """
         for task_id in [
             key for key, run in self._runs.items() if run.poll() is not None
         ]:
             self._runs.pop(task_id, None)
+            self._reported.pop(task_id, None)
+
+    def _forget_disowned(self) -> None:
+        """Drop runs the adapter can no longer act on. Called before every launch.
+
+        The backstop for the failure this class has already had once: an entry
+        whose process is gone in a way ``poll()`` cannot see — a pid that is no
+        longer ours because it exited and was reused, or a run whose identity
+        stopped matching. Such an entry occupies the concurrency slot and can
+        never be freed by anything, because every path that would free it starts
+        by finding a process that is not there.
+
+        Holding the slot for a process the adapter still owns is correct.
+        Holding it for one it demonstrably does not is a machine that refuses
+        work until it is restarted.
+
+        The caller holds the lock. Nothing is signalled here: a run that is not
+        ours is precisely the one never to send a signal to.
+        """
+        for task_id in [
+            key
+            for key, run in self._runs.items()
+            if run.poll() is None and not run.still_ours()
+        ]:
+            self._runs.pop(task_id, None)
+            self._reported.pop(task_id, None)
 
     def active_task_ids(self):
         with self._lock:

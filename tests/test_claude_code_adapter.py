@@ -1672,6 +1672,216 @@ class ConcurrencyAndIsolation(ClaudeTaskTestCase):
         )
 
 
+class SlotOwnershipAndRelease(ClaudeTaskTestCase):
+    """The live-validation failure: a finished task kept the only slot.
+
+    Claude's own OAuth token expired mid-run. The CLI reported the error and
+    went on waiting for input, so the task failed *while its process was still
+    alive* — and the release path declined to drop a live run. The slot was held
+    by a terminal task, and six consecutive creates were refused with "another
+    Claude Code task is already running". Nothing but a daemon restart would
+    have freed it.
+    """
+
+    def test_a_finished_turn_holds_the_slot(self):
+        """1. Expected, and worth stating: a retained session is a real cost."""
+        row, _ = self.create("one")
+        row = self.settle(row.task_id)
+        self.assertEqual(row.state, STATE_READY_FOR_FOLLOWUP)
+        self.assertEqual(len(self.adapter.active_task_ids()), 1)
+
+        second, _ = self.create("two")
+        self.assertEqual(second.state, STATE_FAILED)
+        self.assertIn("one at a time", (second.failure.message or "").lower())
+
+    def test_finishing_releases_the_process_and_the_slot(self):
+        """2."""
+        row, _ = self.create("one")
+        row = self.settle(row.task_id)
+        run = self.adapter._runs[row.task_id]
+        self.assertIsNone(run.poll())
+
+        row = self.service.finish_task(row.task_id)
+        self.assertEqual(row.state, STATE_COMPLETED)
+        self.assertIsNotNone(run.poll(), "the process outlived the task")
+        self.assertEqual(self.adapter.active_task_ids(), ())
+        self.assertNotIn(row.task_id, self.adapter._runs)
+
+    def test_a_new_task_starts_after_finishing(self):
+        """3. The property the machine actually lost."""
+        first, _ = self.create("one")
+        first = self.settle(first.task_id)
+        self.service.finish_task(first.task_id)
+
+        second, created = self.create("two")
+        self.assertTrue(created)
+        self.assertEqual(second.state, STATE_RUNNING)
+        second = self.settle(second.task_id)
+        self.assertEqual(second.state, STATE_READY_FOR_FOLLOWUP)
+
+    def test_finishing_is_idempotent(self):
+        """4."""
+        from cofferdam.workstation.tasks.errors import TaskAlreadyFinished
+
+        row, _ = self.create()
+        row = self.settle(row.task_id)
+        first = self.service.finish_task(row.task_id)
+        self.assertEqual(first.state, STATE_COMPLETED)
+        with self.assertRaises(TaskAlreadyFinished):
+            self.service.finish_task(row.task_id)
+        self.assertEqual(self.service.get_task(row.task_id).state, STATE_COMPLETED)
+
+    def test_a_terminal_task_never_keeps_its_process(self):
+        """2, 6. The exact shape of the leak, driven through a failing turn."""
+        row, _ = self.create()
+        row = self.settle(row.task_id)
+        run = self.adapter._runs[row.task_id]
+
+        # Fail the task the way the CLI did: an error result while the process
+        # is still alive and still willing to read stdin.
+        from cofferdam.workstation.tasks.adapters.claude_code.frames import TurnResult
+
+        with run.lock:
+            run.state.last_result = TurnResult(
+                is_error=True, subtype="success", text="something broke",
+                session_id=run.session_id,
+            )
+        self.adapter._reported.pop(row.task_id, None)
+        row = self.service.refresh_task(row.task_id)
+
+        self.assertEqual(row.state, STATE_FAILED)
+        self.assertIsNotNone(run.poll(), "a terminal task kept its process")
+        self.assertEqual(self.adapter.active_task_ids(), ())
+
+        following, created = self.create("after the failure")
+        self.assertTrue(created)
+        self.assertEqual(following.state, STATE_RUNNING)
+
+    def test_a_contradictory_subtype_is_not_used_as_a_failure_code(self):
+        """`is_error` with subtype "success" produced the code `claude_success`."""
+        from cofferdam.workstation.tasks.adapters.claude_code.adapter import _failure_code
+
+        self.assertEqual(_failure_code("success"), "claude_error")
+        self.assertEqual(_failure_code(None), "claude_error")
+        self.assertEqual(_failure_code("error_max_turns"), "claude_error_max_turns")
+
+
+class SlotIsolationAndStaleEntries(ClaudeTaskTestCase):
+    max_concurrent = 2
+
+    def test_finishing_one_task_cannot_touch_another(self):
+        """5."""
+        first, _ = self.create("one")
+        second, _ = self.create("two")
+        first = self.settle(first.task_id)
+        second = self.settle(second.task_id)
+        second_run = self.adapter._runs[second.task_id]
+
+        self.service.finish_task(first.task_id)
+
+        self.assertIsNone(second_run.poll(), "finishing one task stopped another")
+        self.assertTrue(second_run.still_ours())
+        self.assertEqual(
+            self.service.get_task(second.task_id).state, STATE_READY_FOR_FOLLOWUP
+        )
+        self.assertEqual(self.adapter.active_task_ids(), (second.task_id,))
+
+    def test_a_stale_entry_cannot_block_new_tasks_forever(self):
+        """6. A run the adapter can no longer act on is forgotten, not held.
+
+        An entry whose process is alive but no longer *ours* — a pid that
+        exited and was reused — can never be freed by any path that starts by
+        finding the process, so it would occupy the slot until a restart.
+        """
+        row, _ = self.create("one")
+        row = self.settle(row.task_id)
+        run = self.adapter._runs[row.task_id]
+
+        # Identity broken exactly as a reused pid would break it.
+        run.start_time = (run.start_time or 0) + 999999
+        self.assertFalse(run.still_ours())
+
+        following, created = self.create("after the stale entry")
+        self.assertTrue(created)
+        self.assertEqual(following.state, STATE_RUNNING)
+        self.assertNotIn(row.task_id, self.adapter._runs)
+
+    def test_nothing_is_signalled_to_forget_a_disowned_run(self):
+        """A run that is not ours is precisely the one never to signal."""
+        row, _ = self.create("one")
+        row = self.settle(row.task_id)
+        run = self.adapter._runs[row.task_id]
+        run.start_time = (run.start_time or 0) + 999999
+
+        self.create("after")
+        self.assertEqual(run.signals_sent, [])
+
+
+class ExpiredSignInIsNotAFailedTask(ClaudeTaskTestCase):
+    """Claude's own credentials expiring is not the task going wrong."""
+
+    def test_it_waits_for_sign_in_rather_than_failing(self):
+        row, _ = self.create()
+        row = self.settle(row.task_id)
+        run = self.adapter._runs[row.task_id]
+
+        from cofferdam.workstation.tasks.adapters.claude_code.frames import TurnResult
+
+        with run.lock:
+            run.state.last_result = TurnResult(
+                is_error=True, subtype="success",
+                text="Failed to authenticate. API Error: 401 OAuth access token "
+                     "has expired. Re-authenticate to continue.",
+                session_id=run.session_id,
+            )
+        self.adapter._reported.pop(row.task_id, None)
+        row = self.service.refresh_task(row.task_id)
+
+        self.assertEqual(row.state, STATE_WAITING_FOR_USER)
+        self.assertEqual(row.waiting_reason, WAITING_AUTHENTICATION)
+
+    def test_the_slot_is_freed_so_other_work_is_not_blocked(self):
+        row, _ = self.create()
+        row = self.settle(row.task_id)
+        run = self.adapter._runs[row.task_id]
+
+        from cofferdam.workstation.tasks.adapters.claude_code.frames import TurnResult
+
+        with run.lock:
+            run.state.last_result = TurnResult(
+                is_error=True, subtype="success",
+                text="Failed to authenticate. API Error: 401 OAuth access token has expired.",
+                session_id=run.session_id,
+            )
+        self.adapter._reported.pop(row.task_id, None)
+        self.service.refresh_task(row.task_id)
+        self.assertEqual(self.adapter.active_task_ids(), ())
+
+    def test_the_cli_message_is_not_republished(self):
+        """It can name an account. Only the fact and the remedy are kept."""
+        row, _ = self.create()
+        row = self.settle(row.task_id)
+        run = self.adapter._runs[row.task_id]
+
+        from cofferdam.workstation.tasks.adapters.claude_code.frames import TurnResult
+
+        with run.lock:
+            run.state.last_result = TurnResult(
+                is_error=True, subtype="success",
+                text="Failed to authenticate for account someone@example.com",
+                session_id=run.session_id,
+            )
+        self.adapter._reported.pop(row.task_id, None)
+        row = self.service.refresh_task(row.task_id)
+
+        blob = json.dumps(
+            [row.latest_activity, row.final_result]
+            + [[e.text, e.detail] for e in self.store.events(row.task_id)]
+        )
+        self.assertNotIn("@example.com", blob)
+        self.assertIn("workstation", blob.lower())
+
+
 class CancellationThroughTaskCore(ClaudeTaskTestCase):
     behaviour = "hang"
 
