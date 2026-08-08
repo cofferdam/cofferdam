@@ -15,22 +15,51 @@ of the pipeline rather than a rule each call site has to remember.
 On the recogniser
 -----------------
 
-``LINK_PATTERN`` is written against the documented behaviour of
-``claude remote-control`` — sessions are controlled from ``claude.ai/code`` —
-and is deliberately narrow: an ``https`` URL on an allowlisted host only.
+**``LINK_PATTERN`` is now written against real output.** M2H PR2 could not
+confirm it: the CLI stopped at its own one-time consent question, waiting for a
+``stdin`` this package deliberately does not give it, so no session and no URL
+ever existed. M2H PR2.5 closed that by having a person answer the prompt once at
+the machine — Cofferdam still cannot and does not answer it — after which two
+independent bounded PTY startups produced the same link shape.
 
-**It has not been confirmed against real output, and the M2H PR2 live spike
-explains why.** Two bounded startups were watched on a real pseudo-terminal with
-the fixed argv. The CLI rendered its display and then stopped on its own
-one-time consent question, waiting for a ``stdin`` this package deliberately
-does not give it, so it never enabled the feature, never created a session and
-never printed a URL. There was nothing to confirm the pattern against.
+The confirmed structure, and nothing wider:
 
-So :data:`LINK_FORMAT_CONFIRMED` stays ``False``, and it is a gate rather than a
-note: nothing is recognised at all while it is closed, and the supervisor
-reports "no link captured" rather than pretending. Guessing here would be the
-worst kind of wrong — a pattern that half-matches would store a truncated
-capability URL and report success.
+* ``https``, never ``http``
+* an allowlisted host (:data:`ALLOWED_LINK_HOSTS`)
+* the exact path :data:`LINK_PATH`, one segment, no session id in the path
+* exactly one query parameter, :data:`LINK_QUERY_KEY`
+* whose value is the capability: URL-safe base64 characters, 28 of them in both
+  observations, bounded here rather than pinned so that a token-length change
+  upstream does not turn a working link into "no link available"
+
+The capability therefore lives in the **query string**, which is the part of
+this module that the rest of the package is built around: a URL whose secret is
+in the query is one that leaks through a referrer header, a proxy log, an
+analytics tag or a screenshot of an address bar. Nothing here writes it anywhere
+but the 0600 runtime state file, and :func:`redact` removes it from everything
+else.
+
+Restarting is **not** revocation
+--------------------------------
+
+Worth stating plainly, because M2H PR2 assumed the opposite. The parameter is
+called ``environment`` and it means it: it identifies the registered
+environment, not one launch of it. Two Remote Control generations started
+minutes apart in the same project produced the *same* URL, and the CLI says so
+on shutdown — "Environment preserved. Restart `claude remote-control` to
+reconnect existing sessions."
+
+So a person who has seen this URL keeps a working capability across a Cofferdam
+stop and start. Cofferdam's generation rules still do what they were built to
+do — a stale generation cannot read the current state, and the stored link is
+cleared on stop, so *Cofferdam* stops handing it out — but nobody should read
+that as the link being invalidated. Revoking it is an account-level action on
+Anthropic's side, and this package has no mechanism for it and does not pretend
+to.
+
+The pattern is narrow on purpose. It was previously "any path on an allowlisted
+host", which would have matched a docs link, a login page or an error page the
+child happened to print, and stored that as a session capability.
 
 Redaction is deliberately **wider** than recognition. It removes any ``https``
 URL from retained output, not only ones matching the pattern, because a
@@ -63,26 +92,62 @@ ALLOWED_LINK_HOSTS: Tuple[str, ...] = ("claude.ai", "www.claude.ai")
 #: other URL the process mentioned is a capability handed to whoever holds it.
 #:
 #: Flipped to ``True`` only in a commit that also records a real observation and
-#: corrects :data:`LINK_PATTERN` to match it.
-LINK_FORMAT_CONFIRMED = False
+#: corrects :data:`LINK_PATTERN` to match it. **M2H PR2.5 is that commit:** the
+#: consent prompt was answered once by a person at the machine, and two bounded
+#: PTY startups then produced the same structure, which is what
+#: :data:`LINK_PATTERN` below now encodes.
+#:
+#: It remains a gate, not a note. Setting it back to ``False`` — on a workstation
+#: where the format is in doubt, or in a build that has not re-confirmed it —
+#: still stops every link from being recognised, persisted or returned, and a
+#: test asserts that closed behaviour has not rotted.
+LINK_FORMAT_CONFIRMED = True
 
 #: Bounded: a session URL is not a document. Anything longer is not a link.
 MAX_LINK_CHARS = 512
+
+#: The one path a Remote Control link uses. Confirmed, and exact: the session is
+#: identified entirely by the query parameter below, so a link with anything else
+#: after the host is not one of these.
+LINK_PATH = "/code"
+
+#: The one query parameter, whose value is the capability itself.
+LINK_QUERY_KEY = "environment"
+
+#: Bounds on that value. Both live observations produced 28 URL-safe base64
+#: characters; the band is wider so an upstream length change degrades into
+#: "still recognised" rather than "no link available", while a stray
+#: ``?environment=1`` is still refused.
+#:
+#: The lower bound is the anti-truncation defence *inside* the pattern. The
+#: primary one is :class:`LinkScanner`, which only ever scans complete lines, so
+#: a URL split across two terminal reads is never matched in halves.
+LINK_TOKEN_MIN_CHARS = 16
+LINK_TOKEN_MAX_CHARS = 128
 
 #: Any absolute https URL. Used for *redaction*, where over-matching is safe and
 #: under-matching is a leak.
 _ANY_URL = re.compile(r"https?://[^\s<>\"')\]]+")
 
-#: A candidate Remote Control link: https, an allowlisted host, then a run of
-#: non-delimiter characters.
+#: The confirmed Remote Control link, and only that.
 #:
-#: Deliberately **unbounded** in the pattern, with the length checked after the
-#: match instead. A bounded quantifier here would silently *truncate* a longer
-#: URL into something that still looks like a link — and a truncated capability
-#: URL that is stored and handed out is worse than no URL at all, because it
-#: fails somewhere far away from the mistake.
+#: Every part is pinned to what was observed: scheme, an allowlisted host, the
+#: exact path, the single query key, and a URL-safe token. The trailing
+#: assertion matters — without it the pattern would happily match the first 16
+#: characters of a longer token and hand out a capability URL that fails
+#: somewhere far away from the mistake.
 LINK_PATTERN = re.compile(
-    r"https://(?:" + "|".join(re.escape(host) for host in ALLOWED_LINK_HOSTS) + r")/[^\s<>\"')\]]+"
+    r"https://(?:"
+    + "|".join(re.escape(host) for host in ALLOWED_LINK_HOSTS)
+    + r")"
+    + re.escape(LINK_PATH)
+    + r"\?"
+    + re.escape(LINK_QUERY_KEY)
+    + r"=[A-Za-z0-9_-]{"
+    + str(LINK_TOKEN_MIN_CHARS)
+    + r","
+    + str(LINK_TOKEN_MAX_CHARS)
+    + r"}(?![A-Za-z0-9_-])"
 )
 
 #: What replaces a URL in anything that can be logged.
@@ -287,6 +352,10 @@ def redact_lines(lines: List[object], limit: int) -> List[str]:
 
 
 __all__ = [
+    "LINK_PATH",
+    "LINK_QUERY_KEY",
+    "LINK_TOKEN_MAX_CHARS",
+    "LINK_TOKEN_MIN_CHARS",
     "ALLOWED_LINK_HOSTS",
     "LINK_FORMAT_CONFIRMED",
     "LINK_PATTERN",
