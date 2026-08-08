@@ -125,40 +125,43 @@ Nothing is in progress in this repository today. The queued work is M2H → M2I 
   launcher exit code (PR #8); the Wayland session is reported honestly with `screenshot: false`
   and GUI capabilities gated on a live graphical-session check.
 
-### OPEN RELEASE GATE — M1 post-reboot auto-start is NOT validated
+### CLOSED RELEASE GATE — M1 post-reboot auto-start is validated
 
-**M1 must not be described as fully validated, reboot-validated, or complete while this gate is
-open.** Everything recorded above was observed in a single continuously logged-in session. The
-host has not been rebooted since the service was installed, so the following remain **unverified
-by observation**:
+**Closed 2026-08-09 by the M2H PR4 cold-reboot validation.** It stayed open through every
+milestone since M1 because no earlier work changed boot behaviour; M2H was the first that did, so
+its unattended-reboot validation and this gate were always the same step.
 
-- the systemd user service starting automatically after a cold boot, through lingering, with no
-  human logging in first;
-- `tailscaled` coming up before the service needs its address (the service previously died in a
-  restart loop with `cannot assign requested address` when the Tailscale address was absent);
-- the listener re-binding to the Tailscale address unattended;
-- phone-over-tailnet access working after an unattended reboot;
-- graphical-session detection reporting `open_application`/`open_url` as **false** before login
-  and **true** once a desktop session exists — the linger-before-login path is covered by tests,
-  not yet by a real boot.
+The reboot was real and the evidence is from the boot itself, not from a description of it. Boot
+id went from `618fd2db-…` to `a2c7860c-…`.
 
-Known factor: automatic login is **not** enabled on this host (`/etc/gdm3/custom.conf` has no
-`AutomaticLoginEnable`), so after a reboot the API is expected to return while GUI capabilities
-correctly report unavailable until someone logs in at the desktop. That expectation is untested.
+| Observed | Timestamp |
+|---|---|
+| machine booted | 2026-08-08 18:10:34 |
+| `tailscaled` started (system, enabled at boot) | 18:11:14 |
+| user manager `user@1000.service` started, **class `manager`, no session** | 18:11:14 |
+| `cofferdam-workstation.service` started | 18:11:14 |
+| Tailscale address still absent — daemon logged its bounded wait | 18:11:14 |
+| bound and serving on `100.116.199.35:7101` | 18:11:20 |
+| **first phone connection over the tailnet** | 18:11:24 |
+| graphical session first active | **2026-08-09 00:59:09** |
 
-**How to close it:** reboot the host without logging in, run the reboot section of
-`docs/checklists/m1-ubuntu-validation.md`, then record the observed result here and in
-[`ROADMAP.md`](ROADMAP.md). The reboot is deferred at the user's request because the workstation
-is in active use; it is not blocked or waived.
+So the phone reached Cofferdam **50 seconds after power-on and 6 hours 48 minutes before anyone
+logged into the desktop.** Every item this gate listed as unverified is now observed:
 
-**It is now a gate inside M2H.** Every milestone since M1 has been able to say truthfully that it
-changed no boot behaviour, which is why the gate could keep being deferred. M2H supervises native
-Remote Control hosts as user services and is the first work that changes what runs at boot, so its
-unattended-reboot validation and this gate are the same step, and M2H is not complete while it is
-open.
+- the user service started automatically through lingering with nobody logged in;
+- `tailscaled` was not ready in time, and that was fine — the daemon waited 6 seconds for its own
+  address rather than dying in the restart loop this gate was written about. `NRestarts=0`,
+  `Result=success`, no start-limit failure;
+- the listener re-bound to the Tailscale address unattended, and to nothing else;
+- phone-over-tailnet access worked after an unattended reboot;
+- the linger-before-login path is now covered by observation as well as tests.
 
-**M2A does not change this gate.** It alters no boot behaviour, no systemd unit, and no bind
-logic; the gate stays open and unaffected, and no M2A document may describe M1 as validated.
+Authentication survived: the token file persisted at mode 0600 and the phone's previously saved
+token was accepted with no re-entry. Unauthenticated requests still returned 401.
+
+**One expectation from the old text was not re-tested and is not claimed:** graphical-session
+detection reporting `open_application`/`open_url` as false before login and true afterwards. It
+remains covered by tests only. Automatic login is still not enabled on this host.
 
 ### M2A — control plane foundation
 
@@ -617,55 +620,50 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
-### M2H PR3 — Project Workstation Remote Control card and secure native-link open flow
+### M2H PR4 — unattended recovery validated, and the Remote Control milestone closed
 
-On `feat/m2h-project-workstation-remote-control`. **M2H is still not complete and this PR does not
-close the M1 reboot gate.**
+On `feat/m2h-unattended-recovery`. **M2H is complete.** PR1 (#23), PR2 (#24), PR2.5 (#25) and
+PR3 (#26) are merged; this is the validation that was always the point of them.
 
-PR1 (#23), PR2 (#24) and PR2.5 (#25) are merged. Together they gave Cofferdam a PTY-backed,
-project-scoped, generation-aware Remote Control supervisor behind authenticated routes, with a
-live-confirmed link format and a fail-closed capture gate. None of it had a user surface.
+**Cold reboot passed.** A real reboot, then the phone, then — much later — the desktop. Cofferdam
+was reachable over the tailnet **50 seconds after power-on and 6h48m before anyone logged in**,
+the previously saved device token was accepted with no re-entry, and from the iPhone the full
+flow worked: `claude-sandbox` showed **Stopped**, Start brought it to **Running** without a manual
+reload, `awaiting_consent` stayed false, **Open Remote Control** opened the correct native Claude
+environment, and Stop returned it to **Stopped** with Open no longer offered. Server side agrees:
+the host started at 00:58:17, captured its link 2 seconds later, and exited on request at 00:58:58
+with status 0, leaving an empty runtime-state directory. The full evidence table is in the closed
+M1 gate above.
 
-**What exists after this PR:** a Remote Control card in the Project Workstation PWA
-(`web/remote.js`), rendering the capability flag, the six lifecycle states, evidence-backed
-`awaiting_consent`, link availability *as a boolean*, and a bounded safe error summary. Start,
-Stop and an explicit **Open Remote Control** control, state-aware and single-submission. Status
-polling only — the link route is never polled, prefetched, or called to decide whether a button is
-enabled. The capability URL is fetched inside one click gesture, validated against the backend
-contract, used to navigate one opener-severed tab, and dropped; it reaches no markup, no `href`,
-no browser storage, no log and no audit record. The link response now carries `Cache-Control:
-no-store`, `Pragma: no-cache` and `Referrer-Policy: no-referrer`, and the page sets
-`referrer: no-referrer`.
+**What the audit found on the way, which mattered more than the boot path.** Every milestone since
+M2A had installed a `cofferdam-workstation.service.d/*-validation.conf` repointing `ExecStart` at
+its own feature worktree, and none were removed. Twelve had accumulated; systemd applies drop-ins
+in lexical order, so production had been running **M2G-era code out of a feature worktree** since
+PR #21, with a validation-only task adapter enabled. No test caught it, because every test
+asserted the *shipped* unit — which was always correct — and the drift lived only in the installed
+drop-in directory. Production now runs `slots/a` at the merged commit, and
+`tests/test_deployment_drift.py` plus the read-only `deploy/preflight.sh` guard both halves.
 
-**The security boundary the card states, because it is real:** stopping the local host removes the
-link from Cofferdam, and **does not revoke an Anthropic environment link already shared
-elsewhere.** The native URL is environment-scoped, not launch-scoped — two generations produced
-the same URL, and the CLI preserves the environment across restarts. Cofferdam has no
-account-level revocation mechanism and the UI does not claim one.
+**Boot behaviour, recorded because it is load-bearing:** user linger is enabled and is what makes
+the user manager start at boot — without it a rebooted machine has no Cofferdam until somebody
+signs in. `tailscaled` is enabled at boot but is not something a *user* unit can order against, so
+the daemon waits for its own bind address in-process for up to 120s and never falls back to
+another interface; this boot it waited 6 seconds and bound cleanly.
 
-**Validated on the phone, manually, over the private Tailscale surface.** A temporary
-Tailscale-only server from the PR worktree served the real router, supervisor and systemd unit
-against a temporary `COFFERDAM_HOME`, a throwaway token and a registry *copy* with Remote Control
-enabled for `claude-sandbox` alone — the live registry was never modified and the production daemon
-was never restarted. From the iPhone: the card appeared, **Start** started the host, the state
-updated and **Open Remote Control** became usable, the button opened the correct native Claude
-destination and not an unrelated one, and **Stop** stopped the host. The capability URL was not
-copied, no prompt was sent, and no conversation content was read.
+**Remote Control hosts do not auto-start after a reboot, by design.** The installed
+`cofferdam-rc@.service` template has no `[Install]` section (`UnitFileState=static`), so no
+instance can be enabled and none came back after the reboot. The property this milestone claims is
+only that a person can *start* one from the phone once Cofferdam has recovered.
 
-The audit record for that run contains exactly the five expected events — `start_requested`,
-`start_succeeded`, `link_retrieved`, `stop_requested`, `stop_succeeded` — and no URL. The
-runtime-state directory was empty after the stop, so the link was cleared with the generation that
-minted it.
+**The boundary that has not moved:** stopping the local host removes the link from Cofferdam and
+**does not revoke an Anthropic environment URL already shared elsewhere** — the URL is scoped to
+the environment, not to a launch, and Cofferdam has no account-level revocation mechanism.
+Transcript reading and prompt injection remain out of scope permanently under D-2026-08-08-3; no
+conversation content is read or stored anywhere in this lane.
 
-**What is NOT in this PR, and must not be read as working:**
-
-- **Transcript reading and prompt injection remain out of scope**, permanently under
-  D-2026-08-08-3. The card supervises a session; it never looks inside one.
-- **Unattended reboot recovery and linger are still unvalidated.** The unit template still ships
-  with no `[Install]` section and is not enabled.
-
-Next: **M2H PR4 — unattended reboot/linger recovery, cold-start phone reachability and M2H
-milestone closeout.**
+**Remaining limitations:** graphical-session capability reporting before and after login is still
+covered by tests rather than by a boot observation; automatic login is not enabled on this host;
+and a Remote Control host must still be started deliberately after every reboot.
 
 ## Planned (active roadmap — see [`ROADMAP.md`](ROADMAP.md))
 

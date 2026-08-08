@@ -193,15 +193,14 @@ sees the host *and can make the host do things*.
 - **OPEN RELEASE GATE — post-reboot automatic startup is not validated.** The Ubuntu host
   validation above passed on 2026-08-03 (Ubuntu 26.04, GNOME/Wayland) **within a single
   continuously logged-in session**. The reboot test that ends the checklist has **not** been run:
-  the host has not been cold-booted since the service was installed, so unattended auto-start
-  through lingering, `tailscaled` ordering versus the service's bind, unattended re-binding to the
-  Tailscale address, phone access after reboot, and the linger-before-graphical-login capability
-  behaviour are all unobserved. M1 therefore **stays "in progress"** and must not be reported as
-  reboot-validated or complete. The reboot is deferred at the user's request (the workstation is in
-  active use) — deferred, not waived. Closing it means rebooting without logging in, running the
-  reboot section of the checklist, and recording the result here and in [`STATUS.md`](STATUS.md).
-  Later milestones may proceed while this gate is open only where they neither depend on nor alter
-  boot behaviour.
+  **Closed 2026-08-09 inside M2H PR4.** A real cold reboot was performed and the phone was used
+  before any desktop login: the user manager started through lingering at boot, `tailscaled` was
+  not ready in time and the daemon waited 6 seconds for its own address instead of dying in the
+  old restart loop, the listener re-bound to the Tailscale address unattended, and the phone
+  reached Cofferdam 50 seconds after power-on — 6h48m before the graphical session started. The
+  saved device token survived. The one item **not** re-observed is graphical-session capability
+  reporting before and after login, which remains covered by tests only. Full evidence table in
+  [`STATUS.md`](STATUS.md).
 - **Dependencies:** none.
 - **Review depth:** low-risk — tests + self-review, no council. (The device-token middleware
   gets one focused look at M5, when activation control starts riding on it.)
