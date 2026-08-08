@@ -145,6 +145,15 @@ class TaskProject:
             "project_id": self.project_id,
             "display_name": self.display_name,
             "enabled": self.enabled,
+            # Published so a client can render the Remote Control control matrix
+            # truthfully — a disabled Start with a reason, rather than an enabled
+            # Start that discovers the refusal by being pressed.
+            #
+            # A capability boolean is safe to publish where the root path is not:
+            # it says *whether* this project may host a session, and nothing about
+            # where that session would run. The server still re-checks it on every
+            # start; this is for the shape of the button, never the authority.
+            "remote_control_enabled": self.remote_control_enabled,
             "adapters": list(self.adapters),
             "notes": self.notes,
         }

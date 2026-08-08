@@ -1337,6 +1337,9 @@
     // And the tasks panel, which holds the most personal content in the
     // product: what somebody asked the workstation to do, and what it answered.
     if (global.CofferdamTasks) { global.CofferdamTasks.stop(); }
+    // And Remote Control, which holds a capability URL for the length of one
+    // navigation and must not keep polling for a session on a forgotten token.
+    if (global.CofferdamRemote) { global.CofferdamRemote.stop(); }
     el("registrySections").innerHTML = '<p class="muted">Loading…</p>';
     el("app").hidden = true;
     el("setup").hidden = false;
@@ -1409,6 +1412,12 @@
       if (global.CofferdamTasks) {
         global.CofferdamTasks.mount({ api: api, escapeHtml: escapeHtml, el: el })
           .catch(function () { /* tasks.js renders its own failure state */ });
+      }
+      // Remote Control (M2H Lane A). Same isolation: a workstation with no
+      // Remote Control unit installed, or a registry where no project has the
+      // capability, is a state remote.js renders itself.
+      if (global.CofferdamRemote) {
+        global.CofferdamRemote.mount({ api: api, escapeHtml: escapeHtml, el: el });
       }
       // Same again for the YouTube player: a host with no browser to open one
       // in, or a player that is simply not open yet, is a state youtube.js

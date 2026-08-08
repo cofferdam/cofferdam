@@ -709,3 +709,43 @@ button.danger { color: var(--err); }
   .task-facts dt { margin-top: 4px; }
   .task-actions button { flex: 1 1 100%; }
 }
+
+/* Remote Control (M2H Lane A) -------------------------------------------- */
+
+/* Reuses the shared button, focus and 46px touch-target rules above rather
+   than restating them: this panel is the same product, not a new one. What is
+   here is only the row layout the other panels did not already need. */
+
+.rc-choose { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.rc-choose label { color: var(--muted); font-size: 13px; }
+.rc-choose select { flex: 1; min-width: 0; }
+
+.rc-card { border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+.rc-title { margin: 0 0 10px; font-size: 16px; }
+
+/* A definition list, not a table: a table of two columns on a phone is a table
+   that scrolls sideways. `min-width: 0` and `overflow-wrap` let a long safe
+   error summary wrap instead of widening the page. */
+.rc-rows { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 0 0 12px; }
+.rc-rows dt { color: var(--muted); font-size: 13px; }
+.rc-rows dd { margin: 0; min-width: 0; overflow-wrap: anywhere; font-size: 14px; }
+
+.rc-badge { display: inline-block; padding: 2px 8px; border-radius: 999px;
+  background: rgba(255, 255, 255, .07); font-size: 12px; }
+.rc-badge.ok { background: rgba(70, 192, 122, .18); color: var(--ok); }
+.rc-badge.warn { background: rgba(224, 163, 58, .18); color: var(--warn); }
+.rc-badge.err { background: rgba(224, 92, 92, .18); color: var(--err); }
+
+/* Wraps rather than scrolls. Three controls do not fit one narrow phone row,
+   and a horizontally scrolling action bar hides the control on the right. */
+.rc-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.rc-actions button { flex: 1 1 auto; min-width: 44%; }
+
+.rc-error { color: var(--err); font-size: 14px; margin: 10px 0 0; overflow-wrap: anywhere; }
+
+/* Present, not shouting. The security boundary is worth understanding, and a
+   card that warns on every render trains people to stop reading warnings. */
+.rc-info { margin-top: 12px; }
+.rc-info summary { color: var(--muted); font-size: 13px; cursor: pointer; min-height: 44px;
+  display: flex; align-items: center; }
+.rc-info p { color: var(--muted); font-size: 13px; margin: 6px 0 0; }

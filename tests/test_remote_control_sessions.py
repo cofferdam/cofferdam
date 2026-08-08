@@ -392,10 +392,25 @@ class RegistryCapabilityTests(unittest.TestCase):
         project, _ = _read_project(self._entry(remote_control_enabled=True), ())
         self.assertIsInstance(project.remote_control_enabled, bool)
 
-    def test_the_flag_is_not_published_to_clients(self) -> None:
-        """No route change in this PR: the client payload is untouched."""
+    def test_the_flag_is_published_but_the_path_still_is_not(self) -> None:
+        """Changed deliberately in M2H PR3, and narrowed rather than opened.
+
+        PR1 published nothing, because nothing needed it. The Remote Control
+        card does: without the capability it can only render an enabled Start
+        button that discovers the refusal by being pressed, which is the
+        confidently-wrong UI this milestone exists to avoid.
+
+        What did *not* change is the rule that actually protects the machine —
+        a boolean says whether this project may host a session; the root path
+        stays absent, so a client still cannot learn where anything lives.
+        """
         project = make_project("demo", remote_control_enabled=True)
-        self.assertNotIn("remote_control_enabled", project.to_dict())
+        payload = project.to_dict()
+        self.assertIs(payload["remote_control_enabled"], True)
+        self.assertNotIn("root", payload)
+
+        off = make_project("other", remote_control_enabled=False).to_dict()
+        self.assertIs(off["remote_control_enabled"], False)
 
     def test_forbidden_execution_fields_are_still_refused(self) -> None:
         for field in ("argv", "command", "env", "executable", "shell", "token"):
