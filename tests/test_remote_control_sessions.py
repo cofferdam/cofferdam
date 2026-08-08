@@ -214,6 +214,131 @@ class ProjectResolutionTests(unittest.TestCase):
         self.assertTrue(runner.argvs_containing("stop"))
 
 
+class RevokedCapabilityContractTests(unittest.TestCase):
+    """The full authority matrix, stated once so it cannot drift.
+
+    Two different fields are involved and confusing them is easy, so they are
+    spelled out here:
+
+    ``enabled``
+        The registry's own switch. A project that is off is off for everything;
+        all three operations refuse it.
+    ``remote_control_enabled``
+        The Lane A capability. It gates **start only**.
+
+    The asymmetry is deliberate. The capability controls what may be *created*.
+    If revoking it also blocked ``stop``, then turning the flag off on a project
+    whose host is currently running would strand a live interactive agent with
+    no supervised way to shut it down — a strictly worse outcome than the one
+    the flag exists to prevent. ``status`` stays open for the same reason: you
+    cannot decide to stop something you are not allowed to look at.
+    """
+
+    def _supervisor_for(self, **kwargs):
+        runner = FakeRunner(
+            default=FakeCompleted(0, show_output(active_state="active", sub_state="running"))
+        )
+        return runner, _supervisor(runner, make_project("demo", **kwargs))
+
+    # -- unknown project: everything refused ---------------------------------
+
+    def test_unknown_project_refuses_start_status_and_stop(self) -> None:
+        runner, supervisor = self._supervisor_for(remote_control_enabled=True)
+        for operation in ("start", "status", "stop"):
+            with self.subTest(operation=operation):
+                with self.assertRaises(SessionProjectUnknown):
+                    getattr(supervisor, operation)("not-registered")
+        self.assertEqual(runner.calls, [], "a refusal must not reach systemctl")
+
+    # -- capability revoked: start refused, status and stop allowed ----------
+
+    def test_revoked_capability_refuses_start_only(self) -> None:
+        _, supervisor = self._supervisor_for(remote_control_enabled=False)
+        with self.assertRaises(RemoteControlNotEnabled):
+            supervisor.start("demo")
+
+    def test_revoked_capability_still_allows_status(self) -> None:
+        """A failed or running unit stays observable after revocation."""
+        for active_state, expected in (
+            ("active", STATE_RUNNING),
+            ("failed", STATE_FAILED),
+            ("inactive", STATE_STOPPED),
+        ):
+            with self.subTest(active_state=active_state):
+                runner = FakeRunner(
+                    default=FakeCompleted(0, show_output(active_state=active_state))
+                )
+                supervisor = _supervisor(
+                    runner, make_project("demo", remote_control_enabled=False)
+                )
+                self.assertEqual(supervisor.status("demo").state, expected)
+
+    def test_revoked_capability_still_allows_stop(self) -> None:
+        """Revocation must not strand a running host."""
+        runner, supervisor = self._supervisor_for(remote_control_enabled=False)
+        status = supervisor.stop("demo")
+        self.assertEqual(
+            runner.argvs_containing("stop"),
+            [["systemctl", "--user", "stop", "cofferdam-rc@demo.service"]],
+        )
+        self.assertIsNotNone(status)
+
+    # -- capability granted: everything allowed ------------------------------
+
+    def test_enabled_capability_allows_start_status_and_stop(self) -> None:
+        for operation in ("start", "status", "stop"):
+            with self.subTest(operation=operation):
+                _, supervisor = self._supervisor_for(remote_control_enabled=True)
+                self.assertIsNotNone(getattr(supervisor, operation)("demo"))
+
+    # -- the registry switch is not the capability ---------------------------
+
+    def test_a_registry_disabled_project_refuses_everything(self) -> None:
+        """`enabled=false` is broader than the capability and blocks all three."""
+        runner = FakeRunner()
+        supervisor = _supervisor(
+            runner, make_project("demo", enabled=False, remote_control_enabled=True)
+        )
+        for operation in ("start", "status", "stop"):
+            with self.subTest(operation=operation):
+                with self.assertRaises(SessionProjectDisabled):
+                    getattr(supervisor, operation)("demo")
+        self.assertEqual(runner.calls, [])
+
+    def test_status_and_stop_resolve_through_the_registry(self) -> None:
+        """Not a bypass: the project is still looked up, just not gated on the flag.
+
+        The unit name every operation acts on is derived from the *registered*
+        project id, so a caller cannot reach a unit the registry does not name.
+        """
+        runner, supervisor = self._supervisor_for(remote_control_enabled=False)
+        supervisor.status("demo")
+        supervisor.stop("demo")
+        for argv in runner.argvs:
+            with self.subTest(argv=argv):
+                self.assertIn("cofferdam-rc@demo.service", argv)
+
+    def test_stop_does_not_require_the_project_root_to_still_exist(self) -> None:
+        """Stopping is de-escalation and must not depend on the filesystem.
+
+        The supervisor resolves the project but never calls ``verify_root``: a
+        directory deleted or moved while a host is running would otherwise make
+        that host unstoppable, which is the same stranding failure the
+        capability asymmetry exists to prevent. Root verification belongs at the
+        point of *launch* — ``host.resolve`` — where it is checked immediately
+        before the exec.
+        """
+        runner = FakeRunner(
+            default=FakeCompleted(0, show_output(active_state="active", sub_state="running"))
+        )
+        supervisor = _supervisor(
+            runner,
+            make_project("demo", root="/definitely/not/a/real/path", remote_control_enabled=False),
+        )
+        supervisor.stop("demo")
+        self.assertTrue(runner.argvs_containing("stop"))
+
+
 class RegistryCapabilityTests(unittest.TestCase):
     """The flag is parsed by the existing project registry, not a new one."""
 
@@ -982,12 +1107,15 @@ class UnitTemplateTests(unittest.TestCase):
         for value in self.directives.get("WorkingDirectory", []):
             self.assertTrue(value.startswith("%h"), "no absolute host path")
 
-    def test_the_code_directory_matches_the_daemon_unit(self) -> None:
-        """`-m cofferdam...` resolves from cwd, so this must track the slot.
+    def test_the_slot_contract_matches_the_daemon_unit(self) -> None:
+        """Both units must name the same A/B runtime slot.
 
-        The base unit runs from ``%h/cofferdam/slots/a``; a template pointing
-        somewhere else would import a different build of the same package, or
-        fail to import it at all.
+        ``%h/cofferdam/slots/a`` is a declared deployment contract, not a local
+        path: DESIGN.md defines the slot layout, docs/host-setup.md installs
+        into it, and docs/SERVICE_LIFECYCLE.md documents ExecStart pointing
+        there. Asserting the two units agree is what makes an A/B slot switch
+        move the daemon and its Remote Control hosts together, rather than
+        leaving them on different builds of the same package.
         """
         base = (REPO_ROOT / "deploy" / "cofferdam-workstation.service").read_text(
             encoding="utf-8"
@@ -998,6 +1126,36 @@ class UnitTemplateTests(unittest.TestCase):
             if line.strip().startswith("WorkingDirectory=")
         ]
         self.assertEqual(self.directives["WorkingDirectory"], base_workdir)
+
+    def test_the_interpreter_is_the_slot_venv_used_by_the_daemon(self) -> None:
+        """Same interpreter as the base unit, so both run the same install."""
+        base = (REPO_ROOT / "deploy" / "cofferdam-workstation.service").read_text(
+            encoding="utf-8"
+        )
+        base_exec = [
+            line.split("=", 1)[1].strip()
+            for line in base.splitlines()
+            if line.strip().startswith("ExecStart=") and line.strip() != "ExecStart="
+        ]
+        self.assertTrue(base_exec)
+        base_interpreter = base_exec[0].split()[0]
+        self.assertEqual(self.directives["ExecStart"][0].split()[0], base_interpreter)
+
+    def test_the_invoked_package_is_shipped_by_the_distribution(self) -> None:
+        """A wheel install must contain the module ExecStart names.
+
+        The regression this guards actually happened: `cofferdam.workstation.
+        tasks` shipped in M2F and was never added to pyproject's package list,
+        so a built wheel omitted it entirely. The documented install is editable
+        and hid that for two milestones.
+        """
+        pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        for required in (
+            '"cofferdam.workstation.sessions"',
+            '"cofferdam.workstation.tasks"',
+        ):
+            with self.subTest(package=required):
+                self.assertIn(required, pyproject)
 
     def test_it_carries_no_secret(self) -> None:
         lowered = self.text.lower()

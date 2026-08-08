@@ -29,14 +29,29 @@ that adds evidence for them is the PR that may add the states.
 The capability gate, and the one place it does not apply
 --------------------------------------------------------
 
-:meth:`RemoteControlSupervisor.start` requires ``remote_control_enabled`` on the
-project. :meth:`~RemoteControlSupervisor.stop` and
-:meth:`~RemoteControlSupervisor.status` deliberately do not, and that asymmetry
-is on purpose: revoking the flag on a project whose host is *already running*
-must not strand a live process with no supervised way to shut it down. The gate
-exists to control what may be **created**, and refusing to stop something is not
-a smaller permission than refusing to start it — it is a different and worse
-one. Both paths still require the project to be registered and enabled.
+Two different fields decide this, and they are easy to confuse:
+
+``enabled``
+    The project registry's own switch, checked by :meth:`ProjectRegistry.get`.
+    A project that is off is off for everything — start, stop and status all
+    refuse it.
+``remote_control_enabled``
+    The Lane A capability added in M2H. It gates **start, and only start**.
+
+So :meth:`RemoteControlSupervisor.start` requires the capability;
+:meth:`~RemoteControlSupervisor.stop` and :meth:`~RemoteControlSupervisor.status`
+deliberately do not, while still requiring the project to be registered and
+``enabled``. The asymmetry is on purpose: revoking the capability on a project
+whose host is *already running* must not strand a live process with no
+supervised way to shut it down. The gate exists to control what may be
+**created**, and refusing to stop something is not a smaller permission than
+refusing to start it — it is a different and worse one. ``status`` stays open
+for the same reason: nobody can decide to stop what they may not look at.
+
+Neither ``stop`` nor ``status`` verifies the project *root*. That check belongs
+to :func:`..host.resolve`, immediately before the exec, because a root that has
+been deleted or moved must not make a running host unstoppable — the same
+stranding argument, applied to the filesystem instead of the flag.
 """
 
 from __future__ import annotations

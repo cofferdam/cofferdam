@@ -41,12 +41,35 @@ cofferdam = "cofferdam.cli:main"
 cofferdam-workstation = "cofferdam.workstation.__main__:main"
 
 [tool.setuptools]
+# Listed explicitly rather than auto-discovered. `find:` would also sweep up
+# `tests` and any future top-level directory that happens to gain an
+# `__init__.py`, and a packaging list that changes because somebody added a file
+# elsewhere is not a list anybody can review.
+#
+# The cost of being explicit is that a new subpackage must be added here, and
+# that cost was paid the hard way: `tasks` (M2F) and its adapters (M2G) were
+# never added, so a built wheel silently omitted Task Core and the Claude
+# adapter. Nothing caught it because the documented install is editable
+# (`pip install -e`), which puts the source tree on `sys.path` and makes the
+# declaration irrelevant — the gap only appears in a real wheel.
+#
+# `tests/test_packaging.py` now compares this list against the packages that
+# actually exist in the source tree, so the next omission fails a test instead
+# of shipping.
 packages = [
     "cofferdam",
     "cofferdam.workstation",
     "cofferdam.workstation.adapters",
+    "cofferdam.workstation.audio",
+    "cofferdam.workstation.mediasearch",
     "cofferdam.workstation.registries",
     "cofferdam.workstation.runtime",
+    "cofferdam.workstation.sessions",
+    "cofferdam.workstation.spotifyplayer",
+    "cofferdam.workstation.tasks",
+    "cofferdam.workstation.tasks.adapters",
+    "cofferdam.workstation.tasks.adapters.claude_code",
+    "cofferdam.workstation.youtubeplayer",
 ]
 
 [tool.setuptools.dynamic]

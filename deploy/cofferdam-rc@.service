@@ -58,10 +58,23 @@ Type=simple
 # points at the same runtime slot the workstation daemon runs from.
 ExecStart=%h/cofferdam/slots/a/.venv/bin/python -m cofferdam.workstation.sessions.host %i
 
-# The runtime slot, matching the daemon unit — this is where the CODE is, not
-# where the session runs. `-m cofferdam.workstation.sessions.host` resolves the
-# package from this directory exactly as the base unit resolves
-# `-m cofferdam.workstation`, so the two stay in step through an A/B slot switch.
+# DEPLOYMENT CONTRACT: `%h/cofferdam/slots/a` is the active A/B runtime slot.
+#
+# Not a machine-local accident and not a feature worktree. The slot layout is
+# declared in DESIGN.md ("slots/a  slots/b  # runtime checkouts"), the install
+# guide clones the repository into `~/cofferdam/slots/a` and builds `.venv`
+# there, and docs/SERVICE_LIFECYCLE.md documents the installed unit's ExecStart
+# pointing at it. The base `cofferdam-workstation.service` uses exactly this
+# WorkingDirectory and exactly this interpreter, and a static test asserts the
+# two units agree — so an A/B slot switch moves the daemon and its Remote
+# Control hosts together instead of leaving them on different builds.
+#
+# Import resolution does NOT depend on this directory. The package is installed
+# into the slot's own `.venv` (editable in the documented setup, and correct
+# from a plain wheel since `cofferdam.workstation.sessions` and
+# `cofferdam.workstation.tasks` are declared in pyproject.toml — they were not,
+# which is what this follow-up fixed). WorkingDirectory is here for slot
+# consistency, not to make `-m` work.
 #
 # The SESSION's directory is a different thing entirely and is deliberately not
 # set here: the entry point chdirs to the registered project root after
