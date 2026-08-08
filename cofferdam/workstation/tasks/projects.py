@@ -104,6 +104,25 @@ class TaskProject:
     adapters: Tuple[str, ...] = ()
     notes: Optional[str] = None
 
+    #: Whether this project may host a **native** Claude Remote Control session
+    #: (Lane A — see :mod:`..sessions`). Default off, and off for every project
+    #: that predates the field: a registry entry written before Lane A existed
+    #: cannot have consented to it, and "absent means enabled" is how a
+    #: capability arrives somewhere nobody chose.
+    #:
+    #: Deliberately not folded into :attr:`adapters`. That list is Lane B — the
+    #: delegated task adapters Task Core may run in this project — and a native
+    #: interactive session is not one of them. Sharing the field would mean
+    #: enabling a headless adapter also granted an interactive host, which is a
+    #: strictly larger permission than the one being asked for.
+    #:
+    #: A boolean, and only a boolean. It carries no flag, path, model, effort,
+    #: command or environment value; those belong to the M2J run-profile work,
+    #: and a capability that could carry them would be an execution field in a
+    #: configuration file — exactly what :data:`FORBIDDEN_PROJECT_FIELDS` exists
+    #: to refuse.
+    remote_control_enabled: bool = False
+
     def permits(self, adapter_id: str) -> bool:
         """Whether this project allows that adapter.
 
@@ -288,6 +307,18 @@ def _read_project(entry: Any, known_adapters: Sequence[str]) -> Tuple[Optional[T
     if not isinstance(enabled, bool):
         return None, {"project_id": project_id, "problem": "enabled must be true or false"}
 
+    # Absent means off. A malformed value is a rejection rather than a coerced
+    # default: ``"true"``, ``1`` and ``"yes"`` all look like consent to a person
+    # reading the file, and quietly treating any of them as ``False`` would hide
+    # a capability that did not take effect, while treating them as ``True``
+    # would grant one from a typo.
+    remote_control_enabled = entry.get("remote_control_enabled", False)
+    if not isinstance(remote_control_enabled, bool):
+        return None, {
+            "project_id": project_id,
+            "problem": "remote_control_enabled must be true or false",
+        }
+
     return (
         TaskProject(
             project_id=project_id,
@@ -296,6 +327,7 @@ def _read_project(entry: Any, known_adapters: Sequence[str]) -> Tuple[Optional[T
             enabled=enabled,
             adapters=adapters,
             notes=_bounded_label(entry.get("notes"), 200),
+            remote_control_enabled=remote_control_enabled,
         ),
         None,
     )
