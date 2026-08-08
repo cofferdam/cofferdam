@@ -1,11 +1,26 @@
 # Status
 
-Accurate as of **2026-08-06** (M2B runtime inventory, M2B3A media launch profiles, M2B3A.1
-official-provider result selection, M2C audio control, M2D Spotify playback, and M2E the YouTube
-dedicated player, [`DECISIONS.md`](DECISIONS.md) D-2026-08-05-2 … -9 and D-2026-08-06-1). Update
-this file when a category changes, not on every commit.
+Accurate as of **2026-08-08** (M2F Agent Task Core and M2G the Claude Code adapter merged; the
+isolated Custom GPT Actions mobile probe passed; client architecture and the active roadmap
+recorded as [`DECISIONS.md`](DECISIONS.md) D-2026-08-08-1 … -6). Update this file when a category
+changes, not on every commit.
 
 ## Merged (on `main`)
+
+- **M2G — Claude Code adapter** (PR #21, squash-merged as `267fae9`). The first adapter that runs
+  a real program, on the M2F foundation: one long-lived `claude -p` process per task, a bounded
+  stream-json parser, process identity re-verified before every signal, and no Bash tool in the
+  profile at all. Off by default behind `--enable-claude-code-adapter` and a per-project
+  permission. Detail in the milestone record below, and in
+  [`docs/CLAUDE_CODE_ADAPTER.md`](docs/CLAUDE_CODE_ADAPTER.md).
+
+  **Validated live from the phone before merge**, against the real host and the installed CLI: an
+  initial delegated task, a same-session follow-up, turn completion, polling, draft preservation
+  while polling, duplicate suppression, finish and slot release, cancellation isolated to one
+  task, a repeated cancel answered as a conflict rather than a second signal, restart reported as
+  `interrupted` rather than resumed, orphan cleanup, isolation from unrelated Claude sessions on
+  the machine, and no task content in the broad logs. Those behaviours are the parity list the
+  Agent SDK adapter must meet in M2I before this one is retired.
 
 - **M2F — Agent Task Core foundation** (PR #20, squash-merged as `9a645eb`). The provider-neutral task model that had to exist before any agent: identity, an eleven-state machine committed in one transaction with its event, a SQLite store, an append-only history, a host-owned project registry, the adapter protocol, and a deterministic validation adapter that runs no program. Eight authenticated routes and a **Tasks** panel. A default install after this merge has an empty adapter list, which is the honest state of a foundation. See [`docs/AGENT_TASK_CORE.md`](docs/AGENT_TASK_CORE.md) and D-2026-08-06-2.
 
@@ -22,6 +37,29 @@ Trust Core module, PR0 → PR3c1:
 - Durable single-use expiring approval ledger (PR3b).
 - Interactive human approval mint: `cofferdam approve` (PR3c1).
 
+## Verified outside this repository (capability probes)
+
+- **Private Custom GPT Actions, from a real iPhone — PASSED 2026-08-08.** An isolated echo
+  service, in its own directory outside this repository with its own port and its own bearer
+  credential, behind a temporary Cloudflare Quick Tunnel. The desktop GPT Builder called
+  `GET /health` and then the consequential `POST /echo` successfully; the **native iPhone ChatGPT
+  application** then made the same two calls successfully, and the `POST` response came back into
+  the same private conversation. The mobile request carried `client_test_id = mobile-app-1`, and
+  the server recorded `seen = 1`, `duplicate = false` — one accepted mobile confirmation, exactly
+  one server invocation.
+
+  **The working tunnel needed `--edge-ip-version 4` and `--protocol http2`:** the phone's hotspot
+  allowed Cloudflare region2 over IPv4 TCP 7844, while region1, IPv6 and QUIC were unavailable.
+  That is a recorded transport observation, not a solved deployment.
+
+  **What this establishes:** a private Custom GPT can reach a personal workstation service from a
+  real phone, with bearer authentication, including an action that requires confirmation.
+  **What it does not:** any production behaviour. **No Cofferdam Action exists** — `create_task`,
+  `get_result` and the rest are M2I.5, unimplemented. Production transport and network reliability
+  are still that milestone's problem. The Cofferdam repository, the workstation daemon, the PWA,
+  Task Core and the systemd configuration were untouched and unexposed by the probe, and no probe
+  credential is in this repository. Decided as D-2026-08-08-1.
+
 ## Preserved on a branch, not merged
 
 - **PR3c2 — Candidate-B byte-exact executor.** Preserved as a WIP commit (`419f90f`) on branch
@@ -30,9 +68,18 @@ Trust Core module, PR0 → PR3c1:
   unreviewed** — not merged, not on the critical path, and not to be continued unless a task
   explicitly scopes it. Do not rebase or rewrite that branch.
 
-## In progress
+## Milestone records (all merged; written while each was on its branch)
 
-- **M2G — Claude Code adapter.** On branch `feat/claude-code-adapter`, not merged. The first
+Each entry below was written as its milestone was built and is kept as that milestone's record.
+**They are all merged on `main` now** — the merge reference is on each heading — so where an entry
+says "on branch, not merged" it is describing the moment it was written, corrected in place. What
+each milestone *did not* do, and which validations are still outstanding, is still current and is
+why these records are kept rather than collapsed into one line.
+
+Nothing is in progress in this repository today. The queued work is M2H → M2I → M2I.5 → M2J; see
+[`ROADMAP.md`](ROADMAP.md).
+
+- **M2G — Claude Code adapter.** Merged as PR #21. The first
   adapter that runs a real program, built on the merged M2F foundation. A phone picks an approved
   project, picks Claude Code, writes a prompt, watches truthful progress, reads the result, sends a
   follow-up to the same live session, and cancels that one task. Adds
@@ -54,9 +101,10 @@ Trust Core module, PR0 → PR3c1:
   zero without a result frame is a failure, not a completion. Restart marks the task `interrupted`
   and resumes nothing. 134 focused tests, 17/17 mutations caught.
 
-
-  **Not yet validated on the real host.** The `96-agent-task-core-validation` drop-in is prepared
-  and not applied; the live service still runs the M2E build under the unchanged `95` drop-in.
+  **Since validated on the real host, from the phone** — the thirteen behaviours listed under
+  *Merged* above, run against the live service before PR #21 was merged. The sentence that stood
+  here said the `96-agent-task-core-validation` drop-in was prepared and not applied and that the
+  live service still ran the M2E build; that was true while the branch was open and is no longer.
 
 - **M1 — remote control skeleton.** Merged to `main` (PR #6, PR #7, PR #8). Backend service
   (auth, status, typed actions, screenshot/open-application/open-URL, WebSocket events), host
@@ -103,12 +151,18 @@ correctly report unavailable until someone logs in at the desktop. That expectat
 [`ROADMAP.md`](ROADMAP.md). The reboot is deferred at the user's request because the workstation
 is in active use; it is not blocked or waived.
 
+**It is now a gate inside M2H.** Every milestone since M1 has been able to say truthfully that it
+changed no boot behaviour, which is why the gate could keep being deferred. M2H supervises native
+Remote Control hosts as user services and is the first work that changes what runs at boot, so its
+unattended-reboot validation and this gate are the same step, and M2H is not complete while it is
+open.
+
 **M2A does not change this gate.** It alters no boot behaviour, no systemd unit, and no bind
 logic; the gate stays open and unaffected, and no M2A document may describe M1 as validated.
 
 ### M2A — control plane foundation
 
-- **M2A — control plane foundation.** On branch `feat/m2-control-plane-foundation`, not merged.
+- **M2A — control plane foundation.** Merged as PR #9.
   Six versioned registries (devices, displays, applications, browser profiles, agent profiles,
   conversation routes) under `$COFFERDAM_HOME/config/registries/` with strict typed models,
   cross-registry reference validation, normalized Unicode/Turkish alias indexes, an atomic writer
@@ -202,8 +256,7 @@ logic; the gate stays open and unaffected, and no M2A document may describe M1 a
 
 ### M2B — runtime inventory
 
-- **M2B — runtime inventory foundation.** On branch `feat/m2b-runtime-inventory-foundation`, not
-  merged. The layer M2A deliberately did not have: read-only discovery of what is **actually
+- **M2B — runtime inventory foundation.** Merged as PR #13, with M2B2 as PR #14. The layer M2A deliberately did not have: read-only discovery of what is **actually
   connected and running**, as `cofferdam/workstation/runtime/` — one narrow module per backend,
   each stating the resources it owns, the evidence it uses, its limitations, and its status
   semantics. Authenticated read-only `GET /api/runtime` and `GET /api/runtime/{resource_kind}`; a
@@ -285,8 +338,7 @@ logic; the gate stays open and unaffected, and no M2A document may describe M1 a
 
 ### M2B3A — media and application launch profiles
 
-- **M2B3A — media and application launch profiles.** On branch
-  `feat/m2b3a-media-launch-profiles`, not merged. A code-owned provider catalogue
+- **M2B3A — media and application launch profiles.** Merged as PR #15. A code-owned provider catalogue
   (`cofferdam/workstation/media.py`) covering Spotify, YouTube, Netflix, Prime Video and TV+; two
   typed actions (`open_media_provider`, `search_media_provider`); a read-only
   `GET /api/media/providers`; and a *Media* section in the PWA, kept separate from both *Live
@@ -315,8 +367,8 @@ logic; the gate stays open and unaffected, and no M2A document may describe M1 a
 
 ### M2B3A.1 — official-provider search and result selection
 
-- **M2B3A.1 — real results you can pick from, for Spotify and YouTube.** On branch
-  `feat/m2b3a1-media-result-selection`, not merged. Official catalogue search through the Spotify
+- **M2B3A.1 — real results you can pick from, for Spotify and YouTube.** Merged as PR #16.
+  Official catalogue search through the Spotify
   Web API and the YouTube Data API v3, as `cofferdam/workstation/mediasearch/` — credentials,
   transport, per-provider adapters, a versioned result model, and bounded search sessions. Two typed
   actions (`find_media_results`, `open_media_result`), two routes under `/api/media/`, a
@@ -345,8 +397,8 @@ logic; the gate stays open and unaffected, and no M2A document may describe M1 a
 
 ### M2C — audio control foundation
 
-- **M2C — turn the volume down from the phone, and be told the truth about it.** On branch
-  `feat/audio-control-foundation`, not merged. A focused `cofferdam/workstation/audio/` module over
+- **M2C — turn the volume down from the phone, and be told the truth about it.** Merged as
+  PR #17. A focused `cofferdam/workstation/audio/` module over
   PipeWire 1.6.2 / WirePlumber 0.5.13, read through `pw-dump` and driven through `wpctl` — outputs,
   streams, a versioned snapshot, three typed actions, and four routes under `/api/audio/`. An Audio
   panel in the PWA with a bounded slider, mute, and a collapsed outputs list.
@@ -403,8 +455,8 @@ logic; the gate stays open and unaffected, and no M2A document may describe M1 a
 
 ### M2D — Spotify playback with user OAuth
 
-- **M2D — play the track you picked, and control the player that is playing it.** On branch
-  `feat/spotify-playback-oauth`, not merged. M2B3A.1 could find the exact song and open Spotify; it
+- **M2D — play the track you picked, and control the player that is playing it.** Merged as
+  PR #18, with M2D.1. M2B3A.1 could find the exact song and open Spotify; it
   could not press play. This adds a `cofferdam/workstation/spotifyplayer/` module over the official
   Spotify Web API — one-time user authorization, a versioned playback snapshot, opaque Connect
   device handles, nine typed actions, and ten routes — plus a **Spotify player** panel in the PWA
@@ -504,8 +556,7 @@ logic; the gate stays open and unaffected, and no M2A document may describe M1 a
 
 ### M2E — YouTube dedicated player
 
-- **M2E — one player window, not a tab per video.** On branch
-  `feat/youtube-dedicated-player`, not merged. M2B3A.1 could find the exact video and open it;
+- **M2E — one player window, not a tab per video.** Merged as PR #19. M2B3A.1 could find the exact video and open it;
   every selection opened *another* Opera watch tab, Cofferdam could control none of them, and a
   tab appearing was treated as success. This adds a `cofferdam/workstation/youtubeplayer/` module
   over the official IFrame Player API — a Cofferdam-served player document, a bounded loopback
@@ -561,14 +612,31 @@ logic; the gate stays open and unaffected, and no M2A document may describe M1 a
   persistence, and the Opera Companion for Netflix/Prime Video/TV+.
 
 **M2B does not change the M1 reboot gate.** It alters no boot behaviour, no systemd unit, and no
-bind logic. Neither does M2B3A, M2B3A.1, M2C, M2D, or M2E.
+bind logic. Neither does M2B3A, M2B3A.1, M2C, M2D, M2E, M2F, or M2G. **M2H does**, which is why
+the gate closes there.
 
 ## Planned (active roadmap — see [`ROADMAP.md`](ROADMAP.md))
 
-- Guardian/Supervisor + manual recovery command surface, Runtime A/B slots, process/window/
-  display control, browser/media control (YouTube, Netflix profile), Claude Code task adapter,
-  update records, A/B self-update demonstration, natural-language intent routing (Ollama),
-  OpenClaw spike.
+Queued, in order:
+
+- **M2H — supervised Claude Remote Control** (Lane A): per-project native hosts as systemd user
+  services, truthful health and authentication-expiry states, a native link in the PWA, reconnect
+  and restart behaviour, and the unattended-reboot validation that closes the M1 gate above.
+- **M2I — Claude Agent SDK adapter** (Lane B): structured `AskUserQuestion`, clarification
+  questions kept apart from tool approvals, question and answer provenance, cancellation and
+  restart parity, durable results and the `get_result` foundation. The merged CLI adapter is
+  retired only after verified parity.
+- **M2I.5 — private Custom GPT Actions bridge:** a dedicated narrow process, scoped per-client
+  credentials, a production transport decision, the ten bounded Actions, and real iPhone
+  validation against Cofferdam. No approval Action; no exposure of the general API or the PWA.
+- **M2J — Project Workstation, workspaces and profiles:** workspace creation, project templates,
+  a code-owned model allowlist, Auto / Safe / Review profiles, project-context retrieval, and
+  handoff and history surfaces.
+
+Later, unordered: Codex app-server as a second delegated worker and reviewer · Guardian/Supervisor
+and Runtime A/B slots with the manual recovery command surface · update records and the A/B
+self-update demonstration · process, window and display control · natural-language intent routing
+(Ollama) · richer Markdown memory retrieval · an optional OpenClaw client.
 
 ## Deferred (preserved, not on the critical path)
 
@@ -593,3 +661,8 @@ bind logic. Neither does M2B3A, M2B3A.1, M2C, M2D, or M2E.
   whole-product claims (they remain true of the Trust Core module).
 - Per-PR council review gates as the default process.
 - Monetization/productization planning (sponsors, design partners, hosted plans).
+- **An Xorg (X11) session as the MVP display baseline.** The product was built and validated on
+  GNOME Wayland instead; see the marked baseline entry in [`ROADMAP.md`](ROADMAP.md).
+- **M4's single `ClaudeCodeAdapter` owning both an interactive session and a delegated task.**
+  Delivered early as M2F + M2G, and replaced by the two-lane architecture in D-2026-08-08-3.
+- **The pre-M4 OpenClaw evaluation spike.** Nothing waits on it any more (D-2026-08-08-5).

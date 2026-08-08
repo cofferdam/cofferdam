@@ -54,13 +54,21 @@ repeated reboots with the API reachable before anyone logs in. Two corrections c
 validation and are merged — a login-lifecycle regression (M1.1) and untruthful screenshot
 capability reporting (M1.2).
 
-Two milestones are in progress on branches since then. **M2A** adds semantic registries — optional
-labels, aliases, and launch preferences — over a read-only API. **M2B** adds the runtime inventory:
-Cofferdam now discovers the displays actually connected to the host and the applications actually
-running on it, and shows them in a *Live system* panel kept deliberately separate from
-configuration. That separation is the point — an application being *installed and launchable* and
-an application *running right now* are different facts, and neither view may borrow the other's
-words.
+Everything through **M2G** is merged since then: semantic registries over a read-only API (M2A);
+the runtime inventory, which discovers the displays actually connected and the applications
+actually running and shows them in a *Live system* panel kept deliberately separate from
+configuration (M2B); media launch profiles and official-provider search (M2B3A, M2B3A.1); audio
+control, Spotify playback and a dedicated YouTube player (M2C–M2E); the provider-neutral **Agent
+Task Core** (M2F); and the first adapter that runs a real program, the **Claude Code adapter**
+(M2G) — a phone picks an approved project, sends a prompt, watches truthful progress, follows up
+in the same session, and cancels that one task, with no shell behind any of it.
+
+Claude is reached through **two lanes that do not merge**: supervised *native* interactive
+sessions, whose lifecycle Cofferdam owns and whose conversation it does not read, and *delegated*
+tasks through Task Core and official SDK adapters. The ChatGPT-facing client is a **private Custom
+GPT calling bounded Actions** — a replaceable client that may ask and never decides. That client
+path has been proven from a real phone against an isolated probe service; **no Cofferdam Action is
+implemented yet**. See [`STATUS.md`](STATUS.md) and `DECISIONS.md` D-2026-08-08-1 … -6.
 
 Three limits are worth stating plainly rather than discovering later. **Screen capture does not
 work under Wayland on this host**, so `screenshot` reports `false` — that is the truthful answer,
