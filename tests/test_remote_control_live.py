@@ -54,10 +54,15 @@ from ._sessions_doubles import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-#: A stand-in with the shape the recogniser expects. Not a real session URL —
-#: the real format is confirmed during the live spike, and until then this
-#: exercises the machinery without asserting a format nobody has observed.
-SAMPLE_LINK = "https://claude.ai/code/session/abc123XYZ-placeholder"
+#: A link with the **confirmed live structure** and entirely **fake** capability
+#: material. The shape — https, allowlisted host, ``/code``, one ``environment``
+#: query parameter, a 28-character URL-safe token — is what M2H PR2.5 observed
+#: twice on a real PTY. The token is typed here by hand and grants nothing.
+#:
+#: Real capability material never enters this file, and a test below asserts the
+#: fixture is not mistakable for a live one.
+SAMPLE_TOKEN = "FAKEfake0123456789-_TESTtok0"
+SAMPLE_LINK = "https://claude.ai/code?environment=" + SAMPLE_TOKEN
 
 
 class _Config:
@@ -71,15 +76,36 @@ def _store(home: Path) -> LinkStore:
 
 @contextlib.contextmanager
 def confirmed_format():
-    """Temporarily open the capture gate, for tests about *mechanics*.
+    """The gate as this build ships it: open, against the confirmed format.
 
-    Chunking, ordering and redaction have to be testable without waiting for a
-    format nobody has observed yet. This makes that dependency explicit and
-    loud: any test that needs a link to be recognised has to say so, and
-    everything outside this block sees the real, closed, fail-closed gate.
+    Kept as an explicit context manager even though ``True`` is now the default,
+    so the tests that depend on recognition say so at the point they depend on
+    it. If the gate is ever closed again — a workstation where the format is in
+    doubt, a build that has not re-confirmed it — these tests keep testing the
+    thing they were written to test instead of silently passing on a closed
+    gate.
     """
     original = links.LINK_FORMAT_CONFIRMED
     links.LINK_FORMAT_CONFIRMED = True
+    try:
+        yield
+    finally:
+        links.LINK_FORMAT_CONFIRMED = original
+
+
+@contextlib.contextmanager
+def unconfirmed_format():
+    """The fail-closed half of the gate, which still has to work.
+
+    M2H PR2.5 confirmed the format, so the shipped default is now ``True``. That
+    makes the closed behaviour *harder* to keep honest, not less important: it is
+    the mode a future CLI change drops us back into, and the whole design rests
+    on "no link at all" being the answer when the format is not trusted. So it
+    is exercised deliberately here rather than being whatever the module happens
+    to be set to.
+    """
+    original = links.LINK_FORMAT_CONFIRMED
+    links.LINK_FORMAT_CONFIRMED = False
     try:
         yield
     finally:
@@ -99,9 +125,13 @@ class LinkRecognitionTests(unittest.TestCase):
             )
 
     def test_nothing_is_recognised_while_the_format_is_unconfirmed(self) -> None:
-        """The gate, at its source. Fail-closed, not informational."""
-        self.assertFalse(links.LINK_FORMAT_CONFIRMED)
-        self.assertIsNone(links.find_link("Open " + SAMPLE_LINK + " to connect"))
+        """The gate, at its source. Fail-closed, not informational.
+
+        A link of the *confirmed* shape, refused anyway, because the gate is
+        about trust in the format rather than the look of the string.
+        """
+        with unconfirmed_format():
+            self.assertIsNone(links.find_link("Open " + SAMPLE_LINK + " to connect"))
 
     def test_unrelated_output_is_ignored(self) -> None:
         for line in (
@@ -128,9 +158,190 @@ class LinkRecognitionTests(unittest.TestCase):
     def test_an_over_long_candidate_is_refused(self) -> None:
         self.assertIsNone(links.find_link("https://claude.ai/code/" + "a" * 900))
 
-    def test_the_format_is_marked_unconfirmed(self) -> None:
-        """Honest until the live spike says otherwise."""
-        self.assertFalse(links.LINK_FORMAT_CONFIRMED)
+    def test_the_format_is_confirmed_in_this_build(self) -> None:
+        """M2H PR2.5 observed it live, twice, so the gate ships open."""
+        self.assertTrue(links.LINK_FORMAT_CONFIRMED)
+
+    def test_the_confirmed_pattern_is_the_observed_structure(self) -> None:
+        """Pinned to what was seen, not to whatever still parses."""
+        self.assertEqual(links.LINK_PATH, "/code")
+        self.assertEqual(links.LINK_QUERY_KEY, "environment")
+        self.assertEqual(links.ALLOWED_LINK_HOSTS, ("claude.ai", "www.claude.ai"))
+
+    def test_the_fixture_carries_no_real_capability_material(self) -> None:
+        """The token in this file is typed by hand and grants nothing."""
+        self.assertIn("FAKE", SAMPLE_TOKEN)
+        self.assertEqual(len(SAMPLE_TOKEN), 28)
+
+
+class ConfirmedFormatTests(unittest.TestCase):
+    """The live-confirmed structure, and everything close to it that is refused.
+
+    Every URL here is fabricated. The shape came from two bounded PTY startups
+    in M2H PR2.5; no capability material from those runs is in this file, this
+    repository, or its history.
+    """
+
+    def _link(self, token: str) -> str:
+        return "https://claude.ai/code?environment=" + token
+
+    def test_the_confirmed_shape_is_recognised(self) -> None:
+        with confirmed_format():
+            line = "Continue coding in the Claude mobile app or " + SAMPLE_LINK
+            self.assertEqual(links.find_link(line), SAMPLE_LINK)
+
+    def test_the_www_host_is_also_accepted(self) -> None:
+        url = "https://www.claude.ai/code?environment=" + SAMPLE_TOKEN
+        with confirmed_format():
+            self.assertEqual(links.find_link(url), url)
+
+    def test_a_different_path_is_refused(self) -> None:
+        """The old pattern accepted any path; a login page is not a session."""
+        with confirmed_format():
+            for path in ("/login", "/code/session", "/", "/codex", "/settings"):
+                with self.subTest(path=path):
+                    url = "https://claude.ai" + path + "?environment=" + SAMPLE_TOKEN
+                    self.assertIsNone(links.find_link(url))
+
+    def test_a_different_query_key_is_refused(self) -> None:
+        with confirmed_format():
+            for key in ("env", "environments", "session", "token"):
+                with self.subTest(key=key):
+                    self.assertIsNone(
+                        links.find_link(
+                            "https://claude.ai/code?" + key + "=" + SAMPLE_TOKEN
+                        )
+                    )
+
+    def test_a_link_with_no_query_is_refused(self) -> None:
+        with confirmed_format():
+            self.assertIsNone(links.find_link("https://claude.ai/code"))
+            self.assertIsNone(links.find_link("https://claude.ai/code?environment="))
+
+    def test_a_truncated_token_is_refused(self) -> None:
+        """Better no link than a capability URL that fails somewhere else."""
+        with confirmed_format():
+            for length in (1, 4, 8, links.LINK_TOKEN_MIN_CHARS - 1):
+                with self.subTest(length=length):
+                    self.assertIsNone(links.find_link(self._link("A" * length)))
+
+    def test_an_over_long_token_is_refused(self) -> None:
+        with confirmed_format():
+            self.assertIsNone(
+                links.find_link(self._link("A" * (links.LINK_TOKEN_MAX_CHARS + 1)))
+            )
+
+    def test_a_token_is_never_matched_in_part(self) -> None:
+        """The trailing assertion: no prefix of a longer token is a link."""
+        with confirmed_format():
+            long_token = "B" * (links.LINK_TOKEN_MAX_CHARS + 40)
+            self.assertIsNone(links.find_link(self._link(long_token)))
+
+    def test_plain_http_is_refused(self) -> None:
+        with confirmed_format():
+            self.assertIsNone(
+                links.find_link("http://claude.ai/code?environment=" + SAMPLE_TOKEN)
+            )
+
+    def test_a_lookalike_host_is_refused(self) -> None:
+        with confirmed_format():
+            for host in (
+                "claude.ai.attacker.test",
+                "notclaude.ai",
+                "claude.ai.evil.test",
+                "evil.test",
+            ):
+                with self.subTest(host=host):
+                    self.assertIsNone(
+                        links.find_link(
+                            "https://" + host + "/code?environment=" + SAMPLE_TOKEN
+                        )
+                    )
+
+    def test_a_control_sequence_cannot_forge_an_allowed_host_or_path(self) -> None:
+        """The dangerous direction: renders as one thing, matches as another.
+
+        Recognition runs on the *stripped* text, which is what a terminal shows
+        a person. So the case that must never pass is output that reads as some
+        other host while matching as Claude — a colour reset does not launder
+        ``evil.test`` into an allowlisted host, and does not launder ``/login``
+        into ``/code``.
+        """
+        with confirmed_format():
+            for forged in (
+                "https://evil.test\x1b[0m/code?environment=" + SAMPLE_TOKEN,
+                "https://claude.ai.evil.test\x1b[0m/code?environment=" + SAMPLE_TOKEN,
+                "https://claude.ai\x1b[0m/login?environment=" + SAMPLE_TOKEN,
+            ):
+                with self.subTest(forged=forged[:34]):
+                    self.assertIsNone(links.find_link(forged))
+
+    def test_decoration_inside_a_genuine_link_is_removed_not_rejected(self) -> None:
+        """The benign direction, which the real CLI actually produces.
+
+        Remote Control underlines its URL, so escape sequences land *inside* the
+        string. Stripping them yields exactly the link the person sees on screen,
+        and refusing it instead would mean failing to capture a link that is
+        plainly there.
+        """
+        with confirmed_format():
+            decorated = "https://claude\x1b[0m.ai/code?environment=" + SAMPLE_TOKEN
+            self.assertEqual(links.find_link(decorated), SAMPLE_LINK)
+
+    def test_the_real_startup_line_shape_is_recognised(self) -> None:
+        """The line the CLI actually prints, reconstructed with a fake token."""
+        with confirmed_format():
+            painted = (
+                "\x1b[2K\r  Continue coding in the Claude mobile app or "
+                "\x1b[4m" + SAMPLE_LINK + "\x1b[0m"
+            )
+            self.assertEqual(links.find_link(painted), SAMPLE_LINK)
+
+    def test_a_repainted_line_does_not_produce_a_glued_token(self) -> None:
+        """Carriage-return repaints must not concatenate two links into one."""
+        with confirmed_format():
+            repainted = SAMPLE_LINK + "\r" + SAMPLE_LINK
+            self.assertEqual(links.find_link(repainted.split("\r")[0]), SAMPLE_LINK)
+
+    def test_a_restart_does_not_invalidate_the_link_and_we_do_not_claim_it_does(
+        self,
+    ) -> None:
+        """The live finding M2H PR2 had backwards, pinned so it stays honest.
+
+        The parameter is ``environment``, not ``session``: two generations
+        started minutes apart produced the same URL, and the CLI prints
+        "Environment preserved" on shutdown. Cofferdam's generation rules stop
+        *Cofferdam* handing out a stale link; they do not revoke it upstream.
+
+        This test guards the documentation rather than a branch, because the
+        dangerous version of this system is one whose comments promise a
+        revocation it cannot perform.
+        """
+        source = (REPO_ROOT / "cofferdam" / "workstation" / "sessions" / "links.py").read_text(
+            "utf-8"
+        )
+        self.assertIn("Restarting is **not** revocation", source)
+        self.assertEqual(links.LINK_QUERY_KEY, "environment")
+
+        # Same environment, two generations: identical URLs are expected, and
+        # the store still keeps them apart by generation.
+        store = MemoryLinkStore({"demo": {"generation": "g2", "link": SAMPLE_LINK}})
+        supervisor = _supervisor(
+            FakeRunner(
+                default=FakeCompleted(0, show_output(active_state="active", sub_state="running"))
+            ),
+            make_project("demo"),
+            store=store,
+        )
+        with confirmed_format():
+            payload = supervisor.link("demo")
+        self.assertEqual(payload["generation"], "g2")
+
+    def test_redaction_removes_the_confirmed_link(self) -> None:
+        redacted = links.redact("open " + SAMPLE_LINK + " now")
+        self.assertNotIn(SAMPLE_TOKEN, redacted)
+        self.assertNotIn("claude.ai", redacted)
+        self.assertIn(links.REDACTION, redacted)
 
 
 class TerminalDecorationTests(unittest.TestCase):
@@ -160,7 +371,8 @@ class TerminalDecorationTests(unittest.TestCase):
 
     def test_an_osc8_hyperlink_is_gated_like_any_other(self) -> None:
         hyperlink = "\x1b]8;;" + SAMPLE_LINK + "\x07open session\x1b]8;;\x07"
-        self.assertIsNone(links.find_link(hyperlink))
+        with unconfirmed_format():
+            self.assertIsNone(links.find_link(hyperlink))
 
     def test_an_osc8_target_on_a_foreign_host_is_refused(self) -> None:
         with confirmed_format():
@@ -598,8 +810,8 @@ class WrapperTests(unittest.TestCase):
 
     def test_no_link_is_captured_while_the_format_is_unconfirmed(self) -> None:
         """The gate, end to end through the real wrapper."""
-        self.assertFalse(links.LINK_FORMAT_CONFIRMED)
-        _, _, recorded, _ = self._run(["starting\n", SAMPLE_LINK + "\n"])
+        with unconfirmed_format():
+            _, _, recorded, _ = self._run(["starting\n", SAMPLE_LINK + "\n"])
         self.assertEqual(recorded, [])
 
 
@@ -715,7 +927,8 @@ class WrapperSignalTests(unittest.TestCase):
             on_link=recorded.append,
             log=lambda message: None,
         )
-        self.assertEqual(host.run(), 0)
+        with unconfirmed_format():
+            self.assertEqual(host.run(), 0)
         self.assertEqual(recorded, [])
 
 
@@ -982,8 +1195,9 @@ class LinkRetrievalTests(unittest.TestCase):
         """
         store = MemoryLinkStore({"demo": {"generation": "g", "link": SAMPLE_LINK}})
         supervisor = _supervisor(self._running(), make_project("demo"), store=store)
-        with self.assertRaises(LinkUnavailable) as caught:
-            supervisor.link("demo")
+        with unconfirmed_format():
+            with self.assertRaises(LinkUnavailable) as caught:
+                supervisor.link("demo")
         self.assertIn("not been confirmed", caught.exception.detail)
 
     def test_retrieval_works_once_the_format_is_confirmed(self) -> None:
