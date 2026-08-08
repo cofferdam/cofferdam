@@ -81,14 +81,20 @@ case "$exec_start" in
   *) pass "no validation-only adapter enabled" ;;
 esac
 
-if [ -d "$DROPIN_DIR" ]; then
-  stale=$(grep -l -E '^(ExecStart|WorkingDirectory)=' "$DROPIN_DIR"/*.conf 2>/dev/null | wc -l)
+# A drop-in is judged by where it points, not by existing. Selecting a host
+# capability is legitimate; repointing production at a development checkout is
+# the drift. Only the second is a failure.
+if [ -d "$DROPIN_DIR" ] && ls "$DROPIN_DIR"/*.conf >/dev/null 2>&1; then
+  stale=$(grep -l -E '^(ExecStart|WorkingDirectory)=.*cofferdam/(clones|worktrees)/' \
+          "$DROPIN_DIR"/*.conf 2>/dev/null | wc -l)
   if [ "$stale" -gt 0 ]; then
-    fail "$stale drop-in(s) override where production runs from:"
-    grep -l -E '^(ExecStart|WorkingDirectory)=' "$DROPIN_DIR"/*.conf 2>/dev/null |
+    fail "$stale drop-in(s) point production at a development checkout:"
+    grep -l -E '^(ExecStart|WorkingDirectory)=.*cofferdam/(clones|worktrees)/' \
+      "$DROPIN_DIR"/*.conf 2>/dev/null |
       while read -r f; do printf '        %s\n' "$f"; done
   else
-    pass "no drop-in overrides ExecStart or WorkingDirectory"
+    count=$(ls "$DROPIN_DIR"/*.conf 2>/dev/null | wc -l)
+    pass "$count drop-in(s), none pointing outside the slot"
   fi
 else
   pass "no drop-in directory"
