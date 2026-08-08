@@ -918,6 +918,124 @@ one. This one does, and a textarea labelled "Your answer" under "waiting for sig
 invitation to type a password into a task history. Cofferdam does not want the secret and has
 nowhere to put it, so it says so and points at the workstation.
 
+## D-2026-08-08-1 — A private Custom GPT with Actions is the ChatGPT-facing client (EFE DECISION, ACTIVE)
+
+**Decision.** The primary ChatGPT-facing client for Cofferdam is a **private Custom GPT calling
+bounded GPT Actions** against a Cofferdam-owned HTTP bridge. It is a *client* — replaceable,
+untrusted, and holding no authority — in exactly the sense D-2026-08-04-3(1) already requires of
+the PWA: it may ask, it never decides.
+
+**The capability was probed before it was planned into a milestone, and the probe passed on
+2026-08-08.** An isolated echo service outside this repository — its own directory, its own port,
+its own bearer credential, a temporary Cloudflare Quick Tunnel in front of it — was called
+successfully by the desktop GPT Builder (`GET /health`, then the consequential `POST /echo`) and
+then by the **native iPhone ChatGPT application** (the same two calls), with the response returning
+into the same private conversation. The mobile call carried `client_test_id = mobile-app-1` and the
+server recorded `seen = 1`, `duplicate = false`: one accepted mobile confirmation produced exactly
+one server invocation, which is the property that matters for an Action that creates a task. The
+Cofferdam repository, the workstation daemon, the PWA, Task Core and the systemd configuration were
+not modified, not exposed and not involved.
+
+**What that probe does and does not establish.** It establishes that a private Custom GPT can reach
+a personal workstation service from a phone, with bearer authentication, including a consequential
+action requiring confirmation. It establishes nothing about production transport reliability: the
+working tunnel needed `--edge-ip-version 4` and `--protocol http2`, because the phone's hotspot
+allowed Cloudflare region2 IPv4 TCP 7844 while region1, IPv6 and QUIC were unavailable. A temporary
+tunnel that worked once on one network is a capability result, not a deployment. **No production
+Cofferdam Action exists yet** — `create_task`, `get_result` and the rest are the M2I.5 milestone,
+not shipped behaviour.
+
+**The bounded Action vocabulary**, recorded now so the first implementation cannot quietly widen
+it: `list_projects`, `get_project_context`, `create_task`, `get_task`, `get_updates`,
+`get_pending_questions`, `submit_clarification_answer`, `send_followup`, `cancel_task`,
+`get_result`.
+
+**What the Custom GPT never receives**, by construction rather than by validation — there is no
+request field for any of it, following D-2026-08-06-2: arbitrary shell, a path, a working
+directory, an executable, raw CLI flags, an environment, credentials or secrets of any kind,
+registry write access, `bypassPermissions` or any equivalent, arbitrary process control, and any
+authority to approve a risky tool call or operating-system action.
+
+## D-2026-08-08-2 — Cofferdam is the authority; every client is a view (EFE DECISION, ACTIVE)
+
+**Decision.** Cofferdam remains the single authority for registered projects, workspaces, task
+lifecycle, process lifecycle, typed workstation actions, model and profile allowlists, approvals,
+audit and evidence, task questions and answers, results, and future project-memory access. ChatGPT,
+the PWA, a future desktop companion, a future local assistant and an optional OpenClaw client are
+all **clients of scoped APIs**. This restates D-2026-08-04-3(1) for the case where the client is
+somebody else's product and is worth stating explicitly for that reason.
+
+- **Task Core stays provider-neutral and model-free** (D-2026-08-06-2). Nothing about ChatGPT,
+  Claude, Codex or any provider may enter it; the Actions bridge is a separate process in front of
+  the task API, not a widening of it.
+- **A remote client cannot mint an approval.** Risky tool calls and operating-system actions are
+  approved on a Cofferdam human surface — the PWA today, the workstation itself — never by an
+  Action, and never by text a model produced. The Actions surface therefore has **no approval
+  endpoint at all**, which is a stronger statement than an endpoint that refuses.
+- **The bridge is not the daemon.** The general Cofferdam API and the PWA are not exposed through
+  whatever transport the Custom GPT reaches; the bridge publishes the Action vocabulary above and
+  nothing else, under its own scoped per-client credential.
+
+## D-2026-08-08-3 — The Claude architecture is dual-lane (EFE DECISION, ACTIVE)
+
+**Decision.** Claude is reached through **two lanes that do not merge**, because they answer two
+different questions and merging them would mean one of the two lying about the other.
+
+- **Lane A — supervised native interactive sessions.** Claude Remote Control, per project, hosted
+  and supervised by Cofferdam as user services. Cofferdam owns the **lifecycle**: start, stop,
+  health, authentication expiry, restart, and a truthful failure state. It does **not** own the
+  conversation. Transcript scraping, prompt injection into a native session, and mirroring session
+  content into Cofferdam are out of the architecture — not deferred, excluded. What Cofferdam
+  publishes about Lane A is a link and a state.
+- **Lane B — delegated tasks.** Task Core plus official SDK/protocol adapters: the Claude Agent SDK
+  first, a Codex app-server adapter later. Lane B owns structured questions, answers, provenance,
+  activity, cancellation and durable results, and it is the only lane an Action can create work in.
+
+The merged Claude Code CLI adapter (M2G) is Lane B's first implementation. It is retired only after
+the Agent SDK adapter reaches verified parity on the behaviours PR #21 validated live — not on the
+day the replacement first works.
+
+## D-2026-08-08-4 — Custom GPT communication is user-turn-driven (RECORDED, ACTIVE)
+
+**Cofferdam cannot push an unsolicited message into an inactive consumer ChatGPT conversation.**
+That is a property of the product on the other side, and the architecture is built on it rather
+than around it.
+
+So: Cofferdam **stores** task state, questions and results, and the Custom GPT **retrieves** them
+on a user turn through `get_task`, `get_updates`, `get_pending_questions` and `get_result`. Live
+monitoring — a task that is running right now, watched without asking — is the Project
+Workstation's job, not ChatGPT's. Turkish shortcuts such as `/durum`, `/soru`, `/sonuc` and
+`/devam` may later exist as **Custom GPT instruction-level shortcuts** over those same Actions;
+they are phrasing, not new authority.
+
+Browser scraping of ChatGPT, cookie manipulation, and UI automation of the ChatGPT client are not
+part of the architecture, in line with D-2026-08-04-7.
+
+## D-2026-08-08-5 — OpenClaw stays optional, and may never become an authority (EFE DECISION, ACTIVE)
+
+Extends D-2026-08-01-3 now that the client architecture is settled. OpenClaw is **not required**
+for the Custom GPT loop, the Claude lanes, or the Project Workstation, and nothing in the plan
+above waits on it. It may later be adopted as a Telegram/WebChat client, a notification channel, a
+quick-response client, or a local-assistant experiment.
+
+It must never become task authority, process authority, project-path authority, an arbitrary shell
+gateway, or a required dependency of Cofferdam. The pre-M4 evaluation spike in
+[`ROADMAP.md`](ROADMAP.md) is **superseded** by this entry: the delegated-task lane is being built
+natively, so there is no longer a decision waiting on that spike.
+
+## D-2026-08-08-6 — Memory is human-readable and user-owned (EFE DECISION, ACTIVE)
+
+**Project memory is the repository's own Markdown** — `README.md`, `STATUS.md`, `DECISIONS.md`,
+`ROADMAP.md`, and optionally a `memory/` directory — readable and editable by a person with no
+Cofferdam running. **Personal memory** lives in a user-owned Markdown vault, Obsidian-compatible,
+kept outside Cofferdam's home directory; Cofferdam reads it under an explicit grant and does not
+own it.
+
+**Task Core's SQLite database is runtime authority** for tasks and events (D-2026-08-06-2) and is
+not memory. Any full-text index or embedding built later is a **derived index**: rebuildable,
+discardable, and never the canonical copy of anything. If the index and the Markdown disagree, the
+Markdown is right.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when
@@ -939,5 +1057,8 @@ nowhere to put it, so it says so and points at the workstation.
   port-based A/B switching; Guardian as discovery endpoint rather than full proxy in MVP;
   X11/Xorg session first; Playwright with a persistent Chrome profile. Detailed rationale and the
   open questions are in [`ROADMAP.md`](ROADMAP.md).
-- **R-3**: Do not integrate OpenClaw in Milestone 1–2; run a timeboxed spike before the Claude
-  task milestone to decide whether its session/streaming layer earns its integration cost.
+- **R-3** (*settled 2026-08-08 by D-2026-08-08-5*): do not integrate OpenClaw in Milestone 1–2;
+  run a timeboxed spike before the Claude task milestone to decide whether its session/streaming
+  layer earns its integration cost. The first half held — nothing was integrated. The spike is now
+  moot: the Claude task milestones shipped natively (M2F, M2G), so there is no integration cost
+  left for it to weigh.

@@ -5,6 +5,11 @@ remote Claude, then the A/B self-update demonstration, then natural-language rou
 depth follows the post-pivot policy in [`DECISIONS.md`](DECISIONS.md) D-2026-08-01-6. Items
 marked **OPEN QUESTION** are unresolved; each names the experiment that settles it.
 
+**Read [Active implementation order](#active-implementation-order-recorded-2026-08-08) first.**
+The M1–M7 sections remain the reference for what each layer *is*, and the M2x sections are the
+record of what shipped; the work actually queued next is M2H → M2I → M2I.5 → M2J, and that
+section takes precedence wherever the two disagree.
+
 ## Implementation philosophy (binding)
 
 - **No council for ordinary work.** UI, adapters, media, and all M1 work need **tests plus
@@ -52,17 +57,95 @@ contradicted by experiment):
   same repo on different branches/commits), not packaged builds. Zero packaging work, exact
   provenance per slot, cheap diffing. Packaged builds reconsidered only if worktrees prove
   fragile.
-- **Display/session:** run the desktop as an **Xorg (X11) session**, not Wayland, for the MVP.
-  X11 gives working `wmctrl`/`xdotool` window placement, cross-app screenshots, and multi-display
-  targeting today; GNOME Wayland restricts screenshots and global window control. Ubuntu still
-  ships "Ubuntu on Xorg" at the login screen. Wayland support is a later milestone.
-  **OPEN QUESTION:** long-term Wayland path (wlroots protocols / GNOME portal APIs / ydotool) —
-  irrelevant until the X11 product works.
+- **Display/session:** ~~run the desktop as an **Xorg (X11) session**, not Wayland, for the MVP.~~
+  **SUPERSEDED by what was actually built (2026-08-05, recorded here 2026-08-08).** The host runs
+  **GNOME Wayland**, and M1 through M2G were designed, validated and merged on it: displays come
+  from `org.gnome.Mutter.DisplayConfig` joined to `/sys/class/drm` rather than from `xrandr`
+  (D-2026-08-05-2), screen capture reports `false` truthfully instead of being worked around, and
+  window enumeration is published as `unavailable` with a reason (D-2026-08-05-3). No X11 session
+  is required, and no milestone plans one. What remains open is not "when do we move to Wayland"
+  but the two capabilities Wayland withholds: a portal-based capture path, and window control
+  through a companion extension the user installs knowingly.
 - **Browser automation:** Playwright (Python) driving **system Chrome/Chromium with persistent
   user-data dirs** under `~/cofferdam/profiles/`. Netflix DRM (Widevine) requires a real branded
   browser build — use Playwright's `channel="chrome"` with a persistent context. One-time
   manual login by Efe on the desktop persists in the profile; no plaintext passwords in config,
   no passwords through any model.
+
+---
+
+## Active implementation order (recorded 2026-08-08)
+
+Where the milestone sections below are the design reference, this is the queue. M2F (Task Core,
+PR #20) and M2G (the Claude Code CLI adapter, PR #21) are merged on `main`; the delegated-task
+lane exists and has been driven from a phone. Client architecture and authority for everything
+below are fixed by [`DECISIONS.md`](DECISIONS.md) D-2026-08-08-1 … -6.
+
+### M2H — Supervised Claude Remote Control (Lane A)
+
+- **Objective:** per-project native Claude Remote Control hosts, supervised by Cofferdam as
+  systemd **user** services, under the session-lifecycle boundary in [`DESIGN.md`](DESIGN.md).
+- **Visible result:** the PWA lists a project's Remote Control host with a truthful state, a
+  native link that opens the real interactive session, and an honest failure or
+  authentication-expired state instead of a spinner.
+- **In scope:** supervision, health, authentication-expiry reporting, reconnect and restart
+  behaviour, unattended-reboot validation.
+- **Out of scope, permanently:** transcript scraping, mirroring session content, and injecting a
+  prompt into a native session (D-2026-08-08-3).
+- **Release gate:** **the open M1 post-reboot gate is closed inside this milestone.** M2H is the
+  first work since M1 that changes what runs at boot, so the reboot section of
+  `docs/checklists/m1-ubuntu-validation.md` is a required step here rather than a deferred one.
+  See [`STATUS.md`](STATUS.md).
+- **Review depth:** normal backend; the systemd unit template is the part worth one focused look.
+
+### M2I — Claude Agent SDK adapter (Lane B)
+
+- **Objective:** replace the CLI adapter's transport with the official Agent SDK, and gain the
+  structured question channel the CLI could not give.
+- **In scope:** structured `AskUserQuestion` support; **clarification questions kept separate from
+  tool approvals**, because they are different acts and a client allowed to answer the first must
+  not thereby answer the second; question and answer provenance; meaningful task activity;
+  cancellation and restart parity with M2G; durable task results and the `get_result` foundation.
+- **Retirement rule:** the raw Claude CLI adapter is removed only after the SDK adapter is
+  verified against the behaviours PR #21 validated live — initial task, same-session follow-up,
+  turn completion, polling, draft preservation, duplicate suppression, finish and slot release,
+  cancellation isolation, repeated-cancel conflict, restart → `interrupted`, orphan cleanup,
+  unrelated-session isolation, broad-log privacy.
+- **Review depth:** normal backend.
+
+### M2I.5 — Private Custom GPT Actions bridge
+
+- **Objective:** the bounded Actions surface from D-2026-08-08-1, as a **dedicated narrow bridge
+  process** in front of the task API — not a new route on the workstation daemon.
+- **In scope:** scoped per-client credentials; the production transport decision (the probe's
+  temporary tunnel is not one); `list_projects`, `get_project_context`, `create_task`, `get_task`,
+  `get_updates`, `get_pending_questions`, `submit_clarification_answer`, `send_followup`,
+  `cancel_task`, `get_result`; real iPhone end-to-end validation against Cofferdam rather than
+  against an echo service.
+- **Out of scope:** any approval endpoint, and any exposure of the general Cofferdam API or the
+  PWA through the bridge's transport (D-2026-08-08-2).
+- **Prior art:** the 2026-08-08 capability probe, recorded in [`STATUS.md`](STATUS.md). It proves
+  the client path works from a real phone; it proves nothing about this bridge, which does not
+  exist yet.
+- **Review depth:** high-risk — this is an internet-reachable transport and a credential
+  boundary. One focused architecture review before implementation, one after.
+
+### M2J — Project Workstation, workspaces and profiles
+
+- **Objective:** the surface a person actually works from, and the project context an Action can
+  retrieve.
+- **In scope:** existing / new / temporary workspace creation; project templates; a **code-owned**
+  model allowlist; Auto / Safe / Review profiles; the Project Workstation interface; project-context
+  retrieval for the Custom GPT (`get_project_context`); handoff and history surfaces.
+- **Review depth:** normal backend; the profile semantics deserve one focused review, because a
+  profile that quietly widens what a task may do is the failure worth designing against.
+
+### Later, unordered
+
+Codex app-server as a second delegated worker and reviewer in Lane B · richer Markdown memory
+retrieval under D-2026-08-08-6 · an optional OpenClaw client under D-2026-08-08-5 · an MCP or App
+transport, only when it materially improves the Actions path that has been proven to work · a
+local personal assistant · voice, STT and TTS.
 
 ---
 
@@ -437,6 +520,16 @@ window, or display *control*.
 
 ## M4 — Remote Claude: tasks as cards
 
+> **Largely delivered early, and partly superseded (2026-08-08).** M4's objective shipped ahead of
+> M2 and M3 as **M2F** (provider-neutral Task Core, PR #20) and **M2G** (the Claude Code adapter,
+> PR #21): a phone picks a project, sends a prompt, watches truthful state, follows up in the same
+> session and cancels one task. What is superseded is the *shape* recorded below — a single
+> `ClaudeCodeAdapter` owning both the interactive session and the delegated task. That is now two
+> lanes (D-2026-08-08-3), and the CLI transport described here is replaced by the Agent SDK in
+> M2I. The two OPEN QUESTIONS below were settled by the M2G probes against the installed CLI and
+> by the host-owned project registry; the resource-audit and card-architecture subsections that
+> follow are **not** superseded and remain the plan of record.
+
 - **Objective:** start, observe, steer, and stop Claude Code tasks from the phone.
 - **Visible result:** pick a project, type/paste a prompt, get a task card: state
   (running/waiting/done/failed), the **latest meaningful assistant output** by default,
@@ -659,10 +752,13 @@ Per D-2026-08-01-3. Current entries (updated whenever an OpenClaw capability is 
 | Agent session persistence / event streaming | *Candidate*, pending spike before M4: may beat hand-rolling reconnect-safe session plumbing | `AgentSessionAdapter` (task model stays Cofferdam's) | No — M4 is buildable natively | The M4 state machine itself | If spike shows <2 days saved |
 | Browser automation / model routing / Ollama integration | *Candidate*, only if the spike shows material lift over direct Playwright/Ollama APIs | `BrowserAdapter` / `ModelRouter` | No | Already planned natively (M3, M7) | Immediately, by design |
 
-**Spike (before M4, timeboxed ~1 day):** stand up OpenClaw, drive one agent session and one
-browser action through it, measure integration cost vs the native path. Adopt only what
-materially accelerates; record adoptions here with removal criteria. OpenClaw is never in the
-Guardian or activation/rollback critical path.
+~~**Spike (before M4, timeboxed ~1 day):**~~ **SUPERSEDED by D-2026-08-08-5 (2026-08-08).** The
+delegated-task lane was built natively — Task Core and its adapters are merged — so there is no
+decision left for that spike to settle, and the register above stays at *none adopted*. OpenClaw
+remains optional and may later be adopted as a notification, Telegram/WebChat or conversational
+**client**; it is never task authority, process authority, a project-path authority, an arbitrary
+shell gateway, or part of the Guardian and activation/rollback path. Adoptions are still recorded
+in this table with removal criteria.
 
 ## Other dependency posture
 
