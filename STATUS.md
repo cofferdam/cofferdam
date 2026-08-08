@@ -617,38 +617,55 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
-### M2H PR1 — supervised Remote Control session foundation
+### M2H PR3 — Project Workstation Remote Control card and secure native-link open flow
 
-On `feat/m2h-remote-control-foundation`. **M2H is not complete and this PR does not close the M1
-reboot gate.** It is the first of several, and it is deliberately a foundation with no user-visible
-surface at all.
+On `feat/m2h-project-workstation-remote-control`. **M2H is still not complete and this PR does not
+close the M1 reboot gate.**
 
-**What exists after it:** a native-session model (`cofferdam/workstation/sessions/`) with six
-lifecycle states derived only from systemd's `ActiveState`, and no field that could hold
-conversation content; a supervisor with start/stop/status, a capability gate and idempotent start;
-a systemd backend that speaks three fixed `systemctl --user` commands through an injectable
-runner; an explicit per-project `remote_control_enabled` flag in the host-owned project registry,
-off by default and off for every record written before it existed; a Cofferdam-owned host entry
-point; a staged `deploy/cofferdam-rc@.service` template; and 96 stdlib-only tests.
+PR1 (#23), PR2 (#24) and PR2.5 (#25) are merged. Together they gave Cofferdam a PTY-backed,
+project-scoped, generation-aware Remote Control supervisor behind authenticated routes, with a
+live-confirmed link format and a fail-closed capture gate. None of it had a user surface.
 
-**What is NOT verified, and must not be read as working:**
+**What exists after this PR:** a Remote Control card in the Project Workstation PWA
+(`web/remote.js`), rendering the capability flag, the six lifecycle states, evidence-backed
+`awaiting_consent`, link availability *as a boolean*, and a bounded safe error summary. Start,
+Stop and an explicit **Open Remote Control** control, state-aware and single-submission. Status
+polling only — the link route is never polled, prefetched, or called to decide whether a button is
+enabled. The capability URL is fetched inside one click gesture, validated against the backend
+contract, used to navigate one opener-severed tab, and dropped; it reaches no markup, no `href`,
+no browser storage, no log and no audit record. The link response now carries `Cache-Control:
+no-store`, `Pragma: no-cache` and `Referrer-Policy: no-referrer`, and the page sets
+`referrer: no-referrer`.
 
-- **The real Remote Control process has never been launched by this code.** No automated test
-  starts one, and the entry point's `execv` path has not run against the live product. The CLI
-  additionally documents two preconditions this PR does not handle — a logged-in subscription and
-  a workspace-trust dialog accepted by running `claude` in the directory once — either of which
-  will fail a first live start.
-- **Session URL capture does not exist.** `session_url` is a reserved field and is always `None`.
-- **Authentication state is not observable.** Nothing here can tell a logged-out host from a
-  working one; both report `running` while the unit is active, and that is the honest limit of
-  process supervision.
-- **No PWA integration and no routes.** The supervisor is not reachable from the service, and a
-  test asserts it stays that way until PR2.
-- **Unattended reboot recovery is not validated.** The unit template existing is not evidence. The
-  template ships with no `[Install]` section, is not installed and is not enabled.
+**The security boundary the card states, because it is real:** stopping the local host removes the
+link from Cofferdam, and **does not revoke an Anthropic environment link already shared
+elsewhere.** The native URL is environment-scoped, not launch-scoped — two generations produced
+the same URL, and the CLI preserves the environment across restarts. Cofferdam has no
+account-level revocation mechanism and the UI does not claim one.
 
-Next: **M2H PR2 — real-host Remote Control spike, URL capture boundary, truthful health/auth
-states and daemon read/control routes.**
+**Validated on the phone, manually, over the private Tailscale surface.** A temporary
+Tailscale-only server from the PR worktree served the real router, supervisor and systemd unit
+against a temporary `COFFERDAM_HOME`, a throwaway token and a registry *copy* with Remote Control
+enabled for `claude-sandbox` alone — the live registry was never modified and the production daemon
+was never restarted. From the iPhone: the card appeared, **Start** started the host, the state
+updated and **Open Remote Control** became usable, the button opened the correct native Claude
+destination and not an unrelated one, and **Stop** stopped the host. The capability URL was not
+copied, no prompt was sent, and no conversation content was read.
+
+The audit record for that run contains exactly the five expected events — `start_requested`,
+`start_succeeded`, `link_retrieved`, `stop_requested`, `stop_succeeded` — and no URL. The
+runtime-state directory was empty after the stop, so the link was cleared with the generation that
+minted it.
+
+**What is NOT in this PR, and must not be read as working:**
+
+- **Transcript reading and prompt injection remain out of scope**, permanently under
+  D-2026-08-08-3. The card supervises a session; it never looks inside one.
+- **Unattended reboot recovery and linger are still unvalidated.** The unit template still ships
+  with no `[Install]` section and is not enabled.
+
+Next: **M2H PR4 — unattended reboot/linger recovery, cold-start phone reachability and M2H
+milestone closeout.**
 
 ## Planned (active roadmap — see [`ROADMAP.md`](ROADMAP.md))
 

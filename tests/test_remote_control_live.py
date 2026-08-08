@@ -1327,6 +1327,44 @@ class RouteShapeTests(unittest.TestCase):
         self.assertIn('"/api/remote-control/{project_id}/link"', self.service)
         self.assertIn('"/api/remote-control/{project_id}"', self.service)
 
+    def test_the_link_response_forbids_caching_and_the_referrer(self) -> None:
+        """The only response carrying capability material, so the only one that
+        says so in its headers.
+
+        ``no-cache`` would not be enough: it permits writing the body to disk
+        and revalidating later, which for a bearer URL means a capability left
+        in a browser cache directory after the session it opened is gone.
+        """
+        link_route = self.service.split("get_remote_control_link")[1].split("# -- live events")[0]
+        self.assertIn('"Cache-Control": "no-store"', link_route)
+        self.assertIn('"Pragma": "no-cache"', link_route)
+        self.assertIn('"Referrer-Policy": "no-referrer"', link_route)
+
+    def test_the_status_route_carries_no_such_headers_because_it_carries_no_url(
+        self,
+    ) -> None:
+        """A guard against the headers drifting onto the wrong route, which
+        would suggest status is sensitive and the link route is not."""
+        status_route = self.service.split("async def get_remote_control(")[1].split(
+            "async def start_remote_control"
+        )[0]
+        self.assertNotIn("no-store", status_route)
+
+    def test_the_project_payload_publishes_the_capability_but_never_a_path(self) -> None:
+        """The client needs the flag to render a truthful Start button; it still
+        never learns where the project lives."""
+        from cofferdam.workstation.tasks.projects import TaskProject
+
+        payload = TaskProject(
+            project_id="demo",
+            display_name="Demo",
+            root=Path("/srv/secret-place"),
+            remote_control_enabled=True,
+        ).to_dict()
+        self.assertIs(payload["remote_control_enabled"], True)
+        self.assertNotIn("root", payload)
+        self.assertNotIn("secret-place", json.dumps(payload))
+
     def test_the_status_route_returns_to_dict_which_drops_the_url(self) -> None:
         from cofferdam.workstation.sessions.model import NativeSessionStatus
 

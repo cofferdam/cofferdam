@@ -2131,7 +2131,27 @@ def create_app(
             project_id=project_id,
             generation=payload.get("generation"),
         )
-        return {"link": payload}
+        # The only response in Cofferdam that carries capability material, and
+        # therefore the only one that says so in its headers.
+        #
+        # ``no-store`` rather than ``no-cache``: no-cache still permits writing
+        # the body to disk and revalidating it later, which for a bearer URL
+        # means a capability sitting in a browser cache directory after the
+        # session it opened is gone. ``Pragma`` is the HTTP/1.0 spelling, kept
+        # for intermediaries that only understand that one.
+        #
+        # ``Referrer-Policy`` is the one that matters for *this* payload's
+        # eventual destination: the client navigates a new tab to the URL, and
+        # without it the Cofferdam page address would travel in the ``Referer``
+        # header of that navigation.
+        return JSONResponse(
+            content={"link": payload},
+            headers={
+                "Cache-Control": "no-store",
+                "Pragma": "no-cache",
+                "Referrer-Policy": "no-referrer",
+            },
+        )
 
     # Two events named in the M2H PR2 plan are deliberately **not** emitted
     # here, because emitting them would mean inventing the evidence:

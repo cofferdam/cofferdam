@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0f1720">
+<!-- No Referer on any navigation out of Cofferdam. This matters most for the
+     Remote Control link: the new tab is navigated from script, and without
+     this the Cofferdam address would travel to claude.ai in a header. -->
+<meta name="referrer" content="no-referrer">
 <title>Cofferdam</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/styles.css">
@@ -58,6 +62,28 @@
          project the workstation already knows and an adapter that already
          exists, and the prompt is content for that adapter rather than
          something this machine runs. -->
+    <!-- M2H Lane A. A live interactive Claude session the user drives from
+         somewhere else, which is a different thing from the delegated work in
+         the Tasks panel below and is kept in a different file for the same
+         reason the backend keeps them in different packages.
+
+         There is no field here for a unit, a path, a flag or an executable.
+         Every control sends a registered project id and nothing else. The
+         session link is capability material: it is never rendered, never put in
+         an href, and is fetched only when somebody presses the button. -->
+    <section class="panel" id="remotePanel">
+      <div class="panel-head">
+        <h2>Remote Control</h2>
+        <div class="row tight">
+          <button id="rcRefresh" class="ghost">Refresh</button>
+        </div>
+      </div>
+      <p class="muted">
+        Open a live Claude session for a registered project, and drive it from this device.
+      </p>
+      <div data-remote-body></div>
+    </section>
+
     <section class="panel" id="tasksPanel">
       <div class="panel-head">
         <h2>Tasks</h2>
@@ -237,6 +263,7 @@
 <script src="/spotify.js"></script>
 <script src="/youtube.js"></script>
 <script src="/tasks.js"></script>
+<script src="/remote.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>
