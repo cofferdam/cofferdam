@@ -643,6 +643,20 @@ elsewhere.** The native URL is environment-scoped, not launch-scoped — two gen
 the same URL, and the CLI preserves the environment across restarts. Cofferdam has no
 account-level revocation mechanism and the UI does not claim one.
 
+**Validated on the phone, manually, over the private Tailscale surface.** A temporary
+Tailscale-only server from the PR worktree served the real router, supervisor and systemd unit
+against a temporary `COFFERDAM_HOME`, a throwaway token and a registry *copy* with Remote Control
+enabled for `claude-sandbox` alone — the live registry was never modified and the production daemon
+was never restarted. From the iPhone: the card appeared, **Start** started the host, the state
+updated and **Open Remote Control** became usable, the button opened the correct native Claude
+destination and not an unrelated one, and **Stop** stopped the host. The capability URL was not
+copied, no prompt was sent, and no conversation content was read.
+
+The audit record for that run contains exactly the five expected events — `start_requested`,
+`start_succeeded`, `link_retrieved`, `stop_requested`, `stop_succeeded` — and no URL. The
+runtime-state directory was empty after the stop, so the link was cleared with the generation that
+minted it.
+
 **What is NOT in this PR, and must not be read as working:**
 
 - **Transcript reading and prompt injection remain out of scope**, permanently under
