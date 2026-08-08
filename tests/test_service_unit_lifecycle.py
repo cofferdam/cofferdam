@@ -443,9 +443,19 @@ class ProcessTerminationTests(unittest.TestCase):
         ``tests/test_claude_code_adapter.py``, which asserts the part this scan
         cannot see: every signal is preceded by a fresh pid + start-time +
         process-group check, and removing that check fails a test.
+
+        ``sessions/wrapper.py`` (M2H PR2) is excepted for exactly the same
+        reason and no wider one. It supervises the native Remote Control child:
+        it forked it, holds its ``Popen``, and created the process group it
+        signals — ``os.killpg`` on a group this module made, never a pid from
+        elsewhere and never a name match. The exception is paid for in
+        ``tests/test_remote_control_live.py``, which starts a real ``/bin/sh``
+        child, terminates it, and asserts the whole group is gone.
         """
         for path in _python_sources():
             if "claude_code" in path.parts:
+                continue
+            if path.name == "wrapper.py" and path.parent.name == "sessions":
                 continue
             text = path.read_text(encoding="utf-8")
             with self.subTest(path=path.name):

@@ -28,10 +28,15 @@ What this package contains
 - :mod:`.systemd` — three fixed ``systemctl --user`` commands.
 - :mod:`.supervisor` — the capability gate, idempotency, and the registry seam.
 - :mod:`.claude` — Lane A's complete vocabulary for the native product.
+- :mod:`.links` — recognising a session link, and redacting it everywhere else.
+- :mod:`.state` — per-project runtime state, owner-only and atomic.
+- :mod:`.wrapper` — supervising the fixed child so its link can be captured.
 - :mod:`.host` — the entry point the shipped unit template starts.
 
-Nothing here is wired to a route. This is the foundation PR; the daemon
-read/control routes, URL capture and truthful auth states arrive in M2H PR2.
+A Remote Control URL is capability material, not a status field. It travels one
+path — the child's stdout, into owner-only state, out through one authenticated
+retrieval — and appears in no status payload, audit record, exception or log
+line anywhere else.
 """
 
 from __future__ import annotations
@@ -55,6 +60,8 @@ from .model import (
     NativeSessionStatus,
     map_active_state,
 )
+from .links import redact
+from .state import LinkStore, new_generation
 from .supervisor import RemoteControlSupervisor
 from .systemd import SystemdUserBackend
 from .units import TEMPLATE_FILENAME, UNIT_TEMPLATE, unit_name
@@ -77,7 +84,10 @@ __all__ = [
     "RemoteControlSupervisor",
     "SessionProjectDisabled",
     "SessionProjectUnknown",
+    "LinkStore",
     "SystemdUserBackend",
     "map_active_state",
+    "new_generation",
+    "redact",
     "unit_name",
 ]

@@ -58,11 +58,13 @@ from __future__ import annotations
 
 import datetime
 from dataclasses import replace
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
 from ..tasks.errors import ProjectDisabled, ProjectUnknown
 from ..tasks.projects import ProjectRegistry, TaskProject
 from .errors import (
+    LinkUnavailable,
+    RemoteControlError,
     RemoteControlNotEnabled,
     SessionProjectDisabled,
     SessionProjectUnknown,
@@ -72,6 +74,7 @@ from .model import (
     STATE_STOPPED,
     NativeSessionStatus,
 )
+from .state import LinkStore
 from .systemd import SystemdUserBackend
 
 #: Supplies the current project registry. A callable rather than a value so the
@@ -96,10 +99,13 @@ class RemoteControlSupervisor:
         registry_provider: RegistryProvider,
         *,
         backend: Optional[SystemdUserBackend] = None,
+        store: Optional[LinkStore] = None,
         clock: Optional[Clock] = None,
+        config=None,
     ) -> None:
         self._registry_provider = registry_provider
         self._backend = backend if backend is not None else SystemdUserBackend()
+        self._store = store if store is not None else LinkStore(config)
         self._clock = clock if clock is not None else utc_now_iso
 
     # -- authority -----------------------------------------------------------
@@ -129,9 +135,54 @@ class RemoteControlSupervisor:
     # -- operations ----------------------------------------------------------
 
     def status(self, project_id: str) -> NativeSessionStatus:
-        """What this workstation can truthfully say about that project's host."""
+        """What this workstation can truthfully say about that project's host.
+
+        Two independent sources, kept apart. systemd answers "is the process
+        up"; the runtime state file answers "did that process report a session
+        link". Neither is allowed to imply the other: a running unit with no
+        link is ``running`` with ``url_available=False``, and a leftover link
+        without a running unit is not reported at all.
+        """
         project = self._project(project_id)
-        return self._stamp(self._backend.status(project.project_id))
+        status = self._backend.status(project.project_id)
+        return self._stamp(self._with_link_evidence(status))
+
+    def link(self, project_id: str) -> Dict[str, Any]:
+        """The current session link, or refuse.
+
+        The only operation in Cofferdam that returns a Remote Control URL. It is
+        deliberately separate from :meth:`status` so the capability material has
+        its own route, its own audit line, and no presence in a payload that
+        gets cached and rendered.
+
+        Refuses whenever the link is not *currently* live: never started, host
+        stopped, link not yet reported, or the stored link belongs to a previous
+        generation. All four are one refusal, because the answer to "give me the
+        link" is the same in each.
+        """
+        project = self._project(project_id)
+        status = self._backend.status(project.project_id)
+
+        # The unit must be up. A link whose process has exited is a dead
+        # capability, and handing one out would be worse than saying no.
+        if status.state not in LIVE_STATES:
+            raise LinkUnavailable()
+
+        document = self._store.read(project.project_id)
+        if not document or not document.get("link"):
+            raise LinkUnavailable()
+
+        generation = document.get("generation")
+        if not generation:
+            raise LinkUnavailable()
+
+        return {
+            "project_id": project.project_id,
+            "generation": generation,
+            "url": document["link"],
+            "discovered_at": document.get("discovered_at"),
+            "retrieved_at": self._clock(),
+        }
 
     def start(self, project_id: str) -> NativeSessionStatus:
         """Bring the host up, or report that it already is.
@@ -159,11 +210,56 @@ class RemoteControlSupervisor:
         project = self._project(project_id)
         current = self._backend.status(project.project_id)
         if current.state == STATE_STOPPED:
+            self._forget(project.project_id)
             return self._stamp(current)
         self._backend.stop(project.project_id)
+        # The host's own `finally` clears this too. Doing it here as well means
+        # a child killed hard enough to skip its cleanup still cannot leave a
+        # retrievable capability URL behind.
+        self._forget(project.project_id)
         return self._stamp(self._backend.status(project.project_id))
 
     # -- helpers -------------------------------------------------------------
+
+    def _forget(self, project_id: str) -> None:
+        """Drop any stored link. Never fails a stop.
+
+        A stop that reported failure because a state file could not be deleted
+        would be a stop somebody retries forever while the process is already
+        gone. The link is unusable either way: :meth:`link` refuses whenever the
+        unit is not live.
+        """
+        try:
+            self._store.clear(project_id)
+        except RemoteControlError:
+            return
+
+    def _with_link_evidence(self, status: NativeSessionStatus) -> NativeSessionStatus:
+        """Fold the runtime state file into a systemd-derived status.
+
+        Conservative in one direction only. Link and auth evidence are attached
+        **only** while the unit is live: a state file that outlived its process
+        describes a host that no longer exists, and reporting
+        ``url_available=True`` for it would send somebody to a dead session.
+
+        A state file that cannot be read is not an error here. Status must keep
+        answering when the link store is unavailable — the systemd half of the
+        answer is still true and still useful.
+        """
+        if not status.is_live():
+            return status
+        try:
+            document = self._store.read(status.project_id)
+        except RemoteControlError:
+            return replace(status, error=status.error or "the runtime state could not be read")
+        if not document:
+            return status
+        return replace(
+            status,
+            generation=document.get("generation"),
+            url_available=bool(document.get("link")),
+            auth_required=bool(document.get("auth_required")),
+        )
 
     def _stamp(self, status: NativeSessionStatus) -> NativeSessionStatus:
         """Record when Cofferdam last got an answer it could read.

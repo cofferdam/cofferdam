@@ -97,7 +97,11 @@ class NoShellExecutionTests(unittest.TestCase):
         third one is a failing test rather than a review someone skims.
 
         ``adapters/base.py`` runs the desktop's own tools. The Claude Code task
-        adapter runs the Claude Code CLI and its Git observations. The property
+        adapter runs the Claude Code CLI and its Git observations.
+        ``sessions/wrapper.py`` (M2H PR2) runs the native Remote Control child
+        and reads its stdout, which is the only way to capture the session link —
+        an ``execv`` replacement, which is what PR1 used, has nothing left to
+        read with. The property
         being protected is not "one file" — it is that a request handler, a
         model, the store, or the service layer can never reach a process, and
         that is still exactly true.
@@ -111,6 +115,8 @@ class NoShellExecutionTests(unittest.TestCase):
             if path.name == "base.py" and path.parent.name == "adapters":
                 continue
             if "claude_code" in path.parts:
+                continue
+            if path.name == "wrapper.py" and path.parent.name == "sessions":
                 continue
             source = path.read_text(encoding="utf-8")
             if "subprocess." in source:

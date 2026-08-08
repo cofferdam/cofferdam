@@ -4,20 +4,21 @@
 turns that into a running ``claude remote-control`` in the right directory, or
 refuses and exits non-zero with a sentence somebody can read in ``journalctl``.
 
-Why ``execv`` and not a subprocess
------------------------------------
+Why this supervises rather than ``execv``-ing
+----------------------------------------------
 
-This program replaces itself with Claude rather than supervising it. That is the
-correct shape for a ``Type=simple`` unit and it removes a whole class of bug:
-there is no Python shim left holding a pipe, so systemd's ``ExecStop``, its stop
-timeout and its ``KillMode`` act directly on the real process, ``SIGTERM``
-reaches Claude without a forwarding hop, and the exit status systemd records is
-Claude's own. A shim would have to reimplement signal forwarding and would get
-the exit code subtly wrong; ``execv`` gets both for free.
+PR1 replaced this process with Claude, which was right for a foundation that
+only had to start something. Capturing the Remote Control session link means
+*reading* what the child prints, and a process that has replaced itself has
+nothing left to read with. So M2H PR2 supervises instead, and :mod:`.wrapper`
+pays back what ``execv`` gave away for free — signals forwarded to the child's
+whole process group, and the child's exit status returned unchanged.
 
-It also means this package contains no ``subprocess`` call at all, which is why
-the repository's "subprocess lives only in adapter code" structural test needs
-no exemption for it.
+The stream is attached for one purpose: finding the session URL. It is redacted
+before anything is logged, only the link is stored, and nothing here parses the
+child's output for meaning. Remote Control prints operational startup output on
+this stream; conversation content lives in the session, which Cofferdam does not
+read and has nowhere to put.
 
 The argument, and the fact that there is only one
 -------------------------------------------------
@@ -41,10 +42,9 @@ themselves. Nothing about the environment is logged.
 
 from __future__ import annotations
 
-import os
+import datetime
 import sys
-from pathlib import Path
-from typing import Callable, List, Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from ..config import load_config
 from ..tasks.errors import ProjectDisabled, ProjectRootInvalid, ProjectUnknown
@@ -58,6 +58,8 @@ from .errors import (
     SessionProjectUnknown,
     SessionRootInvalid,
 )
+from .state import LinkStore, new_generation
+from .wrapper import SupervisedHost
 
 #: Exit code for every refusal. Distinct from 0 so ``Restart=on-failure``
 #: applies, and uniform because the *reason* belongs in the log line, not in a
@@ -84,7 +86,7 @@ def _log(message: str) -> None:
 def resolve(project_id: str, *, config=None):
     """Registered, enabled, Remote-Control-enabled, with a usable root.
 
-    Returns ``(project, executable)``. Every failure is a
+    Returns ``(project, executable, config)``. Every failure is a
     :class:`~.errors.RemoteControlError`, so the caller has one thing to catch
     and one place that decides what a person is told.
 
@@ -115,22 +117,26 @@ def resolve(project_id: str, *, config=None):
     if executable is None or not claude.verify_executable(executable):
         raise ExecutableMissing()
 
-    return project, executable
+    return project, executable, configuration
 
 
 def main(
     argv: Optional[Sequence[str]] = None,
     *,
     config=None,
-    chdir: Callable[[str], None] = os.chdir,
-    exec_fn: Callable[[str, List[str]], None] = os.execv,
+    store: Optional[LinkStore] = None,
+    supervise: Optional[Callable[..., int]] = None,
 ) -> int:
-    """Resolve the project named by the single argument, then become Claude.
+    """Resolve the project named by the single argument, then run Claude.
 
-    ``chdir`` and ``exec_fn`` are injected so the tests can prove the working
-    directory and the exact argv without ever starting a Remote Control host.
-    Production uses the real ones, and on the real path this function does not
-    return — :func:`os.execv` replaces the process image.
+    ``store`` and ``supervise`` are injected so the tests can prove the argv,
+    the working directory, the captured link and the state transitions without
+    ever starting a Remote Control host.
+
+    State lifetime is the load-bearing part. A generation is minted here, any
+    link from a previous launch is cleared **before** the child starts, and the
+    state is cleared again when it exits — so a stored URL only ever refers to a
+    process that was alive when it was written.
     """
     arguments = list(sys.argv[1:] if argv is None else argv)
     if len(arguments) != 1:
@@ -140,7 +146,7 @@ def main(
     project_id = arguments[0]
 
     try:
-        project, executable = resolve(project_id, config=config)
+        project, executable, configuration = resolve(project_id, config=config)
     except RemoteControlError as exc:
         # The message is Cofferdam's, and the detail is a constant from
         # errors.py. Neither can carry a path or a value read from disk.
@@ -148,20 +154,81 @@ def main(
         return EXIT_REFUSED
 
     command = claude.build_argv(executable, project.project_id)
+    links_store = store if store is not None else LinkStore(configuration)
+    generation = new_generation()
 
-    # The working directory is the registered root and nothing else. Remote
-    # Control operates on the current directory, so this line is what binds a
-    # session to a project — and it is set from the registry, never from an
-    # argument.
-    chdir(str(project.root))
+    try:
+        # Before, not after. A crash between clearing and starting leaves no
+        # link, which is the safe direction; the reverse would leave a stale
+        # capability URL readable for the length of a launch.
+        links_store.clear(project.project_id)
+        links_store.write(
+            project.project_id, generation=generation, observed_at=_now()
+        )
+    except RemoteControlError as exc:
+        _log("refused: " + exc.message)
+        return EXIT_REFUSED
 
-    _log("starting the Remote Control host for project " + project.project_id)
+    def on_link(link: str) -> None:
+        # The only place a captured URL is written. Never logged.
+        links_store.write(
+            project.project_id,
+            generation=generation,
+            link=link,
+            discovered_at=_now(),
+            observed_at=_now(),
+        )
 
-    exec_fn(command[0], command)
+    def on_auth_required() -> None:
+        links_store.write(
+            project.project_id,
+            generation=generation,
+            auth_required=True,
+            observed_at=_now(),
+        )
 
-    # Only reached if exec failed without raising, which should not happen.
-    _log("refused: the Claude command could not be started")
-    return EXIT_REFUSED
+    _log(
+        "starting the Remote Control host for project "
+        + project.project_id
+        + " (generation "
+        + generation
+        + ")"
+    )
+
+    runner = supervise if supervise is not None else _supervise
+    try:
+        status = runner(
+            command,
+            cwd=str(project.root),
+            on_link=on_link,
+            on_auth_required=on_auth_required,
+            log=_log,
+        )
+    finally:
+        # Whatever happened, the link is no longer live. Clearing in `finally`
+        # means a crash in the supervisor does not leave a usable URL behind.
+        try:
+            links_store.clear(project.project_id)
+        except RemoteControlError:
+            _log("the runtime state could not be cleared")
+
+    _log("the Remote Control host exited with status " + str(status))
+    return status
+
+
+def _supervise(argv, *, cwd, on_link, on_auth_required, log) -> int:
+    host = SupervisedHost(
+        argv,
+        cwd=cwd,
+        on_link=on_link,
+        on_auth_required=on_auth_required,
+        log=log,
+    )
+    return host.run()
+
+
+def _now() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised via main() in tests
