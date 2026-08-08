@@ -831,7 +831,7 @@ class HostEntryPointTests(unittest.TestCase):
     def logged(self) -> str:
         return self._stdout.getvalue()
 
-    def _supervise(self, argv, *, cwd, on_link, on_auth_required, log):
+    def _supervise(self, argv, *, cwd, on_link, on_auth_required, on_consent_required, log):
         """Stands in for the real supervisor. Starts nothing.
 
         Records the argv and working directory the entry point decided on, and
@@ -842,6 +842,7 @@ class HostEntryPointTests(unittest.TestCase):
         self.chdirs.append(cwd)
         self.on_link = on_link
         self.on_auth_required = on_auth_required
+        self.on_consent_required = on_consent_required
         return 0
 
     def _write_registry(self, tmp: Path, **entry) -> _RecordingConfig:

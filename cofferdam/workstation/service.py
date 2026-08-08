@@ -2133,6 +2133,25 @@ def create_app(
         )
         return {"link": payload}
 
+    # Two events named in the M2H PR2 plan are deliberately **not** emitted
+    # here, because emitting them would mean inventing the evidence:
+    #
+    # ``remote_control.url_discovered``
+    #     Gated on a confirmed capture format, and
+    #     :data:`~.sessions.links.LINK_FORMAT_CONFIRMED` is ``False``. The live
+    #     PTY spike never reached a session URL — the CLI stops at its own
+    #     consent prompt first — so there is nothing to announce, and an event
+    #     saying a URL was discovered would be the first lie in the chain.
+    #
+    # ``remote_control.process_exited``
+    #     The process that exits runs in ``cofferdam-rc@<project>.service``, a
+    #     different unit from this daemon, and nothing here observes its exit:
+    #     status is a poll, not a subscription. The honest options are to have
+    #     the host write its own audit record — a second writer into the action
+    #     store from another unit, which is a design decision, not a follow-up —
+    #     or to leave the exit where systemd already records it truthfully, in
+    #     the journal. This build does the latter.
+
     # -- live events ---------------------------------------------------------
 
     @app.websocket("/ws")

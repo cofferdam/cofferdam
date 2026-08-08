@@ -12,6 +12,8 @@ print fake output and sleep — never Claude.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import re
@@ -23,7 +25,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from cofferdam.workstation.sessions import links, state, wrapper
+from cofferdam.workstation.sessions import links, state, supervisor as supervisor_module, systemd, wrapper
 from cofferdam.workstation.sessions.errors import (
     LinkUnavailable,
     SessionProjectUnknown,
@@ -33,6 +35,8 @@ from cofferdam.workstation.sessions.model import (
     STATE_FAILED,
     STATE_RUNNING,
     STATE_STOPPED,
+    NativeSessionStatus,
+    map_active_state,
 )
 from cofferdam.workstation.sessions.state import LinkStore, new_generation
 from cofferdam.workstation.sessions.supervisor import RemoteControlSupervisor
@@ -65,14 +69,39 @@ def _store(home: Path) -> LinkStore:
     return LinkStore(_Config(home))
 
 
+@contextlib.contextmanager
+def confirmed_format():
+    """Temporarily open the capture gate, for tests about *mechanics*.
+
+    Chunking, ordering and redaction have to be testable without waiting for a
+    format nobody has observed yet. This makes that dependency explicit and
+    loud: any test that needs a link to be recognised has to say so, and
+    everything outside this block sees the real, closed, fail-closed gate.
+    """
+    original = links.LINK_FORMAT_CONFIRMED
+    links.LINK_FORMAT_CONFIRMED = True
+    try:
+        yield
+    finally:
+        links.LINK_FORMAT_CONFIRMED = original
+
+
 # ---------------------------------------------------------------------------
 # Link recognition and redaction
 # ---------------------------------------------------------------------------
 
 
 class LinkRecognitionTests(unittest.TestCase):
-    def test_a_claude_link_is_recognised(self) -> None:
-        self.assertEqual(links.find_link("Open " + SAMPLE_LINK + " to connect"), SAMPLE_LINK)
+    def test_a_claude_link_is_recognised_once_the_format_is_confirmed(self) -> None:
+        with confirmed_format():
+            self.assertEqual(
+                links.find_link("Open " + SAMPLE_LINK + " to connect"), SAMPLE_LINK
+            )
+
+    def test_nothing_is_recognised_while_the_format_is_unconfirmed(self) -> None:
+        """The gate, at its source. Fail-closed, not informational."""
+        self.assertFalse(links.LINK_FORMAT_CONFIRMED)
+        self.assertIsNone(links.find_link("Open " + SAMPLE_LINK + " to connect"))
 
     def test_unrelated_output_is_ignored(self) -> None:
         for line in (
@@ -104,12 +133,146 @@ class LinkRecognitionTests(unittest.TestCase):
         self.assertFalse(links.LINK_FORMAT_CONFIRMED)
 
 
+class TerminalDecorationTests(unittest.TestCase):
+    """Recognition on output that came off a terminal rather than a pipe."""
+
+    def test_a_link_wrapped_in_colour_codes_is_still_found(self) -> None:
+        with confirmed_format():
+            painted = "\x1b[1m\x1b[36m" + SAMPLE_LINK + "\x1b[0m"
+            self.assertEqual(links.find_link(painted), SAMPLE_LINK)
+
+    def test_a_colour_reset_inside_the_url_does_not_forge_a_host(self) -> None:
+        """Stripping happens before matching, never mid-match.
+
+        The attack this closes: control characters spliced into a URL so that
+        the visible text reads as an allowed host while the bytes do not.
+        """
+        with confirmed_format():
+            spliced = "https://evil.test\x1b[0m/claude.ai/code/session/x"
+            self.assertIsNone(links.find_link(spliced))
+
+    def test_an_osc8_hyperlink_target_is_extracted(self) -> None:
+        """The URL lives in the escape sequence; the visible text is a label."""
+        with confirmed_format():
+            hyperlink = "\x1b]8;;" + SAMPLE_LINK + "\x07open session\x1b]8;;\x07"
+            self.assertEqual(links.find_link(hyperlink), SAMPLE_LINK)
+            self.assertEqual(links.hyperlink_targets(hyperlink), [SAMPLE_LINK])
+
+    def test_an_osc8_hyperlink_is_gated_like_any_other(self) -> None:
+        hyperlink = "\x1b]8;;" + SAMPLE_LINK + "\x07open session\x1b]8;;\x07"
+        self.assertIsNone(links.find_link(hyperlink))
+
+    def test_an_osc8_target_on_a_foreign_host_is_refused(self) -> None:
+        with confirmed_format():
+            hyperlink = "\x1b]8;;https://evil.test/code/x\x07claude.ai\x1b]8;;\x07"
+            self.assertIsNone(links.find_link(hyperlink))
+
+    def test_stripping_leaves_ordinary_text_alone(self) -> None:
+        self.assertEqual(links.strip_ansi("plain output"), "plain output")
+
+
+class ConsentPromptTests(unittest.TestCase):
+    """The M2H PR2 live finding: the CLI stops and asks before it starts.
+
+    Observed on this workstation through a PTY with the fixed argv. The host
+    renders its explanation and then waits on ``Enable Remote Control? (y/n)``,
+    which ``stdin=/dev/null`` cannot answer — so the unit is active, healthy,
+    and will never publish a session.
+    """
+
+    def test_the_observed_prompt_is_recognised(self) -> None:
+        self.assertTrue(wrapper.CONSENT_FORMAT_CONFIRMED)
+        self.assertTrue(wrapper.detect_consent_required("Enable Remote Control? (y/n)"))
+
+    def test_recognition_survives_terminal_decoration(self) -> None:
+        painted = "\x1b[2K\r\x1b[1mEnable Remote Control?\x1b[0m (y/n)"
+        self.assertTrue(wrapper.detect_consent_required(painted))
+
+    def test_ordinary_output_is_not_a_consent_prompt(self) -> None:
+        for line in (
+            "Remote Control is enabled",
+            "Starting Remote Control...",
+            "The session keeps running on this machine.",
+            "",
+        ):
+            with self.subTest(line=line):
+                self.assertFalse(wrapper.detect_consent_required(line))
+
+    def test_the_wrapper_reports_the_prompt_once(self) -> None:
+        seen = []
+
+        def popen(argv, **kwargs):
+            return _FakeProcess(
+                ["Enable Remote Control? (y/n)", "Enable Remote Control? (y/n)"],
+                0,
+                slave=kwargs.get("stdout"),
+            )
+
+        host = wrapper.SupervisedHost(
+            ["/usr/bin/claude", "remote-control"],
+            cwd="/srv/demo",
+            on_consent_required=lambda: seen.append(True),
+            log=lambda message: None,
+            popen=popen,
+        )
+        host.run()
+        self.assertEqual(seen, [True])
+
+    def test_a_prompt_split_across_two_reads_is_still_recognised(self) -> None:
+        """It is a prompt: no trailing newline, and a terminal may split it."""
+        seen = []
+        host = wrapper.SupervisedHost(
+            ["/usr/bin/claude"], cwd="/srv/demo",
+            on_consent_required=lambda: seen.append(True),
+            log=lambda message: None,
+        )
+        host._absorb_chunk("Enable Remo")
+        self.assertEqual(seen, [])
+        host._absorb_chunk("te Control? (y/n)")
+        self.assertEqual(seen, [True])
+
+    def test_the_marker_buffer_is_bounded(self) -> None:
+        host = wrapper.SupervisedHost(
+            ["/usr/bin/claude"], cwd="/srv/demo", log=lambda message: None
+        )
+        for _ in range(50):
+            host._absorb_chunk("x" * 200)
+        self.assertLessEqual(len(host._marker_tail), wrapper.MARKER_TAIL_CHARS)
+
+    def test_the_prompt_is_not_answered(self) -> None:
+        """Consent is the user's to give. stdin stays closed even for this."""
+        captured = {}
+
+        def popen(argv, **kwargs):
+            captured.update(kwargs)
+            return _FakeProcess(["Enable Remote Control? (y/n)"], 0, slave=kwargs.get("stdout"))
+
+        host = wrapper.SupervisedHost(
+            ["/usr/bin/claude"], cwd="/srv/demo",
+            on_consent_required=lambda: None,
+            log=lambda message: None,
+            popen=popen,
+        )
+        host.run()
+        self.assertEqual(captured["stdin"], subprocess.DEVNULL)
+
+    def test_no_link_is_invented_from_the_consent_screen(self) -> None:
+        """The real screen names claude.ai/code as prose. It is not a session."""
+        with confirmed_format():
+            prose = (
+                "Open the Code tab in the Claude mobile app, or visit "
+                "claude.ai/code in a browser."
+            )
+            self.assertIsNone(links.find_link(prose))
+
+
 class ChunkedCaptureTests(unittest.TestCase):
     def test_a_link_split_across_chunks_is_found(self) -> None:
-        scanner = links.LinkScanner()
-        half = len(SAMPLE_LINK) // 2
-        self.assertIsNone(scanner.feed("noise " + SAMPLE_LINK[:half]))
-        self.assertEqual(scanner.feed(SAMPLE_LINK[half:] + " more\n"), SAMPLE_LINK)
+        with confirmed_format():
+            scanner = links.LinkScanner()
+            half = len(SAMPLE_LINK) // 2
+            self.assertIsNone(scanner.feed("noise " + SAMPLE_LINK[:half]))
+            self.assertEqual(scanner.feed(SAMPLE_LINK[half:] + " more\n"), SAMPLE_LINK)
 
     def test_a_partial_link_is_never_reported_as_complete(self) -> None:
         """The dangerous case: a chunk that ends mid-URL still matches a pattern.
@@ -126,17 +289,19 @@ class ChunkedCaptureTests(unittest.TestCase):
         self.assertIsNone(scanner.link)
 
     def test_a_link_split_three_ways_is_found(self) -> None:
-        scanner = links.LinkScanner()
-        third = len(SAMPLE_LINK) // 3
-        scanner.feed(SAMPLE_LINK[:third])
-        scanner.feed(SAMPLE_LINK[third : 2 * third])
-        self.assertEqual(scanner.feed(SAMPLE_LINK[2 * third :] + "\n"), SAMPLE_LINK)
+        with confirmed_format():
+            scanner = links.LinkScanner()
+            third = len(SAMPLE_LINK) // 3
+            scanner.feed(SAMPLE_LINK[:third])
+            scanner.feed(SAMPLE_LINK[third : 2 * third])
+            self.assertEqual(scanner.feed(SAMPLE_LINK[2 * third :] + "\n"), SAMPLE_LINK)
 
     def test_only_the_first_link_is_kept(self) -> None:
-        scanner = links.LinkScanner()
-        self.assertEqual(scanner.feed(SAMPLE_LINK + "\n"), SAMPLE_LINK)
-        self.assertIsNone(scanner.feed("https://claude.ai/code/session/second\n"))
-        self.assertEqual(scanner.link, SAMPLE_LINK)
+        with confirmed_format():
+            scanner = links.LinkScanner()
+            self.assertEqual(scanner.feed(SAMPLE_LINK + "\n"), SAMPLE_LINK)
+            self.assertIsNone(scanner.feed("https://claude.ai/code/session/second\n"))
+            self.assertEqual(scanner.link, SAMPLE_LINK)
 
     def test_the_carry_buffer_is_bounded(self) -> None:
         """A chatty child cannot make this allocate without limit."""
@@ -298,13 +463,26 @@ class LinkStoreTests(unittest.TestCase):
 
 
 class _FakeProcess:
-    def __init__(self, lines, status=0):
-        import io
+    """A child that writes to the PTY slave it was handed, then exits.
 
-        self.stdout = io.BytesIO(b"".join(line.encode() for line in lines))
+    The wrapper now gives the child a pseudo-terminal, so a double that only
+    exposes a ``.stdout`` object would be testing an I/O shape production no
+    longer uses. This writes real bytes into the real slave descriptor.
+    """
+
+    def __init__(self, lines, status=0, slave=None):
         self.pid = os.getpid()
         self._status = status
         self.signals = []
+        if slave is not None:
+            try:
+                for line in lines:
+                    os.write(slave, line.encode())
+            except OSError:
+                pass
+
+    def poll(self):
+        return self._status
 
     def wait(self, timeout=None):
         return self._status
@@ -321,7 +499,7 @@ class WrapperTests(unittest.TestCase):
         def popen(argv, **kwargs):
             captured["argv"] = list(argv)
             captured["kwargs"] = kwargs
-            return _FakeProcess(lines, status)
+            return _FakeProcess(lines, status, slave=kwargs.get("stdout"))
 
         host = wrapper.SupervisedHost(
             ["/usr/bin/claude", "remote-control", "--name", "cofferdam-demo"],
@@ -347,32 +525,58 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(captured["kwargs"]["cwd"], "/srv/demo")
 
     def test_stdin_is_closed_so_nothing_can_be_injected(self) -> None:
-        """No prompt channel into a native session, structurally."""
+        """The terminal is one-way: output only, no prompt channel."""
         _, captured, _, _ = self._run(["ready\n"])
         self.assertEqual(captured["kwargs"]["stdin"], subprocess.DEVNULL)
 
-    def test_a_link_in_the_stream_is_reported_once(self) -> None:
-        _, _, recorded, _ = self._run(["starting\n", SAMPLE_LINK + "\n", "more\n"])
-        self.assertEqual(recorded, [SAMPLE_LINK])
+    def test_the_child_is_given_a_terminal_not_a_pipe(self) -> None:
+        """The reason this PR exists: a pipe produced no session URL at all."""
+        _, captured, _, _ = self._run(["ready\n"])
+        stdout = captured["kwargs"]["stdout"]
+        self.assertIsInstance(stdout, int)
+        self.assertEqual(stdout, captured["kwargs"]["stderr"])
 
-    def test_a_second_link_does_not_replace_the_first(self) -> None:
-        _, _, recorded, _ = self._run(
-            [SAMPLE_LINK + "\n", "https://claude.ai/code/session/other\n"]
+    def test_a_platform_without_a_terminal_falls_back_to_a_pipe(self) -> None:
+        """Never ``stdout=None``. Inheriting would write raw output to journald."""
+        captured = {}
+
+        def popen(argv, **kwargs):
+            captured.update(kwargs)
+            process = _FakeProcess([], 0, slave=None)
+            process.stdout = io.BytesIO(b"ready\n")
+            return process
+
+        host = wrapper.SupervisedHost(
+            ["/usr/bin/claude"], cwd="/srv/demo", log=lambda message: None, popen=popen
         )
-        self.assertEqual(recorded, [SAMPLE_LINK])
+        host._open_terminal = lambda: (None, None)
+        host.run()
+        self.assertEqual(captured["stdout"], subprocess.PIPE)
+        self.assertEqual(captured["stderr"], subprocess.STDOUT)
+        self.assertIsNotNone(captured["stdout"])
 
-    def test_retained_output_is_redacted(self) -> None:
-        _, _, _, host = self._run(["starting\n", SAMPLE_LINK + "\n"])
+    def test_retained_output_is_redacted_and_stripped(self) -> None:
+        _, _, _, host = self._run(["starting\r\n", "\x1b[32m" + SAMPLE_LINK + "\x1b[0m\r\n"])
         joined = " ".join(host.retained)
         self.assertNotIn(SAMPLE_LINK, joined)
         self.assertNotIn("claude.ai", joined)
+        self.assertNotIn("\x1b", joined)
 
     def test_retained_output_is_bounded(self) -> None:
         _, _, _, host = self._run(["line %d\n" % i for i in range(500)])
         self.assertLessEqual(len(host.retained), wrapper.MAX_RETAINED_LINES)
 
-    def test_a_very_long_line_is_truncated(self) -> None:
-        _, _, _, host = self._run(["x" * 100000 + "\n"])
+    def test_a_long_line_is_truncated_in_retention(self) -> None:
+        """Retention is capped per line as well as by line count.
+
+        Sized just over the cap rather than pathologically. A pseudo-terminal
+        has a finite kernel buffer, and a fixture that writes tens of kilobytes
+        faster than the reader drains blocks on its own write — which tests the
+        harness, not the wrapper. The production guard against a genuinely
+        enormous line is the same cap asserted here.
+        """
+        _, _, _, host = self._run(["y" * (wrapper.MAX_LINE_CHARS + 500) + "\n"])
+        self.assertTrue(host.retained)
         for line in host.retained:
             self.assertLessEqual(len(line), wrapper.MAX_LINE_CHARS)
 
@@ -387,17 +591,16 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(code, 128 + int(signal.SIGTERM))
 
     def test_auth_detection_is_off_until_confirmed(self) -> None:
-        """No auth_required until a real signal has been observed."""
         self.assertFalse(wrapper.AUTH_FORMAT_CONFIRMED)
         for line in ("please log in", "you must authenticate", "subscription required"):
             with self.subTest(line=line):
                 self.assertFalse(wrapper.detect_auth_required(line))
 
-    def test_nothing_from_the_environment_is_retained(self) -> None:
-        _, _, _, host = self._run(["HOME=%s\n" % os.environ.get("HOME", "/root")])
-        # The line is retained verbatim only because the child printed it; what
-        # matters is that the wrapper never *adds* environment of its own.
-        self.assertEqual(len(host.retained), 1)
+    def test_no_link_is_captured_while_the_format_is_unconfirmed(self) -> None:
+        """The gate, end to end through the real wrapper."""
+        self.assertFalse(links.LINK_FORMAT_CONFIRMED)
+        _, _, recorded, _ = self._run(["starting\n", SAMPLE_LINK + "\n"])
+        self.assertEqual(recorded, [])
 
 
 class WrapperSignalTests(unittest.TestCase):
@@ -496,11 +699,24 @@ class WrapperSignalTests(unittest.TestCase):
             on_link=recorded.append,
             log=retained.append,
         )
-        code = host.run()
+        with confirmed_format():
+            code = host.run()
         self.assertEqual(code, 0)
-        self.assertEqual(recorded, [SAMPLE_LINK])
+        self.assertEqual(recorded, [SAMPLE_LINK], "captured through a real PTY")
         self.assertNotIn(SAMPLE_LINK, " ".join(host.retained))
         self.assertNotIn(SAMPLE_LINK, " ".join(retained))
+
+    def test_a_real_child_link_is_not_captured_while_unconfirmed(self) -> None:
+        """Same child, gate closed: nothing is captured and nothing is stored."""
+        recorded = []
+        host = wrapper.SupervisedHost(
+            ["/bin/sh", "-c", "echo " + SAMPLE_LINK],
+            cwd="/tmp",
+            on_link=recorded.append,
+            log=lambda message: None,
+        )
+        self.assertEqual(host.run(), 0)
+        self.assertEqual(recorded, [])
 
 
 # ---------------------------------------------------------------------------
@@ -515,6 +731,137 @@ def _supervisor(runner, *projects, store=None):
         store=store if store is not None else MemoryLinkStore(),
         clock=fixed_clock(),
     )
+
+
+class StopTimeoutTests(unittest.TestCase):
+    """A stop that works must not be reported as a backend failure.
+
+    Found by the M2H PR2 live validation: ``systemctl stop`` blocked for about
+    fifteen seconds because the CLI ignores SIGTERM, hit the shared control
+    timeout, and the route answered 503 for a unit that had in fact stopped
+    cleanly with status 0.
+    """
+
+    def test_the_stop_bound_exceeds_the_units_own_shutdown_bound(self) -> None:
+        template = (REPO_ROOT / "deploy" / systemd.__name__.split(".")[-1]).parent
+        unit = (REPO_ROOT / "deploy" / "cofferdam-rc@.service").read_text()
+        declared = int(re.search(r"TimeoutStopSec=(\d+)", unit).group(1))
+        self.assertGreater(
+            systemd.STOP_TIMEOUT_SECONDS,
+            declared,
+            "a stop can take the whole of the unit's TimeoutStopSec",
+        )
+        self.assertGreater(systemd.STOP_TIMEOUT_SECONDS, systemd.CONTROL_TIMEOUT_SECONDS)
+        self.assertTrue(template.exists())
+
+    def test_stop_is_given_the_longer_timeout_and_start_is_not(self) -> None:
+        seen = []
+
+        def runner(argv, timeout=None):
+            seen.append((argv[2], timeout))
+            return FakeCompleted(0, "")
+
+        backend = SystemdUserBackend(runner)
+        backend.start("demo")
+        backend.stop("demo")
+        self.assertEqual(seen[0][0], "start")
+        self.assertEqual(seen[0][1], systemd.CONTROL_TIMEOUT_SECONDS)
+        self.assertEqual(seen[1][0], "stop")
+        self.assertEqual(seen[1][1], systemd.STOP_TIMEOUT_SECONDS)
+
+
+class StartSettleTests(unittest.TestCase):
+    """The generation must be known by the time a start returns.
+
+    Also found live: ``systemctl start`` returns on fork, the host writes its
+    generation a moment later, and a status read in between reports ``None`` —
+    which made "did the second launch differ from the first" compare two blanks
+    and pass for the wrong reason.
+    """
+
+    class _Backend:
+        """Reports ``inactive`` until asked to start, then ``active``.
+
+        The real launch shape, which is what makes the race reachable: the unit
+        must genuinely go from down to up for the supervisor to take the start
+        path rather than the idempotent one.
+        """
+
+        def __init__(self, states=None) -> None:
+            self.started = 0
+            self._states = list(states or [])
+
+        def status(self, project_id):
+            if self._states:
+                active = self._states.pop(0)
+            else:
+                active = "active" if self.started else "inactive"
+            return NativeSessionStatus(
+                project_id=project_id,
+                unit="cofferdam-rc@" + project_id + ".service",
+                state=map_active_state(active),
+                active_state=active,
+            )
+
+        def start(self, project_id):
+            self.started += 1
+
+    def _supervisor(self, backend, store, sleep):
+        return RemoteControlSupervisor(
+            provider(make_project("demo", remote_control_enabled=True)),
+            backend=backend,
+            store=store,
+            clock=fixed_clock(),
+            sleep=sleep,
+        )
+
+    def test_start_waits_for_the_host_to_write_its_generation(self) -> None:
+        store = MemoryLinkStore()
+        slept = []
+
+        def late_writer(seconds):
+            slept.append(seconds)
+            store.documents["demo"] = {"generation": "gen-1"}
+
+        status = self._supervisor(self._Backend(), store, late_writer).start("demo")
+        self.assertEqual(status.generation, "gen-1")
+        self.assertTrue(slept, "it should have waited at least once")
+
+    def test_a_host_that_never_identifies_itself_is_not_given_a_generation(self) -> None:
+        """No invention. A blank is honest; a made-up generation is not."""
+        supervisor = self._supervisor(self._Backend(), MemoryLinkStore(), lambda _s: None)
+        self.assertIsNone(supervisor.start("demo").generation)
+
+    def test_the_wait_is_bounded(self) -> None:
+        slept = []
+        supervisor = self._supervisor(
+            self._Backend(), MemoryLinkStore(), lambda seconds: slept.append(seconds)
+        )
+        supervisor.start("demo")
+        self.assertLessEqual(len(slept), supervisor_module.START_SETTLE_ATTEMPTS)
+        self.assertLessEqual(
+            sum(slept),
+            supervisor_module.START_SETTLE_ATTEMPTS * supervisor_module.START_SETTLE_SECONDS,
+        )
+
+    def test_an_already_running_host_reports_its_existing_generation(self) -> None:
+        """Idempotent repeat start: the same generation, not a blank."""
+        backend = self._Backend()
+        backend.started = 1
+        store = MemoryLinkStore({"demo": {"generation": "gen-1"}})
+        supervisor = self._supervisor(backend, store, lambda _s: None)
+        self.assertEqual(supervisor.start("demo").generation, "gen-1")
+        self.assertEqual(backend.started, 1, "no second host for a double tap")
+
+    def test_a_unit_that_never_comes_up_is_not_waited_on(self) -> None:
+        """Nothing to settle if there is no live host to settle into."""
+        slept = []
+        backend = self._Backend(states=["inactive", "inactive", "inactive"])
+        supervisor = self._supervisor(
+            backend, MemoryLinkStore(), lambda seconds: slept.append(seconds)
+        )
+        supervisor.start("demo")
+        self.assertEqual(slept, [])
 
 
 class HealthEvidenceTests(unittest.TestCase):
@@ -546,6 +893,33 @@ class HealthEvidenceTests(unittest.TestCase):
             with self.subTest(field=forbidden):
                 self.assertNotIn(forbidden, payload)
         self.assertNotIn(payload["state"], ("connected", "authenticated"))
+
+    def test_a_host_waiting_for_consent_says_so_instead_of_just_running(self) -> None:
+        """The gap this PR found: ``active`` and useless at the same time.
+
+        systemd is not wrong — the process is up. But nothing is reachable from
+        a phone and nothing will be until somebody answers the prompt at the
+        machine, so the status carries that fact rather than leaving a reader to
+        infer health from ``running``.
+        """
+        store = MemoryLinkStore({"demo": {"generation": "g", "awaiting_consent": True}})
+        status = _supervisor(self._running(), make_project("demo"), store=store).status("demo")
+        self.assertEqual(status.state, STATE_RUNNING)
+        self.assertTrue(status.awaiting_consent)
+        self.assertFalse(status.url_available)
+        self.assertTrue(status.to_dict()["awaiting_consent"])
+
+    def test_consent_is_false_unless_the_prompt_was_actually_seen(self) -> None:
+        store = MemoryLinkStore({"demo": {"generation": "g"}})
+        status = _supervisor(self._running(), make_project("demo"), store=store).status("demo")
+        self.assertFalse(status.awaiting_consent)
+
+    def test_consent_evidence_is_ignored_when_the_unit_is_not_live(self) -> None:
+        store = MemoryLinkStore({"demo": {"generation": "g", "awaiting_consent": True}})
+        runner = FakeRunner(default=FakeCompleted(0, show_output(active_state="inactive")))
+        status = _supervisor(runner, make_project("demo"), store=store).status("demo")
+        self.assertEqual(status.state, STATE_STOPPED)
+        self.assertFalse(status.awaiting_consent)
 
     def test_link_evidence_is_ignored_when_the_unit_is_not_live(self) -> None:
         """A state file outliving its process must not claim a live URL."""
@@ -592,9 +966,35 @@ class LinkRetrievalTests(unittest.TestCase):
         store = MemoryLinkStore(
             {"demo": {"generation": "g1", "link": SAMPLE_LINK, "discovered_at": "T"}}
         )
-        payload = _supervisor(self._running(), make_project("demo"), store=store).link("demo")
+        with confirmed_format():
+            payload = _supervisor(self._running(), make_project("demo"), store=store).link(
+                "demo"
+            )
         self.assertEqual(payload["url"], SAMPLE_LINK)
         self.assertEqual(payload["generation"], "g1")
+
+    def test_retrieval_refuses_truthfully_while_the_format_is_unconfirmed(self) -> None:
+        """Even with a stored link and a live unit, the gate refuses.
+
+        Second lock on the same door: `find_link` cannot recognise anything, so
+        nothing should be stored — but this asserts the retrieval boundary
+        refuses on its own terms rather than relying on that.
+        """
+        store = MemoryLinkStore({"demo": {"generation": "g", "link": SAMPLE_LINK}})
+        supervisor = _supervisor(self._running(), make_project("demo"), store=store)
+        with self.assertRaises(LinkUnavailable) as caught:
+            supervisor.link("demo")
+        self.assertIn("not been confirmed", caught.exception.detail)
+
+    def test_retrieval_works_once_the_format_is_confirmed(self) -> None:
+        store = MemoryLinkStore(
+            {"demo": {"generation": "g1", "link": SAMPLE_LINK, "discovered_at": "T"}}
+        )
+        with confirmed_format():
+            payload = _supervisor(self._running(), make_project("demo"), store=store).link(
+                "demo"
+            )
+        self.assertEqual(payload["url"], SAMPLE_LINK)
 
     def test_no_link_before_capture(self) -> None:
         supervisor = _supervisor(self._running(), make_project("demo"))
@@ -602,31 +1002,35 @@ class LinkRetrievalTests(unittest.TestCase):
             supervisor.link("demo")
 
     def test_no_link_when_the_host_is_stopped(self) -> None:
-        store = MemoryLinkStore({"demo": {"generation": "g", "link": SAMPLE_LINK}})
-        runner = FakeRunner(default=FakeCompleted(0, show_output(active_state="inactive")))
-        with self.assertRaises(LinkUnavailable):
-            _supervisor(runner, make_project("demo"), store=store).link("demo")
+        with confirmed_format():
+            store = MemoryLinkStore({"demo": {"generation": "g", "link": SAMPLE_LINK}})
+            runner = FakeRunner(default=FakeCompleted(0, show_output(active_state="inactive")))
+            with self.assertRaises(LinkUnavailable):
+                _supervisor(runner, make_project("demo"), store=store).link("demo")
 
     def test_no_link_when_the_host_failed(self) -> None:
-        store = MemoryLinkStore({"demo": {"generation": "g", "link": SAMPLE_LINK}})
-        runner = FakeRunner(default=FakeCompleted(0, show_output(active_state="failed")))
-        with self.assertRaises(LinkUnavailable):
-            _supervisor(runner, make_project("demo"), store=store).link("demo")
+        with confirmed_format():
+            store = MemoryLinkStore({"demo": {"generation": "g", "link": SAMPLE_LINK}})
+            runner = FakeRunner(default=FakeCompleted(0, show_output(active_state="failed")))
+            with self.assertRaises(LinkUnavailable):
+                _supervisor(runner, make_project("demo"), store=store).link("demo")
 
     def test_a_link_cannot_be_read_across_projects(self) -> None:
-        store = MemoryLinkStore({"alpha": {"generation": "g", "link": SAMPLE_LINK}})
-        supervisor = _supervisor(
-            self._running(), make_project("alpha"), make_project("beta"), store=store
-        )
-        self.assertEqual(supervisor.link("alpha")["url"], SAMPLE_LINK)
-        with self.assertRaises(LinkUnavailable):
-            supervisor.link("beta")
+        with confirmed_format():
+            store = MemoryLinkStore({"alpha": {"generation": "g", "link": SAMPLE_LINK}})
+            supervisor = _supervisor(
+                self._running(), make_project("alpha"), make_project("beta"), store=store
+            )
+            self.assertEqual(supervisor.link("alpha")["url"], SAMPLE_LINK)
+            with self.assertRaises(LinkUnavailable):
+                supervisor.link("beta")
 
     def test_an_unknown_project_cannot_retrieve_a_link(self) -> None:
-        store = MemoryLinkStore({"demo": {"generation": "g", "link": SAMPLE_LINK}})
-        supervisor = _supervisor(self._running(), make_project("demo"), store=store)
-        with self.assertRaises(SessionProjectUnknown):
-            supervisor.link("nope")
+        with confirmed_format():
+            store = MemoryLinkStore({"demo": {"generation": "g", "link": SAMPLE_LINK}})
+            supervisor = _supervisor(self._running(), make_project("demo"), store=store)
+            with self.assertRaises(SessionProjectUnknown):
+                supervisor.link("nope")
 
     def test_stop_clears_the_link(self) -> None:
         store = MemoryLinkStore({"demo": {"generation": "g", "link": SAMPLE_LINK}})

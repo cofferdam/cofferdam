@@ -45,10 +45,29 @@ SYSTEMCTL = "systemctl"
 #: for a loaded user manager and short enough that a status screen never hangs.
 QUERY_TIMEOUT_SECONDS = 5
 
-#: ``start`` and ``stop`` are ``Type=simple`` transitions, so systemd returns as
-#: soon as the job is queued and the fork succeeds — it does not wait for the
-#: program to be useful. Fifteen seconds is for a busy manager, not for Claude.
+#: ``start`` is a ``Type=simple`` transition, so systemd returns as soon as the
+#: job is queued and the fork succeeds — it does not wait for the program to be
+#: useful. Fifteen seconds is for a busy manager, not for Claude.
 CONTROL_TIMEOUT_SECONDS = 15
+
+#: ``stop`` is not the same shape, and treating it as if it were is what this
+#: constant fixes.
+#:
+#: ``systemctl stop`` blocks until the job *completes*, and completing means the
+#: unit's whole shutdown sequence has run. The M2H PR2 live validation measured
+#: it: the CLI does not exit on SIGTERM, so the wrapper waits out its grace
+#: period and then kills the process group, and the call returns after about
+#: fifteen seconds — right at the old shared timeout. Cofferdam therefore
+#: answered HTTP 503 "the user service manager did not answer" for a stop that
+#: had in fact worked, leaving the caller to believe a session was still up
+#: while the unit sat inactive with status 0.
+#:
+#: So this bound is derived from the unit rather than guessed: the shipped
+#: template sets ``TimeoutStopSec=30``, which is the longest systemd will let a
+#: shutdown take before the manager kills the unit's cgroup itself. Fifteen
+#: seconds of margin on top covers a loaded manager. Past this, "did not answer"
+#: is finally the truth rather than impatience.
+STOP_TIMEOUT_SECONDS = 45
 
 #: Exactly the properties needed to answer "is it up, since when, and is the
 #: template even installed". Nothing here reads a log, and there is no journal
@@ -157,10 +176,12 @@ class SystemdUserBackend:
         *,
         query_timeout: int = QUERY_TIMEOUT_SECONDS,
         control_timeout: int = CONTROL_TIMEOUT_SECONDS,
+        stop_timeout: int = STOP_TIMEOUT_SECONDS,
     ) -> None:
         self._runner = runner if runner is not None else run_fixed
         self._query_timeout = query_timeout
         self._control_timeout = control_timeout
+        self._stop_timeout = stop_timeout
 
     # -- reading -------------------------------------------------------------
 
@@ -226,17 +247,25 @@ class SystemdUserBackend:
         self._control(start_argv(unit_name(project_id)))
 
     def stop(self, project_id: str) -> None:
-        """Queue a stop for that project's unit. Raises on refusal."""
-        self._control(stop_argv(unit_name(project_id)))
+        """Stop that project's unit, waiting out the real shutdown.
 
-    def _control(self, argv: Sequence[str]) -> None:
-        completed = _run(self._runner, argv, self._control_timeout)
+        The longer bound is the whole point — see
+        :data:`STOP_TIMEOUT_SECONDS`. ``stop`` blocks until the unit is down,
+        and the child this package supervises does not exit on SIGTERM.
+        """
+        self._control(stop_argv(unit_name(project_id)), timeout=self._stop_timeout)
+
+    def _control(self, argv: Sequence[str], *, timeout: Optional[int] = None) -> None:
+        completed = _run(
+            self._runner, argv, self._control_timeout if timeout is None else timeout
+        )
         if getattr(completed, "returncode", 1) != 0:
             raise BackendRefused(_redact(getattr(completed, "stderr", None)))
 
 
 __all__ = [
     "CONTROL_TIMEOUT_SECONDS",
+    "STOP_TIMEOUT_SECONDS",
     "MAX_ERROR_CHARS",
     "QUERY_TIMEOUT_SECONDS",
     "SHOW_PROPERTIES",

@@ -139,6 +139,16 @@ class NativeSessionStatus:
     #: ``False`` in this build.
     auth_required: bool = False
 
+    #: The host is up and waiting for Remote Control to be enabled on this
+    #: machine, which is a question only a person at the keyboard can answer.
+    #:
+    #: Unlike :attr:`auth_required` this one *is* reachable in this build,
+    #: because the marker behind it was observed in real output during the M2H
+    #: PR2 PTY spike. It is the difference between "the process is running" and
+    #: "your phone can reach a session": with the prompt unanswered, systemd
+    #: reports a perfectly healthy unit that will never publish anything.
+    awaiting_consent: bool = False
+
     #: **Never populated in a status payload.** The field stays on the dataclass
     #: so the retrieval path has a typed place to put a link, and
     #: :meth:`to_dict` drops it unconditionally.
@@ -173,6 +183,7 @@ class NativeSessionStatus:
             "generation": self.generation,
             "url_available": self.url_available,
             "auth_required": self.auth_required,
+            "awaiting_consent": self.awaiting_consent,
             "started_at": self.started_at,
             "last_seen_at": self.last_seen_at,
             "error": self.error,

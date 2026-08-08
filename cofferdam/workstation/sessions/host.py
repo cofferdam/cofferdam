@@ -187,6 +187,18 @@ def main(
             observed_at=_now(),
         )
 
+    def on_consent_required() -> None:
+        # The unit is up and the host is alive, but it is sitting on a question
+        # nobody here can answer. Recorded so status can say that instead of
+        # "running", which would be true of the process and false of the thing
+        # the person actually asked about.
+        links_store.write(
+            project.project_id,
+            generation=generation,
+            awaiting_consent=True,
+            observed_at=_now(),
+        )
+
     _log(
         "starting the Remote Control host for project "
         + project.project_id
@@ -202,6 +214,7 @@ def main(
             cwd=str(project.root),
             on_link=on_link,
             on_auth_required=on_auth_required,
+            on_consent_required=on_consent_required,
             log=_log,
         )
     finally:
@@ -216,12 +229,13 @@ def main(
     return status
 
 
-def _supervise(argv, *, cwd, on_link, on_auth_required, log) -> int:
+def _supervise(argv, *, cwd, on_link, on_auth_required, on_consent_required, log) -> int:
     host = SupervisedHost(
         argv,
         cwd=cwd,
         on_link=on_link,
         on_auth_required=on_auth_required,
+        on_consent_required=on_consent_required,
         log=log,
     )
     return host.run()

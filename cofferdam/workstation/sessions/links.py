@@ -19,12 +19,18 @@ On the recogniser
 ``claude remote-control`` — sessions are controlled from ``claude.ai/code`` —
 and is deliberately narrow: an ``https`` URL on an allowlisted host only.
 
-**It has not yet been confirmed against real output.** The M2H PR2 live spike
-observes one bounded startup and this pattern is corrected from what the process
-actually prints. Until then :data:`LINK_FORMAT_CONFIRMED` is ``False`` and the
-supervisor reports "no link captured" rather than pretending. Guessing here
-would be the worst kind of wrong: a pattern that half-matches would store a
-truncated capability URL and report success.
+**It has not been confirmed against real output, and the M2H PR2 live spike
+explains why.** Two bounded startups were watched on a real pseudo-terminal with
+the fixed argv. The CLI rendered its display and then stopped on its own
+one-time consent question, waiting for a ``stdin`` this package deliberately
+does not give it, so it never enabled the feature, never created a session and
+never printed a URL. There was nothing to confirm the pattern against.
+
+So :data:`LINK_FORMAT_CONFIRMED` stays ``False``, and it is a gate rather than a
+note: nothing is recognised at all while it is closed, and the supervisor
+reports "no link captured" rather than pretending. Guessing here would be the
+worst kind of wrong — a pattern that half-matches would store a truncated
+capability URL and report success.
 
 Redaction is deliberately **wider** than recognition. It removes any ``https``
 URL from retained output, not only ones matching the pattern, because a
@@ -44,8 +50,20 @@ from typing import List, Optional, Tuple
 ALLOWED_LINK_HOSTS: Tuple[str, ...] = ("claude.ai", "www.claude.ai")
 
 #: Whether :data:`LINK_PATTERN` has been confirmed against real process output.
-#: Flipped to ``True`` in the commit that records the live observation, together
-#: with the pattern correction. See the module docstring.
+#:
+#: **This is an operational gate, not a note.** While it is ``False``,
+#: :func:`find_link` returns nothing at all, so no candidate URL can be
+#: persisted, returned or announced anywhere in the system. The failure mode it
+#: closes is the dangerous one: a pattern nobody has checked against real output
+#: matching something *else* the child printed, and Cofferdam then storing that
+#: and handing it to a phone as a session link.
+#:
+#: Fail-closed was chosen over fail-open deliberately. "No link available" is an
+#: inconvenience somebody can act on; "here is a link" that is actually some
+#: other URL the process mentioned is a capability handed to whoever holds it.
+#:
+#: Flipped to ``True`` only in a commit that also records a real observation and
+#: corrects :data:`LINK_PATTERN` to match it.
 LINK_FORMAT_CONFIRMED = False
 
 #: Bounded: a session URL is not a document. Anything longer is not a link.
@@ -69,6 +87,43 @@ LINK_PATTERN = re.compile(
 
 #: What replaces a URL in anything that can be logged.
 REDACTION = "[remote-control-link redacted]"
+
+#: ANSI escape sequences: CSI (colour, cursor movement), OSC (window title and
+#: hyperlinks), and single-character escapes.
+#:
+#: Needed because the child now writes to a pseudo-terminal. A TTY-aware program
+#: paints its output — colour codes, cursor jumps, line rewrites — and a URL with
+#: a colour reset spliced into the middle of it does not match any pattern. OSC 8
+#: matters most: a terminal hyperlink wraps the URL in an escape sequence, so the
+#: link is *there* and invisible to a naive search.
+_ANSI = re.compile(
+    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC ... BEL or ST
+    r"|\x1b\[[0-9;?]*[ -/]*[@-~]"              # CSI
+    r"|\x1b[@-Z\\-_]"                          # single-character escapes
+)
+
+
+#: The payload of an OSC 8 terminal hyperlink: ``ESC ] 8 ; params ; URI ST``.
+#:
+#: Read *before* stripping, because in a hyperlink the URI exists only inside
+#: the escape sequence — the visible text is a label like "open session". Strip
+#: first and the link is gone; ignore OSC 8 entirely and a terminal-aware child
+#: appears to print no URL at all.
+_OSC8 = re.compile(r"\x1b\]8;[^;\x07\x1b]*;([^\x07\x1b]*)(?:\x07|\x1b\\)")
+
+
+def hyperlink_targets(text: str) -> List[str]:
+    """Every URI carried in an OSC 8 hyperlink in that text."""
+    return [target for target in _OSC8.findall(text) if target]
+
+
+def strip_ansi(text: str) -> str:
+    """Remove terminal control sequences before anything is matched.
+
+    Applied to PTY output on the way in. A link is only recognisable once the
+    paint is off it, and an OSC 8 hyperlink hides one completely otherwise.
+    """
+    return _ANSI.sub("", text)
 
 
 def redact(text: object) -> str:
@@ -112,17 +167,44 @@ def find_link(text: object) -> Optional[str]:
     than trimmed. Trimming would produce a plausible-looking link that does not
     work, and "no link" is a far better answer than "a link that fails later".
     """
+    if not LINK_FORMAT_CONFIRMED:
+        # The gate. Nothing is recognised, so nothing downstream can persist,
+        # return or announce a link while the format is unverified.
+        return None
     if isinstance(text, bytes):
         text = text.decode("utf-8", "replace")
     if not isinstance(text, str):
         return None
-    match = LINK_PATTERN.search(text)
-    if match is None:
-        return None
-    candidate = match.group(0)
-    if len(candidate) > MAX_LINK_CHARS:
+    candidate = _first_candidate(text)
+    if candidate is None or len(candidate) > MAX_LINK_CHARS:
         return None
     return candidate
+
+
+def _first_candidate(text: str) -> Optional[str]:
+    """A pattern match from the hyperlink targets first, then the visible text."""
+    for target in hyperlink_targets(text):
+        match = LINK_PATTERN.fullmatch(target) or LINK_PATTERN.search(target)
+        if match is not None:
+            return match.group(0)
+    match = LINK_PATTERN.search(strip_ansi(text))
+    return match.group(0) if match is not None else None
+
+
+def match_link_format(text: object) -> Optional[str]:
+    """What :func:`find_link` *would* return if the format were confirmed.
+
+    Exists only so the live spike and its tests can exercise the pattern without
+    the gate silently answering for it. **No production path calls this** — a
+    test asserts that — because a second way to get a link past the gate would
+    be the gate not existing.
+    """
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", "replace")
+    if not isinstance(text, str):
+        return None
+    candidate = _first_candidate(text)
+    return candidate if candidate is not None and len(candidate) <= MAX_LINK_CHARS else None
 
 
 class LinkScanner:
@@ -212,7 +294,10 @@ __all__ = [
     "REDACTION",
     "LinkScanner",
     "contains_link",
+    "hyperlink_targets",
     "find_link",
+    "match_link_format",
+    "strip_ansi",
     "redact",
     "redact_lines",
 ]
