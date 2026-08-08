@@ -27,7 +27,7 @@
 # entry point receives is byte-for-byte the project id in the configuration
 # file. A test asserts `%I` and `%f` never appear here.
 Description=Cofferdam Claude Remote Control host for project %i
-Documentation=file:docs/CLAUDE_CODE_ADAPTER.md
+Documentation=https://github.com/cofferdam/cofferdam/blob/main/docs/CLAUDE_CODE_ADAPTER.md
 
 # Bounded restart policy, in [Unit] where systemd actually reads it. The base
 # workstation unit carries the comment explaining why these two keys are worth

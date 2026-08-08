@@ -223,6 +223,52 @@ class ActionStore:
             }
         )
 
+    def record_remote_control_event(
+        self,
+        operation: str,
+        result: str,
+        project_id: Optional[str] = None,
+        unit: Optional[str] = None,
+        generation: Optional[str] = None,
+        state: Optional[str] = None,
+    ) -> None:
+        """Audit one native Remote Control lifecycle operation.
+
+        Narrower than :meth:`record_task_event`, and for a sharper reason. The
+        thing this lane handles that no other does is a **session URL**, which
+        is capability material: anyone holding it can reach a live interactive
+        agent inside a registered project. An action log is kept on disk, listed
+        in the PWA beside the volume changes, and read by whoever is debugging —
+        so a URL in it would be a credential in it.
+
+        There is therefore **no parameter that can carry one**. The signature
+        accepts six values and every one is either an id Cofferdam minted or a
+        word from a closed vocabulary: which operation, how it turned out, which
+        project, which unit, which process generation, and which lifecycle
+        state. ``url_available`` is not recorded either — whether a capability
+        exists is still information about that capability.
+
+        The generation id is safe here for the reason the task id is: minted
+        from a timestamp and randomness, derived from nothing about the session.
+        """
+        self.add(
+            {
+                "action_id": uuid.uuid4().hex,
+                "action": operation,
+                "status": "succeeded" if result in ("ok", "requested") else "failed",
+                "started_at": _utc_now(),
+                "finished_at": _utc_now(),
+                "params": {"project_id": project_id, "unit": unit},
+                "result": {
+                    "outcome": result,
+                    "generation": generation,
+                    "state": state,
+                },
+                "error": None if result in ("ok", "requested") else {"code": result},
+                "stub": False,
+            }
+        )
+
     def record_task_event(
         self,
         operation: str,

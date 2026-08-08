@@ -116,12 +116,37 @@ def provider(*projects: TaskProject):
     return lambda: registry
 
 
+class MemoryLinkStore:
+    """A LinkStore with the disk taken out.
+
+    The on-disk behaviour — atomic replace, owner-only mode, symlink refusal —
+    is tested directly against the real `LinkStore` in the state tests. Here the
+    supervisor only needs *some* store, and a real one would put a temporary
+    directory in every supervisor test for no added coverage.
+    """
+
+    def __init__(self, documents=None) -> None:
+        self.documents = dict(documents or {})
+        self.cleared: List[str] = []
+
+    def read(self, project_id: str):
+        return self.documents.get(project_id)
+
+    def write(self, project_id: str, **fields) -> None:
+        self.documents[project_id] = dict(fields, project_id=project_id)
+
+    def clear(self, project_id: str) -> None:
+        self.cleared.append(project_id)
+        self.documents.pop(project_id, None)
+
+
 def fixed_clock(value: str = "2026-08-08T00:00:00+00:00"):
     return lambda: value
 
 
 __all__ = [
     "FakeCompleted",
+    "MemoryLinkStore",
     "FakeRunner",
     "RaisingRunner",
     "fixed_clock",

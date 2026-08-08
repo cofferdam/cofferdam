@@ -33,6 +33,11 @@ CODE_BACKEND_REFUSED = "remote_control_backend_refused"
 
 CODE_EXECUTABLE_MISSING = "remote_control_executable_missing"
 
+# -- runtime state and links -------------------------------------------------
+
+CODE_STATE_UNAVAILABLE = "remote_control_state_unavailable"
+CODE_LINK_UNAVAILABLE = "remote_control_link_unavailable"
+
 
 class RemoteControlError(Exception):
     """A refusal a person should see, with a stable code to branch on."""
@@ -122,10 +127,46 @@ class ExecutableMissing(RemoteControlError):
         )
 
 
+class StateUnavailable(RemoteControlError):
+    """The runtime state directory or file could not be used safely.
+
+    Raised rather than swallowed for the *unsafe* cases — a symlinked path, an
+    unwritable directory — because a capability URL that cannot be stored
+    securely must not be stored insecurely instead.
+    """
+
+    def __init__(self, detail: Optional[str] = None) -> None:
+        super().__init__(
+            CODE_STATE_UNAVAILABLE,
+            "the Remote Control runtime state cannot be used right now",
+            detail or "the state directory is missing, unwritable or unsafe",
+        )
+
+
+class LinkUnavailable(RemoteControlError):
+    """There is no current Remote Control link for that project.
+
+    One code for every reason: never started, already stopped, started but the
+    link has not appeared yet, or the stored link belongs to an older
+    generation. Distinguishing them in the response would tell a caller which of
+    those states the host is in, and the honest answer to "give me the link" is
+    the same in all four — there isn't one.
+    """
+
+    def __init__(self, detail: Optional[str] = None) -> None:
+        super().__init__(
+            CODE_LINK_UNAVAILABLE,
+            "there is no current Remote Control link for that project",
+            detail or "start the host, or wait for it to report a session",
+        )
+
+
 __all__ = [
     "CODE_BACKEND_REFUSED",
     "CODE_BACKEND_UNAVAILABLE",
     "CODE_EXECUTABLE_MISSING",
+    "CODE_LINK_UNAVAILABLE",
+    "CODE_STATE_UNAVAILABLE",
     "CODE_NOT_ENABLED",
     "CODE_PROJECT_DISABLED",
     "CODE_PROJECT_ROOT_INVALID",
@@ -133,9 +174,11 @@ __all__ = [
     "BackendRefused",
     "BackendUnavailable",
     "ExecutableMissing",
+    "LinkUnavailable",
     "RemoteControlError",
     "RemoteControlNotEnabled",
     "SessionProjectDisabled",
     "SessionProjectUnknown",
     "SessionRootInvalid",
+    "StateUnavailable",
 ]

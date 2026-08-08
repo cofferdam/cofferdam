@@ -166,6 +166,18 @@ from .audio.actions import (
 from .audio.actions import REJECT_UNKNOWN_RESOURCE as REJECT_AUDIO_UNKNOWN_RESOURCE
 from .audio.models import AUDIO_RESOURCE_KINDS
 from .browser_selection import PRODUCT_DEFAULT_BROWSER
+from .sessions.errors import (
+    CODE_BACKEND_REFUSED,
+    CODE_BACKEND_UNAVAILABLE,
+    CODE_LINK_UNAVAILABLE,
+    CODE_NOT_ENABLED,
+    CODE_STATE_UNAVAILABLE,
+    RemoteControlError,
+)
+from .sessions.errors import CODE_PROJECT_DISABLED as CODE_RC_PROJECT_DISABLED
+from .sessions.errors import CODE_PROJECT_ROOT_INVALID as CODE_RC_ROOT_INVALID
+from .sessions.errors import CODE_PROJECT_UNKNOWN as CODE_RC_PROJECT_UNKNOWN
+from .sessions.supervisor import RemoteControlSupervisor
 from .spotifyplayer import AuthorizationRunner, SpotifyActionExecutor, SpotifyPlayerService
 from .spotifyplayer.coldstart import DeviceRecovery, SpotifyLauncher
 from .spotifyplayer.errors import (
@@ -430,6 +442,24 @@ MAX_TASK_BODY_BYTES = 32 * 1024
 # refuses. 422 is "the request itself was wrong", which is where every content
 # and identifier problem lands. A client can distinguish "try again later" from
 # "send something different" without reading the message.
+#: Remote Control refusal codes to HTTP status. Same shape as _TASK_STATUS.
+#:
+#: 404 for "no such project" so an unknown id is indistinguishable from one the
+#: caller may not use. 409 for states the world is in rather than the request
+#: being malformed — turned off, capability not granted, no live link. 503 when
+#: the machinery itself is unavailable, because that one is worth retrying and
+#: the others are not.
+_REMOTE_CONTROL_STATUS = {
+    CODE_RC_PROJECT_UNKNOWN: 404,
+    CODE_RC_PROJECT_DISABLED: 409,
+    CODE_RC_ROOT_INVALID: 409,
+    CODE_NOT_ENABLED: 409,
+    CODE_LINK_UNAVAILABLE: 409,
+    CODE_BACKEND_REFUSED: 502,
+    CODE_BACKEND_UNAVAILABLE: 503,
+    CODE_STATE_UNAVAILABLE: 503,
+}
+
 _TASK_STATUS = {
     CODE_TASK_UNKNOWN: 404,
     CODE_PROJECT_UNKNOWN: 404,
@@ -543,6 +573,16 @@ def create_app(
         # describes a process that no longer exists, and reporting it as running
         # would be the first lie the whole milestone exists to prevent.
         tasks.recover_after_restart()
+
+    # Native Remote Control (M2H, Lane A). Constructed unconditionally because
+    # it holds no process and starts nothing: every operation is refused unless
+    # the named project is registered, enabled, and — for start — has explicitly
+    # set `remote_control_enabled`. It shares the project registry with Task
+    # Core and nothing else; Lane B's task lifecycle is untouched by it.
+    remote_control = RemoteControlSupervisor(
+        lambda: tasks.projects,
+        config=config,
+    )
 
     executor = ActionExecutor(
         adapter, store, config, on_event=_on_event, media_search=media_search
@@ -1976,6 +2016,141 @@ def create_app(
     async def list_task_projects() -> Dict[str, Any]:
         """Where tasks may run, by name. **No filesystem path is published.**"""
         return tasks.projects.to_dict()
+
+    # -- native Remote Control (M2H, Lane A) ---------------------------------
+    #
+    # Four operations, all authenticated by the same device token as everything
+    # else, all taking a registered project id and nothing else. There is no
+    # parameter anywhere below for a path, a unit name, a systemctl verb, a
+    # Claude flag, a model or an executable — the project registry is the only
+    # thing that names a directory, and the argv is a constant in
+    # sessions/claude.py.
+    #
+    # These are private-client operations. The future Custom GPT Actions bridge
+    # (M2I.5) exposes a bounded, separately-chosen set of Actions and must never
+    # include these: handing a session URL to an external model provider would
+    # give it a live interactive agent on this workstation.
+
+    async def _run_remote_control(operation, *args, **kwargs) -> Any:
+        try:
+            return await run_in_threadpool(operation, *args, **kwargs)
+        except RemoteControlError as rejection:
+            raise ApiError(
+                code=rejection.code,
+                message=rejection.message,
+                status_code=_REMOTE_CONTROL_STATUS.get(rejection.code, 422),
+                detail=rejection.detail,
+            )
+
+    @app.get("/api/remote-control/{project_id}", dependencies=[Depends(require_token)])
+    async def get_remote_control(project_id: str) -> Dict[str, Any]:
+        """Lifecycle state for one project's native host. **Never the URL.**
+
+        ``url_available`` says whether a link exists; retrieving one is a
+        separate authenticated call, because this payload is polled, cached and
+        rendered, and a capability URL must be in none of those.
+        """
+        status = await _run_remote_control(remote_control.status, project_id)
+        return {"session": status.to_dict()}
+
+    @app.post("/api/remote-control/{project_id}/start", dependencies=[Depends(require_token)])
+    async def start_remote_control(project_id: str, request: Request) -> Dict[str, Any]:
+        """Bring the host up, or report that it already is.
+
+        Idempotent: a host that is already running is returned unchanged rather
+        than started twice — two Remote Control servers in one project directory
+        is not a harmless duplicate.
+        """
+        await _task_body(request, allowed=set())
+        store.record_remote_control_event(
+            "remote_control.start_requested", "requested", project_id=project_id
+        )
+        try:
+            status = await _run_remote_control(remote_control.start, project_id)
+        except ApiError as rejection:
+            store.record_remote_control_event(
+                "remote_control.start_failed", rejection.code, project_id=project_id
+            )
+            raise
+        store.record_remote_control_event(
+            "remote_control.start_succeeded",
+            "ok",
+            project_id=project_id,
+            unit=status.unit,
+            generation=status.generation,
+            state=status.state,
+        )
+        return {"session": status.to_dict()}
+
+    @app.post("/api/remote-control/{project_id}/stop", dependencies=[Depends(require_token)])
+    async def stop_remote_control(project_id: str, request: Request) -> Dict[str, Any]:
+        """Take the host down, or report that it is already down.
+
+        Deliberately does **not** require ``remote_control_enabled`` to still be
+        set: revoking the capability on a project whose host is running must not
+        strand a live agent with no supervised way to stop it.
+        """
+        await _task_body(request, allowed=set())
+        store.record_remote_control_event(
+            "remote_control.stop_requested", "requested", project_id=project_id
+        )
+        try:
+            status = await _run_remote_control(remote_control.stop, project_id)
+        except ApiError as rejection:
+            store.record_remote_control_event(
+                "remote_control.stop_failed", rejection.code, project_id=project_id
+            )
+            raise
+        store.record_remote_control_event(
+            "remote_control.stop_succeeded",
+            "ok",
+            project_id=project_id,
+            unit=status.unit,
+            state=status.state,
+        )
+        return {"session": status.to_dict()}
+
+    @app.get("/api/remote-control/{project_id}/link", dependencies=[Depends(require_token)])
+    async def get_remote_control_link(project_id: str) -> Dict[str, Any]:
+        """The current session URL. The only route that returns one.
+
+        Refuses whenever the link is not currently live — never started, host
+        stopped, link not yet reported, or a previous generation — and the
+        refusal is the same in all four cases, because "there isn't one" is the
+        honest answer to each and distinguishing them would describe the host's
+        internal state to whoever asked.
+
+        The audit line records that a link was retrieved and for which
+        generation. It cannot record the URL: ``record_remote_control_event``
+        has no parameter that accepts one.
+        """
+        payload = await _run_remote_control(remote_control.link, project_id)
+        store.record_remote_control_event(
+            "remote_control.link_retrieved",
+            "ok",
+            project_id=project_id,
+            generation=payload.get("generation"),
+        )
+        return {"link": payload}
+
+    # Two events named in the M2H PR2 plan are deliberately **not** emitted
+    # here, because emitting them would mean inventing the evidence:
+    #
+    # ``remote_control.url_discovered``
+    #     Gated on a confirmed capture format, and
+    #     :data:`~.sessions.links.LINK_FORMAT_CONFIRMED` is ``False``. The live
+    #     PTY spike never reached a session URL — the CLI stops at its own
+    #     consent prompt first — so there is nothing to announce, and an event
+    #     saying a URL was discovered would be the first lie in the chain.
+    #
+    # ``remote_control.process_exited``
+    #     The process that exits runs in ``cofferdam-rc@<project>.service``, a
+    #     different unit from this daemon, and nothing here observes its exit:
+    #     status is a poll, not a subscription. The honest options are to have
+    #     the host write its own audit record — a second writer into the action
+    #     store from another unit, which is a design decision, not a follow-up —
+    #     or to leave the exit where systemd already records it truthfully, in
+    #     the journal. This build does the latter.
 
     # -- live events ---------------------------------------------------------
 

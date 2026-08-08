@@ -120,7 +120,38 @@ class NativeSessionStatus:
     #: injected clock; ``None`` when the question could not be answered.
     last_seen_at: Optional[str] = None
 
-    #: Reserved for the URL-capture PR. Always ``None`` in this one.
+    #: The launch this status is about. ``None`` when nothing has been started
+    #: or the state was cleared. A link minted by a different generation is not
+    #: returned for this one, which is what makes a restart invalidate the old
+    #: URL structurally rather than by remembering to delete a file.
+    generation: Optional[str] = None
+
+    #: **Whether** a session link has been captured for this generation — never
+    #: the link itself. This is the field a status screen renders; the URL is a
+    #: separate authenticated retrieval, because a status payload is cached,
+    #: rendered, screenshotted and logged, and a capability URL must be in none
+    #: of those.
+    url_available: bool = False
+
+    #: Set only from an explicit, observed signal in the child's own output.
+    #: Never inferred from a unit being inactive or from a missing link — see
+    #: :data:`..wrapper.AUTH_FORMAT_CONFIRMED`, which is why this is always
+    #: ``False`` in this build.
+    auth_required: bool = False
+
+    #: The host is up and waiting for Remote Control to be enabled on this
+    #: machine, which is a question only a person at the keyboard can answer.
+    #:
+    #: Unlike :attr:`auth_required` this one *is* reachable in this build,
+    #: because the marker behind it was observed in real output during the M2H
+    #: PR2 PTY spike. It is the difference between "the process is running" and
+    #: "your phone can reach a session": with the prompt unanswered, systemd
+    #: reports a perfectly healthy unit that will never publish anything.
+    awaiting_consent: bool = False
+
+    #: **Never populated in a status payload.** The field stays on the dataclass
+    #: so the retrieval path has a typed place to put a link, and
+    #: :meth:`to_dict` drops it unconditionally.
     session_url: Optional[str] = None
 
     #: A short, bounded, already-redacted sentence. Never a journal dump.
@@ -130,7 +161,13 @@ class NativeSessionStatus:
         return self.state in LIVE_STATES
 
     def to_dict(self) -> Dict[str, Any]:
-        """The internal shape. Not wired to any route in this PR.
+        """The client-facing shape. **The session URL is not in it.**
+
+        Dropped unconditionally rather than conditionally: a status payload that
+        carries the link "only when the caller is allowed" is one refactor away
+        from carrying it always, and this response is cached, rendered and
+        screenshotted. ``url_available`` says whether a link exists;
+        ``GET …/link`` is the only thing that returns one.
 
         The project *root* is absent for the same reason it is absent from
         :meth:`..tasks.projects.TaskProject.to_dict`: a client chooses a project
@@ -143,9 +180,12 @@ class NativeSessionStatus:
             "state": self.state,
             "active_state": self.active_state,
             "sub_state": self.sub_state,
+            "generation": self.generation,
+            "url_available": self.url_available,
+            "auth_required": self.auth_required,
+            "awaiting_consent": self.awaiting_consent,
             "started_at": self.started_at,
             "last_seen_at": self.last_seen_at,
-            "session_url": self.session_url,
             "error": self.error,
         }
 

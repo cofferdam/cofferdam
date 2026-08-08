@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import re
 import io
 import unittest
 from pathlib import Path
@@ -44,6 +45,7 @@ from cofferdam.workstation.tasks.projects import TaskProject, _read_project
 from ._sessions_doubles import (
     FakeCompleted,
     FakeRunner,
+    MemoryLinkStore,
     RaisingRunner,
     fixed_clock,
     make_project,
@@ -83,10 +85,11 @@ def _string_literals(path: Path) -> List[str]:
     ]
 
 
-def _supervisor(runner, *projects, clock=None):
+def _supervisor(runner, *projects, clock=None, store=None):
     return RemoteControlSupervisor(
         provider(*projects),
         backend=SystemdUserBackend(runner),
+        store=store if store is not None else MemoryLinkStore(),
         clock=clock or fixed_clock(),
     )
 
@@ -691,13 +694,17 @@ class StateMappingTests(unittest.TestCase):
             with self.subTest(field=forbidden):
                 self.assertNotIn(forbidden, keys)
 
-    def test_session_url_is_reserved_and_always_absent(self) -> None:
+    def test_the_url_is_never_in_a_status_payload(self) -> None:
+        """The capability material has its own route and is not in this one."""
         runner = FakeRunner(
             replies=[FakeCompleted(0, show_output(active_state="active", sub_state="running"))]
         )
         status = SystemdUserBackend(runner).status("demo")
-        self.assertIn("session_url", status.to_dict())
-        self.assertIsNone(status.session_url)
+        payload = status.to_dict()
+        self.assertNotIn("session_url", payload)
+        self.assertNotIn("url", payload)
+        self.assertIn("url_available", payload)
+        self.assertFalse(payload["url_available"])
 
     def test_last_seen_at_is_stamped_only_by_the_supervisor(self) -> None:
         runner = FakeRunner()
@@ -799,8 +806,11 @@ class IdempotencyTests(unittest.TestCase):
 
 
 class _RecordingConfig:
+    """The two directories the entry point reads: the registry, and state."""
+
     def __init__(self, config_dir: Path) -> None:
         self.config_dir = config_dir
+        self.state_dir = config_dir / "state"
 
 
 class HostEntryPointTests(unittest.TestCase):
@@ -821,11 +831,19 @@ class HostEntryPointTests(unittest.TestCase):
     def logged(self) -> str:
         return self._stdout.getvalue()
 
-    def _exec(self, path, argv):
-        self.execs.append((path, list(argv)))
+    def _supervise(self, argv, *, cwd, on_link, on_auth_required, on_consent_required, log):
+        """Stands in for the real supervisor. Starts nothing.
 
-    def _chdir(self, path):
-        self.chdirs.append(path)
+        Records the argv and working directory the entry point decided on, and
+        exposes the link callback so a test can simulate the child reporting a
+        session without a child existing.
+        """
+        self.execs.append((argv[0], list(argv)))
+        self.chdirs.append(cwd)
+        self.on_link = on_link
+        self.on_auth_required = on_auth_required
+        self.on_consent_required = on_consent_required
+        return 0
 
     def _write_registry(self, tmp: Path, **entry) -> _RecordingConfig:
         import json
@@ -841,7 +859,7 @@ class HostEntryPointTests(unittest.TestCase):
 
     def _run(self, tmp: Path, argv, **entry) -> int:
         config = self._write_registry(tmp, **entry)
-        return host.main(argv, config=config, chdir=self._chdir, exec_fn=self._exec)
+        return host.main(argv, config=config, supervise=self._supervise)
 
     def test_it_takes_exactly_one_argument(self) -> None:
         import tempfile
@@ -1240,14 +1258,29 @@ class NoLiveEffectTests(unittest.TestCase):
         cls.package = REPO_ROOT / "cofferdam" / "workstation" / "sessions"
         cls.sources = sorted(cls.package.rglob("*.py"))
 
-    def test_the_package_uses_no_shell_and_no_subprocess(self) -> None:
+    def test_the_package_uses_no_shell(self) -> None:
         for path in self.sources:
             source = path.read_text(encoding="utf-8")
             with self.subTest(module=path.name):
                 self.assertNotIn("shell=True", source)
                 self.assertNotIn("os.system", source)
                 self.assertNotIn("os.popen", source)
-                self.assertNotIn("subprocess.", source)
+
+    def test_only_the_wrapper_touches_subprocess(self) -> None:
+        """Process control is one file, named here so a second one fails.
+
+        M2H PR2 needs to read the child's stdout to capture the session link, so
+        the package can no longer be subprocess-free the way PR1 was. It is
+        confined to `wrapper.py` instead: the supervisor, the model, the state
+        store and the systemd backend still cannot reach a process, and the
+        systemd backend still goes through the shared `run_fixed` helper.
+        """
+        offenders = [
+            path.name
+            for path in self.sources
+            if path.name != "wrapper.py" and "subprocess." in path.read_text(encoding="utf-8")
+        ]
+        self.assertEqual(offenders, [], "subprocess outside the wrapper: %s" % offenders)
 
     def test_the_package_never_names_the_system_scope(self) -> None:
         for path in self.sources:
@@ -1291,22 +1324,57 @@ class NoLiveEffectTests(unittest.TestCase):
                     self.assertNotIn("from ..%s import" % forbidden, source)
                     self.assertNotIn("import cofferdam.workstation.%s" % forbidden, source)
 
-    def test_no_module_is_wired_to_a_route(self) -> None:
-        """This PR adds no public surface; that is asserted, not just intended.
+    def test_every_remote_control_route_requires_authentication(self) -> None:
+        """PR1 asserted there were no routes. PR2 adds four, all authenticated.
 
-        The supervisor exists and is tested, and the live service does not know
-        it exists. Routes arrive in M2H PR2 together with the evidence that
-        makes them worth exposing.
+        Checked against the source rather than a live app so this runs on the
+        stdlib-only CI path: every `@app.<verb>("/api/remote-control...")`
+        decorator must carry `dependencies=[Depends(require_token)]`.
         """
         service = (REPO_ROOT / "cofferdam" / "workstation" / "service.py").read_text(
             encoding="utf-8"
         )
-        # Anchored on this package specifically: the unrelated
-        # `mediasearch.sessions` module has been imported here since M2B3A.1.
-        self.assertNotIn("from .sessions import", service)
-        self.assertNotIn("from cofferdam.workstation.sessions", service)
-        self.assertNotIn("RemoteControlSupervisor", service)
-        self.assertNotIn("remote_control", service)
+        decorators = re.findall(
+            r'@app\.(?:get|post|put|delete)\(\s*"(/api/remote-control[^"]*)"([^)]*)\)',
+            service,
+        )
+        self.assertEqual(
+            sorted(path for path, _ in decorators),
+            [
+                "/api/remote-control/{project_id}",
+                "/api/remote-control/{project_id}/link",
+                "/api/remote-control/{project_id}/start",
+                "/api/remote-control/{project_id}/stop",
+            ],
+        )
+        for path, rest in decorators:
+            with self.subTest(route=path):
+                self.assertIn("require_token", rest)
+
+    def test_no_route_takes_a_path_unit_or_flag_from_the_caller(self) -> None:
+        """The only path parameter is a project id."""
+        service = (REPO_ROOT / "cofferdam" / "workstation" / "service.py").read_text(
+            encoding="utf-8"
+        )
+        block = service[service.index("native Remote Control (M2H") :]
+        block = block[: block.index("-- live events")]
+        # Comments and docstrings explain what is *not* accepted; matching them
+        # would fail the explanation rather than the code.
+        block = "\n".join(
+            line for line in block.splitlines() if not line.strip().startswith("#")
+        )
+        for forbidden in (
+            "{unit}",
+            "{path}",
+            "{root}",
+            "permission_mode",
+            "bypassPermissions",
+            "executable",
+            "argv",
+            "systemctl",
+        ):
+            with self.subTest(token=forbidden):
+                self.assertNotIn(forbidden, block)
 
 
 if __name__ == "__main__":
