@@ -1,11 +1,19 @@
 # Status
 
-Accurate as of **2026-08-08** (M2F Agent Task Core and M2G the Claude Code adapter merged; the
-isolated Custom GPT Actions mobile probe passed; client architecture and the active roadmap
-recorded as [`DECISIONS.md`](DECISIONS.md) D-2026-08-08-1 … -6). Update this file when a category
-changes, not on every commit.
+Accurate as of **2026-08-09** (**M2H is complete and merged**, closing the M1 post-reboot gate;
+M2F Agent Task Core and M2G the Claude Code adapter merged; the isolated Custom GPT Actions mobile
+probe passed; client architecture and the active roadmap recorded as
+[`DECISIONS.md`](DECISIONS.md) D-2026-08-08-1 … -6). **M2I PR1 — the Claude Agent SDK foundation —
+is on a branch.** Update this file when a category changes, not on every commit.
 
 ## Merged (on `main`)
+
+- **M2H — supervised Claude Remote Control** (Lane A), PRs #23, #24, #25, #26 and #27, the last
+  squash-merged as `0818d25`. **Complete.** Per-project native Claude hosts as systemd user
+  service instances, a fail-closed link-capture boundary, the confirmed native URL format, the
+  Project Workstation card and secure open flow, and the cold-reboot validation that closes the
+  M1 post-reboot gate. Lane A reads no transcript and injects no prompt, permanently. Detail in
+  the milestone record below.
 
 - **M2G — Claude Code adapter** (PR #21, squash-merged as `267fae9`). The first adapter that runs
   a real program, on the M2F foundation: one long-lived `claude -p` process per task, a bounded
@@ -76,8 +84,8 @@ says "on branch, not merged" it is describing the moment it was written, correct
 each milestone *did not* do, and which validations are still outstanding, is still current and is
 why these records are kept rather than collapsed into one line.
 
-Nothing is in progress in this repository today. The queued work is M2H → M2I → M2I.5 → M2J; see
-[`ROADMAP.md`](ROADMAP.md).
+**M2I PR1 is in progress on a branch** — see the entry under *In progress* below. The queued work
+after it is the rest of M2I → M2I.5 → M2J; see [`ROADMAP.md`](ROADMAP.md).
 
 - **M2G — Claude Code adapter.** Merged as PR #21. The first
   adapter that runs a real program, built on the merged M2F foundation. A phone picks an approved
@@ -620,9 +628,74 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2I PR1 — the Claude Agent SDK foundation and structured session events
+
+On `feat/m2i-agent-sdk-foundation`. The first PR of Lane B's M2I: the official
+**Claude Agent SDK** as a second delegated-task transport, and the provider-neutral event
+vocabulary that makes a structured question channel possible. **Not deployed, off by default, and
+no live SDK call was made from this repository.**
+
+**Verified before anything was written.** The SDK contract was read from the published
+`claude-agent-sdk` distribution rather than recalled: distribution `claude-agent-sdk`, import
+`claude_agent_sdk`, version `0.2.134`, MIT, `Requires-Python >=3.10`; `ClaudeSDKClient` with
+`connect`/`query`/`receive_messages`/`interrupt`/`disconnect`; the `ClaudeAgentOptions` dataclass;
+the typed message and content-block families; and `can_use_tool` returning
+`PermissionResultAllow`/`PermissionResultDeny`. Three findings changed the design: the wheel is
+about 91 MB and bundles its own CLI (Cofferdam pins the host's instead), `can_use_tool` refuses a
+string prompt passed to `connect`, and `ClaudeAgentOptions.env` layers over the daemon's
+environment rather than replacing it — the one place this adapter is weaker than the CLI one, and
+it is stated rather than papered over.
+
+**A dependency boundary that means something.** `agent-sdk` is its own extra with a
+`python_version >= '3.10'` marker and a `<0.3` bound. Exactly one function imports the SDK, from
+inside adapter methods; importing Cofferdam, starting the daemon and running the entire suite
+never import it, and a source scan enforces that. A missing SDK, an old interpreter and an
+incompatible version each get a different, precise sentence. The whole event model, tool policy
+and adapter behaviour are tested without the dependency, so the stdlib-only CI job keeps its
+meaning.
+
+**Clarification and tool approval are separated at the storage layer.** Two dataclasses with
+disjoint required fields and disjoint serialized shapes; each refuses a payload carrying the
+other's fields even when the discriminator looks right; they map to different waiting reasons and
+project to visibly different history entries. A clarification may one day be answered from a phone
+or a Custom GPT; **a tool approval never will**. In this foundation the SDK's permission callback
+is a code-owned handler that denies and records, reading the tool's name and none of its input.
+
+**What it deliberately does not do.** Neither request moves the task into `waiting_for_user`: an
+approval is not a wait, because Cofferdam denied it and the agent carries on, and a clarification
+has no answer channel yet — parking a task there with nothing able to answer it would strand it,
+since `waiting_for_user → completed` is absent from the graph on purpose. There is no follow-up
+(the seam is preserved and the capability is not claimed), no `get_result` route, and no
+production change of any kind.
+
+**Cancellation and results.** Task Core stays the authority; cancellation reaches the SDK's own
+`interrupt()` on that task's client, with no signal, pid or name matching anywhere. A result that
+already arrived beats a later cancel; a result arriving after a cancellation is dropped by the
+event log's finality rule. A terminal event produces a provider-neutral result — bounded output or
+a failure category with a Cofferdam-worded summary, plus provider and session provenance — with no
+stack and no raw payload.
+
+**Storage.** The normalized events project onto Task Core's existing generic event storage. **No
+schema migration, no second table, no second database of delegated tasks.**
+
+**The Claude Code adapter is unchanged and remains the fallback.** Both adapters can be
+registered; they have different ids; enabling one never disables the other; a duplicate adapter id
+is now a start-up failure rather than a silent overwrite. The retirement rule in
+[`ROADMAP.md`](ROADMAP.md) is unchanged: the CLI adapter goes only after verified parity with the
+behaviours PR #21 validated live.
+
+**No production validation is claimed.** No Anthropic call, no model usage, no login, no network,
+no subprocess, no transcript, no live registry change, no service restart. Documented in
+[`docs/CLAUDE_AGENT_SDK_ADAPTER.md`](docs/CLAUDE_AGENT_SDK_ADAPTER.md).
+
+**Next:** M2I PR2 — the structured clarification-question round trip, answer provenance, and
+strict separation from local tool approvals.
+
+## Recently merged milestone records
+
 ### M2H PR4 — unattended recovery validated, and the Remote Control milestone closed
 
-On `feat/m2h-unattended-recovery`. **M2H is complete.** PR1 (#23), PR2 (#24), PR2.5 (#25) and
+Merged as PR #27 (`0818d25`). **M2H is complete.** PR1 (#23), PR2 (#24), PR2.5 (#25) and
 PR3 (#26) are merged; this is the validation that was always the point of them.
 
 **Cold reboot passed.** A real reboot, then the phone, then — much later — the desktop. Cofferdam
@@ -669,13 +742,12 @@ and a Remote Control host must still be started deliberately after every reboot.
 
 Queued, in order:
 
-- **M2H — supervised Claude Remote Control** (Lane A): per-project native hosts as systemd user
-  services, truthful health and authentication-expiry states, a native link in the PWA, reconnect
-  and restart behaviour, and the unattended-reboot validation that closes the M1 gate above.
 - **M2I — Claude Agent SDK adapter** (Lane B): structured `AskUserQuestion`, clarification
   questions kept apart from tool approvals, question and answer provenance, cancellation and
   restart parity, durable results and the `get_result` foundation. The merged CLI adapter is
-  retired only after verified parity.
+  retired only after verified parity. **PR1 — the SDK dependency boundary, the adapter foundation,
+  the normalized event vocabulary and the clarification/approval separation — is on a branch;** the
+  question round trip is PR2.
 - **M2I.5 — private Custom GPT Actions bridge:** a dedicated narrow process, scoped per-client
   credentials, a production transport decision, the ten bounded Actions, and real iPhone
   validation against Cofferdam. No approval Action; no exposure of the general API or the PWA.

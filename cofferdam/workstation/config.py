@@ -48,6 +48,7 @@ ENV_ADAPTER = "COFFERDAM_ADAPTER"
 ENV_TOKEN = "COFFERDAM_TOKEN"
 ENV_VALIDATION_TASK_ADAPTER = "COFFERDAM_ENABLE_VALIDATION_TASK_ADAPTER"
 ENV_CLAUDE_CODE_ADAPTER = "COFFERDAM_ENABLE_CLAUDE_CODE_ADAPTER"
+ENV_CLAUDE_AGENT_SDK_ADAPTER = "COFFERDAM_ENABLE_CLAUDE_AGENT_SDK_ADAPTER"
 
 #: Off, and it stays off unless somebody with access to this machine turns it
 #: on. The validation task adapter is a lifecycle exerciser for a validation
@@ -61,6 +62,14 @@ DEFAULT_ENABLE_VALIDATION_TASK_ADAPTER = False
 #: flag, a config key, or an environment variable in the unit — and by nothing
 #: a client can send. See ``docs/CLAUDE_CODE_ADAPTER.md``.
 DEFAULT_ENABLE_CLAUDE_CODE_ADAPTER = False
+
+#: Off, and a **separate** switch from the one above rather than a replacement
+#: for it. The Agent SDK adapter is a second transport to the same agent, and
+#: turning it on must not silently retire the one that was validated live from a
+#: phone against this host. A workstation may run neither, either, or both; a
+#: project still has to list an adapter before a task may use it. See
+#: ``docs/CLAUDE_AGENT_SDK_ADAPTER.md``.
+DEFAULT_ENABLE_CLAUDE_AGENT_SDK_ADAPTER = False
 
 
 @dataclass(frozen=True)
@@ -78,6 +87,9 @@ class Config:
     #: Server-side only, exactly like the field above and for stronger
     #: reasons. No route, header or request body reaches this.
     enable_claude_code_adapter: bool = DEFAULT_ENABLE_CLAUDE_CODE_ADAPTER
+    #: Server-side only. Independent of the field above: neither implies the
+    #: other, and neither turns the other off.
+    enable_claude_agent_sdk_adapter: bool = DEFAULT_ENABLE_CLAUDE_AGENT_SDK_ADAPTER
 
     @property
     def secrets_dir(self) -> Path:
@@ -228,6 +240,15 @@ def load_config(home: Optional[Path] = None) -> Config:
                 DEFAULT_ENABLE_CLAUDE_CODE_ADAPTER,
             ),
             DEFAULT_ENABLE_CLAUDE_CODE_ADAPTER,
+        ),
+        enable_claude_agent_sdk_adapter=_as_bool(
+            _pick(
+                ENV_CLAUDE_AGENT_SDK_ADAPTER,
+                overrides,
+                "enable_claude_agent_sdk_adapter",
+                DEFAULT_ENABLE_CLAUDE_AGENT_SDK_ADAPTER,
+            ),
+            DEFAULT_ENABLE_CLAUDE_AGENT_SDK_ADAPTER,
         ),
     )
 

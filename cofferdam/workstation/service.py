@@ -563,6 +563,7 @@ def create_app(
             build_task_adapters(
                 enable_validation_adapter=config.enable_validation_task_adapter,
                 enable_claude_code_adapter=config.enable_claude_code_adapter,
+                enable_claude_agent_sdk_adapter=config.enable_claude_agent_sdk_adapter,
             ),
             # The audit hook takes ids and outcome words only — see
             # store.record_task_event for why there is no content parameter.
