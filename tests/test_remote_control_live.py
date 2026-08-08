@@ -438,6 +438,55 @@ class WrapperSignalTests(unittest.TestCase):
 
                 time.sleep(0.05)
 
+    def test_a_requested_stop_reports_success_not_the_kill_status(self) -> None:
+        """The M2H PR2 live-spike regression, pinned.
+
+        A deliberate `systemctl stop` used to leave the unit `failed` with exit
+        137: the signal handler called `wait()` re-entrantly on a child the main
+        thread was already waiting on, which returned at once and escalated
+        straight to SIGKILL, and the kill status was then propagated as the
+        unit's exit code. With Restart=on-failure that is a lie that restarts
+        things nobody asked to restart.
+        """
+        import threading
+        import time
+
+        host = wrapper.SupervisedHost(
+            ["/bin/sh", "-c", "sleep 60"], cwd="/tmp", log=lambda message: None
+        )
+        result = {}
+        thread = threading.Thread(target=lambda: result.setdefault("code", host.run()))
+        thread.start()
+        for _ in range(100):
+            if host._process is not None:
+                break
+            time.sleep(0.02)
+        host.terminate()
+        thread.join(timeout=30)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result.get("code"), 0, "a requested stop is not a failure")
+
+    def test_terminate_does_not_block_the_caller(self) -> None:
+        """It runs in a signal handler; it must return promptly."""
+        import threading
+        import time
+
+        host = wrapper.SupervisedHost(
+            ["/bin/sh", "-c", "trap '' TERM; sleep 30"], cwd="/tmp", log=lambda m: None
+        )
+        thread = threading.Thread(target=host.run)
+        thread.start()
+        for _ in range(100):
+            if host._process is not None:
+                break
+            time.sleep(0.02)
+        started = time.monotonic()
+        host.terminate()
+        self.assertLess(time.monotonic() - started, 2.0, "terminate() blocked")
+        host._escalation.cancel()
+        host._process.kill()
+        thread.join(timeout=15)
+
     def test_a_real_child_link_is_captured_and_redacted(self) -> None:
         recorded = []
         retained = []

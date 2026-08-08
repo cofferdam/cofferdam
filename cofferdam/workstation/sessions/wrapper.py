@@ -113,6 +113,7 @@ class SupervisedHost:
         self._retained: List[str] = []
         self._auth_reported = False
         self._stopping = threading.Event()
+        self._escalation: Optional[threading.Timer] = None
 
     # -- output --------------------------------------------------------------
 
@@ -196,17 +197,37 @@ class SupervisedHost:
             status = self._process.wait()
         finally:
             self._restore_signal_handlers(previous)
+            if self._escalation is not None:
+                self._escalation.cancel()
             reader.join(timeout=5.0)
+
+        if self._stopping.is_set():
+            # We were asked to stop and we did. Reporting the child's kill
+            # status here would tell systemd that a deliberate `systemctl stop`
+            # failed — and with Restart=on-failure, a lie in that direction is
+            # one that restarts things nobody asked to restart.
+            self._log("the Remote Control host stopped on request")
+            return 0
 
         return _exit_status(status)
 
     def terminate(self) -> None:
-        """Forward a stop to the whole process group, then escalate once.
+        """Forward a stop to the whole process group, then escalate on a timer.
 
-        SIGTERM to the group, a bounded wait, SIGKILL to the group if it is
-        still there. The group rather than the pid is the point: Remote Control
-        spawns sessions, and terminating only the parent would leave them
-        running with nothing supervising them.
+        SIGTERM to the group, and a background timer that escalates to SIGKILL
+        only if the child is still there after the grace period. The group
+        rather than the pid is the point: Remote Control spawns sessions, and
+        terminating only the parent would leave them running with nothing
+        supervising them.
+
+        **This must not wait.** It is called from a signal handler, which runs
+        on the main thread — the same thread already blocked in
+        :meth:`run`'s ``wait()``. Calling ``wait()`` again from here is
+        re-entrant on the same child and returns immediately rather than
+        waiting, which made every deliberate stop escalate straight to SIGKILL:
+        the unit then exited 137 and systemd recorded ``failed`` for what was a
+        perfectly clean shutdown. Found by the M2H PR2 live spike, which is
+        exactly the class of thing a unit test with a fake process cannot show.
         """
         if self._process is None or self._stopping.is_set():
             return
@@ -214,16 +235,16 @@ class SupervisedHost:
 
         group = _process_group(self._process)
         _signal_group(group, self._process, signal.SIGTERM)
-        try:
-            self._process.wait(timeout=TERM_GRACE_SECONDS)
-            return
-        except subprocess.TimeoutExpired:
-            pass
-        except Exception:  # pragma: no cover - defensive
-            return
 
-        self._log("the host did not stop in time; killing its process group")
-        _signal_group(group, self._process, signal.SIGKILL)
+        def escalate() -> None:
+            if self._process is not None and self._process.poll() is None:
+                self._log("the host did not stop in time; killing its process group")
+                _signal_group(group, self._process, signal.SIGKILL)
+
+        timer = threading.Timer(TERM_GRACE_SECONDS, escalate)
+        timer.daemon = True
+        timer.start()
+        self._escalation = timer
 
     # -- signals -------------------------------------------------------------
 
