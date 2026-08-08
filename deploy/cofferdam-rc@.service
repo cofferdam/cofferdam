@@ -1,0 +1,155 @@
+[Unit]
+# Cofferdam native Claude Remote Control host — systemd **user** template.
+#
+# STAGED, NOT INSTALLED. This file lives in the repository. Nothing in M2H PR1
+# copies it into ~/.config/systemd/user/, enables it, or starts an instance, and
+# the supervisor that knows how to talk to it is not wired to any route yet.
+# Installing it is a later, deliberate step with its own live checklist.
+#
+# One instance per registered project:
+#
+#   systemctl --user start cofferdam-rc@<project-id>.service
+#
+# The instance is a PROJECT IDENTIFIER, never a path. `%i` is expanded into the
+# argument list below and reaches
+# cofferdam/workstation/sessions/host.py, which refuses anything the host's own
+# project registry does not already accept — lowercase letters, digits, dash and
+# underscore, bounded, non-empty. `../../tmp`, `/home/someone/project`, a name
+# with whitespace or a shell metacharacter, and the empty string are all
+# rejected before a directory is ever named.
+#
+# %i and NOT %I or %f — this is load-bearing
+# -------------------------------------------
+# systemd treats `-` in an instance name as an encoded `/` when a unit expands
+# `%I` (unescaped instance) or `%f` (unescaped instance as a path). A perfectly
+# ordinary project id like `my-project` would therefore unescape to
+# `my/project`. This template uses the RAW `%i` everywhere, so the string the
+# entry point receives is byte-for-byte the project id in the configuration
+# file. A test asserts `%I` and `%f` never appear here.
+Description=Cofferdam Claude Remote Control host for project %i
+Documentation=file:docs/CLAUDE_CODE_ADAPTER.md
+
+# Bounded restart policy, in [Unit] where systemd actually reads it. The base
+# workstation unit carries the comment explaining why these two keys are worth
+# stating explicitly: under [Service] they are ignored with only a warning, so a
+# rate limit can look configured while doing nothing.
+#
+# Three attempts in five minutes. Lower than the daemon's ten because the
+# failure this bounds is different: a Remote Control host that cannot start is
+# usually an expired login or an unaccepted workspace-trust dialog, and neither
+# is fixed by trying again. Respawning into the same refusal would burn CPU and
+# fill the journal while the actual fix waits for a person.
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+
+# The entry point is Cofferdam's own module, not the Claude binary. It resolves
+# %i through the project registry, requires that project to have opted in with
+# `remote_control_enabled`, re-verifies the root directory, and only then
+# replaces itself (execv) with the fixed `claude remote-control` command.
+#
+# ExecStart is a plain argv list: no shell, no `sh -c`, no interpolation beyond
+# systemd's own %h and %i specifiers. `%i` is a separate argument rather than
+# part of a string, so it cannot become a second word however it is spelled.
+#
+# %h, never a hardcoded /home/<user>, and never a feature-worktree path: this
+# points at the same runtime slot the workstation daemon runs from.
+ExecStart=%h/cofferdam/slots/a/.venv/bin/python -m cofferdam.workstation.sessions.host %i
+
+# DEPLOYMENT CONTRACT: `%h/cofferdam/slots/a` is the active A/B runtime slot.
+#
+# Not a machine-local accident and not a feature worktree. The slot layout is
+# declared in DESIGN.md ("slots/a  slots/b  # runtime checkouts"), the install
+# guide clones the repository into `~/cofferdam/slots/a` and builds `.venv`
+# there, and docs/SERVICE_LIFECYCLE.md documents the installed unit's ExecStart
+# pointing at it. The base `cofferdam-workstation.service` uses exactly this
+# WorkingDirectory and exactly this interpreter, and a static test asserts the
+# two units agree — so an A/B slot switch moves the daemon and its Remote
+# Control hosts together instead of leaving them on different builds.
+#
+# Import resolution does NOT depend on this directory. The package is installed
+# into the slot's own `.venv` (editable in the documented setup, and correct
+# from a plain wheel since `cofferdam.workstation.sessions` and
+# `cofferdam.workstation.tasks` are declared in pyproject.toml — they were not,
+# which is what this follow-up fixed). WorkingDirectory is here for slot
+# consistency, not to make `-m` work.
+#
+# The SESSION's directory is a different thing entirely and is deliberately not
+# set here: the entry point chdirs to the registered project root after
+# re-verifying it against the registry. A WorkingDirectory naming a project in
+# this file would be a second, unvalidated source of truth for where an
+# interactive agent runs, and the one in the registry is the one that was
+# checked for symlinks moments before the exec.
+WorkingDirectory=%h/cofferdam/slots/a
+
+Environment=COFFERDAM_HOME=%h/cofferdam
+
+# No EnvironmentFile. The base daemon unit reads one because it needs a bind
+# address; this one needs nothing configurable, and an EnvironmentFile here
+# would be a caller-supplied environment channel into a process that runs an
+# interactive agent. If a future setting genuinely needs to reach this unit, it
+# belongs in the host-owned project registry, not in a file whose path could be
+# overridden by a drop-in.
+
+Restart=on-failure
+RestartSec=10
+
+# Logs go to the journal:
+#   journalctl --user -u cofferdam-rc@<project-id> -f
+# The entry point writes a handful of bounded lines — a start line and, on
+# refusal, one sentence. It never logs an environment, a credential, a path or
+# anything read from a session.
+StandardOutput=journal
+StandardError=journal
+
+# Shutdown. `mixed` sends SIGTERM to the main process only, then SIGKILL to
+# everything left in the cgroup if the timeout expires: Claude gets a chance to
+# close its own session cleanly, while any child it spawned is still guaranteed
+# to be cleaned up rather than reparented and left running.
+#
+# 30 seconds is a real bound, not politeness. A Remote Control host that has not
+# exited by then is not going to.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Modest hardening, matching the daemon unit and deliberately going no further.
+#
+# There is no ProtectHome, no PrivateTmp=yes, no ProtectSystem=strict and no
+# IPAddressDeny here, and each omission is a decision:
+#
+#   * HOME must stay readable and writable. The CLI authenticates with a
+#     claude.ai subscription login whose credentials live under the user's home
+#     directory. Cofferdam does not read them, does not know their format and
+#     does not name their path — it grants reachability and lets the product do
+#     its own thing. ProtectHome would break login with an error nobody could
+#     act on.
+#   * Outbound network must stay available. Remote Control is a persistent
+#     connection to claude.ai; sandboxing the network turns this unit into a
+#     host that starts, reports active, and can never be reached from a phone —
+#     which is precisely the confidently-wrong state this milestone exists to
+#     avoid.
+#   * Registered project roots must stay writable. The person driving the
+#     session from their phone is there to change files.
+#
+# NoNewPrivileges stays on: it costs nothing here because this unit starts a
+# CLI, not a confined snap. (The daemon unit carries the long note about why
+# graphical applications are NOT started as its children for exactly that
+# reason.)
+NoNewPrivileges=yes
+PrivateTmp=no
+
+# No [Install] section, on purpose.
+#
+# A templated unit with WantedBy=default.target would need an explicit
+# `systemctl --user enable cofferdam-rc@<project-id>` per project anyway, and
+# leaving the section out means there is no way to enable this by accident and
+# no possibility of every registered project acquiring a boot-time Remote
+# Control host because somebody ran a broad enable.
+#
+# Unattended start-at-boot is NOT configured and NOT validated by this file
+# existing. The M1 post-reboot gate stays open until the live checklist proves
+# linger behaviour, a cold reboot, service recovery, host recovery, truthful
+# auth-failure reporting, and phone reachability without walking to the machine.

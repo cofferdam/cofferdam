@@ -615,6 +615,41 @@ logic; the gate stays open and unaffected, and no M2A document may describe M1 a
 bind logic. Neither does M2B3A, M2B3A.1, M2C, M2D, M2E, M2F, or M2G. **M2H does**, which is why
 the gate closes there.
 
+## In progress (on a branch, not merged)
+
+### M2H PR1 — supervised Remote Control session foundation
+
+On `feat/m2h-remote-control-foundation`. **M2H is not complete and this PR does not close the M1
+reboot gate.** It is the first of several, and it is deliberately a foundation with no user-visible
+surface at all.
+
+**What exists after it:** a native-session model (`cofferdam/workstation/sessions/`) with six
+lifecycle states derived only from systemd's `ActiveState`, and no field that could hold
+conversation content; a supervisor with start/stop/status, a capability gate and idempotent start;
+a systemd backend that speaks three fixed `systemctl --user` commands through an injectable
+runner; an explicit per-project `remote_control_enabled` flag in the host-owned project registry,
+off by default and off for every record written before it existed; a Cofferdam-owned host entry
+point; a staged `deploy/cofferdam-rc@.service` template; and 96 stdlib-only tests.
+
+**What is NOT verified, and must not be read as working:**
+
+- **The real Remote Control process has never been launched by this code.** No automated test
+  starts one, and the entry point's `execv` path has not run against the live product. The CLI
+  additionally documents two preconditions this PR does not handle — a logged-in subscription and
+  a workspace-trust dialog accepted by running `claude` in the directory once — either of which
+  will fail a first live start.
+- **Session URL capture does not exist.** `session_url` is a reserved field and is always `None`.
+- **Authentication state is not observable.** Nothing here can tell a logged-out host from a
+  working one; both report `running` while the unit is active, and that is the honest limit of
+  process supervision.
+- **No PWA integration and no routes.** The supervisor is not reachable from the service, and a
+  test asserts it stays that way until PR2.
+- **Unattended reboot recovery is not validated.** The unit template existing is not evidence. The
+  template ships with no `[Install]` section, is not installed and is not enabled.
+
+Next: **M2H PR2 — real-host Remote Control spike, URL capture boundary, truthful health/auth
+states and daemon read/control routes.**
+
 ## Planned (active roadmap — see [`ROADMAP.md`](ROADMAP.md))
 
 Queued, in order:
