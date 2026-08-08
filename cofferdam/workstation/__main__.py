@@ -145,6 +145,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "that folder. Off unless this flag is given."
         ),
     )
+    parser.add_argument(
+        "--enable-claude-agent-sdk-adapter",
+        action="store_true",
+        help=(
+            "register the Claude Agent SDK task adapter. It runs Claude through "
+            "the official Agent SDK inside a project from the host's project "
+            "registry, with the same tool profile and no shell. It does not "
+            "replace the Claude Code adapter; both may be enabled. Needs the "
+            "'agent-sdk' extra installed. Off unless this flag is given."
+        ),
+    )
     args = parser.parse_args(argv)
 
     config = load_config()
@@ -165,6 +176,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # Same one-directional rule as above, for the same reason.
         config = type(config)(
             **{**config.__dict__, "enable_claude_code_adapter": True}
+        )
+    if args.enable_claude_agent_sdk_adapter:
+        # Same one-directional rule again, and note what it does *not* do: it
+        # never clears `enable_claude_code_adapter`. Two Claude transports can
+        # be registered at once, and choosing the newer one is a per-project
+        # decision in the host's registry, not a side effect of a flag.
+        config = type(config)(
+            **{**config.__dict__, "enable_claude_agent_sdk_adapter": True}
         )
     config.ensure_dirs()
 
@@ -198,6 +217,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "[cofferdam] the Claude Code task adapter is enabled. Tasks can run "
             "Claude Code inside projects listed in task-projects.json, where it "
             "can read and edit files. It has no shell.",
+            file=sys.stderr,
+        )
+
+    if config.enable_claude_agent_sdk_adapter:
+        # Announced on every start, like the two above. This one also says what
+        # it did *not* do, because "I enabled the new adapter" and "the old one
+        # is gone" are easy to conflate and only one of them is true.
+        print(
+            "[cofferdam] the Claude Agent SDK task adapter is enabled. It runs "
+            "Claude through the official Agent SDK in projects listed in "
+            "task-projects.json, with no shell. The Claude Code adapter is "
+            "unaffected by this flag.",
             file=sys.stderr,
         )
 

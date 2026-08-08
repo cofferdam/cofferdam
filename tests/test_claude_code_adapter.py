@@ -97,15 +97,25 @@ class Enablement(unittest.TestCase):
     def test_build_registry_takes_no_client_shaped_argument(self):
         """2. There is no parameter a request could ride in on.
 
-        ``build_registry`` accepts two booleans and nothing else: no path, no
-        class, no module name, no mapping. A client that could pass *anything*
-        here would still not be able to name what runs.
+        ``build_registry`` accepts booleans and nothing else: no path, no class,
+        no module name, no mapping. A client that could pass *anything* here
+        would still not be able to name what runs.
+
+        The list grew by one in M2I when the Agent SDK adapter gained its own
+        switch. That is the shape this test is protecting — one boolean per
+        opt-in adapter — so the addition is recorded rather than the assertion
+        loosened to "all of them are booleans".
         """
         import inspect
 
         parameters = inspect.signature(build_registry).parameters
         self.assertEqual(
-            sorted(parameters), ["enable_claude_code_adapter", "enable_validation_adapter"]
+            sorted(parameters),
+            [
+                "enable_claude_agent_sdk_adapter",
+                "enable_claude_code_adapter",
+                "enable_validation_adapter",
+            ],
         )
         for parameter in parameters.values():
             self.assertIsInstance(parameter.default, bool)
@@ -2396,10 +2406,19 @@ class Pwa(unittest.TestCase):
 
 class LayerBoundary(unittest.TestCase):
     def test_task_core_imports_nothing_from_this_package(self):
-        """The architecture rule, asserted rather than trusted."""
+        """The architecture rule, asserted rather than trusted.
+
+        The exclusion is ``adapters/`` as a whole, not this package plus the
+        registry file. It was written that way when ``adapters/`` held one vendor
+        subpackage; M2I added a second (``claude_agent_sdk``), which of course
+        names Claude in its own source. Adapters are where integration names
+        belong — the sibling guard in ``test_task_core.py`` says so in exactly
+        those words — and the property that matters is unchanged: **nothing in
+        Task Core outside ``adapters/`` may name a vendor.**
+        """
         tasks = REPO_ROOT / "cofferdam" / "workstation" / "tasks"
         for path in sorted(tasks.rglob("*.py")):
-            if "claude_code" in path.parts or path.parent.name == "adapters":
+            if "adapters" in path.parts:
                 continue
             source = python_code_only(path.read_text("utf-8"))
             self.assertNotIn("claude", source.lower(), str(path) + " names claude")
