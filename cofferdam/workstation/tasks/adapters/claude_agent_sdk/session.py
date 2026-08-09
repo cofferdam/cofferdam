@@ -8,77 +8,99 @@ somebody looks at a task. Something has to sit between those two shapes.
 This module is that something, and it is deliberately two things rather than one:
 
 :class:`DelegatedSession`
-    The boundary. A small synchronous surface — start, drain, cancel, close —
-    with no SDK anywhere in it. The adapter is written against *this*, so every
-    behaviour worth testing (ordering, cancellation precedence, terminal
-    finality, resource release) can be tested with a double on a machine where
-    the SDK is not installed.
+    The boundary. A small synchronous surface — start, drain, answer, cancel,
+    close — with no SDK anywhere in it. Everything above is written against
+    *this*, so every behaviour worth testing (ordering, cancellation precedence,
+    terminal finality, answer routing, resource release) can be tested with a
+    double on a machine where the SDK is not installed.
 
 :class:`SdkSession`
     The real implementation. It owns one thread, that thread owns one event
-    loop, and the loop owns one ``ClaudeSDKClient``. Nothing else in Cofferdam
-    creates a task, a loop or a thread for this.
+    loop, and the loop owns one ``ClaudeSDKClient``. **It runs inside the helper
+    process**, never in the daemon — see :mod:`.hostenv` for why — so nothing in
+    this file is imported by an ordinary Cofferdam start-up.
 
 The rules the implementation is written to
 ------------------------------------------
 
 **One session per task, and no way to reach another.** The client is held on the
-instance, found by the task that owns it. There is no registry to look one up
-in, no identifier a caller passes, and therefore no argument that could point a
-cancel at somebody else's session.
+instance. There is no registry to look one up in, no identifier a caller passes,
+and therefore no argument that could point a cancel or an answer at somebody
+else's session.
 
 **Bounded everything.** One thread, one loop, one bounded event buffer that drops
-its oldest entries rather than growing. A session that produced ten thousand
-events uses the same memory as one that produced two hundred.
+its oldest entries rather than growing, one pending question at a time.
 
-**Cancellation reaches the SDK, and cannot be faked.** ``request_cancel`` calls
-the SDK's own ``interrupt`` on the loop that owns the client, then closes the
-connection. If it does not work, this class says so — nothing here reports a
-session as stopped because stopping it was requested.
+**Cancellation reaches the SDK, and cannot be faked.** ``request_cancel`` wakes
+any blocked question, calls the SDK's own ``interrupt`` on the loop that owns the
+client, then closes the connection. If it does not work, this class says so.
 
 **A terminal event ends the iteration.** Once the session has produced a result,
-the reader stops, the client disconnects and the thread exits. That is what keeps
-"no unbounded background task" true rather than intended, and it is why this
-foundation does not offer same-session follow-up: keeping the session alive for
-another turn is a different lifetime with different failure modes, and it belongs
-to the PR that also builds the answer channel. The *seam* is here — the provider
-session id is preserved and :meth:`DelegatedSession.send_followup` exists and
-refuses truthfully — so that PR changes this file rather than the adapter above
-it.
+the reader stops, the client disconnects and the thread exits.
+
+How a question is asked, and how it is answered
+-----------------------------------------------
+
+This is the part M2I PR2 adds, and the mechanism was chosen from what the SDK
+source actually proves rather than from what would be convenient.
+
+A question arrives through ``can_use_tool``. Two facts from the published 0.2.134
+source make that the right place. Control requests are dispatched with
+``spawn_detached``, so a callback that takes its time **does not block the read
+loop** — messages keep arriving and ``interrupt`` still lands. And the callback is
+handed the tool's ``input`` and may still refuse, so the question can be *read*
+without the tool being *run*.
+
+The answer is delivered as the ``message`` of a ``PermissionResultDeny``. That
+choice is deliberate and it is the conservative one:
+
+* it uses only typed, documented API — the SDK turns it into
+  ``{"behavior": "deny", "message": …}``, which is verified in ``query.py``;
+* it grants nothing. The question tool never executes, so there is no
+  unverified interactive path being relied on inside a headless session;
+* the session is unchanged — same client, same process, same provider session id
+  — so continuation is a property of not having torn anything down, rather than
+  a resume this build would have to prove.
+
+What is *not* claimed: that allowing the tool with an updated input would also
+work. It might; it is unverified, it is unused, and there is no code here that
+does it.
 
 Two things the permission handler will never do
 -----------------------------------------------
 
-It never allows. The callback Cofferdam installs returns a deny, always, and
-records that the agent asked — which turns a permission request into a task
-waiting for a person at the workstation rather than an automatic yes from a
-phone.
+It never allows. Every branch returns a deny — with a person's answer when there
+is one, with a refusal sentence when there is not.
 
-It never reads the tool input. The callback is handed the command, the path and
-the arguments the agent wanted to use, and the handler takes the tool's *name*
-and nothing else. Those arguments are exactly the material that makes approvals
-worth keeping on a trusted surface; copying them into an event a phone renders
-would give away the thing the arrangement protects.
+It never puts tool input into a durable event. For an ordinary tool the handler
+reads the *name* and nothing else. For a question tool it reads the input through
+:mod:`.question`, which returns bounded sanitized question text and Cofferdam's
+own option identifiers — and, when it cannot read the shape, returns names and
+type names and no values at all.
 """
 
 from __future__ import annotations
 
 import asyncio
+import secrets
 import threading
 from collections import deque
 from pathlib import Path
-from typing import Any, Callable, Deque, List, Optional
+from typing import Any, Callable, Deque, List, Optional, Tuple
 
 from ....runtime.identity import now_iso
 from ...delegated import (
+    KIND_ACTIVITY,
     KIND_CANCELLATION_REQUESTED,
     KIND_CANCELLED,
     KIND_PROVIDER_FAILED,
     DelegatedEvent,
     build_event,
     safe_line,
+    safe_text,
 )
-from . import normalize, options as option_policy, sdk as sdk_boundary
+from . import normalize, options as option_policy, question as question_reader
+from . import sdk as sdk_boundary
 
 #: How long a start waits for the SDK to connect and accept the prompt. Generous,
 #: because a first connect starts a CLI subprocess; bounded, because a start that
@@ -93,10 +115,32 @@ CANCEL_TIMEOUT_SECONDS = 15.0
 #: disconnect before this class stops waiting and says so.
 CLOSE_TIMEOUT_SECONDS = 20.0
 
+#: How long the permission callback holds a question open waiting for a person.
+#:
+#: Twenty minutes, and the number is a judgement rather than a limit somebody
+#: measured. A question asked from a workstation and answered from a phone has to
+#: survive somebody putting the phone down; a question nobody has answered in
+#: twenty minutes is one where an agent holding a subscription session open is
+#: costing more than the answer is worth. When it expires the question is
+#: declined truthfully — the agent is told nobody answered — rather than answered
+#: with a guess.
+QUESTION_TIMEOUT_SECONDS = 20 * 60.0
+
 #: The most normalized events one session buffers between drains. Oldest are
 #: dropped, because the newest activity is what somebody looking at a phone
 #: wants and an unbounded buffer is a memory leak with a nice name.
 MAX_BUFFERED_EVENTS = 500
+
+#: How many questions one session will ask before it stops being read as a
+#: conversation and starts being read as a loop. A turn that has asked this many
+#: has not earned another.
+MAX_QUESTIONS_PER_SESSION = 8
+
+#: The prefix of the token this session gives a question so that an answer can be
+#: routed back to it. Distinct from Task Core's own ``q_`` question id: the two
+#: namespaces are separate on purpose, so a value from one can never be used as a
+#: value in the other.
+QUESTION_TOKEN_PREFIX = "ask_"
 
 
 class SessionRefused(RuntimeError):
@@ -109,6 +153,11 @@ class SessionRefused(RuntimeError):
     """
 
 
+def new_question_token() -> str:
+    """A token this session uses to recognise the answer to its own question."""
+    return QUESTION_TOKEN_PREFIX + secrets.token_hex(8)
+
+
 class DelegatedSession:
     """The synchronous surface an adapter is written against.
 
@@ -119,8 +168,8 @@ class DelegatedSession:
     """
 
     #: The provider's own session identifier, once it has reported one. Preserved
-    #: so a later PR can resume the same conversation, and so a durable result
-    #: can say which session produced it.
+    #: so an answer can be verified against the session that asked, and so a
+    #: durable result can say which session produced it.
     provider_session_id: Optional[str] = None
 
     def start(self, prompt: str) -> None:
@@ -130,14 +179,31 @@ class DelegatedSession:
         """Every normalized event since the last drain. Never blocks."""
         return []
 
+    @property
+    def pending_question_token(self) -> Optional[str]:
+        """The token of the question this session is waiting on, if any."""
+        return None
+
+    def submit_answer(self, token: str, answer: str) -> bool:
+        """Deliver one answer to the question identified by ``token``.
+
+        ``True`` only when this session was actually waiting on that token. A
+        mismatched token is ``False`` rather than an exception, because the
+        caller's correct response is the same either way — refuse the answer —
+        and because an answer arriving a moment after a question was superseded
+        is an ordinary race rather than a fault.
+        """
+        raise SessionRefused("this session cannot take an answer")
+
     def send_followup(self, followup: str) -> None:
         """Deliver another user turn to the same session.
 
-        Refused in this foundation, and refused rather than silently accepted:
-        the session ends at its first terminal event here, so a follow-up would
-        have nowhere to go and a client told "ok" would be told something false.
-        The seam exists so M2I PR2 changes this method rather than the shape of
-        everything above it.
+        Distinct from :meth:`submit_answer`: a follow-up is a new instruction to
+        a session that is waiting for nothing, while an answer resolves a
+        question the agent is blocked on. They are separate methods because they
+        reach the provider through entirely different channels, and a single
+        method would have to decide which — from state, at the worst possible
+        moment.
         """
         raise SessionRefused(
             "same-session follow-up is not implemented by this adapter yet"
@@ -160,13 +226,32 @@ class DelegatedSession:
         return not self.finished
 
 
+class _PendingQuestion:
+    """One question the session is holding open, and the answer slot for it.
+
+    The event is an :class:`asyncio.Event` rather than a threading one, and that
+    is not a style choice: the callback awaiting it runs on the SDK's event loop,
+    and a thread primitive awaited there would block the loop that has to deliver
+    the interrupt this design relies on. Everything from another thread reaches it
+    through ``call_soon_threadsafe``.
+    """
+
+    __slots__ = ("token", "event", "answer", "cancelled")
+
+    def __init__(self, token: str, event: "asyncio.Event") -> None:
+        self.token = token
+        self.event = event
+        self.answer: Optional[str] = None
+        self.cancelled = False
+
+
 class SdkSession(DelegatedSession):
     """One Claude Agent SDK session, driven from a dedicated thread.
 
-    Constructed by the adapter with values the adapter resolved: a task id it
-    minted, a project root the server verified, and an executable found by the
-    fixed search in the Claude Code adapter's ``cli`` module. Nothing here takes
-    a parameter that could carry a request value.
+    Constructed by the helper process with values it was launched with: a task id
+    Task Core minted, a project root the server verified, and an executable found
+    by the fixed search in the Claude Code adapter's ``cli`` module. Nothing here
+    takes a parameter that could carry a request value.
     """
 
     def __init__(
@@ -193,10 +278,12 @@ class SdkSession(DelegatedSession):
         self._stopped = threading.Event()
         self._cancel_requested = False
         self._start_error: Optional[str] = None
+        self._pending: Optional[_PendingQuestion] = None
+        self._questions_asked = 0
         #: Sequence numbers for events this class mints itself — a cancellation
-        #: notice, a transport failure. Counted separately from the normalizer's
-        #: so a Cofferdam-authored event can never be mistaken for one the
-        #: provider sent.
+        #: notice, a transport failure, a clarification. Counted separately from
+        #: the normalizer's so a Cofferdam-authored event can never be mistaken
+        #: for one the provider sent.
         self._local_sequence = 0
 
     # -- reading -------------------------------------------------------------
@@ -212,6 +299,11 @@ class SdkSession(DelegatedSession):
     @property
     def cancel_requested(self) -> bool:
         return self._cancel_requested
+
+    @property
+    def pending_question_token(self) -> Optional[str]:  # type: ignore[override]
+        with self._lock:
+            return self._pending.token if self._pending is not None else None
 
     def drain(self) -> List[DelegatedEvent]:
         with self._lock:
@@ -255,6 +347,32 @@ class SdkSession(DelegatedSession):
             self.close()
             raise SessionRefused(self._start_error)
 
+    def submit_answer(self, token: str, answer: str) -> bool:
+        """Wake the blocked permission callback with one person's answer.
+
+        Checked against the token the session itself minted, so an answer can
+        only resolve the question it was written for. Two answers to one question
+        cannot both land: the first clears the pending slot, and the second finds
+        nothing to match.
+        """
+        if not isinstance(token, str) or not isinstance(answer, str) or not answer:
+            return False
+        loop = self._loop
+        with self._lock:
+            pending = self._pending
+            if pending is None or pending.token != token or pending.cancelled:
+                return False
+            if pending.answer is not None:
+                return False
+            pending.answer = answer
+        if loop is None:  # pragma: no cover - the loop is gone with the session
+            return False
+        try:
+            loop.call_soon_threadsafe(pending.event.set)
+        except RuntimeError:  # pragma: no cover - loop already closed
+            return False
+        return True
+
     def request_cancel(self) -> bool:
         """Interrupt this session, and only this one.
 
@@ -263,13 +381,15 @@ class SdkSession(DelegatedSession):
         this method — which is what makes "cancel cannot reach another task"
         structural rather than checked.
 
-        Repeated cancellation is truthful: the second call records nothing new
-        and returns whether the session is actually stopping, so a caller cannot
-        be told a fresh cancellation happened when it did not.
+        A question being held open is released first. A callback still awaiting
+        an answer would otherwise sit there until its timeout while the session
+        around it was being torn down, and the agent would be told nothing at the
+        one moment it most needs to stop.
         """
         with self._lock:
             first = not self._cancel_requested
             self._cancel_requested = True
+        self._release_pending_question()
         if first:
             self._emit(
                 KIND_CANCELLATION_REQUESTED,
@@ -301,6 +421,7 @@ class SdkSession(DelegatedSession):
         subprocess that outlives the task that owns it, and that failure is
         invisible until a workstation has a dozen of them.
         """
+        self._release_pending_question()
         loop = self._loop
         if loop is not None and not self._stopped.is_set():
             try:
@@ -313,6 +434,21 @@ class SdkSession(DelegatedSession):
             if thread.is_alive():
                 return False
         return True
+
+    def _release_pending_question(self) -> None:
+        """Wake a blocked callback without answering it."""
+        loop = self._loop
+        with self._lock:
+            pending = self._pending
+            if pending is None or pending.cancelled:
+                return
+            pending.cancelled = True
+        if loop is None:  # pragma: no cover
+            return
+        try:
+            loop.call_soon_threadsafe(pending.event.set)
+        except RuntimeError:  # pragma: no cover
+            return
 
     # -- the thread ----------------------------------------------------------
 
@@ -380,7 +516,7 @@ class SdkSession(DelegatedSession):
                         terminal = True
                 if terminal:
                     # The turn produced its result. Stop reading rather than
-                    # holding a live subprocess for a follow-up this foundation
+                    # holding a live subprocess for a follow-up this adapter
                     # does not deliver.
                     break
                 if self._cancel_requested and self._stopped.is_set():  # pragma: no cover
@@ -405,13 +541,23 @@ class SdkSession(DelegatedSession):
         file importable without the SDK.
         """
 
+        def deny(message: str) -> Any:
+            return module.PermissionResultDeny(
+                behavior="deny", message=message, interrupt=False
+            )
+
         async def can_use_tool(tool_name: Any, tool_input: Any, context: Any) -> Any:
-            # `tool_input` and `context` are accepted because the SDK's callback
-            # signature requires them, and are deliberately not read. The input
-            # is the command or path the agent wanted; the context carries a
-            # prompt sentence and a blocked path. None of it belongs in a durable
-            # event a phone renders, and the tool's name is enough for a person
-            # to decide at the workstation.
+            # `context` is accepted because the SDK's callback signature requires
+            # it, and is deliberately not read: it carries a prompt sentence, a
+            # blocked path and permission suggestions, none of which belongs in a
+            # durable event a phone renders.
+            if question_reader.is_question_tool(tool_name):
+                return await self._handle_question(tool_input, deny)
+
+            # `tool_input` is the command or path the agent wanted. For an
+            # ordinary tool it is not read at all — the tool's name is enough for
+            # a person to decide at the workstation, and that material is exactly
+            # what makes approvals worth keeping on a trusted surface.
             request = normalize.approval_request(tool_name)
             if request is not None:
                 self._append(
@@ -421,16 +567,108 @@ class SdkSession(DelegatedSession):
                         provider_session_id=self.provider_session_id,
                     )
                 )
-            return module.PermissionResultDeny(
-                behavior="deny",
-                message=(
-                    "Cofferdam does not approve tools from a phone. Decide this "
-                    "at the workstation."
-                ),
-                interrupt=False,
+            return deny(
+                "Cofferdam does not approve tools from a phone. Decide this at "
+                "the workstation."
             )
 
         return can_use_tool
+
+    async def _handle_question(self, tool_input: Any, deny: Callable[[str], Any]) -> Any:
+        """Read one question, publish it, wait for an answer, and reply.
+
+        Every exit from here is a deny. The question tool never runs: what the
+        agent receives is either the person's answer or a sentence saying why
+        there is not one.
+        """
+        observation = question_reader.observe(
+            question_reader.QUESTION_TOOL_NAMES[0], tool_input
+        )
+        parsed = question_reader.read_question(tool_input)
+
+        if parsed is None:
+            # Conservative branch. The shape is not one this build can defend, so
+            # no clarification is fabricated — a bounded observation goes into the
+            # history instead, carrying key names and counts and no values.
+            self._append(
+                self._build_event(
+                    KIND_ACTIVITY,
+                    text=observation.summary(),
+                    detail=safe_line(
+                        "keys=" + str(len(observation.key_names))
+                        + " questions=" + str(observation.question_count)
+                        + " options=" + str(observation.option_count),
+                        60,
+                    ),
+                )
+            )
+            return deny(
+                "Cofferdam could not read that question, so nobody was asked. "
+                "Continue with what you have, or state the choice in your reply."
+            )
+
+        with self._lock:
+            if self._pending is not None:
+                # One question at a time. A second while the first is open would
+                # give a task two things to be waiting for and one state to say
+                # so in.
+                return deny("Cofferdam is already waiting on an earlier question.")
+            if self._questions_asked >= MAX_QUESTIONS_PER_SESSION:
+                return deny("This task has asked as many questions as it may.")
+            self._questions_asked += 1
+            pending = _PendingQuestion(new_question_token(), asyncio.Event())
+            self._pending = pending
+
+        self._append(
+            self._build_event(
+                normalize.KIND_CLARIFICATION_REQUESTED,
+                text=parsed.question,
+                clarification=normalize.clarification_from_observed(parsed),
+                provider_event_id=pending.token,
+            )
+        )
+
+        try:
+            await asyncio.wait_for(pending.event.wait(), QUESTION_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            pending.cancelled = True
+        except asyncio.CancelledError:  # pragma: no cover - loop torn down
+            pending.cancelled = True
+            raise
+        finally:
+            with self._lock:
+                if self._pending is pending:
+                    self._pending = None
+
+        answer = None if pending.cancelled else pending.answer
+        if answer is None:
+            self._append(
+                self._build_event(
+                    KIND_ACTIVITY,
+                    text="Nobody answered that question, so Claude was told so.",
+                    detail="clarification_unanswered",
+                )
+            )
+            return deny(
+                "Nobody answered that question. Continue with what you have, or "
+                "stop and say what you needed."
+            )
+
+        self._append(
+            self._build_event(
+                KIND_ACTIVITY,
+                text="An answer was delivered to Claude.",
+                detail="clarification_answered",
+            )
+        )
+        # The answer, and nothing Cofferdam wrapped around it beyond one framing
+        # sentence composed here. There is no template read from anywhere and no
+        # client-supplied structure in this string — see
+        # ``clarifications.encode_answer``, which produced the answer itself.
+        return deny(
+            "The question was not asked through this tool. The person answered: "
+            + answer
+        )
 
     # -- bookkeeping ---------------------------------------------------------
 
@@ -446,18 +684,18 @@ class SdkSession(DelegatedSession):
         with self._lock:
             self._buffer.append(event)
 
-    def _emit(self, kind: str, *, text: str, **fields: Any) -> None:
-        self._append(
-            build_event(
-                kind=kind,
-                provider=normalize.PROVIDER,
-                provider_sequence=self._next_local_sequence(),
-                observed_at=now_iso(),
-                provider_session_id=self.provider_session_id,
-                text=text,
-                **fields,
-            )
+    def _build_event(self, kind: str, **fields: Any) -> DelegatedEvent:
+        return build_event(
+            kind=kind,
+            provider=normalize.PROVIDER,
+            provider_sequence=self._next_local_sequence(),
+            observed_at=now_iso(),
+            provider_session_id=self.provider_session_id,
+            **fields,
         )
+
+    def _emit(self, kind: str, *, text: str, **fields: Any) -> None:
+        self._append(self._build_event(kind, text=text, **fields))
 
     def _record_transport_failure(self, exc: BaseException) -> None:
         """Record a provider failure in Cofferdam's words.
@@ -509,8 +747,12 @@ __all__ = [
     "CANCEL_TIMEOUT_SECONDS",
     "CLOSE_TIMEOUT_SECONDS",
     "MAX_BUFFERED_EVENTS",
+    "MAX_QUESTIONS_PER_SESSION",
+    "QUESTION_TIMEOUT_SECONDS",
+    "QUESTION_TOKEN_PREFIX",
     "START_TIMEOUT_SECONDS",
     "DelegatedSession",
     "SdkSession",
     "SessionRefused",
+    "new_question_token",
 ]

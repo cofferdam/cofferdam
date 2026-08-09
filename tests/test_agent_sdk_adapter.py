@@ -440,11 +440,24 @@ class OptionPolicyTests(unittest.TestCase):
         for word in ("token", "secret", "key", "password"):
             self.assertNotIn(word, blob)
 
-    def test_cofferdam_own_secret_names_are_blanked_in_the_child(self) -> None:
+    def test_the_override_map_no_longer_blanks_anything(self) -> None:
+        """PR1 blanked ``COFFERDAM_TOKEN`` here. PR2 removed the need to.
+
+        Blanking was a denylist — it protected the one name somebody thought of
+        — and it existed only because the SDK merges ``env`` over an inherited
+        environment. The helper process replaced it with an allowlist, which
+        protects every name nobody thought of, so the secret name is now simply
+        absent from the child rather than present and empty.
+
+        Asserted rather than deleted, because "this list is empty on purpose" is
+        a claim worth failing if somebody quietly starts adding to it again
+        instead of extending the allowlist.
+        """
+        self.assertEqual(option_policy.ENVIRONMENT_BLANKED, ())
         environment = option_policy.build_environment(
             {"COFFERDAM_TOKEN": "a-real-looking-token"}
         )
-        self.assertEqual(environment["COFFERDAM_TOKEN"], "")
+        self.assertNotIn("COFFERDAM_TOKEN", environment)
         self.assertNotIn("a-real-looking-token", repr(environment))
 
     def test_an_unexpected_environment_override_is_refused(self) -> None:
@@ -470,19 +483,46 @@ class OptionPolicyTests(unittest.TestCase):
         values = self.build(cli_path=Path("/home/x/.local/bin/claude"))
         self.assertEqual(values["cli_path"], "/home/x/.local/bin/claude")
 
-    def test_the_tool_profile_matches_the_claude_code_adapter(self) -> None:
-        """Two transports, one policy. A difference here would mean switching
-        transport quietly changed what the agent may do."""
+    def test_the_action_tools_match_the_claude_code_adapter(self) -> None:
+        """Two transports, one policy — about what the agent may *do*.
+
+        The comparison is against ``PROFILE_ACTION_TOOLS`` rather than the whole
+        set, and the narrowing is deliberate rather than a weakening. The rule
+        this test protects is that switching transport must not quietly change
+        what an agent can do to the workstation. A question tool does nothing to
+        a workstation: it reads no file, writes none, and runs no command. It is
+        in the SDK profile and not the CLI's because the SDK has a channel an
+        answer can come back on and the CLI does not — which is the reason M2I
+        exists, not a drift between two lists.
+        """
         from cofferdam.workstation.tasks.adapters.claude_code import cli
 
-        self.assertEqual(option_policy.PROFILE_TOOLS, cli.PROFILE_TOOLS)
+        self.assertEqual(option_policy.PROFILE_ACTION_TOOLS, cli.PROFILE_TOOLS)
+
+    def test_the_only_extra_tool_is_the_question_tool(self) -> None:
+        """The gap between the two profiles is exactly one harmless tool."""
+        from cofferdam.workstation.tasks.adapters.claude_code import cli
+
+        extra = tuple(
+            tool for tool in option_policy.PROFILE_TOOLS if tool not in cli.PROFILE_TOOLS
+        )
+        self.assertEqual(extra, option_policy.PROFILE_QUESTION_TOOLS)
+        self.assertEqual(extra, ("AskUserQuestion",))
         self.assertEqual(
             option_policy.PROFILE_PERMISSION_MODE, cli.PROFILE_PERMISSION_MODE
         )
 
 
 class SourceGuardTests(unittest.TestCase):
-    def test_the_package_never_uses_a_shell_or_spawns_a_process(self) -> None:
+    #: The one module allowed to start a process, and the one function in it.
+    #:
+    #: PR1 asserted the package spawned nothing at all. PR2 spawns exactly one
+    #: thing — the helper that gives the SDK a bounded environment — so the guard
+    #: became narrower rather than looser: it now names the file, and every other
+    #: file in the package is held to the original rule.
+    LAUNCHER = "hostclient.py"
+
+    def test_only_the_launcher_may_start_a_process_and_never_with_a_shell(self) -> None:
         """Checked against imported module *names*, not substrings.
 
         Substring matching would flag ``empty_result`` for containing "pty",
@@ -501,9 +541,109 @@ class SourceGuardTests(unittest.TestCase):
                 elif isinstance(node, ast.ImportFrom):
                     imported.add((node.module or "").split(".")[0])
             with self.subTest(path=path.name):
-                self.assertEqual(imported & forbidden, set())
+                allowed = {"subprocess"} if path.name == self.LAUNCHER else set()
+                self.assertEqual(imported & forbidden, allowed)
+                # No shell in any file, launcher included. This is the line that
+                # does not get an exception, because a shell is the one thing a
+                # fixed argv exists to make impossible.
                 self.assertNotIn("shell=True", source)
                 self.assertNotIn("os.system", source)
+
+    def test_the_launcher_spawns_a_fixed_argv_with_no_shell(self) -> None:
+        """The exact shape of the one ``Popen`` in the package, read from its AST.
+
+        From the syntax tree rather than from the text, because a substring
+        search over source would be satisfied by a docstring that *mentions*
+        ``shell=False`` — which is the failure mode where the guard passes and
+        the call does the opposite of what it says.
+
+        Asserted structurally rather than by running it, because the property is
+        about what *can* be passed rather than what was passed once.
+        """
+        tree = ast.parse((PACKAGE_ROOT / self.LAUNCHER).read_text(encoding="utf-8"))
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "Popen"
+        ]
+        self.assertEqual(len(calls), 1, "exactly one process launch in this package")
+        call = calls[0]
+        keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+
+        # No shell, stated by the call itself.
+        self.assertIsInstance(keywords["shell"], ast.Constant)
+        self.assertIs(keywords["shell"].value, False)
+        self.assertNotIn(None, keywords, "no **kwargs may reach this call")
+
+        # The argument vector: a list literal of exactly three elements, none of
+        # which is a parameter of the enclosing function.
+        argv = call.args[0]
+        self.assertIsInstance(argv, ast.List)
+        self.assertEqual(len(argv.elts), 3)
+        self.assertEqual(
+            [ast.unparse(element) for element in argv.elts],
+            ["sys.executable", "'-m'", "HOST_MODULE"],
+        )
+
+        # A complete environment from the allowlist builder, not a mapping the
+        # caller supplied and not `os.environ`.
+        self.assertEqual(
+            ast.unparse(keywords["env"]), "hostenv.build_child_environment()"
+        )
+        self.assertIs(keywords["start_new_session"].value, True)
+        self.assertEqual(ast.unparse(keywords["stderr"]), "subprocess.DEVNULL")
+
+    def test_no_module_in_the_package_forwards_os_environ_to_a_child(self) -> None:
+        """The regression guard for the finding this whole PR started from.
+
+        M2I PR1 discovered that ``ClaudeAgentOptions.env`` layers over
+        ``os.environ`` rather than replacing it. The fix is an allowlist, and the
+        way an allowlist gets quietly undone is somebody passing the real
+        environment "just to get something working".
+
+        So: no expression anywhere in this package may hand ``os.environ``, or a
+        copy of it, to anything. ``hostenv`` may *read* it — that is what
+        selection means — but only through subscripting and ``.get``, never by
+        passing the mapping itself.
+
+        One call is exempt and it is the opposite of the problem:
+        ``verify_child_environment(os.environ)``, which the helper runs on itself
+        to *refuse* an environment that is not the one Cofferdam built.
+        """
+        checkers = {"hostenv.verify_child_environment", "verify_child_environment"}
+        for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                if ast.unparse(node.func) in checkers:
+                    continue
+                supplied = list(node.args) + [
+                    keyword.value for keyword in node.keywords
+                ]
+                for argument in supplied:
+                    rendered = ast.unparse(argument)
+                    with self.subTest(path=path.name, call=ast.unparse(node.func)[:40]):
+                        self.assertNotEqual(rendered, "os.environ")
+                        self.assertNotEqual(rendered, "dict(os.environ)")
+                        self.assertNotEqual(rendered, "os.environ.copy()")
+
+    def test_the_launcher_takes_no_executable_environment_or_argument(self) -> None:
+        """The spawn function's signature is the whole surface, so it is asserted.
+
+        One keyword-only parameter, and it is a project root the server resolved.
+        There is nowhere in this signature for a caller to put an interpreter, a
+        module name, an argument, an environment or a shell — which is what makes
+        "no caller-provided environment or CLI path" structural.
+        """
+        import inspect
+
+        from cofferdam.workstation.tasks.adapters.claude_agent_sdk import hostclient
+
+        signature = inspect.signature(hostclient._spawn_helper)
+        self.assertEqual(sorted(signature.parameters), ["project_root"])
 
     def test_bypass_permissions_appears_only_where_it_is_forbidden(self) -> None:
         """The string may exist — in the forbidden list — and nowhere else."""
@@ -680,7 +820,16 @@ class NormalizationTests(unittest.TestCase):
 class ClarificationRecognitionTests(unittest.TestCase):
     """Conservative by design — the question tool's schema is unverified."""
 
-    def test_a_question_tool_with_an_unmistakable_question_is_recognised(self) -> None:
+    def test_the_message_stream_never_produces_a_clarification(self) -> None:
+        """A question block is activity here, and a clarification nowhere else.
+
+        The rule: a clarification event is created only where an answer can
+        actually be delivered. Nothing a reader of ``receive_messages`` can do
+        will get an answer back to a blocked turn, so producing one here would
+        give a task a pending question that could never be answered — which is
+        the state PR1 deliberately refused to enter and this reverses only
+        because there is now a channel that *can*.
+        """
         normalizer = normalize.MessageNormalizer()
         events = normalizer.normalize(
             AssistantMessage(
@@ -696,12 +845,27 @@ class ClarificationRecognitionTests(unittest.TestCase):
                 ]
             )
         )
-        self.assertEqual([e.kind for e in events], [KIND_CLARIFICATION_REQUESTED])
-        self.assertEqual(events[0].clarification.question, "Rebase or merge?")
+        self.assertEqual([e.kind for e in events], [KIND_ACTIVITY])
+        self.assertIsNone(events[0].clarification)
         self.assertIsNone(events[0].approval)
 
-    def test_a_question_tool_this_build_cannot_read_degrades_to_activity(self) -> None:
-        """No invented question. That mistake is much worse than a lost one."""
+    def test_a_question_block_never_carries_its_input_into_an_event(self) -> None:
+        """Not even the question text, on this path. It is not read at all."""
+        normalizer = normalize.MessageNormalizer()
+        events = normalizer.normalize(
+            AssistantMessage(
+                content=[
+                    ToolUseBlock(
+                        id="t1",
+                        name="AskUserQuestion",
+                        input={"question": "a-very-distinctive-string"},
+                    )
+                ]
+            )
+        )
+        self.assertNotIn("a-very-distinctive-string", repr(events))
+
+    def test_an_unreadable_question_block_is_still_only_activity(self) -> None:
         normalizer = normalize.MessageNormalizer()
         for payload in ({}, {"prompt": "?"}, {"questions": []}, "not a dict", None):
             with self.subTest(payload=payload):
@@ -712,12 +876,15 @@ class ClarificationRecognitionTests(unittest.TestCase):
                         ]
                     )
                 )
-                self.assertEqual([e.kind for e in events], [KIND_TOOL_STARTED])
+                self.assertEqual([e.kind for e in events], [KIND_ACTIVITY])
+                self.assertIsNone(events[0].clarification)
 
-    def test_the_question_tool_is_not_in_the_running_profile(self) -> None:
-        """Unreachable in this build, and stated as a fact rather than a hope."""
+    def test_the_question_tool_is_in_the_profile_and_is_not_an_action_tool(self) -> None:
+        """Reachable now, and still incapable of touching the workstation."""
         for tool in normalize.QUESTION_TOOLS:
-            self.assertNotIn(tool, option_policy.PROFILE_TOOLS)
+            self.assertIn(tool, option_policy.PROFILE_TOOLS)
+            self.assertNotIn(tool, option_policy.PROFILE_ACTION_TOOLS)
+            self.assertNotIn(tool, option_policy.PROFILE_DISALLOWED_TOOLS)
 
 
 class ApprovalRecognitionTests(unittest.TestCase):

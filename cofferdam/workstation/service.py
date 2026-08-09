@@ -45,6 +45,10 @@ route                                        auth  purpose
 ``GET  /api/tasks/{task_id}/events``         yes   append-only history, paged
 ``POST /api/tasks/{task_id}/followups``      yes   answer a waiting task
 ``POST /api/tasks/{task_id}/cancel``         yes   ask that task's adapter to stop
+``GET  /api/tasks/{id}/clarifications``      yes   questions the agent is waiting on
+``POST /api/tasks/{id}/clarifications/{qid}/answer``
+                                             yes   answer one question — never a
+                                                   tool approval, which has no route
 ``GET  /api/task-adapters``                  yes   registered adapters + capabilities
 ``GET  /api/task-projects``                  yes   configured projects, names only
 ``WS   /ws``                                 yes   live events
@@ -269,11 +273,19 @@ from .runtime.overlay_writes import (
 )
 from .store import ActionStore, screenshot_path
 from .tasks import TaskService, TaskStore, build_registry as build_task_adapters
+from .tasks.clarifications import (
+    SOURCE_WORKSTATION_PWA as ANSWER_SOURCE_WORKSTATION_PWA,
+)
 from .tasks.errors import (
     CODE_ADAPTER_FAILED as CODE_TASK_ADAPTER_FAILED,
     CODE_ADAPTER_NOT_PERMITTED,
     CODE_ADAPTER_UNKNOWN as CODE_TASK_ADAPTER_UNKNOWN,
     CODE_CANCEL_UNSUPPORTED,
+    CODE_CLARIFICATION_CLOSED,
+    CODE_CLARIFICATION_INVALID,
+    CODE_CLARIFICATION_NOT_DELIVERED,
+    CODE_CLARIFICATION_UNKNOWN,
+    CODE_CLARIFICATION_UNSUPPORTED,
     CODE_FOLLOWUP_INVALID,
     CODE_FOLLOWUP_NOT_WAITING,
     CODE_FOLLOWUP_UNSUPPORTED,
@@ -478,6 +490,18 @@ _TASK_STATUS = {
     CODE_FOLLOWUP_NOT_WAITING: 409,
     CODE_FOLLOWUP_UNSUPPORTED: 422,
     CODE_CANCEL_UNSUPPORTED: 422,
+    # 404 for an unknown question, and the same answer whether it never existed
+    # or belongs to another task — distinguishing them would let somebody learn
+    # which question ids exist elsewhere by watching which refusal came back.
+    CODE_CLARIFICATION_UNKNOWN: 404,
+    # 409 rather than 422: the request was well formed and the *world* has moved
+    # on. A client that gets this should reload the task, not retype.
+    CODE_CLARIFICATION_CLOSED: 409,
+    CODE_CLARIFICATION_INVALID: 422,
+    CODE_CLARIFICATION_UNSUPPORTED: 422,
+    # 502: Cofferdam accepted the answer and the provider did not take it. The
+    # failure is downstream, and the client's answer was never the problem.
+    CODE_CLARIFICATION_NOT_DELIVERED: 502,
     CODE_TASK_ADAPTER_FAILED: 502,
     CODE_STORE_UNAVAILABLE: 503,
 }
@@ -2001,6 +2025,85 @@ def create_app(
         """
         await _task_body(request, allowed=set())
         row = await _run_task(tasks.cancel_task, task_id)
+        return {"task": tasks.snapshot(row).to_dict()}
+
+    # -- clarification questions (M2I PR2) -----------------------------------
+    #
+    # Two operations, and what is *not* here is the point of the section.
+    #
+    # There is no approval route. Not a disabled one, not a stubbed one, not one
+    # that always refuses — none. A tool approval is decided on a trusted surface
+    # at the workstation, and the way that survives a future refactor is that
+    # this API has no path a permission decision could travel on.
+    #
+    # There is no generic "answer a request" route either, which is the shape
+    # somebody would reach for to avoid writing two similar handlers. One route
+    # serving both categories would put the entire clarification/approval
+    # distinction inside a single `if` — and that `if` is exactly the thing this
+    # milestone exists to make structural.
+    #
+    # These are private-client operations. The future Custom GPT Actions bridge
+    # (M2I.5) will expose `get_pending_questions` and `submit_clarification_answer`
+    # as bounded Actions of its own; it does not proxy these, and nothing here is
+    # reachable from it today.
+
+    @app.get(
+        "/api/tasks/{task_id}/clarifications", dependencies=[Depends(require_token)]
+    )
+    async def list_task_clarifications(task_id: str) -> Dict[str, Any]:
+        """The questions this task is waiting on. Bounded, normalized, no payload.
+
+        `refresh_task` first, for the same reason the detail view does it: a
+        question asked thirty seconds ago is sitting in an adapter's buffer until
+        somebody asks, and a list that could not see it would send people to a
+        task screen that says "needs you" with nothing to answer.
+
+        The response carries no provider session id, no tool input and no raw
+        provider payload — see `PendingClarification.to_dict`.
+        """
+        row = await _run_task(tasks.refresh_task, task_id)
+        pending = await run_in_threadpool(tasks.pending_clarifications, row.task_id)
+        return {
+            "version": TASK_API_VERSION,
+            "task_id": row.task_id,
+            "state": row.state,
+            "waiting_reason": row.waiting_reason,
+            "clarifications": [item.to_dict() for item in pending],
+        }
+
+    @app.post(
+        "/api/tasks/{task_id}/clarifications/{question_id}/answer",
+        dependencies=[Depends(require_token)],
+    )
+    async def answer_task_clarification(
+        task_id: str, question_id: str, request: Request
+    ) -> Dict[str, Any]:
+        """Answer one specific question on one specific task.
+
+        The whole client vocabulary is two fields. `answer` is text a person
+        typed; `option_ids` are Cofferdam's own identifiers, taken from the
+        question this route is answering and checked against it.
+
+        Everything else is **absent rather than validated**: there is no field
+        here for a session id, a project, a path, a tool, a command, a permission
+        mode or an allow/deny decision, and `_task_body` refuses an unexpected key
+        rather than ignoring it. A body carrying an approval-shaped field is
+        refused again, by name, in `ClarificationAnswer.from_request` — twice,
+        because this is the one route where the difference between information
+        and permission is the difference that matters.
+
+        `source` is not among the fields either. It is assigned here from the
+        authenticated request context, because a client choosing how its own
+        answer is later attributed is the opposite of what provenance is for.
+        """
+        payload = await _task_body(request, allowed={"answer", "option_ids"})
+        row = await _run_task(
+            tasks.answer_clarification,
+            task_id,
+            question_id,
+            payload,
+            source=ANSWER_SOURCE_WORKSTATION_PWA,
+        )
         return {"task": tasks.snapshot(row).to_dict()}
 
     @app.get("/api/task-adapters", dependencies=[Depends(require_token)])

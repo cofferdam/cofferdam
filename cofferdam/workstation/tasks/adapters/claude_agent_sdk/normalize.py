@@ -26,26 +26,40 @@ have nowhere to hold one, and this module never tries. Thinking blocks are
 skipped without comment; the agent's private reasoning is not Cofferdam's to
 collect, and the absence of a branch is the implementation of that.
 
-The one thing that is not verified
------------------------------------
+Where a clarification comes from, and where it does not
+-------------------------------------------------------
 
-Clarification. The SDK package contains no ``AskUserQuestion`` type and no schema
-for one — that tool belongs to the CLI, and its input shape could not be read out
-of the distribution the way every other name here was. So this module recognises
-a question tool **conservatively**: it produces a clarification only when the
-tool input contains an unambiguous question string, and otherwise degrades to
-ordinary tool activity rather than inventing a question nobody asked.
+A question tool also appears here, as an ordinary ``ToolUseBlock`` in an
+assistant message. **This module does not turn one into a clarification**, and
+the reason is a rule worth stating in one line:
 
-It is also unreachable in this build by construction: the question tool is not in
-:data:`~.options.PROFILE_TOOLS`, so the profile cannot produce one. Enabling it
-needs the answer channel, and the answer channel is M2I PR2's subject, where the
-schema will be verified against the real CLI before anything depends on it.
+    A clarification event is created only where an answer can actually be
+    delivered.
+
+The message stream is not such a place. Nothing a reader of ``receive_messages``
+can do will get an answer back to a blocked turn; the channel that can is the
+permission callback, which is handed the same tool input and can hold the turn
+open while somebody replies. So the callback creates the clarification — see
+:mod:`.session` — and this module records the block as bounded activity.
+
+M2I PR1 did it the other way round, because there was no answer channel at all
+and recording the question somewhere was better than losing it. Now that there is
+one, producing a second clarification here would give a task two pending
+questions for one thing the agent asked, only one of which could ever be
+answered.
+
+The schema is still not verified. The SDK package contains no ``AskUserQuestion``
+type and no schema for one — checked, not assumed: the string does not occur
+anywhere in the published 0.2.134 archive. Reading it conservatively is
+:mod:`.question`'s job, and its ``SCHEMA_VERIFIED`` flag is ``False`` until a
+supervised live spike says otherwise.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from . import question
 from ....runtime.identity import now_iso
 from ...delegated import (
     KIND_ACTIVITY,
@@ -129,9 +143,11 @@ BLOCK_SERVER_TOOL_RESULT = "ServerToolResultBlock"
 MAX_BLOCKS = 64
 
 #: Tool names that mean "the agent is asking a person a question" rather than
-#: "the agent is doing something". Code-owned and currently unreachable: none of
-#: these is in the running profile. See the module docstring.
-QUESTION_TOOLS: Tuple[str, ...] = ("AskUserQuestion",)
+#: "the agent is doing something".
+#:
+#: Re-exported from :mod:`.question`, which owns the definition, so that a reader
+#: of this module can see the set without a second copy of it existing.
+QUESTION_TOOLS: Tuple[str, ...] = question.QUESTION_TOOL_NAMES
 
 #: What a tool would broadly do, for the one line a person reads before deciding
 #: an approval. Coarse on purpose — see the vocabulary note in
@@ -314,19 +330,17 @@ class MessageNormalizer:
 
     def _tool_use(self, message: Any, block: Any, index: int) -> DelegatedEvent:
         name = getattr(block, "name", None)
-        if isinstance(name, str) and name in QUESTION_TOOLS:
-            clarification = clarification_from_tool_input(getattr(block, "input", None))
-            if clarification is not None:
-                return self._event(
-                    KIND_CLARIFICATION_REQUESTED,
-                    text=clarification.question,
-                    clarification=clarification,
-                    provider_event_id=_block_id(message, index),
-                )
-            # A question tool whose input this build cannot read is reported as
-            # ordinary tool activity. Not as a clarification with an invented
-            # question, and not as an error: the agent did something, Cofferdam
-            # simply has no verified words for what it asked.
+        if question.is_question_tool(name):
+            # Activity, never a clarification. The clarification for this same
+            # question is created by the permission callback, which is the only
+            # channel an answer can travel back on — see the module docstring.
+            # The tool's input is not read here at all.
+            return self._event(
+                KIND_ACTIVITY,
+                text="Claude is asking a question.",
+                detail="clarification",
+                provider_event_id=_block_id(message, index),
+            )
         # Validated *before* it is written into a sentence. Dropping the field
         # while leaving the name in the text would be half a check.
         label = name if valid_tool_name(name) else None
@@ -505,50 +519,44 @@ def approval_event(
     )
 
 
-# -- clarification, read conservatively --------------------------------------
+# -- clarification, from an already-conservative reading ---------------------
 
 
-def clarification_from_tool_input(payload: Any) -> Optional[ClarificationRequest]:
-    """A clarification, only if the input unambiguously contains one.
+def clarification_from_observed(
+    parsed: "question.ObservedQuestion",
+) -> ClarificationRequest:
+    """A normalized clarification request from a question :mod:`.question` read.
 
-    The schema of the CLI's question tool is **not verified** — it is not in the
-    SDK distribution — so this reader accepts only shapes where a question string
-    is unmistakable, and returns ``None`` for everything else. ``None`` costs a
-    clarification that becomes an ordinary activity line; a looser reader would
-    cost a *fabricated* question shown to somebody as if the agent had asked it,
-    and those two mistakes are not the same size.
+    The provider's input never reaches this function. What arrives is an
+    :class:`~.question.ObservedQuestion` — sanitized text, Cofferdam's own option
+    identifiers, a mode from a closed vocabulary — and it still goes through
+    :meth:`~....delegated.ClarificationRequest.from_dict`, so the result cannot
+    carry a tool field even if some future shape were to grow one.
 
-    Whatever this returns still goes through
-    :meth:`~....delegated.ClarificationRequest.from_dict`, so it cannot produce
-    something carrying a tool field even if a future shape contains one.
+    Two readers in sequence rather than one, and the split is worth the extra
+    hop: :mod:`.question` decides *whether a question can be read at all*, which
+    is where the unverified schema lives, and this decides *what a readable one
+    becomes*, which is provider-neutral. A single function would put an
+    unverified schema and a durable record in the same place.
     """
-    if not isinstance(payload, dict):
-        return None
-    question = payload.get("question")
-    options = payload.get("options")
-    if not isinstance(question, str):
-        # The plural form: a list of question objects, first one taken. Bounded
-        # to the first because a task waiting on four questions at once has no
-        # answer channel in this build to answer even one.
-        questions = payload.get("questions")
-        if isinstance(questions, (list, tuple)) and questions:
-            first = questions[0]
-            if isinstance(first, dict):
-                question = first.get("question")
-                options = first.get("options")
-    if not isinstance(question, str) or not question.strip():
-        return None
-    try:
-        return ClarificationRequest.from_dict(
-            {
-                "category": "clarification",
-                "question": question,
-                "options": options if isinstance(options, (list, tuple)) else [],
-                "allows_free_text": payload.get("allows_free_text") is not False,
-            }
-        )
-    except ValueError:
-        return None
+    return ClarificationRequest.from_dict(
+        {
+            "category": "clarification",
+            "question": parsed.question,
+            "options": [
+                {
+                    "label": option.label,
+                    "value": option.label,
+                    "option_id": option.option_id,
+                    "description": option.description,
+                }
+                for option in parsed.options
+            ],
+            "allows_free_text": parsed.allows_free_text,
+            "answer_mode": parsed.answer_mode,
+            "schema_verified": parsed.schema_verified,
+        }
+    )
 
 
 # -- small readers -----------------------------------------------------------
@@ -621,6 +629,6 @@ __all__ = [
     "MessageNormalizer",
     "approval_event",
     "approval_request",
-    "clarification_from_tool_input",
+    "clarification_from_observed",
     "tool_category",
 ]

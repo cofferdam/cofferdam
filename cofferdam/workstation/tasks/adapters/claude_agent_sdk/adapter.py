@@ -24,41 +24,47 @@ Every operation starts from a :class:`~..protocol.TaskContext` the core built,
 whose ``project_root`` was resolved from the host registry and re-verified on
 disk moments earlier. Nothing in this file reads a path from anywhere else.
 
-The two waits, and why neither moves the task yet
--------------------------------------------------
+The two waits, and why only one of them is one
+----------------------------------------------
 
 A delegated session can report two kinds of "somebody is needed": a
 **clarification**, where the agent wants information, and a **tool approval**,
 where it wants permission. They are separate types with separate storage all the
-way down — see :mod:`....delegated` — and this adapter records both in the task
-history with their distinction intact.
+way down — see :mod:`....delegated` — and this adapter keeps the distinction
+intact by treating them completely differently.
 
-Neither moves the task into ``waiting_for_user`` in this foundation, and that is
-a deliberate refusal rather than an omission.
+A **clarification is a wait**, and as of M2I PR2 it is reported as one. The
+adapter asks the core to move the task to ``waiting_for_user`` with the reason
+``clarification``, hands over the normalized question and its own routing token,
+and the core does the rest. When an accepted answer comes back down through
+:meth:`ClaudeAgentSdkAdapter.deliver_clarification_answer` the same session
+resumes — same helper, same client, same provider session id — because nothing
+was torn down while it waited.
 
-A tool approval genuinely is not a wait: Cofferdam's permission handler denies
-it, the agent is told no, and it carries on or gives up. Reporting "NEEDS YOU"
-about a task nobody can act on would be the same false claim the Claude Code
-adapter had to unlearn when a finished turn was reported as waiting for an
-answer.
+A **tool approval is not a wait**, and it must never be reported as one.
+Cofferdam's permission handler denies it, the agent is told no, and it carries on
+or gives up. Reporting "NEEDS YOU" about a request nobody can act on would be the
+same false claim the Claude Code adapter had to unlearn when a finished turn was
+reported as waiting for an answer. It is recorded in the history and the task
+keeps running.
 
-A clarification genuinely would be a wait — but there is no answer channel yet,
-and Task Core's graph has no ``waiting_for_user → completed`` edge, on purpose.
-A task parked there with nothing able to answer it could never reach a terminal
-state again. So the event is recorded truthfully and the state is left alone
-until the PR that builds the channel. In this build a clarification is
-unreachable anyway: the question tool is not in :data:`~.options.PROFILE_TOOLS`.
+That asymmetry is the safety property, stated as behaviour rather than as a
+comment: this adapter has one code path that can produce
+``waiting_for_user(clarification)`` and **no** path at all that can produce
+``waiting_for_user(approval)``, and there is no method here that could grant a
+tool.
 """
 
 from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from ....runtime.identity import now_iso
 from ...delegated import (
     KIND_CANCELLED,
+    KIND_CLARIFICATION_REQUESTED,
     KIND_PROVIDER_FAILED,
     KIND_SUCCEEDED,
     TERMINAL_STATE_FOR_KIND,
@@ -74,6 +80,8 @@ from ...models import (
     STATE_CANCELLED,
     STATE_COMPLETED,
     STATE_FAILED,
+    STATE_WAITING_FOR_USER,
+    WAITING_CLARIFICATION,
 )
 from ..protocol import (
     AdapterCapabilities,
@@ -83,9 +91,10 @@ from ..protocol import (
     TaskAdapter,
     TaskContext,
 )
-from . import options as option_policy, sdk as sdk_boundary
+from . import options as option_policy, question as question_reader, sdk as sdk_boundary
+from .hostclient import HostSession
 from .normalize import PROVIDER
-from .session import DelegatedSession, SdkSession, SessionRefused
+from .session import DelegatedSession, SessionRefused
 
 ADAPTER_ID = "claude-agent-sdk"
 DISPLAY_NAME = "Claude (Agent SDK)"
@@ -110,11 +119,13 @@ LIMITATIONS = (
     "It cannot leave the project folder.",
     "Cofferdam never approves a tool from a phone. If Claude asks for "
     "permission, it is refused and the request is recorded.",
+    "Claude can ask you a question, and you can answer it. Answering a "
+    "question grants nothing — it is information, not permission.",
     "A task is not resumed if Cofferdam restarts — it is reported as "
-    "interrupted, and its output is kept.",
-    "This adapter does not take follow-up messages yet; a task runs one turn "
-    "and reports its result.",
-    "Never type a password, one-time code or token into a prompt.",
+    "interrupted, and any question it was waiting on is closed with it.",
+    "This adapter does not take follow-up messages yet; a task runs one turn, "
+    "asks what it needs to, and reports its result.",
+    "Never type a password, one-time code or token into a prompt or an answer.",
 )
 
 
@@ -171,8 +182,14 @@ class ClaudeAgentSdkAdapter(TaskAdapter):
             # follow-up to reach. Declaring the capability would make Task Core
             # offer a button whose only outcome is a refusal.
             followup=False,
-            # False: this adapter cannot grant a permission request. It denies
-            # and records, which is a different and truthful thing.
+            # True: the session can ask a structured question and take an answer
+            # back into the same conversation. This is what M2I PR2 added and it
+            # is the one capability the CLI transport cannot have.
+            clarifications=True,
+            # False, and it is the entry above that makes this one worth reading
+            # twice. This adapter cannot grant a permission request — it denies
+            # and records, which is a different and truthful thing — and no
+            # amount of answering questions changes that.
             approvals=False,
             # False: no authentication probe exists on this transport yet.
             authentication_waits=False,
@@ -200,6 +217,12 @@ class ClaudeAgentSdkAdapter(TaskAdapter):
         # already visible through ``available``.
         described["sdk_version"] = sdk_boundary.installed_version()
         described["verified_sdk_version"] = sdk_boundary.VERIFIED_SDK_VERSION
+        # Published rather than kept in a docstring, because a client that
+        # renders a question deserves to know whether the shape it is rendering
+        # came from a schema anybody has actually seen. ``False`` here is the
+        # honest state of this build until a supervised live spike says
+        # otherwise.
+        described["question_schema_verified"] = question_reader.SCHEMA_VERIFIED
         return described
 
     # -- lifecycle -----------------------------------------------------------
@@ -278,10 +301,22 @@ class ClaudeAgentSdkAdapter(TaskAdapter):
         if session is None or log is None:
             return AdapterOutcome()
 
-        events = self._collect(context.task_id, session)
+        events, asked = self._collect(context.task_id, session)
         terminal = log.terminal_event
 
         if terminal is None:
+            if asked is not None and asked.clarification is not None:
+                # A question, reported as a wait. The core decides whether the
+                # task may enter that state and mints the id a client will use;
+                # this only says what was asked and how to reach the session that
+                # asked it.
+                return AdapterOutcome(
+                    events=tuple(events),
+                    requested_state=STATE_WAITING_FOR_USER,
+                    waiting_reason=WAITING_CLARIFICATION,
+                    clarification=asked.clarification,
+                    clarification_token=asked.provider_event_id,
+                )
             if session.finished:
                 # The session ended without ever producing a result. Exit is not
                 # a result: something ran and reported nothing, and calling that
@@ -317,13 +352,13 @@ class ClaudeAgentSdkAdapter(TaskAdapter):
         if session is None or log is None:
             raise AdapterRefusal("there is no running Claude session for this task")
 
-        events = self._collect(context.task_id, session)
+        events, _ = self._collect(context.task_id, session)
         already = log.terminal_event
         if already is not None:
             return self._settle(context.task_id, already, events)
 
         delivered = session.request_cancel()
-        events.extend(self._collect(context.task_id, session))
+        events.extend(self._collect(context.task_id, session)[0])
         if not delivered:
             # Not promoted to `cancelled`. Saying a task stopped because
             # stopping it was requested is the false success this design refuses
@@ -335,7 +370,14 @@ class ClaudeAgentSdkAdapter(TaskAdapter):
         # still resolves to the result, because the log accepted whichever
         # arrived first and refuses the second.
         session.close()
-        events.extend(self._collect(context.task_id, session))
+        note = getattr(session, "note_cancelled", None)
+        if callable(note):
+            # The out-of-process session cannot record its own cancellation the
+            # way the in-process one does: the helper is gone by now. It is the
+            # object that knows a cancel was actually delivered, so it is the
+            # object that gets to say so.
+            note()
+        events.extend(self._collect(context.task_id, session)[0])
         terminal = log.terminal_event
         if terminal is not None:
             return self._settle(context.task_id, terminal, events)
@@ -363,29 +405,67 @@ class ClaudeAgentSdkAdapter(TaskAdapter):
 
     # -- turning events into a report ---------------------------------------
 
-    def _collect(self, task_id: str, session: DelegatedSession) -> List[AdapterEvent]:
+    def _collect(
+        self, task_id: str, session: DelegatedSession
+    ) -> Tuple[List[AdapterEvent], Optional[DelegatedEvent]]:
         """Drain the session, record through the log, project what survived.
 
         The log is the gate: an event it refuses — a duplicate, or anything after
         a terminal one — never becomes an adapter event, so a late provider
-        result cannot resurrect a task that has already ended.
+        result cannot resurrect a task that has already ended, and a repeated
+        question event cannot open a second question.
+
+        The second return value is the clarification this drain produced, if it
+        produced one. **The last, not the first**: if a session somehow reported
+        two before anybody looked, the newest is the one the provider is actually
+        blocked on, and the older is history rather than a thing to wait for.
         """
         with self._lock:
             log = self._logs.get(task_id)
         if log is None:
-            return []
+            return [], None
         projected: List[AdapterEvent] = []
+        asked: Optional[DelegatedEvent] = None
         for event in session.drain():
             accepted = log.record(event)
             if accepted is None:
                 continue
+            if accepted.kind == KIND_CLARIFICATION_REQUESTED:
+                asked = accepted
             event_type, text, detail = projection(accepted)
             if text is None and detail is None:
                 continue
             projected.append(
                 AdapterEvent(event_type=event_type, text=text, detail=detail)
             )
-        return projected
+        return projected, asked
+
+    # -- answering -----------------------------------------------------------
+
+    def deliver_clarification_answer(
+        self, context: TaskContext, token: str, answer: str
+    ) -> bool:
+        """Hand one answer to this task's own session. Nothing broader happens.
+
+        The session is found by **this task's id** in this adapter's own
+        dictionary, and the token is checked against the question that session is
+        actually holding. There is no argument here that could name another
+        task's session and no registry to look one up in, which is what makes
+        "an answer cannot reach another task" structural rather than validated.
+
+        Returns whether the session took it. A session that has moved on, been
+        cancelled, or timed the question out returns ``False``, and the core
+        turns that into a truthful refusal rather than a recorded answer nobody
+        received.
+        """
+        with self._lock:
+            session = self._sessions.get(context.task_id)
+        if session is None:
+            raise AdapterRefusal("there is no running Claude session for this task")
+        try:
+            return bool(session.submit_answer(token, answer))
+        except SessionRefused:
+            return False
 
     def _settle(
         self, task_id: str, terminal: DelegatedEvent, events: List[AdapterEvent]
@@ -476,7 +556,16 @@ class ClaudeAgentSdkAdapter(TaskAdapter):
 def _default_session_factory(
     *, task_id: str, project_root: Path, cli_path: Optional[Path]
 ) -> DelegatedSession:
-    return SdkSession(task_id=task_id, project_root=project_root, cli_path=cli_path)
+    """One helper process per task.
+
+    :class:`~.hostclient.HostSession`, not the in-process
+    :class:`~.session.SdkSession`. The SDK runs in a child Cofferdam launches
+    with a complete code-owned environment, because ``ClaudeAgentOptions.env``
+    cannot replace an inherited one — see :mod:`.hostenv` for the evidence and
+    the reasoning. From this adapter's point of view the two are the same
+    object, which is what lets every behaviour above be tested with a double.
+    """
+    return HostSession(task_id=task_id, project_root=project_root, cli_path=cli_path)
 
 
 __all__ = [

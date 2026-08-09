@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Tuple
 
+from ..delegated import ClarificationRequest
 from ..models import (
     ACTOR_ADAPTER,
     EVENT_PROGRESS,
@@ -65,6 +66,18 @@ class AdapterCapabilities:
     final_result: bool = False
     approvals: bool = False
     authentication_waits: bool = False
+    #: This adapter can ask a person a **structured question** and take an answer
+    #: back into the same provider session.
+    #:
+    #: Emphatically **not** ``approvals``, and the two are next to each other in
+    #: this list so that anybody adding a third is forced to notice the
+    #: difference. ``approvals`` means "this adapter can grant permission to act",
+    #: which no adapter in Cofferdam claims and none is intended to;
+    #: ``clarifications`` means "this adapter can carry information back", which
+    #: grants nothing. Task Core reads this one before it offers the answer
+    #: route, and reads ``approvals`` before nothing at all, because there is no
+    #: route to offer.
+    clarifications: bool = False
 
     def to_dict(self) -> Dict[str, bool]:
         return {
@@ -76,6 +89,7 @@ class AdapterCapabilities:
             "final_result": self.final_result,
             "approvals": self.approvals,
             "authentication_waits": self.authentication_waits,
+            "clarifications": self.clarifications,
         }
 
 
@@ -160,6 +174,26 @@ class AdapterOutcome:
     #: an adapter cannot launder a claim by moving it into this field — it can
     #: only fail to be believed.
     observations: Sequence[EvidenceReference] = ()
+    #: A question the delegated session is asking, normalized and bounded.
+    #:
+    #: Reported here rather than written anywhere by the adapter, because the
+    #: question and the task's move to ``waiting_for_user`` have to land in one
+    #: transaction and only the core can open one. The adapter says "this was
+    #: asked"; the core decides whether the task may enter that state, mints the
+    #: question id a client will use, and writes both or neither.
+    #:
+    #: There is no counterpart field for a tool approval, and its absence is the
+    #: design: an approval reaches the history as an ordinary event and has
+    #: nowhere durable to become answerable from.
+    clarification: Optional["ClarificationRequest"] = None
+    #: The **adapter's own** routing token for that question — the handle it will
+    #: recognise when the answer comes back. Opaque to the core, which stores it
+    #: as the question's provider event id and hands it back untouched.
+    #:
+    #: Deliberately not the question id: the core mints that, and a single
+    #: identifier serving both namespaces would let a value a client has seen be
+    #: used to address a provider session.
+    clarification_token: Optional[str] = None
 
     @property
     def actor(self) -> str:
@@ -236,6 +270,27 @@ class TaskAdapter:
         to report" is a legitimate answer and should not read as a failure.
         """
         return AdapterOutcome()
+
+    def deliver_clarification_answer(
+        self, context: TaskContext, token: str, answer: str
+    ) -> bool:
+        """Hand one answer to the delegated session that asked for it.
+
+        ``token`` is the adapter's own routing handle from
+        :attr:`AdapterOutcome.clarification_token`; ``answer`` is text a
+        code-owned encoder produced from a validated record. Neither is a value a
+        client sent.
+
+        Returns whether the session actually took it. ``False`` is a real answer
+        and the core treats it as one — the question stays open and the person is
+        told it was not delivered, which is truthful in a way that recording the
+        answer anyway would not be.
+
+        Refused by default. An adapter that declared ``clarifications`` without
+        implementing this cannot deliver anything, which is the safer direction
+        for the mistake to fall.
+        """
+        raise AdapterRefusal("this adapter cannot take an answer to a question")
 
     def recover(self, context: TaskContext) -> AdapterOutcome:
         """Reattach to a task that survived a restart. Not used in this milestone.

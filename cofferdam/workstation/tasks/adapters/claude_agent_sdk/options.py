@@ -29,34 +29,23 @@ and, with Bash absent from :data:`PROFILE_TOOLS`, there is no path to one.
 :data:`FORBIDDEN_PERMISSION_MODES` and asserted by test rather than trusted to
 review, so introducing it is a visible failure rather than a quiet one.
 
-One verified difference from the CLI adapter
---------------------------------------------
+The environment, and where it is actually decided
+-------------------------------------------------
 
-The Claude Code adapter builds its child's environment by *selection*: it calls
-``Popen`` itself and passes a thirteen-name allowlist, so a variable reaches the
-child only when somebody added it here on purpose.
+``ClaudeAgentOptions.env`` is an **override map layered over the calling
+process's own environment**, never a replacement for it — the SDK's transport
+builds ``{**os.environ, "CLAUDE_CODE_ENTRYPOINT": "sdk-py", **options.env, …}``,
+read from the published 0.2.134 source. M2I PR1 recorded that as an unresolved
+limitation, because a child inheriting the daemon's environment inherits the
+daemon's secrets.
 
-The Agent SDK does not offer that. Its transport builds the child environment as
-``{**os.environ, "CLAUDE_CODE_ENTRYPOINT": "sdk-py", **options.env, ...}`` —
-read from the published source, not assumed — so ``env`` is an **override map
-layered over the daemon's own environment**, never a replacement for it. The
-child therefore inherits what the daemon has.
-
-That is stated rather than papered over, and it is bounded by three facts. The
-daemon's environment is host-owned: it comes from the systemd unit and an
-optional ``EnvironmentFile`` on the workstation, and nothing a client sends
-reaches it. The overrides in :data:`ENVIRONMENT_FORCED` are applied last and win.
-And Cofferdam's own secret-bearing variable names are explicitly blanked in
-:data:`ENVIRONMENT_BLANKED` — a named, bounded mitigation for the one class of
-value Cofferdam is responsible for.
-
-What is deliberately *not* blanked is the ``ANTHROPIC_*`` family. Emptying those
-would change how the agent authenticates, and Cofferdam has not verified what an
-empty value does to the CLI's sign-in path; guessing there could break
-authentication or silently move spending to a different account. Narrowing the
-inherited environment properly needs a custom SDK ``Transport``, which is a real
-piece of work and belongs to a later PR rather than to a foundation. It is
-recorded as a limitation in ``docs/CLAUDE_AGENT_SDK_ADAPTER.md``.
+It is no longer a limitation, and the fix is not in this file. Cofferdam runs the
+SDK inside a helper process it launches itself, with a complete code-owned
+environment built by selection — see :mod:`.hostenv`. Because that process's
+``os.environ`` *is* the allowlist, the SDK's merge produces the allowlist. The
+few entries in :data:`ENVIRONMENT_FORCED` below are what remains genuinely
+useful to say through the SDK's own option, and they are exactly the values that
+would otherwise depend on the helper's launcher getting them right twice.
 """
 
 from __future__ import annotations
@@ -66,19 +55,42 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-#: The built-in tools the agent may have **at all**. Everything absent from this
-#: tuple does not exist in the session.
+#: The tools that let the agent **act on the workstation**.
 #:
-#: Identical to the Claude Code adapter's set, and that is the point: the two
-#: adapters are two transports for one policy, and a difference between these
-#: tuples would mean switching transport quietly changed what an agent could do.
-PROFILE_TOOLS: Tuple[str, ...] = (
+#: Identical to the Claude Code adapter's complete set, and that is the point:
+#: the two adapters are two transports for one policy, and a difference between
+#: these tuples would mean switching transport quietly changed what an agent
+#: could *do*. A test asserts they match.
+PROFILE_ACTION_TOOLS: Tuple[str, ...] = (
     "Read",
     "Write",
     "Edit",
     "Glob",
     "Grep",
 )
+
+#: The tool that lets the agent **ask a person something**, and the one place the
+#: two transports legitimately differ.
+#:
+#: It acts on nobody. It reads no file, writes no file, runs no command and
+#: leaves the workstation untouched; its entire effect is to put a question in
+#: front of somebody. That is why adding it does not weaken the parity rule
+#: above — the parity rule is about what an agent can do to a machine, and this
+#: does nothing to one.
+#:
+#: It is here because it is the reason M2I exists. The Claude Code adapter cannot
+#: support it: a CLI stream gives no channel on which an answer could be
+#: delivered mid-turn, so a question there is text in a transcript. The SDK's
+#: permission callback is such a channel, and this tool is what uses it.
+#:
+#: **Its input schema is not verified.** See :mod:`.question`. Until a live spike
+#: settles it, a question whose input this build cannot read conservatively
+#: becomes bounded activity and never a fabricated clarification.
+PROFILE_QUESTION_TOOLS: Tuple[str, ...] = ("AskUserQuestion",)
+
+#: The built-in tools the agent may have **at all**. Everything absent from this
+#: tuple does not exist in the session.
+PROFILE_TOOLS: Tuple[str, ...] = PROFILE_ACTION_TOOLS + PROFILE_QUESTION_TOOLS
 
 #: Named again on the deny side. Redundant with :data:`PROFILE_TOOLS` by
 #: construction — a tool absent from ``tools`` is not in the session — and worth
@@ -150,10 +162,16 @@ CALLER_FORBIDDEN_OPTIONS: Tuple[str, ...] = (
 #: :data:`CALLER_FORBIDDEN_OPTIONS` has no parameter at all.
 HOST_SUPPLIED_OPTIONS: Tuple[str, ...] = ("cli_path",)
 
-#: Environment overrides applied last, so they win over whatever the daemon
-#: inherited. Deliberately four entries and no secrets: a value here ends up in a
-#: child process's environment, and this tuple is the list a reviewer reads to
-#: confirm nothing sensitive was put there.
+#: Environment overrides applied last, so they win over whatever the helper
+#: process has. Deliberately four entries and no secrets: a value here ends up in
+#: a child process's environment, and this mapping is the list a reviewer reads
+#: to confirm nothing sensitive was put there.
+#:
+#: Every name is also in :data:`~.hostenv.CHILD_ENVIRONMENT_FORCED`, so the value
+#: is already correct before the SDK is asked. The redundancy is deliberate:
+#: these four are the ones whose being wrong would be silent — a mangled encoding
+#: or an unattributed user agent — and stating them at both layers means neither
+#: layer's mistake is the only thing standing between them and the child.
 ENVIRONMENT_FORCED: Dict[str, str] = {
     # Identifies the caller in the CLI's user agent. Documented SDK option.
     "CLAUDE_AGENT_SDK_CLIENT_APP": "cofferdam",
@@ -163,16 +181,19 @@ ENVIRONMENT_FORCED: Dict[str, str] = {
     "PYTHONIOENCODING": "utf-8",
 }
 
-#: Cofferdam's own secret-bearing variable names, blanked in the child.
+#: Kept empty, and the emptiness is the change.
 #:
-#: The SDK merges ``env`` over the daemon's environment, so a name set here is
-#: overridden rather than removed — an empty string, which for Cofferdam's own
-#: names is unambiguous because nothing in the child reads them for any purpose.
-#: This is the bounded half of the environment story; the unbounded half is in
-#: the module docstring, stated rather than claimed away.
-ENVIRONMENT_BLANKED: Tuple[str, ...] = (
-    "COFFERDAM_TOKEN",
-)
+#: PR1 blanked ``COFFERDAM_TOKEN`` here because the SDK's merge meant the child
+#: would otherwise inherit it. Blanking was a denylist — it protected the one
+#: name somebody thought of — and the helper-process boundary replaced it with an
+#: allowlist, which protects every name nobody thought of. A name is now absent
+#: from the child because :data:`~.hostenv.CHILD_ENVIRONMENT_ALLOWLIST` does not
+#: contain it, not because this tuple remembered to erase it.
+#:
+#: The constant survives so that :func:`verify_option_values` still has a rule to
+#: enforce and so a future reader can see the mechanism was replaced rather than
+#: dropped.
+ENVIRONMENT_BLANKED: Tuple[str, ...] = ()
 
 
 class OptionPolicyError(ValueError):
@@ -197,18 +218,20 @@ def new_session_id() -> str:
 def build_environment(inherited: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """The override map handed to the SDK as ``ClaudeAgentOptions.env``.
 
-    Small on purpose. This is *not* the child's whole environment — see the
-    module docstring — and writing it as though it were would be the kind of
-    comfortable inaccuracy this project exists to avoid. What it does is force
-    the four values Cofferdam cares about and blank its own secret names.
+    Small on purpose, and honest about what it is: an **override map**, not the
+    child's environment. Writing it as though it were the environment would be
+    the kind of comfortable inaccuracy this project exists to avoid — the child's
+    environment is the helper process's own, built by :mod:`.hostenv` and passed
+    to ``Popen``, and this only forces four values on top of it.
 
     ``inherited`` is accepted so a test can pass a mapping instead of touching
-    the process environment; it is read only to decide whether a blanked name is
-    worth including, never copied through.
+    the process environment. It is read to confirm that nothing needing a blank
+    is present and is never copied through: no value from it appears in the
+    result.
     """
     source = dict(os.environ if inherited is None else inherited)
     overrides: Dict[str, str] = dict(ENVIRONMENT_FORCED)
-    for name in ENVIRONMENT_BLANKED:
+    for name in ENVIRONMENT_BLANKED:  # pragma: no cover - empty by design
         if name in source:
             overrides[name] = ""
     return overrides
@@ -379,10 +402,12 @@ __all__ = [
     "ENVIRONMENT_BLANKED",
     "ENVIRONMENT_FORCED",
     "FORBIDDEN_PERMISSION_MODES",
+    "PROFILE_ACTION_TOOLS",
     "PROFILE_DISALLOWED_TOOLS",
     "PROFILE_MAX_BUDGET_USD",
     "PROFILE_MAX_TURNS",
     "PROFILE_PERMISSION_MODE",
+    "PROFILE_QUESTION_TOOLS",
     "PROFILE_TOOLS",
     "OptionPolicyError",
     "build_environment",

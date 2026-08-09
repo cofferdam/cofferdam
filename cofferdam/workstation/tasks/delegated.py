@@ -145,6 +145,33 @@ TERMINAL_STATE_FOR_KIND: Dict[str, str] = {
 CATEGORY_CLARIFICATION = "clarification"
 CATEGORY_TOOL_APPROVAL = "tool_approval"
 
+# -- how a clarification may be answered -------------------------------------
+#
+# Four modes, and ``unknown`` is the one that earns the vocabulary. A build that
+# could only express three would have to guess whenever a provider's input did
+# not match — and guessing here means offering somebody a text box for a question
+# that wanted a choice, or a choice list that silently drops what they meant to
+# say. The word lives here rather than in an adapter because it is part of what a
+# *client* is told, and no client should have to know which provider asked.
+
+ANSWER_MODE_SINGLE_CHOICE = "single_choice"
+ANSWER_MODE_MULTIPLE_CHOICE = "multiple_choice"
+ANSWER_MODE_FREE_TEXT = "free_text"
+ANSWER_MODE_UNKNOWN = "unknown"
+
+ANSWER_MODES: Tuple[str, ...] = (
+    ANSWER_MODE_SINGLE_CHOICE,
+    ANSWER_MODE_MULTIPLE_CHOICE,
+    ANSWER_MODE_FREE_TEXT,
+    ANSWER_MODE_UNKNOWN,
+)
+
+#: Modes for which a chosen option is the whole answer, so free text is neither
+#: required nor accepted on its own.
+CHOICE_ANSWER_MODES = frozenset(
+    {ANSWER_MODE_SINGLE_CHOICE, ANSWER_MODE_MULTIPLE_CHOICE}
+)
+
 #: Coarse buckets for what a tool would do. Deliberately five words rather than a
 #: tool taxonomy: this is what a person needs to judge an approval at a glance,
 #: and a richer vocabulary would tempt somebody into deriving policy from it.
@@ -296,15 +323,33 @@ class ClarificationOption:
     ``value`` is what would be sent back if this option were chosen, and it is
     bounded and sanitized exactly like the label. It is **not** an instruction,
     a command or a path: nothing in Cofferdam executes an option value, and the
-    answer route that will one day consume it is PR2's, where the provenance of
-    an answer is the whole subject.
+    route that consumes it — M2I PR2's answer submission — accepts an
+    ``option_id`` rather than a value, so a client never sends provider text back
+    at all.
+
+    ``option_id`` is **Cofferdam's**, generated from position by the adapter that
+    read the question. A provider string used as an identifier would be a
+    provider deciding what the answer route's primary key looks like, which is
+    the last surface where that should be true. It is optional here only so that
+    an older stored payload without one can still be read back.
+
+    ``description`` is the bounded subtitle a verified schema may turn out to
+    carry. It is present and usually ``None``: adding the field once is cheaper
+    than a migration, and a field that is absent cannot be filled in by a spike.
     """
 
     label: str
     value: str
+    option_id: Optional[str] = None
+    description: Optional[str] = None
 
-    def to_dict(self) -> Dict[str, str]:
-        return {"label": self.label, "value": self.value}
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "label": self.label,
+            "value": self.value,
+            "option_id": self.option_id,
+            "description": self.description,
+        }
 
 
 @dataclass(frozen=True)
@@ -321,6 +366,15 @@ class ClarificationRequest:
     question: str
     options: Tuple[ClarificationOption, ...] = ()
     allows_free_text: bool = True
+    #: How this question may be answered, from the closed vocabulary in
+    #: :data:`ANSWER_MODES`. ``unknown`` is a legitimate value and the honest one
+    #: for a shape whose schema has not been verified against a live provider.
+    answer_mode: str = ANSWER_MODE_UNKNOWN
+    #: Whether the provider input this was read from matched a schema Cofferdam
+    #: has actually observed. Stored on the record rather than looked up, so a
+    #: later build that verifies the schema cannot retroactively claim that
+    #: yesterday's clarifications were verified.
+    schema_verified: bool = False
 
     @property
     def category(self) -> str:
@@ -332,6 +386,8 @@ class ClarificationRequest:
             "question": self.question,
             "options": [option.to_dict() for option in self.options],
             "allows_free_text": self.allows_free_text,
+            "answer_mode": self.answer_mode,
+            "schema_verified": self.schema_verified,
         }
 
     @classmethod
@@ -364,10 +420,20 @@ class ClarificationRequest:
         question = safe_text(payload.get("question"), MAX_QUESTION_CHARS)
         if question is None:
             raise DelegatedEventInvalid("a clarification must ask something")
+        options = _read_options(payload.get("options"))
+        mode = payload.get("answer_mode")
+        if mode not in ANSWER_MODES:
+            # Not refused. A stored payload from an older build has no mode, and
+            # an unrecognised one from a newer build is a word this build has no
+            # meaning for — both are honestly "unknown", which is a value the
+            # vocabulary contains precisely so this branch does not have to guess.
+            mode = ANSWER_MODE_UNKNOWN
         return cls(
             question=question,
-            options=_read_options(payload.get("options")),
+            options=options,
             allows_free_text=payload.get("allows_free_text") is not False,
+            answer_mode=mode,
+            schema_verified=payload.get("schema_verified") is True,
         )
 
 
@@ -439,8 +505,15 @@ class ToolApprovalRequest:
 #: methods to refuse the other's payload, and listed by name rather than derived
 #: so that adding a field to one class is a visible decision about whether the
 #: other must now refuse it.
-_CLARIFICATION_FIELDS = frozenset({"question", "options", "allows_free_text"})
+_CLARIFICATION_FIELDS = frozenset(
+    {"question", "options", "allows_free_text", "answer_mode"}
+)
 _TOOL_APPROVAL_FIELDS = frozenset({"tool_name", "tool_category"})
+
+#: The shape a Cofferdam-generated option identifier must have. Checked rather
+#: than trusted, because this string is what an answer request names and a
+#: value that is not an identifier is not one whatever produced it.
+_OPTION_ID = re.compile(r"\A[a-z][a-z0-9_]{0,31}\Z")
 
 
 def _read_options(value: Any) -> Tuple[ClarificationOption, ...]:
@@ -449,14 +522,27 @@ def _read_options(value: Any) -> Tuple[ClarificationOption, ...]:
     Dropped rather than refused: a question with one unreadable option is still
     a question worth asking, and losing the whole thing would lose the part a
     person could have answered.
+
+    An entry that arrives without a usable ``option_id`` is given one from its
+    **surviving** position, so the identifiers of a rebuilt request always run
+    ``opt1``, ``opt2``, … with no gaps. Numbering from the input position would
+    leave a hole wherever an option was dropped, and a hole in a list of
+    identifiers a client picks from is a way to answer a question with a choice
+    that is not on it.
     """
     if not isinstance(value, (list, tuple)):
         return ()
     options: List[ClarificationOption] = []
     for entry in list(value)[:MAX_OPTIONS]:
+        description = None
+        identifier = None
         if isinstance(entry, dict):
             label = safe_line(entry.get("label"), MAX_OPTION_LABEL_CHARS)
             raw_value = entry.get("value", entry.get("label"))
+            description = safe_line(entry.get("description"), MAX_OPTION_LABEL_CHARS * 2)
+            candidate = entry.get("option_id")
+            if isinstance(candidate, str) and _OPTION_ID.match(candidate):
+                identifier = candidate
         elif isinstance(entry, str):
             label = safe_line(entry, MAX_OPTION_LABEL_CHARS)
             raw_value = entry
@@ -465,7 +551,14 @@ def _read_options(value: Any) -> Tuple[ClarificationOption, ...]:
         if label is None:
             continue
         option_value = safe_line(raw_value, MAX_OPTION_VALUE_CHARS) or label
-        options.append(ClarificationOption(label=label, value=option_value))
+        options.append(
+            ClarificationOption(
+                label=label,
+                value=option_value,
+                option_id=identifier or ("opt" + str(len(options) + 1)),
+                description=description,
+            )
+        )
     return tuple(options)
 
 
@@ -889,8 +982,14 @@ def result_from_event(
 
 
 __all__ = [
+    "ANSWER_MODES",
+    "ANSWER_MODE_FREE_TEXT",
+    "ANSWER_MODE_MULTIPLE_CHOICE",
+    "ANSWER_MODE_SINGLE_CHOICE",
+    "ANSWER_MODE_UNKNOWN",
     "CATEGORY_CLARIFICATION",
     "CATEGORY_TOOL_APPROVAL",
+    "CHOICE_ANSWER_MODES",
     "DELEGATED_EVENT_VERSION",
     "DELEGATED_KINDS",
     "KIND_ACTIVITY",

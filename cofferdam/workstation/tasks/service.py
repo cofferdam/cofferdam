@@ -44,10 +44,33 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from ..runtime.identity import now_iso
 from .adapters import AdapterRegistry, AdapterRefusal, TaskAdapter, TaskContext
+from .clarifications import (
+    ACCEPTED_ANSWER_SOURCES,
+    OUTCOME_ACCEPTED,
+    OUTCOME_REJECTED,
+    SOURCE_WORKSTATION_PWA,
+    STATUS_CANCELLED,
+    STATUS_SUPERSEDED,
+    AnswerProvenance,
+    ClarificationAnswer,
+    ClarificationInvalid,
+    PendingClarification,
+    answer_summary,
+    answered,
+    build_pending,
+    encode_answer,
+    supersede,
+    valid_question_id,
+)
 from .errors import (
     AdapterFailed,
     AdapterNotPermitted,
     CancelUnsupported,
+    ClarificationAnswerInvalid,
+    ClarificationClosed,
+    ClarificationNotDelivered,
+    ClarificationUnknown,
+    ClarificationUnsupported,
     FollowupInvalid,
     FollowupNotWaiting,
     FollowupUnsupported,
@@ -521,6 +544,23 @@ class TaskService:
                 # itself is user content: it lives on the task, is shown in the
                 # detail view, and is not copied into the history.
                 text="Follow-up received (" + str(len(text)) + " characters).",
+                # A follow-up sent while a question was open closes that
+                # question, in the same write that moves the task.
+                #
+                # The two are different channels — a follow-up is a new
+                # instruction, an answer resolves something the agent is blocked
+                # on — and a person who sends the first has, whatever they meant,
+                # stopped waiting on the second. Leaving it ``pending`` would put
+                # a running task in the "needs you" bucket with an answer box
+                # that no longer leads anywhere, which is the same false claim
+                # this file refuses everywhere else.
+                #
+                # No adapter can reach this today: the one that asks questions
+                # declares ``followup=False``, so the capability check above
+                # refuses first. It is here because that pairing is a fact about
+                # today's adapters rather than about the lifecycle, and the
+                # lifecycle is what has to stay coherent.
+                close_clarifications=self._close_pending(row.task_id, STATE_RUNNING),
             )
             self._audit(
                 "task_followup",
@@ -755,6 +795,18 @@ class TaskService:
                         + ". It was not resumed."
                     ),
                     failure=None,
+                    # A question survives in the history and stops being
+                    # answerable, in the same write that ends the task.
+                    #
+                    # This is the honest half of restart behaviour and it is not
+                    # a limitation being worked around. The session that asked
+                    # the question was a process, that process is gone, and
+                    # nothing anybody typed now could reach it. Leaving the
+                    # question ``pending`` would put a task in the "needs you"
+                    # bucket with an answer box whose only possible outcome is a
+                    # refusal — which is precisely the false claim
+                    # ``interrupted`` exists to avoid making.
+                    close_clarifications=self._close_pending(row.task_id, target),
                 )
             except (IllegalTransition, TaskError):  # pragma: no cover - defensive
                 continue
@@ -768,6 +820,228 @@ class TaskService:
                 correlation_id=updated.correlation_id,
             )
         return settled
+
+    # -- clarifications ------------------------------------------------------
+
+    def pending_clarifications(self, task_id: object) -> List[PendingClarification]:
+        """Every question this task is currently waiting on. Usually none or one.
+
+        A read, and deliberately not a refresh: asking what a task is waiting for
+        must not be able to change what it is waiting for. The route that lists
+        questions calls :meth:`refresh_task` first if it wants fresh ones, which
+        keeps "reading is a read" true of this method whoever calls it.
+        """
+        row = self.get_task(task_id)
+        return self._store.pending_clarifications(row.task_id)
+
+    def clarifications(self, task_id: object) -> List[PendingClarification]:
+        """Every question this task has ever been asked, answered or not."""
+        row = self.get_task(task_id)
+        return self._store.clarifications(row.task_id)
+
+    def answer_clarification(
+        self,
+        task_id: object,
+        question_id: object,
+        payload: object,
+        *,
+        source: str = SOURCE_WORKSTATION_PWA,
+    ) -> TaskRow:
+        """Accept one answer, deliver it, and return the task to ``running``.
+
+        The order of the checks is the design, and each one is here because the
+        alternative is a specific falsehood:
+
+        1. **The question must exist on this task.** Scoped in the query, so a
+           question id from another task simply does not match — an answer cannot
+           be aimed at somebody else's conversation.
+        2. **It must still be open.** An already-answered question refused rather
+           than answered twice; a superseded or cancelled one refused rather than
+           delivered to a session that has moved on.
+        3. **The answer must fit the question**, including refusing any body that
+           carries an approval-shaped field. See
+           :meth:`~.clarifications.ClarificationAnswer.from_request`.
+        4. **The task must be waiting.** Re-read inside the lock, because it may
+           have been cancelled while this request was being validated.
+        5. **The provider must actually take it.** Only then is anything written.
+
+        Nothing is recorded until step five succeeds. An answer stored as
+        delivered that never reached the session would show somebody their answer
+        accepted while the agent sat waiting for it — the exact false success
+        this codebase refuses to produce.
+        """
+        row = self.get_task(task_id)
+        adapter = self._adapters.get(row.adapter_id)
+
+        if source not in ACCEPTED_ANSWER_SOURCES:
+            # The future bridge's name is in the vocabulary and not in this set,
+            # and that gap is the point: a reserved word is not an enabled
+            # surface. Nothing in this build passes it, and if something did it
+            # would be refused here rather than recorded.
+            raise ClarificationAnswerInvalid("that answer source is not accepted")
+        if not adapter.capabilities().clarifications:
+            self._reject(row, "clarification", "adapter does not ask questions")
+            raise ClarificationUnsupported(row.adapter_id)
+        if not valid_question_id(question_id):
+            raise ClarificationUnknown()
+
+        with self._lock:
+            row = self._store.get(row.task_id)
+            pending = self._store.find_clarification(row.task_id, question_id)
+            if pending is None:
+                raise ClarificationUnknown()
+            if not pending.pending:
+                self._reject(row, "clarification", "question is " + pending.status)
+                raise ClarificationClosed(pending.status)
+            if row.state in TERMINAL_STATES:
+                self._reject(row, "clarification", "task is " + row.state)
+                raise TaskAlreadyFinished(row.state)
+            if row.state != STATE_WAITING_FOR_USER:
+                self._reject(row, "clarification", "task is " + row.state)
+                raise FollowupNotWaiting(row.state)
+
+            received_at = now_iso()
+            try:
+                answer = ClarificationAnswer.from_request(
+                    payload,
+                    clarification=pending,
+                    provenance=AnswerProvenance.build(
+                        source=source, received_at=received_at
+                    ),
+                )
+            except ClarificationInvalid as declined:
+                self._record_rejected_answer(row, pending, source, received_at, declined)
+                raise ClarificationAnswerInvalid(str(declined))
+
+            project = self._projects.get(row.project_id)
+            root = verify_root(project.root)
+            context = self._context(row, root, adapter)
+
+            # Composed here, from Cofferdam's own words and the stored option
+            # labels, by a code-owned function. No string a client sent reaches
+            # the provider except the person's own answer text.
+            text = encode_answer(pending, answer)
+            try:
+                delivered = adapter.deliver_clarification_answer(
+                    context, pending.provider_event_id or "", text
+                )
+            except AdapterRefusal:
+                delivered = False
+            except Exception as exc:
+                return self._fail(
+                    row,
+                    "task_adapter_error",
+                    "the task adapter stopped unexpectedly",
+                    type(exc).__name__,
+                )
+            if not delivered:
+                self._record_rejected_answer(
+                    row, pending, source, received_at, "not delivered"
+                )
+                raise ClarificationNotDelivered()
+
+            row = self._store.transition(
+                row.task_id,
+                STATE_RUNNING,
+                event_type=EVENT_FOLLOWUP_RECEIVED,
+                actor=ACTOR_USER,
+                source=SOURCE_COFFERDAM,
+                expected_state=STATE_WAITING_FOR_USER,
+                # Shape, never content. An answer is somebody's private text and
+                # lives on the question; the history says one arrived and how big
+                # it was, exactly as it does for a follow-up.
+                text=answer_summary(answer),
+                detail="clarification",
+                open_clarification=answered(pending, answer, at=now_iso()),
+            )
+            self._audit(
+                "task_clarification_answer",
+                OUTCOME_ACCEPTED,
+                task_id=row.task_id,
+                adapter_id=row.adapter_id,
+                project_id=row.project_id,
+                correlation_id=row.correlation_id,
+            )
+            return row
+
+    def _record_rejected_answer(
+        self,
+        row: TaskRow,
+        pending: PendingClarification,
+        source: str,
+        received_at: str,
+        reason: object,
+    ) -> None:
+        """Record that an answer was refused, without recording the answer.
+
+        The question stays open and stays unanswered — a refused attempt is not a
+        partial answer — so nothing is written to the clarification row. What is
+        written is a rejection on the task's history and one audit line, because
+        "I answered and nothing happened" is a confusing experience whose
+        explanation should be visible where the task is.
+        """
+        self._reject(row, "clarification", str(reason)[:120])
+        self._audit(
+            "task_clarification_answer",
+            OUTCOME_REJECTED,
+            task_id=row.task_id,
+            adapter_id=row.adapter_id,
+            project_id=row.project_id,
+            correlation_id=row.correlation_id,
+        )
+
+    def _clarification_to_open(
+        self, row: TaskRow, outcome
+    ) -> Optional[PendingClarification]:
+        """The durable question an adapter's report implies, if it implies one.
+
+        Returns ``None`` for the common case and for the two that matter:
+
+        **A repeat.** A provider event id that already produced a question
+        produces nothing further, so a retried or re-drained event cannot open a
+        second pending question for one thing the agent asked.
+
+        **A task with no room.** A provider that keeps asking without waiting
+        cannot grow a task's storage past
+        :data:`~.clarifications.MAX_PENDING_PER_TASK`.
+        """
+        request = getattr(outcome, "clarification", None)
+        if request is None:
+            return None
+        token = getattr(outcome, "clarification_token", None)
+        if token and self._store.clarification_for_provider_event(row.task_id, token):
+            return None
+        if not self._store.clarification_room(row.task_id):
+            return None
+        try:
+            return build_pending(
+                task_id=row.task_id,
+                provider=row.adapter_id,
+                request=request,
+                requested_at=now_iso(),
+                provider_event_id=token,
+            )
+        except ClarificationInvalid:
+            # A question that will not build is dropped, and the task is
+            # unaffected. It has already been recorded as an event by the time
+            # this runs, so nothing about what happened is lost — only the
+            # ability to answer it, which a malformed question never had.
+            return None
+
+    def _close_pending(self, task_id: str, reason: str) -> Tuple[PendingClarification, ...]:
+        """Close every open question on a task that is ending.
+
+        A question left ``pending`` on a cancelled or completed task is a task
+        list that shows something needing an answer nobody can give. The status
+        distinguishes why: ``cancelled`` when the task was stopped, ``superseded``
+        when it simply finished around the question.
+        """
+        status = STATUS_CANCELLED if reason == STATE_CANCELLED else STATUS_SUPERSEDED
+        at = now_iso()
+        return tuple(
+            supersede(pending, status=status, at=at)
+            for pending in self._store.pending_clarifications(task_id)
+        )
 
     # -- applying an adapter's report ---------------------------------------
 
@@ -850,11 +1124,20 @@ class TaskService:
             )
 
         requested = outcome.requested_state
+        asked = self._clarification_to_open(row, outcome)
         if requested is None:
             return self._store.get(row.task_id)
 
         current = self._store.get(row.task_id)
         if current.state == requested:
+            if asked is not None:
+                # The task is already where the adapter wants it — waiting — and
+                # a question still has to be stored. Written on its own rather
+                # than through a transition, because there is no state change to
+                # be transactional with: the graph has no `waiting_for_user →
+                # waiting_for_user` edge, and inventing one so this write could
+                # ride along would be changing the lifecycle to suit a store.
+                self._store.save_clarification(asked)
             return current
         if not can_transition(current.state, requested):
             # The adapter asked for something the graph does not contain. Its
@@ -915,6 +1198,14 @@ class TaskService:
             failure=failure,
             cancellation=(
                 {"completed_at": now_iso(), "accepted": True} if cancelling and requested == STATE_CANCELLED else None
+            ),
+            # The question and the move to `waiting_for_user` are one write. A
+            # task that says it is waiting with no question to answer, or a
+            # question left open on a task that has finished, is a disagreement
+            # between two rows that somebody would have to resolve by guessing.
+            open_clarification=asked,
+            close_clarifications=(
+                self._close_pending(row.task_id, requested) if requested in TERMINAL_STATES else ()
             ),
         )
         if requested in TERMINAL_STATES:
