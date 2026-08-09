@@ -48,6 +48,7 @@ from ._agent_sdk_doubles import (
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
+    scripted_module,
 )
 from ._task_doubles import PROJECT_ID, TURKISH_PROMPT, TaskTestCase, python_code_only
 
@@ -70,6 +71,7 @@ from cofferdam.workstation.tasks.adapters.claude_agent_sdk import (
 from cofferdam.workstation.tasks.adapters.protocol import AdapterRefusal, TaskContext
 from cofferdam.workstation.tasks.delegated import (
     KIND_ACTIVITY,
+    KIND_CANCELLATION_REQUESTED,
     KIND_CANCELLED,
     KIND_CLARIFICATION_REQUESTED,
     KIND_OUTPUT,
@@ -85,6 +87,7 @@ from cofferdam.workstation.tasks.models import (
     STATE_CANCELLED,
     STATE_COMPLETED,
     STATE_FAILED,
+    STATE_READY_FOR_FOLLOWUP,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -101,6 +104,23 @@ def event(kind: str, sequence: int = 1, **fields):
         provider_sequence=sequence,
         observed_at=NOW,
         **fields,
+    )
+
+
+def clarification_request(question: str = "Which branch should this land on?"):
+    """One bounded, sanitized question. Content invented here, as always."""
+    from cofferdam.workstation.tasks.delegated import ClarificationRequest
+
+    return ClarificationRequest.from_dict(
+        {
+            "category": "clarification",
+            "question": question,
+            "answer_mode": "single_choice",
+            "options": [
+                {"option_id": "opt1", "label": "main"},
+                {"option_id": "opt2", "label": "develop"},
+            ],
+        }
     )
 
 
@@ -1044,6 +1064,343 @@ class AdapterBehaviourTests(unittest.TestCase):
         self.assertEqual(adapter.inspect(context(self.root)).events, ())
 
 
+class SdkSessionTurnTests(unittest.TestCase):
+    """The **real** :class:`SdkSession`, driven against a scripted async client.
+
+    Everything above this class replaces the session; this one replaces only the
+    SDK underneath it, so the thread, the event loop, the receive loop, the
+    between-turn park and the identity check are the code that actually ships.
+
+    What it still cannot prove is that the real SDK behaves the way
+    :class:`ScriptedClient` does. That reading came from the published 0.2.134
+    source and is recorded in the adapter guide; the live spike is what settles
+    it.
+    """
+
+    def session(self, turns):
+        from cofferdam.workstation.tasks.adapters.claude_agent_sdk import (
+            session as session_module,
+        )
+
+        module = scripted_module(turns)
+        session = session_module.SdkSession(
+            task_id="tsk_turns",
+            project_root=Path("/srv/project"),
+            loader=lambda: module,
+        )
+        # Ends the stream before the session is closed, so a session still
+        # reading unwinds through its own loop instead of being stopped while
+        # an async generator is suspended.
+        self.addCleanup(session.close)
+        self.addCleanup(lambda: module.client and module.client.end_stream())
+        return session, module
+
+    def wait_for(self, predicate, timeout: float = 5.0) -> None:
+        import time
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.005)
+        self.fail("the session never reached the expected state")
+
+    def collect(self, session, kind: str, timeout: float = 5.0):
+        """Drain until an event of ``kind`` shows up, and return everything."""
+        import time
+
+        seen = []
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            seen.extend(session.drain())
+            if any(event.kind == kind for event in seen):
+                return seen
+            time.sleep(0.005)
+        self.fail("no " + kind + " event arrived; saw " + str([e.kind for e in seen]))
+
+    def test_a_result_ends_the_turn_and_not_the_session(self) -> None:
+        session, module = self.session(
+            [[ResultMessage(result="first answer", session_id="sess-live-1")]]
+        )
+        session.start("do the thing")
+        self.collect(session, KIND_SUCCEEDED)
+        self.wait_for(lambda: session.turn_complete)
+
+        self.assertFalse(session.finished)
+        self.assertEqual(session.turn_number, 1)
+        self.assertEqual(session.provider_session_id, "sess-live-1")
+        # The client is still connected: nothing was disconnected by a result.
+        self.assertEqual(module.client.disconnects, 0)
+
+    def test_a_follow_up_queries_the_same_client_and_starts_a_second_turn(
+        self,
+    ) -> None:
+        session, module = self.session(
+            [
+                [ResultMessage(result="first answer", session_id="sess-live-1")],
+                [ResultMessage(result="second answer", session_id="sess-live-1")],
+            ]
+        )
+        session.start("the first question")
+        self.collect(session, KIND_SUCCEEDED)
+        self.wait_for(lambda: session.turn_complete)
+
+        session.send_followup("the second question")
+        events = self.collect(session, KIND_SUCCEEDED)
+
+        # One connect, one client, two queries — the prompt and the follow-up,
+        # in that order and unmodified. No concatenation, no re-prompting.
+        self.assertEqual(module.client.connects, 1)
+        self.assertEqual(
+            module.client.queries, ["the first question", "the second question"]
+        )
+        self.assertEqual(session.turn_number, 2)
+        self.assertEqual(session.provider_session_id, "sess-live-1")
+        results = [e.result for e in events if e.kind == KIND_SUCCEEDED]
+        self.assertIn("second answer", results)
+
+    def test_a_follow_up_is_refused_before_the_turn_ends(self) -> None:
+        session, _ = self.session([[]])
+        session.start("do the thing")
+        with self.assertRaises(session_module.SessionRefused):
+            session.send_followup("hurry up")
+
+    def test_closing_between_turns_ends_the_session_cleanly(self) -> None:
+        """No transport-failure event for a session that was closed on purpose.
+
+        The coroutine parked between turns unwinds by itself rather than having
+        its loop stopped underneath it — which would be recorded as "the session
+        ended unexpectedly" on a task nobody had a problem with.
+        """
+        session, module = self.session(
+            [[ResultMessage(result="first answer", session_id="sess-live-1")]]
+        )
+        session.start("do the thing")
+        self.collect(session, KIND_SUCCEEDED)
+        self.wait_for(lambda: session.turn_complete)
+
+        self.assertTrue(session.close())
+        self.wait_for(lambda: session.finished)
+        self.assertEqual(module.client.disconnects, 1)
+        self.assertEqual(
+            [e.kind for e in session.drain() if e.kind == KIND_PROVIDER_FAILED], []
+        )
+
+    def test_cancelling_between_turns_interrupts_and_records_it(self) -> None:
+        session, module = self.session(
+            [[ResultMessage(result="first answer", session_id="sess-live-1")]]
+        )
+        session.start("do the thing")
+        self.collect(session, KIND_SUCCEEDED)
+        self.wait_for(lambda: session.turn_complete)
+
+        session.request_cancel()
+        self.wait_for(lambda: session.finished)
+        self.assertEqual(module.client.interrupts, 1)
+        kinds = [e.kind for e in session.drain()]
+        self.assertIn(KIND_CANCELLATION_REQUESTED, kinds)
+
+    def test_a_message_from_another_session_ends_the_turn_as_a_failure(self) -> None:
+        """The identity check that makes "the same session continued" a claim.
+
+        Before follow-up existed this was academic — one turn, one stream. It
+        stops being academic the moment a second turn can be issued.
+        """
+        session, _ = self.session(
+            [
+                [ResultMessage(result="first answer", session_id="sess-live-1")],
+                [ResultMessage(result="not ours", session_id="sess-somebody-else")],
+            ]
+        )
+        session.start("the first question")
+        self.collect(session, KIND_SUCCEEDED)
+        self.wait_for(lambda: session.turn_complete)
+
+        session.send_followup("the second question")
+        events = self.collect(session, KIND_PROVIDER_FAILED)
+        failure = [e for e in events if e.kind == KIND_PROVIDER_FAILED][0]
+        self.assertEqual(failure.failure_code, "session_mismatch")
+        # Neither session id is rendered into the message.
+        self.assertNotIn("sess-somebody-else", failure.text or "")
+        self.assertNotIn("sess-live-1", failure.text or "")
+        # And the other session's answer never became a result.
+        self.assertNotIn("not ours", [e.result for e in events])
+
+
+class SameSessionFollowupTests(AdapterBehaviourTests):
+    """M2I PR3: one client, several turns, and no confusion between them.
+
+    Driven through the same injected session boundary as everything else here,
+    so none of it needs the SDK, a subprocess or a network. What it proves is
+    the adapter's half of the contract: which state a finished turn asks for,
+    that a follow-up reaches one session, that turn identity advances, and that
+    a stale event cannot end the turn it arrives in.
+    """
+
+    def retained(self, result: str = "first answer"):
+        """An adapter whose task has finished a turn and kept its session."""
+        adapter = self.adapter(
+            batches=[[event(KIND_SUCCEEDED, 1, text=result, result=result)]]
+        )
+        adapter.start(context(self.root))
+        self.sessions[0].complete_turn()
+        outcome = adapter.inspect(context(self.root))
+        return adapter, outcome
+
+    def test_a_finished_turn_on_a_live_session_asks_for_ready_for_followup(
+        self,
+    ) -> None:
+        """The state that used to be ``completed``, and why it is not.
+
+        The event is identical either way — a success is a success. What
+        differs is whether the session survived it, which is asked of the
+        session rather than inferred.
+        """
+        adapter, outcome = self.retained("kırk iki")
+        self.assertEqual(outcome.requested_state, STATE_READY_FOR_FOLLOWUP)
+        self.assertEqual(outcome.final_result, "kırk iki")
+        self.assertTrue(outcome.session_retained)
+        self.assertEqual(outcome.provider_session_id, "session-abc")
+        # The session was kept, not retired, and the slot is still held.
+        self.assertEqual(self.sessions[0].close_calls, 0)
+        self.assertEqual(adapter.active_task_ids(), (context(self.root).task_id,))
+
+    def test_the_same_event_completes_a_task_whose_session_has_gone(self) -> None:
+        adapter = self.adapter(
+            batches=[[event(KIND_SUCCEEDED, 1, text="done", result="done")]]
+        )
+        adapter.start(context(self.root))
+        # No `complete_turn`: the session reports it is not holding anything.
+        outcome = adapter.inspect(context(self.root))
+        self.assertEqual(outcome.requested_state, STATE_COMPLETED)
+        self.assertFalse(outcome.session_retained)
+        self.assertEqual(self.sessions[0].close_calls, 1)
+
+    def test_a_follow_up_reaches_the_same_session_and_opens_no_second_one(
+        self,
+    ) -> None:
+        adapter, _ = self.retained()
+        adapter.send_followup(context(self.root), "and also this")
+        session = self.sessions[0]
+        self.assertEqual(session.followups, ["and also this"])
+        # One session object, one client, for the whole conversation.
+        self.assertEqual(len(self.sessions), 1)
+        self.assertEqual(session.clients_created, 1)
+
+    def test_the_provider_session_id_does_not_change_across_turns(self) -> None:
+        adapter, first = self.retained()
+        before = first.provider_session_id
+        outcome = adapter.send_followup(context(self.root), "again")
+        self.assertEqual(outcome.provider_session_id, before)
+        self.assertEqual(self.sessions[0].provider_session_id, before)
+
+    def test_a_follow_up_advances_the_turn_number(self) -> None:
+        adapter, _ = self.retained()
+        self.assertEqual(self.sessions[0].turn_number, 1)
+        adapter.send_followup(context(self.root), "again")
+        self.assertEqual(self.sessions[0].turn_number, 2)
+
+    def test_a_second_turn_reports_its_own_result(self) -> None:
+        adapter, first = self.retained("first answer")
+        session = self.sessions[0]
+        session.followup_batches.append(
+            [event(KIND_SUCCEEDED, 5, text="second answer", result="second answer")]
+        )
+        adapter.send_followup(context(self.root), "and again")
+        session.complete_turn()
+        second = adapter.inspect(context(self.root))
+        self.assertEqual(second.requested_state, STATE_READY_FOR_FOLLOWUP)
+        self.assertEqual(second.final_result, "second answer")
+        self.assertEqual(first.final_result, "first answer")
+
+    def test_a_late_event_from_the_previous_turn_cannot_end_the_new_one(self) -> None:
+        """The turn floor, which is the part a fresh log alone would not give.
+
+        A re-sent copy of turn one's result arrives during turn two. A new log
+        has never seen it and has no terminal event, so without the floor it
+        would end turn two with turn one's answer.
+        """
+        adapter, _ = self.retained("first answer")
+        session = self.sessions[0]
+        stale = event(KIND_SUCCEEDED, 1, text="first answer", result="first answer")
+        session.followup_batches.append([stale])
+        adapter.send_followup(context(self.root), "and again")
+        session.complete_turn()
+        outcome = adapter.inspect(context(self.root))
+        # Dropped: no state requested, no result, and the turn is still open.
+        self.assertIsNone(outcome.requested_state)
+        self.assertIsNone(outcome.final_result)
+        self.assertEqual(outcome.events, ())
+
+    def test_a_follow_up_is_refused_while_a_question_is_open(self) -> None:
+        adapter = self.adapter(
+            batches=[
+                [
+                    event(
+                        KIND_CLARIFICATION_REQUESTED,
+                        1,
+                        clarification=clarification_request(),
+                        provider_event_id="ask_1",
+                    )
+                ]
+            ]
+        )
+        adapter.start(context(self.root))
+        adapter.inspect(context(self.root))
+        self.sessions[0].pending_token = "ask_1"
+        with self.assertRaises(AdapterRefusal) as caught:
+            adapter.send_followup(context(self.root), "never mind")
+        self.assertIn("waiting for an answer", str(caught.exception))
+        self.assertEqual(self.sessions[0].followups, [])
+
+    def test_a_follow_up_is_refused_mid_turn(self) -> None:
+        adapter = self.adapter()
+        adapter.start(context(self.root))
+        with self.assertRaises(AdapterRefusal) as caught:
+            adapter.send_followup(context(self.root), "hurry up")
+        self.assertIn("still working", str(caught.exception))
+
+    def test_a_follow_up_to_an_unknown_task_is_refused(self) -> None:
+        adapter, _ = self.retained()
+        with self.assertRaises(AdapterRefusal):
+            adapter.send_followup(context(self.root, "tsk_other"), "hello")
+        self.assertEqual(self.sessions[0].followups, [])
+
+    def test_a_follow_up_after_the_session_ended_is_refused(self) -> None:
+        adapter, _ = self.retained()
+        self.sessions[0].finish()
+        with self.assertRaises(AdapterRefusal):
+            adapter.send_followup(context(self.root), "hello")
+
+    def test_session_available_answers_for_this_process_only(self) -> None:
+        adapter, _ = self.retained()
+        task_id = context(self.root).task_id
+        self.assertTrue(adapter.session_available(task_id))
+        self.assertFalse(adapter.session_available("tsk_never_seen"))
+        # After a restart the dictionary is empty, whatever any stored id says.
+        self.assertFalse(ClaudeAgentSdkAdapter().session_available(task_id))
+
+    def test_session_available_is_false_without_a_provider_session_id(self) -> None:
+        """A conversation nobody can name is not one anybody can continue."""
+        adapter = self.adapter(provider_session_id=None)
+        adapter.start(context(self.root))
+        self.sessions[0].complete_turn()
+        self.assertFalse(adapter.session_available(context(self.root).task_id))
+
+    def test_finishing_releases_the_session(self) -> None:
+        adapter, _ = self.retained()
+        adapter.release_session(context(self.root).task_id)
+        self.assertEqual(self.sessions[0].close_calls, 1)
+        self.assertEqual(adapter.active_task_ids(), ())
+
+    def test_cancelling_a_retained_session_still_stops_it(self) -> None:
+        adapter, _ = self.retained()
+        outcome = adapter.cancel(context(self.root))
+        self.assertEqual(outcome.requested_state, STATE_CANCELLED)
+        self.assertEqual(self.sessions[0].cancel_calls, 1)
+        self.assertEqual(adapter.active_task_ids(), ())
+
+
 class CancellationTests(AdapterBehaviourTests):
     def test_cancel_reaches_the_session_and_reports_cancelled(self) -> None:
         adapter = self.adapter(
@@ -1178,8 +1535,24 @@ class SessionSeamTests(unittest.TestCase):
         with self.assertRaises(session_module.SessionRefused):
             session.send_followup("anything")
 
-    def test_the_adapter_does_not_claim_a_follow_up_capability(self) -> None:
-        self.assertFalse(ClaudeAgentSdkAdapter().capabilities().followup)
+    def test_the_adapter_claims_follow_up_now_that_it_delivers_one(self) -> None:
+        """True as of M2I PR3, and it was false before for a real reason.
+
+        The capability is what makes Task Core offer a follow-up box, so it
+        stayed false for as long as the box would only have produced a refusal.
+        """
+        self.assertTrue(ClaudeAgentSdkAdapter().capabilities().followup)
+
+    def test_a_capability_is_not_a_promise_about_any_particular_task(self) -> None:
+        """Declaring follow-up says nothing about whether *this* task can take one.
+
+        A fresh adapter holds no sessions, so no task is continuable — and the
+        answer is false for a task id it has never heard of rather than an
+        error, because "no" is the truthful answer to "can you continue that".
+        """
+        adapter = ClaudeAgentSdkAdapter()
+        self.assertTrue(adapter.capabilities().followup)
+        self.assertFalse(adapter.session_available("t_nothing_here"))
 
     def test_the_adapter_claims_no_capability_it_has_not_implemented(self) -> None:
         capabilities = ClaudeAgentSdkAdapter().capabilities()
@@ -1460,11 +1833,21 @@ class TaskCoreIntegrationTests(TaskTestCase):
         with self.assertRaises(TaskAlreadyFinished):
             self.service.cancel_task(row.task_id)
 
-    def test_a_follow_up_is_refused_because_the_adapter_does_not_claim_it(self) -> None:
-        from cofferdam.workstation.tasks.errors import FollowupUnsupported
+    def test_a_follow_up_to_a_task_that_is_not_ready_is_refused(self) -> None:
+        """The capability is claimed; this task is still not continuable.
+
+        A running task has not finished a turn, so there is nothing for a
+        follow-up to follow. The refusal names the state rather than the
+        capability, which is the difference PR3 introduced: "not now" and
+        "never" are different sentences and used to be the same one.
+        """
+        from cofferdam.workstation.tasks.errors import FollowupNotWaiting
 
         row = self.create(adapter_id=ADAPTER_ID)
-        with self.assertRaises(FollowupUnsupported):
+        self.assertTrue(
+            self.service.adapters.get(ADAPTER_ID).capabilities().followup
+        )
+        with self.assertRaises(FollowupNotWaiting):
             self.service.send_followup(row.task_id, "and also this")
 
     def test_the_claude_code_adapter_is_untouched_by_any_of_this(self) -> None:

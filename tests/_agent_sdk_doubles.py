@@ -269,6 +269,100 @@ class FakeSdkModule:
             setattr(self, name, value)
 
 
+class ScriptedClient:
+    """An async stand-in for ``ClaudeSDKClient``, scripted per turn.
+
+    Enough of the real object's shape to drive the *real*
+    :class:`~cofferdam...session.SdkSession` — ``connect``, ``query``,
+    ``receive_messages``, ``interrupt``, ``disconnect`` — so the multi-turn
+    loop can be tested without the SDK, a CLI subprocess or a network.
+
+    The behaviour it models is the one read from the published 0.2.134 source
+    and recorded in ``docs/CLAUDE_AGENT_SDK_ADAPTER.md``: a ``ResultMessage``
+    ends **one turn**, ``receive_messages()`` keeps yielding past it, and a
+    later ``query()`` on the same connected client starts the next turn. If
+    that reading of the SDK is wrong, this double is wrong with it — which is
+    why the live spike exists and why saying so here matters more than the
+    green tick.
+
+    ``turns`` is a list of message lists: the first is delivered after
+    ``connect``/``query``, and each subsequent one after the matching
+    follow-up ``query``.
+    """
+
+    def __init__(self, turns: Sequence[Sequence[Any]]) -> None:
+        import asyncio
+
+        self._turns = [list(turn) for turn in turns]
+        self._asyncio = asyncio
+        self.queries: List[str] = []
+        self.connects = 0
+        self.disconnects = 0
+        self.interrupts = 0
+        #: A new queue is *not* made per turn: one client, one stream, exactly
+        #: as the real transport behaves.
+        self._pending: Optional[Any] = None
+
+    async def connect(self, prompt: Any = None) -> None:
+        self.connects += 1
+        self._pending = self._asyncio.Queue()
+        self.loop = self._asyncio.get_running_loop()
+
+    async def query(self, prompt: str, session_id: str = "default") -> None:
+        self.queries.append(prompt)
+        for message in self._turns.pop(0) if self._turns else []:
+            await self._pending.put(message)
+
+    async def receive_messages(self):
+        while True:
+            message = await self._pending.get()
+            if message is None:  # pragma: no cover - only used to end a test
+                return
+            yield message
+
+    async def interrupt(self) -> None:
+        self.interrupts += 1
+
+    async def disconnect(self) -> None:
+        self.disconnects += 1
+
+    def end_stream(self) -> None:
+        """End the message stream from outside the loop, as a real one ends.
+
+        Used by test teardown so a session still reading unwinds through its own
+        ``async for`` rather than having its loop stopped while an async
+        generator is suspended — which is legal, and which prints a shutdown
+        complaint that would otherwise be in every run's output.
+        """
+        loop = getattr(self, "loop", None)
+        if self._pending is None or loop is None:
+            return
+        try:
+            loop.call_soon_threadsafe(self._pending.put_nowait, None)
+        except RuntimeError:
+            return
+
+
+def scripted_module(turns: Sequence[Sequence[Any]]) -> FakeSdkModule:
+    """A module double whose ``ClaudeSDKClient`` is a :class:`ScriptedClient`.
+
+    One client is built and remembered on ``module.client``, so a test can
+    assert that a second turn did not quietly construct a second one.
+    """
+    module = FakeSdkModule()
+    module.client = None
+
+    def factory(options: Any) -> ScriptedClient:
+        if module.client is not None:
+            raise AssertionError("a second SDK client was created for one session")
+        module.client = ScriptedClient(turns)
+        module.client.options = options
+        return module.client
+
+    module.ClaudeSDKClient = factory
+    return module
+
+
 # -- session doubles ---------------------------------------------------------
 
 
@@ -303,11 +397,62 @@ class FakeSession(DelegatedSession):
         self.cancel_calls = 0
         self.close_calls = 0
         self._finished = False
+        #: Everything the session was asked to say after the prompt, in order.
+        #: A test asserts on this to prove a follow-up reached *this* session
+        #: and no other, and that its text was delivered rather than encoded
+        #: into something else.
+        self.followups: List[str] = []
+        #: Batches to release when a follow-up arrives, so a test can script a
+        #: second turn's events the same way it scripts the first turn's.
+        self.followup_batches: List[List[DelegatedEvent]] = []
+        self._turn_complete = False
+        self._turn_number = 0
+        self.followup_error: Optional[str] = None
+        #: The token of a question this session is holding, if any. A follow-up
+        #: must be refused while it is set.
+        self.pending_token: Optional[str] = None
+        #: How many distinct clients this double has ever created. Always one:
+        #: a test asserts on it to prove a follow-up did not open a second
+        #: session behind the same task.
+        self.clients_created = 0
 
     def start(self, prompt: str) -> None:
         if self._start_error is not None:
             raise SessionRefused(self._start_error)
         self.started_with = prompt
+        self.clients_created += 1
+        self._turn_number = 1
+
+    # -- turns ---------------------------------------------------------------
+
+    def complete_turn(self) -> None:
+        """Mark the current turn finished with the session still alive."""
+        self._turn_complete = True
+
+    @property
+    def pending_question_token(self) -> Optional[str]:
+        return self.pending_token
+
+    @property
+    def turn_complete(self) -> bool:
+        return self._turn_complete and not self._finished
+
+    @property
+    def turn_number(self) -> int:
+        return self._turn_number
+
+    def send_followup(self, followup: str) -> None:
+        if self.followup_error is not None:
+            raise SessionRefused(self.followup_error)
+        if self._finished:
+            raise SessionRefused("this Claude session is no longer running")
+        if not self._turn_complete:
+            raise SessionRefused("Claude is still working on the previous message")
+        self.followups.append(followup)
+        self._turn_complete = False
+        self._turn_number += 1
+        if self.followup_batches:
+            self._batches.append(self.followup_batches.pop(0))
 
     def drain(self) -> List[DelegatedEvent]:
         if not self._batches:
@@ -409,6 +554,16 @@ class FakeHelperProcess:
         self.session_id = session_id
         self.received: List[str] = []
         self.answers: List[Dict[str, Any]] = []
+        #: Every follow-up text this helper was sent, in order. A test reads it
+        #: to prove the message reached this helper — and, by checking another
+        #: helper's list is empty, that it reached only this one.
+        self.followups: List[Any] = []
+        #: Set to make the helper refuse the next follow-up with this sentence.
+        self.followup_error: Optional[str] = None
+        #: The token of a question this session is holding, if any. A follow-up
+        #: must be refused while it is set.
+        self.pending_token: Optional[str] = None
+        self.turn = 1
         self.cancelled = 0
         self.closed = 0
         self.terminated = 0
@@ -416,6 +571,7 @@ class FakeHelperProcess:
         self.returncode: Optional[int] = None
         self._question_token = question_token
         self._error = error
+        self._sequence = 100
         self.stdin = _FakeStdin(self)
         self.stdout = _FakeStdout(self)
         if ready:
@@ -456,10 +612,48 @@ class FakeHelperProcess:
             self.answers.append(
                 {"token": parsed.get("token"), "answer": parsed.get("answer")}
             )
+        elif name == self._hostproto.COMMAND_FOLLOWUP:
+            self.followups.append(parsed.get("followup"))
+            if self.followup_error is not None:
+                self.emit(
+                    self._hostproto.message(
+                        self._hostproto.MESSAGE_ERROR, detail=self.followup_error
+                    )
+                )
+                return
+            # A real helper stops being turn-complete the moment it hands the
+            # message to the client, and the parent's wait keys off exactly
+            # that. Emitting an event is how this double says the same thing
+            # over the same channel.
+            self.turn += 1
+            self.emit_event(self._activity("working on the follow-up"))
         elif name == self._hostproto.COMMAND_CANCEL:
             self.cancelled += 1
         elif name == self._hostproto.COMMAND_CLOSE:
             self.closed += 1
+
+    def complete_turn(self) -> None:
+        """Say the current turn ended and the session is still holding."""
+        self.emit(
+            self._hostproto.message(
+                self._hostproto.MESSAGE_TURN_COMPLETE,
+                provider_session_id=self.session_id,
+                turn=self.turn,
+            )
+        )
+
+    def _activity(self, text: str) -> DelegatedEvent:
+        from cofferdam.workstation.tasks.delegated import KIND_ACTIVITY, build_event
+
+        self._sequence += 1
+        return build_event(
+            kind=KIND_ACTIVITY,
+            provider="claude-agent-sdk",
+            provider_sequence=self._sequence,
+            observed_at="2026-08-09T00:00:00Z",
+            provider_session_id=self.session_id,
+            text=text,
+        )
 
     def _clarification(self) -> DelegatedEvent:
         from cofferdam.workstation.tasks.delegated import (
@@ -522,6 +716,7 @@ __all__ = [
     "FakeSdkModule",
     "FakeSession",
     "ResultMessage",
+    "ScriptedClient",
     "SomethingFromANewerSdk",
     "StreamEvent",
     "SystemMessage",
@@ -533,4 +728,5 @@ __all__ = [
     "ToolResultBlock",
     "ToolUseBlock",
     "UserMessage",
+    "scripted_module",
 ]

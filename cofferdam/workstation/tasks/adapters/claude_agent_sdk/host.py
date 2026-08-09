@@ -197,6 +197,10 @@ def main(argv: Optional[list] = None) -> int:
         return EXIT_PROTOCOL
 
     session: Optional[SdkSession] = None
+    #: Whether the parent has already been told about the turn that is currently
+    #: complete. Reset when a new turn starts, so each turn is announced once
+    #: rather than on every poll of an idle session.
+    announced_turn = False
     deadline = time.monotonic() + MAX_LIFETIME_SECONDS
     waiting_for_first = time.monotonic() + FIRST_COMMAND_TIMEOUT_SECONDS
 
@@ -249,6 +253,8 @@ def main(argv: Optional[list] = None) -> int:
                     )
                 elif name == hostproto.COMMAND_ANSWER:
                     _deliver_answer(session, command)
+                elif name == hostproto.COMMAND_FOLLOWUP:
+                    _deliver_followup(stdout, session, command)
                 elif name == hostproto.COMMAND_CANCEL:
                     session.request_cancel()
 
@@ -256,6 +262,23 @@ def main(argv: Optional[list] = None) -> int:
                 continue
             if not _flush(stdout, session):
                 break
+            # A turn that has just ended is announced once, and the loop keeps
+            # going. This is the line that used to read `if session.finished:
+            # break` for both cases, which is how a finished *turn* ended a
+            # session that was still perfectly able to take another message.
+            if session.turn_complete and not announced_turn:
+                announced_turn = True
+                if not _write(
+                    stdout,
+                    hostproto.message(
+                        hostproto.MESSAGE_TURN_COMPLETE,
+                        provider_session_id=session.provider_session_id,
+                        turn=session.turn_number,
+                    ),
+                ):
+                    break
+            elif not session.turn_complete:
+                announced_turn = False
             if session.finished:
                 break
     finally:
@@ -333,6 +356,47 @@ def _deliver_answer(session: Any, command: Dict[str, Any]) -> None:
     answer = command.get("answer")
     if isinstance(token, str) and isinstance(answer, str):
         session.submit_answer(token, answer)
+
+
+def _deliver_followup(stdout: Any, session: Any, command: Dict[str, Any]) -> None:
+    """Start one more turn on the session this helper owns.
+
+    Unlike :func:`_deliver_answer`, a refusal *is* reported back. The two
+    differ because their races differ: an answer that no longer matches is an
+    ordinary supersession the parent already knows about, while a follow-up the
+    session would not take is a message somebody typed that went nowhere — and
+    the parent has to be able to tell them so rather than leave a task sitting
+    in ``running`` with nothing running.
+
+    The command carries text and nothing else. There is no session id on it and
+    no way to add one: this process holds one client and cannot name another.
+    """
+    from . import hostproto
+    from .session import SessionRefused
+
+    followup = command.get("followup")
+    if not isinstance(followup, str) or not followup:
+        _write(
+            stdout,
+            hostproto.message(
+                hostproto.MESSAGE_ERROR, detail="that follow-up is not usable"
+            ),
+        )
+        return
+    try:
+        session.send_followup(followup)
+    except SessionRefused as declined:
+        # Cofferdam's words already — see the exception's own docstring — so
+        # this is safe to hand back and put in an event.
+        _write(stdout, hostproto.message(hostproto.MESSAGE_ERROR, detail=str(declined)))
+    except Exception:
+        _write(
+            stdout,
+            hostproto.message(
+                hostproto.MESSAGE_ERROR,
+                detail="the follow-up could not be delivered to Claude",
+            ),
+        )
 
 
 def _flush(stdout: Any, session: Any) -> bool:

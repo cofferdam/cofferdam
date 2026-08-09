@@ -84,6 +84,7 @@ from .models import (
     MAX_TASK_PAGE,
     MEANINGFUL_EVENT_TYPES,
     SOURCE_COFFERDAM,
+    STATE_COMPLETED,
     STATE_CREATED,
     TERMINAL_STATES,
     EvidenceReference,
@@ -92,20 +93,27 @@ from .models import (
     bounded_line,
     bounded_text,
 )
+from .turns import FOLLOWUP_SOURCES, MAX_TURNS_PER_TASK, TURN_OUTCOMES, TaskTurn
 
 #: Bumped whenever the schema below changes shape. A database written by a newer
 #: build than the one reading it is refused rather than migrated backwards: a
 #: rollback that silently dropped columns would lose task history.
 #:
-#: Version 2 adds ``task_clarifications``. The change is **additive only** — no
-#: column of an existing table moved, changed type or gained a constraint — which
-#: is what makes the upgrade a ``CREATE TABLE IF NOT EXISTS`` and the downgrade
-#: survivable: an older build opening a version-2 database sees every table it
-#: knows about, exactly as it left them, and simply never looks at the new one.
-#: The version is still refused in that direction, because "survivable" is not
-#: "correct" and a build that cannot see pending questions should not be quietly
-#: answering tasks that have them.
-SCHEMA_VERSION = 2
+#: Version 2 adds ``task_clarifications``. Version 3 adds ``task_turns``. Both
+#: changes are **additive only** — no column of an existing table moved, changed
+#: type or gained a constraint — which is what makes each upgrade a
+#: ``CREATE TABLE IF NOT EXISTS`` and the downgrade survivable: an older build
+#: opening a newer database sees every table it knows about, exactly as it left
+#: them, and simply never looks at the new one. The version is still refused in
+#: that direction, because "survivable" is not "correct" and a build that cannot
+#: see pending questions, or cannot see that a task has produced three turns,
+#: should not be quietly answering or continuing it.
+#:
+#: Upgrading from 2 to 3 needs no data migration and writes no rows. A task that
+#: predates ``task_turns`` simply has none, and every reader here treats "no
+#: turns" as the ordinary answer for a task from an older build rather than as a
+#: missing record — see :meth:`TaskStore.latest_completed_turn`.
+SCHEMA_VERSION = 3
 
 #: Where the database lives, under COFFERDAM_HOME. Its own directory so the file
 #: and its WAL/shm siblings stay together and can be permissioned as a unit.
@@ -228,6 +236,53 @@ CREATE INDEX IF NOT EXISTS clarifications_by_status
 -- inventing an id and suppressing something that was not a duplicate.
 CREATE UNIQUE INDEX IF NOT EXISTS clarifications_by_provider_event
     ON task_clarifications (task_id, provider_event_id);
+
+-- One provider turn: a user message in, a terminal outcome out.
+--
+-- Its own table for the reason `task_clarifications` has one, and then for a
+-- reason of its own. A task can have several turns and the earlier ones are
+-- evidence worth keeping — but more than that, `tasks.final_result` is written
+-- with COALESCE, so a second turn's result *replaces* the first one's. That is
+-- right for the single-turn tasks Task Core was built for and destroys history
+-- for a conversation. Here, a completed turn is never written again: the
+-- update is guarded on `completed_at IS NULL`.
+--
+-- `turn_number` is Cofferdam's, allocated as MAX+1 inside the same transaction
+-- that inserts the row, so two concurrent follow-ups cannot both read 1 and
+-- both write 2. The primary key is the backstop: if that allocation were ever
+-- wrong the second insert raises rather than silently overwriting a turn.
+--
+-- There is deliberately no transcript column, no message list and no payload
+-- column. What a turn keeps is what a person could be shown and an auditor
+-- could check.
+CREATE TABLE IF NOT EXISTS task_turns (
+    task_id                TEXT    NOT NULL,
+    turn_number            INTEGER NOT NULL,
+    provider               TEXT    NOT NULL,
+    provider_session_id    TEXT,
+    provider_turn_sequence INTEGER NOT NULL DEFAULT 0,
+    source                 TEXT    NOT NULL,
+    followup_request_id    TEXT,
+    started_at             TEXT    NOT NULL,
+    completed_at           TEXT,
+    outcome                TEXT,
+    result                 TEXT,
+    failure_code           TEXT,
+    failure_summary        TEXT,
+    PRIMARY KEY (task_id, turn_number),
+    FOREIGN KEY (task_id) REFERENCES tasks (task_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS turns_by_completion
+    ON task_turns (task_id, completed_at, turn_number);
+
+-- Duplicate suppression for follow-ups, enforced by the database rather than by
+-- a check a caller has to remember. A retry that reaches the adapter twice
+-- cannot open a second turn for one follow-up. SQLite permits many NULLs in a
+-- unique index, so the first turn — opened by the prompt, with no request id —
+-- is unaffected, and so is a follow-up sent without one.
+CREATE UNIQUE INDEX IF NOT EXISTS turns_by_followup_request
+    ON task_turns (task_id, followup_request_id);
 """
 
 
@@ -491,6 +546,62 @@ def _row_to_clarification(row: sqlite3.Row) -> PendingClarification:
         status=row["status"],
         answered_at=row["answered_at"],
         answer=_answer_from_json(row["answer_json"]),
+    )
+
+
+@dataclass(frozen=True)
+class _TurnDraft:
+    """What :meth:`TaskStore.transition` needs to open a turn.
+
+    Deliberately not a :class:`~.turns.TaskTurn`: that class carries a
+    ``turn_number``, and the number is the store's to allocate inside the
+    transaction. A caller that could supply one could supply a wrong one.
+    """
+
+    provider: str
+    source: str
+    started_at: str
+    provider_session_id: Optional[str] = None
+    followup_request_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class _TurnClose:
+    """What :meth:`TaskStore.transition` needs to finish the open turn.
+
+    Also not a :class:`~.turns.TaskTurn`, and for the mirror-image reason: which
+    turn is being closed is not a caller's choice either. It is whichever one is
+    open, found in the same statement that writes it.
+    """
+
+    outcome: str
+    completed_at: str
+    provider_session_id: Optional[str] = None
+    provider_turn_sequence: int = 0
+    result: Optional[str] = None
+    failure_code: Optional[str] = None
+    failure_summary: Optional[str] = None
+
+
+def _row_to_turn(row: sqlite3.Row) -> TaskTurn:
+    outcome = row["outcome"]
+    return TaskTurn(
+        task_id=row["task_id"],
+        turn_number=int(row["turn_number"]),
+        provider=row["provider"],
+        source=row["source"],
+        started_at=row["started_at"],
+        provider_session_id=row["provider_session_id"],
+        provider_turn_sequence=int(row["provider_turn_sequence"] or 0),
+        followup_request_id=row["followup_request_id"],
+        completed_at=row["completed_at"],
+        # Read back through the vocabulary rather than trusted. A value written
+        # by a newer build, or corrupted, becomes `None` — "this turn ended and
+        # nobody here can say how" — rather than a word a caller might branch on.
+        outcome=outcome if outcome in TURN_OUTCOMES else None,
+        result=row["result"],
+        failure_code=row["failure_code"],
+        failure_summary=row["failure_summary"],
     )
 
 
@@ -1008,6 +1119,8 @@ class TaskStore:
         evidence: Sequence[EvidenceReference] = (),
         open_clarification: Optional[PendingClarification] = None,
         close_clarifications: Sequence[PendingClarification] = (),
+        open_turn: Optional["_TurnDraft"] = None,
+        close_turn: Optional["_TurnClose"] = None,
     ) -> "TaskRow":
         """Move a task to ``new_state`` and record the event. One transaction.
 
@@ -1027,6 +1140,13 @@ class TaskStore:
         task that says ``cancelled``, is a disagreement between two rows that a
         person would have to resolve by guessing. Passing them here makes the
         state change and the question one write or neither.
+
+        ``open_turn`` and ``close_turn`` are here for the same reason and it is
+        the sharper case. A turn that completed while the task did not move, or
+        a task reported ``ready_for_followup`` with no turn recorded as having
+        produced anything, is a result somebody can be shown that the history
+        cannot account for. The state change, the event, and the turn's outcome
+        are one write.
         """
         with self._write() as connection:
             row = connection.execute(
@@ -1092,6 +1212,14 @@ class TaskStore:
                 self._save_clarification_locked(connection, closing)
             if open_clarification is not None:
                 self._save_clarification_locked(connection, open_clarification)
+            # Closed before opened, and the order is not arbitrary: a follow-up
+            # that ends one turn and begins the next does both in this one
+            # transaction, and closing first means the MAX+1 allocation below
+            # counts a turn that is already finished rather than racing it.
+            if close_turn is not None:
+                self._close_turn_locked(connection, task_id, close_turn)
+            if open_turn is not None:
+                self._open_turn_locked(connection, task_id, open_turn)
             self._refresh_activity_locked(connection, task_id, event_type, text)
             updated = connection.execute(
                 "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
@@ -1231,6 +1359,219 @@ class TaskStore:
     def clarification_room(self, task_id: str) -> bool:
         """Whether one more question may be recorded for this task."""
         return self.pending_clarification_count(task_id) < MAX_PENDING_PER_TASK
+
+    # -- turns ---------------------------------------------------------------
+
+    def _open_turn_locked(
+        self, connection: sqlite3.Connection, task_id: str, draft: "_TurnDraft"
+    ) -> None:
+        """Allocate a turn number and insert the row. Caller holds the transaction.
+
+        ``MAX(turn_number) + 1``, read and written inside the one transaction
+        that also moves the task — so two follow-ups arriving together cannot
+        both read 1 and both write 2. The primary key is the backstop rather
+        than the mechanism: if the allocation were ever wrong the insert raises,
+        which is a loud failure instead of a turn quietly overwriting another.
+
+        A plain ``INSERT``, never ``INSERT OR REPLACE``. That choice is the
+        "a later turn cannot overwrite an earlier one" rule, written where it
+        is enforced.
+        """
+        existing = connection.execute(
+            "SELECT COALESCE(MAX(turn_number), 0) AS highest,"
+            " COUNT(*) AS total FROM task_turns WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        highest = int(existing["highest"] or 0)
+        total = int(existing["total"] or 0)
+        if total >= MAX_TURNS_PER_TASK:
+            raise TurnLimitReached()
+        if draft.followup_request_id:
+            # Read half of the follow-up duplicate suppression; the unique index
+            # is the write half. Checked here so a retry is recognised as "this
+            # turn already exists" rather than surfacing as a constraint error
+            # somebody has to interpret.
+            already = connection.execute(
+                "SELECT turn_number FROM task_turns"
+                " WHERE task_id = ? AND followup_request_id = ?",
+                (task_id, draft.followup_request_id),
+            ).fetchone()
+            if already is not None:
+                return
+        connection.execute(
+            """
+            INSERT INTO task_turns
+                (task_id, turn_number, provider, provider_session_id,
+                 provider_turn_sequence, source, followup_request_id,
+                 started_at, completed_at, outcome, result,
+                 failure_code, failure_summary)
+            VALUES (?, ?, ?, ?, 0, ?, ?, ?, NULL, NULL, NULL, NULL, NULL)
+            """,
+            (
+                task_id,
+                highest + 1,
+                draft.provider,
+                draft.provider_session_id,
+                draft.source,
+                draft.followup_request_id,
+                draft.started_at,
+            ),
+        )
+
+    def _close_turn_locked(
+        self, connection: sqlite3.Connection, task_id: str, closing: "_TurnClose"
+    ) -> None:
+        """Finish the task's open turn, if it has one. Caller holds the transaction.
+
+        ``WHERE completed_at IS NULL`` is the whole method. A turn that already
+        finished is not written again — not by a duplicate provider event, not
+        by a late result arriving after a cancellation, and not by a second
+        settle of the same log. The update simply matches no rows, and the
+        earlier outcome stands.
+
+        ``provider_session_id`` is filled in only when the row does not have one
+        yet, for the reason :func:`~.turns.close_turn` gives: an id learned late
+        is worth recording, and an id that *changed* means the stream is no
+        longer this turn's session — a mismatch to report, never to adopt.
+        """
+        connection.execute(
+            """
+            UPDATE task_turns
+               SET completed_at = ?,
+                   outcome = ?,
+                   result = ?,
+                   failure_code = ?,
+                   failure_summary = ?,
+                   provider_turn_sequence = ?,
+                   provider_session_id = COALESCE(provider_session_id, ?)
+             WHERE task_id = ?
+               AND completed_at IS NULL
+               AND turn_number = (
+                   SELECT MAX(turn_number) FROM task_turns
+                    WHERE task_id = ? AND completed_at IS NULL
+               )
+            """,
+            (
+                closing.completed_at,
+                closing.outcome,
+                bounded_text(closing.result, MAX_RESULT_CHARS),
+                closing.failure_code,
+                bounded_text(closing.failure_summary, MAX_FAILURE_CHARS),
+                max(0, int(closing.provider_turn_sequence or 0)),
+                closing.provider_session_id,
+                task_id,
+                task_id,
+            ),
+        )
+
+    def open_turn(
+        self,
+        task_id: str,
+        *,
+        provider: str,
+        source: str,
+        started_at: str,
+        provider_session_id: Optional[str] = None,
+        followup_request_id: Optional[str] = None,
+    ) -> "TaskTurn":
+        """Open a turn on its own, outside a state change.
+
+        Used for the **first** turn, which begins when an adapter starts and is
+        not a transition anybody makes: ``_start`` moves the task through
+        ``queued`` and ``starting`` for reasons that have nothing to do with
+        turns. Every later turn is opened inside the transition that a follow-up
+        causes, where it belongs.
+        """
+        if source not in FOLLOWUP_SOURCES:  # pragma: no cover - callers pass a constant
+            raise StoreUnavailable("unknown turn source")
+        with self._write() as connection:
+            if connection.execute(
+                "SELECT 1 FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone() is None:
+                raise TaskUnknown()
+            self._open_turn_locked(
+                connection,
+                task_id,
+                _TurnDraft(
+                    provider=provider,
+                    source=source,
+                    started_at=started_at,
+                    provider_session_id=provider_session_id,
+                    followup_request_id=followup_request_id,
+                ),
+            )
+        current = self.current_turn(task_id)
+        if current is None:  # pragma: no cover - the insert just succeeded
+            raise StoreUnavailable("the turn could not be opened")
+        return current
+
+    def turns(self, task_id: str) -> List["TaskTurn"]:
+        """Every turn this task has had, oldest first. Bounded by the row limit."""
+        with self._read() as connection:
+            rows = connection.execute(
+                "SELECT * FROM task_turns WHERE task_id = ? ORDER BY turn_number ASC"
+                " LIMIT ?",
+                (task_id, MAX_TURNS_PER_TASK),
+            ).fetchall()
+        return [_row_to_turn(row) for row in rows]
+
+    def turn_count(self, task_id: str) -> int:
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS total FROM task_turns WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return int(row["total"]) if row is not None else 0
+
+    def current_turn(self, task_id: str) -> Optional["TaskTurn"]:
+        """The turn that is open, if one is. At most one ever is."""
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM task_turns WHERE task_id = ? AND completed_at IS NULL"
+                " ORDER BY turn_number DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+        return _row_to_turn(row) if row is not None else None
+
+    def latest_completed_turn(self, task_id: str) -> Optional["TaskTurn"]:
+        """The most recent turn that **succeeded**, or ``None``.
+
+        Successful specifically, not merely finished, and the difference is the
+        one case where it shows: a task whose first turn answered and whose
+        second was cancelled has two finished turns, and the answer somebody
+        should be able to read is the first one. A query for "the last turn
+        that ended" would return the cancelled one and report no result for a
+        task that plainly produced one.
+
+        How a task *ended* is not lost by this — that is the task row's own
+        state, and the published result carries it separately.
+
+        ``None`` is an ordinary answer and means one of three unremarkable
+        things: the task is still on its first turn, it ended before producing
+        anything, or it predates schema version 3. None of them is a missing
+        record, and the caller treats all three the same way.
+        """
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM task_turns WHERE task_id = ?"
+                " AND completed_at IS NOT NULL AND outcome = ?"
+                " ORDER BY turn_number DESC LIMIT 1",
+                (task_id, STATE_COMPLETED),
+            ).fetchone()
+        return _row_to_turn(row) if row is not None else None
+
+    def turn_for_followup(
+        self, task_id: str, followup_request_id: object
+    ) -> Optional["TaskTurn"]:
+        """The turn one follow-up request id already opened, if it opened one."""
+        if not isinstance(followup_request_id, str) or not followup_request_id:
+            return None
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM task_turns WHERE task_id = ? AND followup_request_id = ?",
+                (task_id, followup_request_id),
+            ).fetchone()
+        return _row_to_turn(row) if row is not None else None
 
     # -- reading -------------------------------------------------------------
 

@@ -39,18 +39,23 @@ transport is what it cannot do and what it does not yet replace.
   handles all three conservatively; nobody has seen the provider produce them.
 - **No PWA question UI.** PR2 validates the round trip through the authenticated
   API. Rendering it on a phone is separate work.
-- **No follow-up.** A task runs one turn, asks what it needs to, and reports its
-  result. Answering a question is not a follow-up — see
-  [Two channels, not one](#two-channels-not-one).
+- **No follow-up across a restart.** Same-session follow-up arrived in PR3 and
+  needs the helper process to still be alive. If the daemon restarted, the
+  conversation is over and a follow-up is refused as
+  `task_session_unavailable`. Cross-process `resume` is **not used** and is not
+  evidenced — see [Restart, honestly](#restart-honestly).
 - **No tool approval from a phone, ever.** Not "not yet": a permission request is
   denied by a code-owned handler and recorded, and there is no route, no table
   and no field through which one could be granted. See
   [Clarification is not approval](#clarification-is-not-approval).
-- **No `get_result` route.** The provider-neutral result *shape* exists and is
-  produced; nothing serves it. Claiming otherwise would be claiming M2I.5.
-- **No Custom GPT bridge.** `future_gpt_bridge` is a reserved word in the answer
-  provenance vocabulary and is **not** in the set of sources any route accepts.
-  A vocabulary entry is not an enabled surface.
+- **No *public* `get_result`.** PR3 adds `GET /api/tasks/{id}/result` as a
+  private authenticated route on the workstation daemon. It is not an Action,
+  it is not proxied, and the Custom GPT bridge that will one day call something
+  like it does not exist.
+- **No Custom GPT bridge.** `future_gpt_bridge` is a reserved word in the
+  provenance vocabulary — shared by clarification answers and follow-ups — and
+  is **not** in the set of sources any route accepts. A vocabulary entry is not
+  an enabled surface.
 - **No shell, no transcript reading, no prompt injection, no auto-resume.** Same
   as Lane B has always been.
 
@@ -653,6 +658,95 @@ methods on that object, never `os.kill` and never a pid.
   rule and cannot rewrite the outcome.
 - Repeated cancellation is truthful, and an unrelated task is untouched.
 
+## Same-session follow-up (M2I PR3)
+
+### What the SDK actually supports
+
+Three facts, read from the published 0.2.134 source rather than assumed, and the
+whole feature rests on them:
+
+| Fact | Where |
+|---|---|
+| A result frame ends **one turn, not the run** | `_internal/query.py`, in so many words |
+| `receive_messages()` keeps yielding past a `ResultMessage` | it breaks only on an `end` or `error` frame |
+| `connect()` with **no** prompt never closes stdin | `client.py` spawns `stream_input` — which ends with `end_input()` — only for an `AsyncIterable` prompt |
+
+Cofferdam calls `connect()` with no argument and delivers the prompt with
+`query()`, which it already did for the permission-callback reason. That shape
+turns out to be exactly the one that leaves the transport open for a second
+`query()` later. A follow-up is therefore one more write to a connection that was
+never torn down — no reconnect, no `resume`, no second client.
+
+### Turn identity
+
+One task, one provider session, ordered turns. A turn is its own durable row:
+
+| Field | What it is |
+|---|---|
+| `turn_number` | Cofferdam's, allocated `MAX+1` inside the transaction, from one |
+| `provider_session_id` | the conversation this turn happened in |
+| `provider_turn_sequence` | the provider's own ordering, kept beside Cofferdam's rather than instead of it |
+| `source`, `followup_request_id` | who asked for this turn, and under which request id |
+| `started_at`, `completed_at`, `outcome`, `result` | when, how it ended, and the bounded answer |
+
+There is no transcript column, no message list and no payload column, and a
+completed turn is **never written again**: the update is guarded on
+`completed_at IS NULL`. That guard is what makes "a second turn cannot overwrite
+the first turn's evidence" a property of the schema. `tasks.final_result` still
+moves on, because it is written with `COALESCE` and always has been — which is
+precisely why the turn table exists.
+
+### What `get_result` means
+
+**The latest completed turn's result.** For a terminal task that is also the
+final task result, and `task_terminal` says which case a reader is holding. Both
+are fields; the payload also carries `result_meaning` in words, so a bridge
+author reading one response never has to find this file.
+
+"Completed" means the turn *succeeded*. A task whose first turn answered and was
+then cancelled returns that answer, with `outcome: cancelled` and
+`task_terminal: true` — the answer is real and readable, and the task was
+cancelled, and the response says both rather than picking one.
+
+A terminal task with no successful turn — cancelled before it answered, failed on
+the way, interrupted by a restart — returns its outcome and timestamp and no
+invented text. A live task with nothing yet returns `task_result_not_ready` (409,
+not 404: the task exists).
+
+### The follow-up contract
+
+Allowed only from `ready_for_followup`, with a live session, and no question
+open. Refused, with a distinct code for each, when the task is unknown,
+cancelled, failed, interrupted, has a pending clarification
+(`task_clarification_pending`), has no live session
+(`task_session_unavailable`), already has a turn in flight
+(`task_followup_in_flight`), belongs to an adapter that does not claim follow-up,
+or reuses a `client_request_id` with different content (`task_idempotency_conflict`).
+
+A follow-up from `waiting_for_user` **resumes** the open turn rather than opening
+a new one: that turn is running and blocked, and recording two turns for one unit
+of provider work would put a second `started_at` on something that never stopped.
+
+The adapter is asked *before* anything is written. A follow-up recorded as
+delivered that never reached the session would show somebody their message
+accepted while the agent sat idle.
+
+### Restart, and what is not claimed
+
+The live client is in memory inside the helper. If the daemon or the helper is
+lost, the conversation is gone: `session_available` reads an empty dictionary and
+answers `False`, so the refusal is a consequence of the world rather than a flag
+somebody remembered to set. The task becomes `interrupted`, the turn that was
+running closes as `interrupted`, and **every earlier completed turn is
+untouched** — a task interrupted on its third turn still returns its second
+turn's result.
+
+**Cross-process follow-up is unsupported.** `options.resume` exists in the SDK
+and Cofferdam pins it to `None`. Using it would need its own evidence — that a
+new process resumes a prior session id with context intact and the same
+permission boundary — and that evidence does not exist. There is no recovery by
+session id anywhere in this build.
+
 ## The result foundation
 
 A terminal event produces a provider-neutral `DelegatedResult`: task id, terminal
@@ -660,9 +754,10 @@ state, bounded result *or* a failure category with a bounded Cofferdam-worded
 summary, provider and session provenance, and a completion timestamp. There is no
 `traceback` field and no `exception` field.
 
-**No route serves it.** `adapter.result_for()` is in-process memory, lost on
-restart; the authoritative record of a finished task remains Task Core's own row.
-What exists is the boundary, produced now rather than invented later at the edge.
+`adapter.result_for()` remains in-process memory and is **not** the durable
+record. As of PR3 the durable record is the `task_turns` row, written inside the
+transaction that moves the task, and `GET /api/tasks/{id}/result` serves a
+normalized view of it.
 
 ## Tests
 
@@ -671,6 +766,14 @@ What exists is the boundary, produced now rather than invented later at the edge
 `tests/_agent_sdk_doubles.py` whose class and attribute names were read from the
 published distribution — a double that got one wrong would let the suite pass
 while the real stream produced nothing.
+
+PR3 adds `tests/test_task_followups.py` and two classes in the SDK suite. The
+one worth naming is `SdkSessionTurnTests`, which drives the **real**
+`SdkSession` — its thread, its loop, its receive loop, its between-turn park and
+its session-identity check — against a scripted async client, so the multi-turn
+code that ships is the code under test rather than a double of it. What that
+still cannot prove is that the real SDK behaves the way the scripted client
+does; that reading came from the source and the live spike is what settles it.
 
 PR2 adds 127 focused tests across the environment boundary, the conservative
 schema reader, the bounded observer, clarification/approval separation, the

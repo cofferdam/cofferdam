@@ -69,16 +69,21 @@ from .errors import (
     ClarificationAnswerInvalid,
     ClarificationClosed,
     ClarificationNotDelivered,
+    ClarificationPending,
     ClarificationUnknown,
     ClarificationUnsupported,
+    FollowupInFlight,
     FollowupInvalid,
     FollowupNotWaiting,
     FollowupUnsupported,
     PromptInvalid,
     RequestIdInvalid,
+    ResultNotReady,
+    SessionUnavailable,
     TaskAlreadyFinished,
     TaskError,
     TaskUnknown,
+    TurnLimitReached,
 )
 from .identity import valid_task_id
 from .lifecycle import IllegalTransition, can_transition
@@ -131,7 +136,14 @@ from .models import (
     valid_user_text,
 )
 from .projects import ProjectRegistry, load_projects, verify_root
-from .store import TaskRow, TaskStore
+from .store import TaskRow, TaskStore, _TurnClose, _TurnDraft
+from .turns import (
+    ACCEPTED_FOLLOWUP_SOURCES,
+    TaskResult,
+    result_from_task,
+    result_from_turn,
+    source_for_origin,
+)
 
 #: Audit hook signature: ``(operation, result, task_id, adapter_id, project_id,
 #: correlation_id)``. Content never travels through it — see
@@ -466,7 +478,36 @@ class TaskService:
                 source=SOURCE_COFFERDAM,
                 expected_state=STATE_STARTING,
             )
+            # Turn one. Opened after the adapter accepted the task and before
+            # its report is applied, because that report may already be a
+            # terminal one — a synchronous adapter can finish inside `start` —
+            # and a turn closed before it was opened is a turn that never
+            # existed.
+            #
+            # Its source is the task's own origin rather than a follow-up
+            # source: nobody sent a follow-up to open it, the prompt did.
+            self._open_first_turn(row)
             return self._apply(row, outcome)
+
+    def _open_first_turn(self, row: TaskRow) -> None:
+        """Record that this task's first provider turn has begun.
+
+        Failure here is swallowed on purpose, and it is the one place in this
+        file where that is right. A turn record is *evidence about* a task, not
+        the task — a store that could not write it must not also lose the task
+        that is now running with a live process behind it. What is lost is a
+        row in `task_turns`, and `get_result` treats a missing turn the same way
+        it treats a task from before schema version 3: no result yet.
+        """
+        try:
+            self._store.open_turn(
+                row.task_id,
+                provider=row.adapter_id,
+                source=source_for_origin(row.origin),
+                started_at=now_iso(),
+            )
+        except TaskError:  # pragma: no cover - defensive
+            return
 
     # -- follow-up -----------------------------------------------------------
 
@@ -476,12 +517,45 @@ class TaskService:
         followup: object,
         *,
         client_request_id: object = None,
+        source: str = SOURCE_WORKSTATION_PWA,
     ) -> TaskRow:
-        """Deliver one answer to a task that is waiting for one."""
+        """Deliver one more user turn to the session this task already owns.
+
+        The order of the checks is the contract, and each one refuses a
+        different falsehood:
+
+        1. **Idempotency first**, before any state check. A retry of a
+           follow-up that was already delivered arrives at a task that has since
+           moved on, and checking the state first would turn a successful retry
+           into "that task is not waiting" — true and useless.
+        2. **The adapter must claim follow-up**, or nothing else matters.
+        3. **No question may be open.** A follow-up is a new instruction and an
+           answer resolves something the agent is blocked on; delivering the
+           first as though it were the second puts words in somebody's mouth at
+           the one moment the agent is waiting to be told something specific.
+           Refused, not superseded — see :class:`~.errors.ClarificationPending`.
+        4. **The task must be in a state that can take another message**, and
+        5. **the adapter must still hold a session**, which is the half only it
+           can answer. A state that says ``ready_for_followup`` describes what
+           Cofferdam last observed; whether the process behind it is alive is a
+           question for the thing holding the process.
+        6. **At most one turn may be in flight**, so a double-tap cannot become
+           two provider turns interleaved at a point nobody chose.
+
+        Nothing is written until the adapter takes the message, and the turn
+        record and the state change are one transaction.
+        """
         row = self.get_task(task_id)
         text = self._valid_followup(followup)
         adapter = self._adapters.get(row.adapter_id)
         request_key = self._valid_request_id(client_request_id)
+
+        if source not in ACCEPTED_FOLLOWUP_SOURCES:
+            # `future_gpt_bridge` is in the vocabulary and not in this set, and
+            # the gap is the point: a reserved word is not an enabled surface.
+            # Nothing in this build passes it; if something did it would be
+            # refused here rather than recorded as though a bridge existed.
+            raise FollowupInvalid("that follow-up source is not accepted")
 
         # The idempotency check comes **before** the state checks, and the order
         # is the whole point. A retry of an answer that was already delivered
@@ -533,49 +607,53 @@ class TaskService:
                 raise FollowupNotWaiting(row.state)
             previous = row.state
 
-            row = self._store.transition(
-                row.task_id,
-                STATE_RUNNING,
-                event_type=EVENT_FOLLOWUP_RECEIVED,
-                actor=ACTOR_USER,
-                source=SOURCE_COFFERDAM,
-                expected_state=previous,
-                # The event says one arrived and how long it was. The text
-                # itself is user content: it lives on the task, is shown in the
-                # detail view, and is not copied into the history.
-                text="Follow-up received (" + str(len(text)) + " characters).",
-                # A follow-up sent while a question was open closes that
-                # question, in the same write that moves the task.
-                #
-                # The two are different channels — a follow-up is a new
-                # instruction, an answer resolves something the agent is blocked
-                # on — and a person who sends the first has, whatever they meant,
-                # stopped waiting on the second. Leaving it ``pending`` would put
-                # a running task in the "needs you" bucket with an answer box
-                # that no longer leads anywhere, which is the same false claim
-                # this file refuses everywhere else.
-                #
-                # No adapter can reach this today: the one that asks questions
-                # declares ``followup=False``, so the capability check above
-                # refuses first. It is here because that pairing is a fact about
-                # today's adapters rather than about the lifecycle, and the
-                # lifecycle is what has to stay coherent.
-                close_clarifications=self._close_pending(row.task_id, STATE_RUNNING),
-            )
-            self._audit(
-                "task_followup",
-                "ok",
-                task_id=row.task_id,
-                adapter_id=row.adapter_id,
-                project_id=row.project_id,
-                correlation_id=row.correlation_id,
-            )
+            # A question is open. Refused rather than delivered, and refused
+            # rather than allowed to supersede: the two channels stay separate,
+            # and the person is sent to the one that leads somewhere.
+            if self._store.pending_clarification_count(row.task_id):
+                self._reject(row, "followup", "a question is open")
+                raise ClarificationPending()
+
+            # Whether a session is actually there. Asked of the adapter, fresh,
+            # inside the lock — a helper can die between one read and the next,
+            # and a state name is Cofferdam's memory of an observation rather
+            # than the observation itself.
+            if not self._session_available(adapter, row):
+                self._reject(row, "followup", "no live session")
+                raise SessionUnavailable()
+
+            # Does this message begin a turn, or resume one?
+            #
+            # The distinction is the difference between the two states a
+            # follow-up may arrive in, and it is not a technicality. From
+            # ``ready_for_followup`` the previous turn *finished* — its result
+            # is recorded and readable — so this message opens turn N+1. From
+            # ``waiting_for_user`` the turn is still running and is blocked on
+            # somebody; the message unblocks it, and calling that a new turn
+            # would record two turns for one unit of provider work and put a
+            # second `started_at` on something that never stopped.
+            starts_new_turn = previous == STATE_READY_FOR_FOLLOWUP
+
+            # At most one turn in flight. The open turn is the durable record of
+            # "something is running", so a second follow-up racing the first
+            # finds it and is refused — rather than both reaching the provider
+            # and interleaving at a point nobody chose. Checked only when a new
+            # turn would be opened: a task that is *waiting* has an open turn by
+            # definition, and that one is the thing being resumed.
+            if starts_new_turn and self._store.current_turn(row.task_id) is not None:
+                self._reject(row, "followup", "a turn is already running")
+                raise FollowupInFlight()
 
             context = self._context(row, root, adapter, followup=text)
+            # The adapter is asked **before** anything is written. A follow-up
+            # recorded as delivered that never reached the session would show
+            # somebody their message accepted while the agent sat idle — the
+            # same false success the clarification path refuses.
             try:
                 outcome = adapter.send_followup(context, text)
             except AdapterRefusal as refusal:
-                return self._fail(row, "task_adapter_refused", refusal.message, refusal.detail)
+                self._reject(row, "followup", refusal.message[:120])
+                raise SessionUnavailable(refusal.message[:120])
             except Exception as exc:
                 return self._fail(
                     row,
@@ -583,7 +661,65 @@ class TaskService:
                     "the task adapter stopped unexpectedly",
                     type(exc).__name__,
                 )
+
+            try:
+                row = self._store.transition(
+                    row.task_id,
+                    STATE_RUNNING,
+                    event_type=EVENT_FOLLOWUP_RECEIVED,
+                    actor=ACTOR_USER,
+                    source=SOURCE_COFFERDAM,
+                    expected_state=previous,
+                    # The event says one arrived and how long it was. The text
+                    # itself is user content: it lives on the task, is shown in
+                    # the detail view, and is not copied into the history.
+                    text="Follow-up received (" + str(len(text)) + " characters).",
+                    # The new turn and the state change are one write. A task
+                    # reported ``running`` with no open turn would be a message
+                    # in flight that the durable record cannot account for.
+                    open_turn=(
+                        _TurnDraft(
+                            provider=row.adapter_id,
+                            source=source,
+                            started_at=now_iso(),
+                            provider_session_id=getattr(
+                                outcome, "provider_session_id", None
+                            ),
+                            followup_request_id=request_key,
+                        )
+                        if starts_new_turn
+                        else None
+                    ),
+                )
+            except TurnLimitReached:
+                self._reject(row, "followup", "turn limit reached")
+                raise
+            self._audit(
+                "task_followup",
+                OUTCOME_ACCEPTED,
+                task_id=row.task_id,
+                adapter_id=row.adapter_id,
+                project_id=row.project_id,
+                correlation_id=row.correlation_id,
+            )
             return self._apply(row, outcome)
+
+    def _session_available(self, adapter: TaskAdapter, row: TaskRow) -> bool:
+        """Ask the adapter whether it can still see a session for this task.
+
+        An early refusal rather than the guarantee — see
+        :meth:`~.adapters.protocol.TaskAdapter.session_available` for why the
+        base answer is permissive and where the real check lives. A probe that
+        raises is read as unavailable: an adapter that cannot answer the
+        question has not said yes.
+        """
+        probe = getattr(adapter, "session_available", None)
+        if not callable(probe):  # pragma: no cover - every adapter has the base
+            return True
+        try:
+            return bool(probe(row.task_id))
+        except Exception:  # pragma: no cover - a probe must never fail a request
+            return False
 
     def finish_task(self, task_id: object) -> TaskRow:
         """Close a retained session on purpose, and complete the task.
@@ -807,6 +943,17 @@ class TaskService:
                     # refusal — which is precisely the false claim
                     # ``interrupted`` exists to avoid making.
                     close_clarifications=self._close_pending(row.task_id, target),
+                    # And the turn that was in flight ends with it, as
+                    # ``interrupted`` rather than failed: the daemon stopped
+                    # underneath it, which is not the same as the work going
+                    # wrong. Turns that had already completed are untouched —
+                    # the store's guard sees to that — so a task interrupted on
+                    # its third turn still returns its second turn's result.
+                    close_turn=(
+                        _TurnClose(outcome=STATE_INTERRUPTED, completed_at=now_iso())
+                        if self._store.current_turn(row.task_id) is not None
+                        else None
+                    ),
                 )
             except (IllegalTransition, TaskError):  # pragma: no cover - defensive
                 continue
@@ -820,6 +967,66 @@ class TaskService:
                 correlation_id=updated.correlation_id,
             )
         return settled
+
+    # -- results -------------------------------------------------------------
+
+    def get_result(self, task_id: object) -> TaskResult:
+        """What this task has produced, in the provider-neutral result shape.
+
+        **The meaning, chosen and stated rather than left implicit: the latest
+        completed turn's result.** For a terminal task that is also the final
+        task result, and ``task_terminal`` in the response says which of the two
+        a reader is holding. Both are fields; neither is a rule a client has to
+        know.
+
+        Four cases, and each is a different sentence:
+
+        * **A completed turn exists.** Its result is returned, whatever the task
+          is doing now. A task sitting in ``ready_for_followup`` has an answer
+          somebody should be able to read — refusing it because the session is
+          still open would hide the very thing the follow-up is about.
+        * **The task is terminal with no completed turn.** Cancelled before it
+          answered, failed on the way, or interrupted by a restart. A real
+          outcome and a real timestamp, and no invented text.
+        * **The task is still going and has produced nothing.** A truthful
+          not-ready refusal naming the state, not an empty result.
+        * **No such task.** Not found, as everywhere else.
+
+        A read, and only a read: no ``refresh_task``, no adapter call, no state
+        change. Asking what a task produced must not be able to change what it
+        produced — and a bridge polling this every few seconds must not be able
+        to drive an adapter by doing so.
+        """
+        row = self.get_task(task_id)
+        turn = self._store.latest_completed_turn(row.task_id)
+        count = self._store.turn_count(row.task_id)
+
+        if turn is not None:
+            adapter = self._adapters.find(row.adapter_id)
+            available = bool(
+                row.state == STATE_READY_FOR_FOLLOWUP
+                and adapter is not None
+                and adapter.capabilities().followup
+                and self._session_available(adapter, row)
+            )
+            return result_from_turn(
+                turn,
+                task_state=row.state,
+                turn_count=count,
+                follow_up_available=available,
+            )
+
+        if row.state in TERMINAL_STATES:
+            return result_from_task(
+                task_id=row.task_id,
+                task_state=row.state,
+                completed_at=row.completed_at,
+                turn_count=count,
+                failure_code=row.failure.code if row.failure else None,
+                failure_summary=row.failure.message if row.failure else None,
+            )
+
+        raise ResultNotReady(row.state)
 
     # -- clarifications ------------------------------------------------------
 
@@ -1201,6 +1408,12 @@ class TaskService:
             cancellation=(
                 {"completed_at": now_iso(), "accepted": True} if cancelling and requested == STATE_CANCELLED else None
             ),
+            # The turn's outcome lands in the same write as the task's. A turn
+            # recorded as finished while the task did not move — or a task
+            # reported ``ready_for_followup`` with nothing recorded as having
+            # produced the result somebody is about to read — is a disagreement
+            # between two rows that nobody can resolve afterwards.
+            close_turn=self._turn_to_close(current, outcome, requested),
             # The question and the move to `waiting_for_user` are one write. A
             # task that says it is waiting with no question to answer, or a
             # question left open on a task that has finished, is a disagreement
@@ -1221,6 +1434,46 @@ class TaskService:
             )
         return updated
 
+    #: The states whose arrival means "a provider turn just ended". Three of
+    #: them end the task as well; ``ready_for_followup`` is the one that ends
+    #: only the turn, which is exactly why the two concepts needed separating.
+    TURN_ENDING_STATES = frozenset(
+        {STATE_COMPLETED, STATE_FAILED, STATE_CANCELLED, STATE_READY_FOR_FOLLOWUP}
+    )
+
+    def _turn_to_close(
+        self, current: TaskRow, outcome, requested: str
+    ) -> Optional[_TurnClose]:
+        """The open turn's outcome, if this report ends one.
+
+        ``ready_for_followup`` closes the turn with ``completed``: the *turn*
+        succeeded and produced the result somebody is about to read, and the
+        task staying open is a fact about the session rather than about the
+        work. Collapsing those two would mean either a successful turn recorded
+        as unfinished, or a task reported finished because one of its turns was.
+
+        Returns ``None`` when nothing is open — a task from before schema
+        version 3, or a second report for a turn already closed. The store's
+        ``WHERE completed_at IS NULL`` would refuse the write anyway; not asking
+        for it is the cheaper half of the same guarantee.
+        """
+        if requested not in self.TURN_ENDING_STATES:
+            return None
+        if self._store.current_turn(current.task_id) is None:
+            return None
+        outcome_word = STATE_COMPLETED if requested == STATE_READY_FOR_FOLLOWUP else requested
+        return _TurnClose(
+            outcome=outcome_word,
+            completed_at=now_iso(),
+            provider_session_id=getattr(outcome, "provider_session_id", None),
+            provider_turn_sequence=getattr(outcome, "provider_turn_sequence", 0) or 0,
+            result=outcome.final_result if outcome_word == STATE_COMPLETED else None,
+            failure_code=outcome.failure_code if outcome_word == STATE_FAILED else None,
+            failure_summary=(
+                outcome.failure_message if outcome_word == STATE_FAILED else None
+            ),
+        )
+
     def _fail(
         self, row: TaskRow, code: str, message: str, detail: Optional[str]
     ) -> TaskRow:
@@ -1240,6 +1493,20 @@ class TaskService:
             expected_state=row.state,
             text=message,
             failure=TaskFailure(code=code, message=message, detail=bounded_line(detail, 200)),
+            # The turn ends with the task, and with Cofferdam's words rather
+            # than a provider's. A turn left open on a failed task would make
+            # `current_turn` report something in flight forever, which is the
+            # state a later follow-up check reads.
+            close_turn=(
+                _TurnClose(
+                    outcome=STATE_FAILED,
+                    completed_at=now_iso(),
+                    failure_code=code,
+                    failure_summary=message,
+                )
+                if self._store.current_turn(row.task_id) is not None
+                else None
+            ),
         )
         self._audit(
             "task_failed",

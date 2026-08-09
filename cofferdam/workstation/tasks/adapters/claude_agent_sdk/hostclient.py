@@ -42,6 +42,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
+import time
 from collections import deque
 from pathlib import Path
 from typing import Any, Callable, Deque, List, Optional
@@ -78,6 +79,16 @@ START_TIMEOUT_SECONDS = 120.0
 #: file it was editing.
 CLOSE_TIMEOUT_SECONDS = 20.0
 TERMINATE_TIMEOUT_SECONDS = 5.0
+
+#: How long the parent waits for the helper to acknowledge a follow-up by
+#: starting the turn. Short: the helper is a local process that only has to
+#: write one line to a pipe its client is already holding open, and a wait long
+#: enough to cover a hung helper would be a wait long enough to hang a request
+#: somebody made from a phone.
+FOLLOWUP_ACK_TIMEOUT_SECONDS = 15.0
+
+#: How often that wait re-reads the helper's reported state.
+FOLLOWUP_POLL_SECONDS = 0.02
 
 #: The most events one session buffers between drains.
 MAX_BUFFERED_EVENTS = 500
@@ -119,6 +130,16 @@ class HostSession(DelegatedSession):
         self._pending_token: Optional[str] = None
         self._cancel_requested = False
         self._local_sequence = 0
+        #: Mirrors the helper's own view, learned from ``turn_complete``. The
+        #: parent never infers it from a terminal event: a terminal event says a
+        #: turn produced a result, and whether the *session* survived it is the
+        #: helper's fact to report, not the parent's to guess.
+        self._turn_complete = False
+        self._turn_number = 0
+        #: Set when a follow-up has been written and the helper has not yet said
+        #: the new turn ended. Cleared by the next ``turn_complete``.
+        self._followup_in_flight = False
+        self._followup_error: Optional[str] = None
 
     # -- reading -------------------------------------------------------------
 
@@ -138,6 +159,16 @@ class HostSession(DelegatedSession):
     def pending_question_token(self) -> Optional[str]:  # type: ignore[override]
         with self._lock:
             return self._pending_token
+
+    @property
+    def turn_complete(self) -> bool:  # type: ignore[override]
+        with self._lock:
+            return self._turn_complete and not self._stopped.is_set()
+
+    @property
+    def turn_number(self) -> int:  # type: ignore[override]
+        with self._lock:
+            return self._turn_number
 
     def drain(self) -> List[DelegatedEvent]:
         with self._lock:
@@ -228,6 +259,68 @@ class HostSession(DelegatedSession):
                 # question unanswerable for the rest of the session.
                 self._pending_token = token
         return delivered
+
+    def send_followup(self, followup: str) -> None:  # type: ignore[override]
+        """Write one follow-up down the pipe, and confirm the helper took it.
+
+        Synchronous by design, and the wait is short. The alternative — write
+        and return — would let Task Core move a task to ``running`` on the
+        strength of a successful ``write()``, which is the same "a fork
+        succeeded so it must be working" claim this whole file exists to refuse.
+        What is waited for is the helper *starting* the turn, not finishing it.
+
+        Every refusal raises :class:`SessionRefused` with Cofferdam's words, so
+        a message that went nowhere is reported as one.
+        """
+        if not isinstance(followup, str) or not followup:
+            raise SessionRefused("that follow-up is not usable")
+        with self._lock:
+            if self._stopped.is_set() or self._process is None:
+                raise SessionRefused("this Claude session is no longer running")
+            if self._cancel_requested:
+                raise SessionRefused("this task is being cancelled")
+            if self._pending_token is not None:
+                raise SessionRefused("this session is waiting for an answer")
+            if not self._turn_complete:
+                raise SessionRefused("Claude is still working on the previous message")
+            if self._followup_in_flight:
+                raise SessionRefused("a follow-up is already being delivered")
+            self._followup_error = None
+            self._followup_in_flight = True
+            expected = self._turn_number
+
+        if not self._send(
+            hostproto.command(hostproto.COMMAND_FOLLOWUP, followup=followup)
+        ):
+            with self._lock:
+                self._followup_in_flight = False
+            raise SessionRefused("the Claude Agent SDK helper stopped")
+
+        # Wait for the helper either to begin the turn — which it signals by
+        # ceasing to be turn-complete — or to refuse it. Bounded, because a
+        # helper that answers neither is a helper that is gone.
+        deadline = time.monotonic() + FOLLOWUP_ACK_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            with self._lock:
+                problem = self._followup_error
+                started = not self._turn_complete or self._turn_number > expected
+                gone = self._stopped.is_set()
+            if problem is not None:
+                with self._lock:
+                    self._followup_in_flight = False
+                    self._followup_error = None
+                raise SessionRefused(problem)
+            if gone:
+                with self._lock:
+                    self._followup_in_flight = False
+                raise SessionRefused("the Claude session ended before the follow-up")
+            if started:
+                return
+            time.sleep(FOLLOWUP_POLL_SECONDS)
+
+        with self._lock:
+            self._followup_in_flight = False
+        raise SessionRefused("Claude did not take the follow-up in time")
 
     def request_cancel(self) -> bool:
         """Ask the helper to interrupt its session, and only its own.
@@ -329,13 +422,36 @@ class HostSession(DelegatedSession):
             candidate = payload.get("provider_session_id")
             if isinstance(candidate, str) and candidate:
                 self._provider_session_id = candidate[:64]
+            with self._lock:
+                self._turn_number = max(self._turn_number, 1)
             self._started.set()
+            return
+        if name == hostproto.MESSAGE_TURN_COMPLETE:
+            candidate = payload.get("provider_session_id")
+            with self._lock:
+                if isinstance(candidate, str) and candidate:
+                    if not self._provider_session_id:
+                        self._provider_session_id = candidate[:64]
+                turn = payload.get("turn")
+                if isinstance(turn, int) and turn > self._turn_number:
+                    self._turn_number = turn
+                self._turn_complete = True
+                self._followup_in_flight = False
             return
         if name == hostproto.MESSAGE_ERROR:
             # Bounded, and already Cofferdam's words: the helper never puts an
             # SDK message into this field. See `host._verify_own_environment`
             # and `session._transport_message`.
-            self._error = safe_line(payload.get("detail"), 200) or "the helper refused"
+            detail = safe_line(payload.get("detail"), 200) or "the helper refused"
+            with self._lock:
+                if self._followup_in_flight:
+                    # A refusal that answers a follow-up in flight belongs to
+                    # that request, not to the session as a whole. Routed to the
+                    # waiting caller rather than latched into `_error`, which
+                    # would make every later start check read as failed.
+                    self._followup_error = detail
+                    return
+            self._error = detail
             self._ready.set()
             return
         if name == hostproto.MESSAGE_FINISHED:
@@ -349,6 +465,14 @@ class HostSession(DelegatedSession):
             return
         if event.provider_session_id and not self._provider_session_id:
             self._provider_session_id = event.provider_session_id
+        if not event.terminal:
+            # Anything that is not a turn ending means work is happening, so a
+            # session that had been reported complete is not any more. Belt to
+            # the helper's braces: the helper resets its own flag when a turn
+            # begins, and this keeps the parent from offering a follow-up box
+            # for a session that has already taken one.
+            with self._lock:
+                self._turn_complete = False
         if event.kind == normalize.KIND_CLARIFICATION_REQUESTED:
             # The helper's own token for this question, carried as the provider
             # event id. Remembered so an answer can be routed back to the
@@ -451,6 +575,8 @@ __all__ = [
     "CLOSE_TIMEOUT_SECONDS",
     "HOST_MODULE",
     "MAX_BUFFERED_EVENTS",
+    "FOLLOWUP_ACK_TIMEOUT_SECONDS",
+    "FOLLOWUP_POLL_SECONDS",
     "READY_TIMEOUT_SECONDS",
     "START_TIMEOUT_SECONDS",
     "TERMINATE_TIMEOUT_SECONDS",

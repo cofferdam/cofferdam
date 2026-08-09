@@ -51,7 +51,14 @@ from ...delegated import (
 #: different build is refused rather than half-understood, which matters because
 #: the two halves are deployed as one file tree but run as two processes and
 #: could in principle be mismatched during an upgrade.
-PROTOCOL_VERSION = 1
+#:
+#: Version 2 adds ``followup`` going down and ``turn_complete`` coming up. The
+#: bump is required even though both additions are new words rather than changed
+#: ones: a version-1 helper would silently drop a ``followup`` command as
+#: unknown, and a parent that had sent one would then wait for a turn that is
+#: never going to start. Refusing the mismatched pair outright is the honest
+#: failure — the task reports that the session is unavailable, which is true.
+PROTOCOL_VERSION = 2
 
 #: The most bytes one protocol line may occupy. Generous enough for a bounded
 #: result — sixteen thousand characters of text plus its envelope — and small
@@ -62,10 +69,31 @@ MAX_LINE_BYTES = 96 * 1024
 
 COMMAND_START = "start"
 COMMAND_ANSWER = "answer"
+#: One more user turn for a session that has finished the previous one and is
+#: waiting for nothing.
+#:
+#: Its own command, and **not** a second use of ``answer``. The two carry text
+#: to the same client and are otherwise nothing alike: an answer resolves a
+#: question the agent is blocked on and must match the token of that question,
+#: while a follow-up is a new instruction that is only legal when no question is
+#: open. One command doing both would have to decide which from state, at the
+#: moment when getting it wrong means either answering a question with an
+#: unrelated instruction or losing somebody's message into a callback.
+#:
+#: It carries a bounded text and a turn number, and nothing else. There is no
+#: session id on it — the helper has exactly one client and no way to reach
+#: another — and no option, tool, mode or path.
+COMMAND_FOLLOWUP = "followup"
 COMMAND_CANCEL = "cancel"
 COMMAND_CLOSE = "close"
 
-COMMANDS = (COMMAND_START, COMMAND_ANSWER, COMMAND_CANCEL, COMMAND_CLOSE)
+COMMANDS = (
+    COMMAND_START,
+    COMMAND_ANSWER,
+    COMMAND_FOLLOWUP,
+    COMMAND_CANCEL,
+    COMMAND_CLOSE,
+)
 
 # -- helper to parent --------------------------------------------------------
 
@@ -81,6 +109,11 @@ MESSAGE_EVENT = "event"
 #: One bounded observation of a tool input this build could not read. Names,
 #: types and counts — never a value. See :mod:`.question`.
 MESSAGE_OBSERVATION = "observation"
+#: A turn ended and the client is still connected. Carries the provider session
+#: id and the turn number the helper believes it just finished, so the parent
+#: can check that a second turn happened in the same conversation as the first
+#: rather than assuming it.
+MESSAGE_TURN_COMPLETE = "turn_complete"
 #: The helper is refusing or reporting a failure, in Cofferdam's words.
 MESSAGE_ERROR = "error"
 #: The session reached a terminal event and the helper is shutting down.
@@ -91,6 +124,7 @@ MESSAGES = (
     MESSAGE_STARTED,
     MESSAGE_EVENT,
     MESSAGE_OBSERVATION,
+    MESSAGE_TURN_COMPLETE,
     MESSAGE_ERROR,
     MESSAGE_FINISHED,
 )
@@ -222,6 +256,7 @@ __all__ = [
     "COMMAND_ANSWER",
     "COMMAND_CANCEL",
     "COMMAND_CLOSE",
+    "COMMAND_FOLLOWUP",
     "COMMAND_START",
     "MAX_LINE_BYTES",
     "MESSAGES",
@@ -231,6 +266,7 @@ __all__ = [
     "MESSAGE_OBSERVATION",
     "MESSAGE_READY",
     "MESSAGE_STARTED",
+    "MESSAGE_TURN_COMPLETE",
     "PROTOCOL_VERSION",
     "ProtocolError",
     "command",
