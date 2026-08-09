@@ -192,11 +192,54 @@ function escapeHtml(value) {
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+/* ------------------------------------------------------------------ storage
+ *
+ * A localStorage double, deliberately **outside** the sandbox that runs
+ * tasks.js. That is the whole point of it: a "reload" below builds a brand new
+ * sandbox with brand new module state, and this object is the only thing that
+ * survives — which is exactly what a browser does to a PWA whose tab iOS
+ * discarded. A per-sandbox store could not tell "the draft was saved" from "the
+ * draft was still in a variable".
+ */
+const storage = {
+  data: {},
+  get length() { return Object.keys(this.data).length; },
+  key(index) { return Object.keys(this.data)[index]; },
+  getItem(name) {
+    return Object.prototype.hasOwnProperty.call(this.data, name)
+      ? this.data[name]
+      : null;
+  },
+  setItem(name, value) { this.data[name] = String(value); },
+  removeItem(name) { delete this.data[name]; }
+};
+
+/* A localStorage that throws on every access, as iOS Safari does under Private
+   Browsing. Selected per scenario, so the memory fallback is exercised rather
+   than assumed. */
+const hostileStorage = {
+  get length() { throw new Error("SecurityError"); },
+  key() { throw new Error("SecurityError"); },
+  getItem() { throw new Error("SecurityError"); },
+  setItem() { throw new Error("SecurityError"); },
+  removeItem() { throw new Error("SecurityError"); }
+};
+
 /* `document.getElementById` is used by tasks.js for the two textareas, whose
    values are read at submit time rather than tracked per keystroke. */
+const documentListeners = {};
+
 const documentStub = {
   visibilityState: "visible",
   getElementById(id) { return elements[id] || null; },
+  addEventListener(type, fn) {
+    (documentListeners[type] = documentListeners[type] || []).push(fn);
+  },
+  removeEventListener(type, fn) {
+    const list = documentListeners[type] || [];
+    const index = list.indexOf(fn);
+    if (index !== -1) { list.splice(index, 1); }
+  },
   /* A browser reports which node has focus, and the panel reads it to decide
      whether to put the caret back after a re-render. Without it here, focus
      restoration could never be tested. */
@@ -248,6 +291,39 @@ const CAPABILITIES = {
   structured_progress: true, final_result: true, approvals: false,
   authentication_waits: false
 };
+
+/* An adapter that asks structured questions — the Agent SDK transport. The
+   `clarifications` flag is what routes an answer to the answer route instead of
+   to `/followups`, so it is the one capability these scenarios turn on. */
+const SDK_CAPABILITIES = Object.assign({}, CAPABILITIES, { clarifications: true });
+
+/* One pending question, shaped exactly as `PendingClarification.to_dict`
+   produces it. Note what is absent and cannot be added: no provider session id,
+   no tool input, no raw provider payload — the backend does not send them, so a
+   scenario cannot smuggle one in to see whether the panel would render it. */
+function clarificationPayload(options) {
+  const settings = options || {};
+  return {
+    version: 1,
+    category: "clarification",
+    question_id: settings.question_id || "q_01hqqqqqqqqqqqqqqqqqqqqqqq",
+    task_id: settings.task_id || "task_sdk",
+    provider: "claude-agent-sdk",
+    question: settings.question || "Hangi dosyayı düzenleyeyim?",
+    answer_mode: settings.answer_mode || "single_choice",
+    allows_free_text: settings.allows_free_text === true,
+    schema_verified: settings.schema_verified !== false,
+    options: settings.options === undefined
+      ? [
+          { option_id: "opt1", label: "README.md", description: "The readme" },
+          { option_id: "opt2", label: "STATUS.md", description: null }
+        ]
+      : settings.options,
+    requested_at: "2026-08-09T12:00:00.000Z",
+    status: settings.status || "pending",
+    answered_at: null
+  };
+}
 
 function taskPayload(options) {
   const settings = options || {};
@@ -412,6 +488,24 @@ function makeApi(behaviour) {
           ok: true, status: 200, payload: eventsPayload("t", events)
         });
       }
+      if (pathname.indexOf("/clarifications") !== -1) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          payload: {
+            version: 1,
+            task_id: (detail || taskPayload()).task_id,
+            state: (detail || taskPayload()).state,
+            waiting_reason: (detail || taskPayload()).waiting_reason,
+            clarifications: behaviour.clarifications || []
+          }
+        });
+      }
+      if (pathname.indexOf("/result") !== -1) {
+        return Promise.resolve({
+          ok: true, status: 200, payload: { result: behaviour.resultPayload || {} }
+        });
+      }
       if (pathname.indexOf("/api/tasks/") === 0) {
         return Promise.resolve({
           ok: true, status: 200, payload: { task: detail || taskPayload() }
@@ -448,7 +542,13 @@ function makeApi(behaviour) {
 
 /* ---------------------------------------------------------------- scenarios */
 
-function run() {
+/* One evaluation of the shipped tasks.js, in its own module state.
+ *
+ * A separate function rather than inline, because "load the page again" is now a
+ * property under test: `reload()` below calls it a second time, giving fresh
+ * module variables and a fresh DOM while `storage` persists. Anything that
+ * survives that is something the panel genuinely wrote down. */
+function evaluatePanel(store) {
   const sandbox = {
     console: {
       log: (...a) => record.consoleOutput.push(a.join(" ")),
@@ -456,6 +556,7 @@ function run() {
       error: (...a) => record.consoleOutput.push(a.join(" "))
     },
     document: documentStub,
+    localStorage: store || storage,
     navigator: {},
     AbortController: AbortControllerStub,
     setTimeout: setTimeoutStub,
@@ -468,11 +569,33 @@ function run() {
   sandbox.window = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(TASKS_JS, sandbox, { filename: "tasks.js" });
+  return sandbox.CofferdamTasks;
+}
 
-  const tasks = sandbox.CofferdamTasks;
+function run() {
+  let tasks = evaluatePanel();
 
   function mount(behaviour) {
     return tasks.mount({ api: makeApi(behaviour), el, escapeHtml });
+  }
+
+  /* Throw the page away and load it again — a PWA reload, or iOS discarding a
+     backgrounded tab. Every DOM node and every module variable is new; only
+     `storage` crosses the boundary. */
+  function reload(behaviour, store) {
+    Object.keys(elements).forEach((id) => { delete elements[id]; });
+    IDS.forEach((id) => { elements[id] = makeElement(id); });
+    Object.keys(documentListeners).forEach((type) => {
+      documentListeners[type] = [];
+    });
+    activeElementId = null;
+    tasks = evaluatePanel(store);
+    return tasks.mount({ api: makeApi(behaviour), el, escapeHtml });
+  }
+
+  /* Fire a document-level event, as a browser does when a tab is foregrounded. */
+  function fireDocument(type) {
+    (documentListeners[type] || []).forEach((fn) => fn({ type }));
   }
   function html() { return el("tasksSections").innerHTML; }
   function writes() { return record.requests.filter((r) => r.method !== "GET"); }
@@ -1250,6 +1373,784 @@ function run() {
             return { draft: valueOf("taskFollowupText") };
           });
         });
+      });
+    });
+  }
+
+  /* -- M2I PR4: the structured question round trip -------------------------- */
+
+  function sdkWaiting(extra) {
+    return taskPayload(Object.assign({
+      task_id: "task_sdk",
+      state: "waiting_for_user",
+      waiting_reason: "clarification",
+      capabilities: SDK_CAPABILITIES
+    }, extra || {}));
+  }
+
+  function openSdkQuestion(behaviour) {
+    const waiting = sdkWaiting();
+    return mount(Object.assign({
+      realAdapter: true,
+      initial: listPayload([waiting]),
+      detail: waiting,
+      events: [eventItem(1, "waiting_for_user", "Claude asked a question.")],
+      clarifications: [clarificationPayload({})],
+      result: () => ({ payload: { task: waiting } })
+    }, behaviour || {})).then(function () {
+      fire("click", openButton("task_sdk"));
+      return drain();
+    });
+  }
+
+  if (scenario === "sdk-question-is-rendered-with-its-options") {
+    /* The gap M2I PR4 exists to close. Before it, a task waiting on a structured
+       question got a generic "Your answer" box wired to `/followups` — a route
+       the server refuses outright while a question is open. */
+    return openSdkQuestion().then(function () {
+      const markup = html();
+      return {
+        html: markup,
+        hasQuestion: markup.indexOf("task-question") !== -1,
+        hasAnswerBox: markup.indexOf("taskAnswerText") !== -1,
+        hasFollowupBox: markup.indexOf("taskFollowupText") !== -1,
+        hasSendButton: markup.indexOf("taskAnswerSend") !== -1
+      };
+    });
+  }
+
+  if (scenario === "sdk-question-free-text-is-offered-only-when-allowed") {
+    const waiting = sdkWaiting();
+    return mount({
+      realAdapter: true,
+      initial: listPayload([waiting]),
+      detail: waiting,
+      clarifications: [clarificationPayload({ allows_free_text: true })],
+      result: () => ({ payload: {} })
+    }).then(function () {
+      fire("click", openButton("task_sdk"));
+      return drain().then(function () {
+        return { html: html(), hasAnswerBox: html().indexOf("taskAnswerText") !== -1 };
+      });
+    });
+  }
+
+  if (scenario === "sdk-answer-goes-to-the-answer-route") {
+    /* Which route, and which body. Both matter: `option_ids` are Cofferdam's own
+       identifiers taken from the question being answered, and there is no third
+       field for anything an approval could travel in. */
+    const answered = taskPayload({
+      task_id: "task_sdk", state: "running", capabilities: SDK_CAPABILITIES
+    });
+    return openSdkQuestion({
+      result: () => ({ payload: { task: answered }, detail: answered })
+    }).then(function () {
+      fire("change", { className: "task-option-input", value: "opt2", checked: true });
+      fire("click", button("taskAnswerSend"));
+      return drain().then(function () {
+        return { html: html(), writes: writes() };
+      });
+    });
+  }
+
+  if (scenario === "sdk-followup-is-refused-while-a-question-is-open") {
+    /* The panel refuses before the server has to. A follow-up sent here would be
+       answered `task_clarification_pending`, which is a refusal the person can do
+       nothing about from the screen they are looking at. */
+    return openSdkQuestion().then(function () {
+      fire("click", button("taskFollowupSend"));
+      return drain().then(function () {
+        return { html: html(), writes: writes() };
+      });
+    });
+  }
+
+  if (scenario === "sdk-unverified-question-shape-is-labelled") {
+    const waiting = sdkWaiting();
+    return mount({
+      realAdapter: true,
+      initial: listPayload([waiting]),
+      detail: waiting,
+      clarifications: [clarificationPayload({
+        schema_verified: false, answer_mode: "unknown", options: [],
+        allows_free_text: true
+      })],
+      result: () => ({ payload: {} })
+    }).then(function () {
+      fire("click", openButton("task_sdk"));
+      return drain().then(function () { return { html: html() }; });
+    });
+  }
+
+  if (scenario === "sdk-question-renders-no-provider-field") {
+    /* Everything the payload carries is rendered or dropped; nothing a provider
+       named appears. The assertion belongs in the test, which knows which words
+       are forbidden — this only hands it the markup. */
+    return openSdkQuestion().then(function () {
+      return { html: html(), storage: storage.data };
+    });
+  }
+
+  /* -- M2I PR4: drafts that survive a reload -------------------------------- */
+
+  function readyTask(id) {
+    return taskPayload({
+      task_id: id || "task_ready",
+      state: "ready_for_followup",
+      result: "Birinci tur bitti.",
+      capabilities: SDK_CAPABILITIES
+    });
+  }
+
+  if (scenario === "followup-draft-survives-a-reload") {
+    /* The defect this closes: iOS discards a backgrounded tab, the person comes
+       back, and the sentence they were part-way through is gone. Module state
+       cannot survive that; only storage can, which is why the harness's store
+       lives outside the sandbox. */
+    const ready = readyTask();
+    const behaviour = {
+      realAdapter: true,
+      initial: listPayload([ready]),
+      detail: ready,
+      result: () => ({ payload: { task: ready } })
+    };
+    return mount(behaviour).then(function () {
+      fire("click", openButton("task_ready"));
+      return drain();
+    }).then(function () {
+      field("taskFollowupText", "yarım kalmış bir cümle");
+      /* A render is what files the draft, exactly as a poll would. */
+      advance(4000);
+      return drain();
+    }).then(function () {
+      const before = storage.data;
+      return reload(behaviour).then(function () {
+        fire("click", openButton("task_ready"));
+        return drain().then(function () {
+          return {
+            storedBefore: Object.keys(before).length,
+            draftAfterReload: valueOf("taskFollowupText"),
+            writes: writes()
+          };
+        });
+      });
+    });
+  }
+
+  if (scenario === "clarification-draft-survives-a-reload") {
+    const waiting = sdkWaiting();
+    const behaviour = {
+      realAdapter: true,
+      initial: listPayload([waiting]),
+      detail: waiting,
+      clarifications: [clarificationPayload({ allows_free_text: true })],
+      result: () => ({ payload: { task: waiting } })
+    };
+    return mount(behaviour).then(function () {
+      fire("click", openButton("task_sdk"));
+      return drain();
+    }).then(function () {
+      field("taskAnswerText", "üçüncü seçenek olsun");
+      /* A waiting task polls on the slower interval — it is not active. */
+      advance(12000);
+      return drain();
+    }).then(function () {
+      return reload(behaviour).then(function () {
+        fire("click", openButton("task_sdk"));
+        return drain().then(function () {
+          return {
+            draftAfterReload: valueOf("taskAnswerText"),
+            keys: Object.keys(storage.data),
+            writes: writes()
+          };
+        });
+      });
+    });
+  }
+
+  if (scenario === "drafts-are-separate-by-operation") {
+    /* A half-typed answer to a question must not reappear as a follow-up once
+       the question is answered and the task moves on. Two keys, two boxes. */
+    let waiting = sdkWaiting();
+    const ready = readyTask("task_sdk");
+    const behaviour = {
+      realAdapter: true,
+      initial: listPayload([waiting]),
+      detail: waiting,
+      clarifications: [clarificationPayload({ allows_free_text: true })],
+      result: () => ({ payload: { task: waiting } })
+    };
+    return mount(behaviour).then(function () {
+      fire("click", openButton("task_sdk"));
+      return drain();
+    }).then(function () {
+      field("taskAnswerText", "soruya cevap");
+      advance(12000);
+      return drain();
+    }).then(function () {
+      /* The same task, now past the question. */
+      const moved = Object.assign({}, behaviour, {
+        detail: ready,
+        initial: listPayload([ready]),
+        clarifications: []
+      });
+      return reload(moved).then(function () {
+        fire("click", openButton("task_sdk"));
+        return drain().then(function () {
+          return {
+            followupBox: valueOf("taskFollowupText"),
+            keys: Object.keys(storage.data)
+          };
+        });
+      });
+    });
+  }
+
+  if (scenario === "drafts-do-not-cross-tasks-in-storage") {
+    const a = readyTask("task_a");
+    const b = readyTask("task_b");
+    let current = a;
+    const behaviour = {
+      realAdapter: true,
+      initial: listPayload([a, b]),
+      onGet(pathname) {
+        if (pathname === "/api/tasks/task_a") {
+          return Promise.resolve({ ok: true, status: 200, payload: { task: a } });
+        }
+        if (pathname === "/api/tasks/task_b") {
+          return Promise.resolve({ ok: true, status: 200, payload: { task: b } });
+        }
+        return null;
+      },
+      detail: current,
+      result: () => ({ payload: { task: current } })
+    };
+    return mount(behaviour).then(function () {
+      fire("click", openButton("task_a"));
+      return drain();
+    }).then(function () {
+      field("taskFollowupText", "A için taslak");
+      advance(4000);
+      return drain();
+    }).then(function () {
+      return reload(behaviour).then(function () {
+        fire("click", openButton("task_b"));
+        return drain().then(function () {
+          return { draftInB: valueOf("taskFollowupText"), keys: Object.keys(storage.data) };
+        });
+      });
+    });
+  }
+
+  if (scenario === "a-terminal-task-drops-its-draft") {
+    /* A cancelled task keeps no unsent words. Leaving them would show somebody
+       text on a screen that has nowhere left to send it. */
+    const ready = readyTask("task_end");
+    const cancelled = taskPayload({
+      task_id: "task_end", state: "cancelled", capabilities: SDK_CAPABILITIES
+    });
+    let current = ready;
+    const behaviour = {
+      realAdapter: true,
+      initial: listPayload([ready]),
+      detail: ready,
+      onGet(pathname) {
+        if (pathname.indexOf("/api/tasks/task_end") === 0 &&
+            pathname.indexOf("/events") === -1) {
+          return Promise.resolve({ ok: true, status: 200, payload: { task: current } });
+        }
+        return null;
+      },
+      result() {
+        current = cancelled;
+        return { payload: { task: cancelled }, detail: cancelled };
+      }
+    };
+    return mount(behaviour).then(function () {
+      fire("click", openButton("task_end"));
+      return drain();
+    }).then(function () {
+      field("taskFollowupText", "gönderilmeyecek metin");
+      advance(4000);
+      return drain();
+    }).then(function () {
+      const held = Object.keys(storage.data).length;
+      fire("click", button("taskCancel"));
+      return drain().then(function () {
+        return { keysWhileOpen: held, keysAfterCancel: Object.keys(storage.data).length };
+      });
+    });
+  }
+
+  if (scenario === "signing-out-removes-stored-drafts") {
+    const ready = readyTask();
+    const behaviour = {
+      realAdapter: true,
+      initial: listPayload([ready]),
+      detail: ready,
+      result: () => ({ payload: { task: ready } })
+    };
+    return mount(behaviour).then(function () {
+      fire("click", openButton("task_ready"));
+      return drain();
+    }).then(function () {
+      field("taskFollowupText", "çıkışta silinmeli");
+      advance(4000);
+      return drain();
+    }).then(function () {
+      const before = Object.keys(storage.data).length;
+      tasks.stop();
+      return drain().then(function () {
+        return { before: before, after: Object.keys(storage.data).length };
+      });
+    });
+  }
+
+  if (scenario === "a-storage-refusal-does-not-break-the-panel") {
+    /* iOS Safari throws on the property access itself under Private Browsing.
+       app.js learned this the hard way; this panel inherits the guard. */
+    const ready = readyTask();
+    const behaviour = {
+      realAdapter: true,
+      initial: listPayload([ready]),
+      detail: ready,
+      result: () => ({ payload: { task: ready } })
+    };
+    return reload(behaviour, hostileStorage).then(function () {
+      fire("click", openButton("task_ready"));
+      return drain();
+    }).then(function () {
+      field("taskFollowupText", "hafızada kalsın");
+      advance(4000);
+      return drain().then(function () {
+        return { html: html(), draft: valueOf("taskFollowupText") };
+      });
+    });
+  }
+
+  /* -- M2I PR4: request identity ------------------------------------------- */
+
+  if (scenario === "a-refused-followup-keeps-its-request-id") {
+    /* The defect: the key was cleared on any response at all, including a
+       refusal — so the retry the person immediately makes carried a *new* key
+       and the server could not recognise it as the same message. */
+    const ready = readyTask();
+    let attempts = 0;
+    return mount({
+      realAdapter: true,
+      initial: listPayload([ready]),
+      detail: ready,
+      onWrite(pathname, body) {
+        if (pathname.indexOf("/followups") === -1) { return null; }
+        attempts += 1;
+        if (attempts === 1) {
+          return Promise.resolve({
+            ok: false,
+            status: 503,
+            payload: { error: { code: "task_adapter_error", message: "Not now." } }
+          });
+        }
+        return Promise.resolve({ ok: true, status: 200, payload: { task: ready } });
+      },
+      result: () => ({ payload: { task: ready } })
+    }).then(function () {
+      fire("click", openButton("task_ready"));
+      return drain();
+    }).then(function () {
+      field("taskFollowupText", "aynı mesaj");
+      fire("click", button("taskFollowupSend"));
+      return drain();
+    }).then(function () {
+      /* After the refusal: the words and the key both have to still be here,
+         because this is the moment somebody presses the button again. */
+      const draftAfterRefusal = valueOf("taskFollowupText");
+      field("taskFollowupText", "aynı mesaj");
+      fire("click", button("taskFollowupSend"));
+      return drain().then(function () {
+        /* And the retry is accepted, so now — and only now — it goes. */
+        const posts = writes().filter((w) => w.path.indexOf("/followups") !== -1);
+        return {
+          posts: posts.length,
+          requestIds: posts.map((w) => w.body.client_request_id),
+          draftAfterRefusal: draftAfterRefusal,
+          draftAfterAccept: valueOf("taskFollowupText"),
+          keysAfterAccept: Object.keys(storage.data)
+        };
+      });
+    });
+  }
+
+  if (scenario === "an-edited-followup-gets-a-new-request-id") {
+    /* The other half. The server binds a key to a payload hash and answers the
+       same key with different words as a conflict — so different words have to
+       arrive under a different key. */
+    const ready = readyTask();
+    return mount({
+      realAdapter: true,
+      initial: listPayload([ready]),
+      detail: ready,
+      onWrite(pathname) {
+        if (pathname.indexOf("/followups") === -1) { return null; }
+        return Promise.resolve({
+          ok: false,
+          status: 409,
+          payload: { error: { code: "task_idempotency_conflict", message: "No." } }
+        });
+      },
+      result: () => ({ payload: { task: ready } })
+    }).then(function () {
+      fire("click", openButton("task_ready"));
+      return drain();
+    }).then(function () {
+      field("taskFollowupText", "ilk hâli");
+      fire("click", button("taskFollowupSend"));
+      return drain();
+    }).then(function () {
+      field("taskFollowupText", "düzeltilmiş hâli");
+      fire("click", button("taskFollowupSend"));
+      return drain().then(function () {
+        const posts = writes().filter((w) => w.path.indexOf("/followups") !== -1);
+        return { requestIds: posts.map((w) => w.body.client_request_id) };
+      });
+    });
+  }
+
+  if (scenario === "no-draft-is-submitted-on-its-own") {
+    /* Nothing about coming back to the app may send anything. A draft restored
+       after a reload is text on a screen, not a message in flight. */
+    const ready = readyTask();
+    const behaviour = {
+      realAdapter: true,
+      initial: listPayload([ready]),
+      detail: ready,
+      result: () => ({ payload: { task: ready } })
+    };
+    return mount(behaviour).then(function () {
+      fire("click", openButton("task_ready"));
+      return drain();
+    }).then(function () {
+      field("taskFollowupText", "kendiliğinden gitmesin");
+      advance(4000);
+      return drain();
+    }).then(function () {
+      return reload(behaviour).then(function () {
+        fire("click", openButton("task_ready"));
+        return drain();
+      }).then(function () {
+        documentStub.visibilityState = "hidden";
+        fireDocument("visibilitychange");
+        advance(20000);
+        documentStub.visibilityState = "visible";
+        fireDocument("visibilitychange");
+        advance(20000);
+        return drain().then(function () {
+          return {
+            draft: valueOf("taskFollowupText"),
+            writes: writes().map((w) => w.path)
+          };
+        });
+      });
+    });
+  }
+
+  /* -- M2I PR4: foregrounding ---------------------------------------------- */
+
+  if (scenario === "foregrounding-refreshes-without-waiting") {
+    /* Polling has always stopped while hidden. What was missing is the other
+       half: coming back waited out the rest of an interval before asking. */
+    const running = taskPayload({ task_id: "task_fg", state: "running" });
+    return mount({
+      initial: listPayload([running]),
+      detail: running,
+      result: () => ({ payload: {} })
+    }).then(function () {
+      const before = record.requests.filter((r) => r.method === "GET").length;
+      documentStub.visibilityState = "hidden";
+      fireDocument("visibilitychange");
+      advance(30000);
+      const whileHidden = record.requests.filter((r) => r.method === "GET").length;
+      documentStub.visibilityState = "visible";
+      fireDocument("visibilitychange");
+      return drain().then(function () {
+        return {
+          afterMount: before,
+          whileHidden: whileHidden,
+          afterForeground: record.requests.filter((r) => r.method === "GET").length
+        };
+      });
+    });
+  }
+
+  /* -- M2I PR4: the result route ------------------------------------------- */
+
+  if (scenario === "the-result-route-reports-the-latest-turn") {
+    const ready = readyTask("task_res");
+    return mount({
+      realAdapter: true,
+      initial: listPayload([ready]),
+      detail: ready,
+      resultPayload: {
+        version: 1,
+        task_id: "task_res",
+        task_state: "ready_for_followup",
+        task_terminal: false,
+        outcome: "completed",
+        succeeded: true,
+        completed_at: "2026-08-09T12:00:00.000Z",
+        provider: "claude-agent-sdk",
+        provider_session_id: "3f5a6b7c-1111-2222-3333-444455556666",
+        turn_number: 2,
+        provider_turn_sequence: 12,
+        turn_count: 2,
+        result: "İkinci turun sonucu.",
+        failure_code: null,
+        failure_summary: null,
+        follow_up_available: true,
+        evidence_source: "adapter_reported",
+        result_meaning: "The latest completed turn's result."
+      },
+      result: () => ({ payload: { task: ready } })
+    }).then(function () {
+      fire("click", openButton("task_res"));
+      return drain();
+    }).then(function () {
+      fire("click", button("taskShowResult"));
+      return drain().then(function () {
+        return { html: html(), storage: storage.data };
+      });
+    });
+  }
+
+  /* -- M2I PR4 fix: an accepted follow-up leaves nothing behind ------------- */
+
+  if (scenario === "an-accepted-followup-clears-everything") {
+    /* The defect the phone found, in one scenario.
+
+       Clearing the store was not enough: the draft is not part of the markup,
+       so the textarea still held the accepted sentence, and the next render's
+       `captureDraft` read that node and wrote it back. On the phone the text
+       reappeared, and because the request id had been released with it, the
+       next tap sent the same words under a new key — a second provider turn. */
+    const ready = readyTask("task_acc");
+    return mount({
+      realAdapter: true,
+      initial: listPayload([ready]),
+      detail: ready,
+      result: () => ({ payload: { task: ready } })
+    }).then(function () {
+      fire("click", openButton("task_acc"));
+      return drain();
+    }).then(function () {
+      field("taskFollowupText", "hangi etiketi seçtim?");
+      advance(4000);                       /* a poll files the draft */
+      return drain();
+    }).then(function () {
+      const storedBefore = Object.keys(storage.data).length;
+      fire("click", button("taskFollowupSend"));
+      return drain().then(function () {
+        /* And a further render, which is where the draft used to come back. */
+        advance(4000);
+        return drain().then(function () {
+          return {
+            storedBefore: storedBefore,
+            box: valueOf("taskFollowupText"),
+            keys: Object.keys(storage.data),
+            posts: writes().filter((w) => w.path.indexOf("/followups") !== -1).length
+          };
+        });
+      });
+    });
+  }
+
+  if (scenario === "an-accepted-followup-does-not-return-after-a-reload") {
+    const ready = readyTask("task_acc");
+    const behaviour = {
+      realAdapter: true,
+      initial: listPayload([ready]),
+      detail: ready,
+      result: () => ({ payload: { task: ready } })
+    };
+    return mount(behaviour).then(function () {
+      fire("click", openButton("task_acc"));
+      return drain();
+    }).then(function () {
+      field("taskFollowupText", "gönderildi ve bitti");
+      advance(4000);
+      return drain();
+    }).then(function () {
+      fire("click", button("taskFollowupSend"));
+      return drain();
+    }).then(function () {
+      return reload(behaviour).then(function () {
+        fire("click", openButton("task_acc"));
+        return drain().then(function () {
+          return { box: valueOf("taskFollowupText"), keys: Object.keys(storage.data) };
+        });
+      });
+    });
+  }
+
+  if (scenario === "a-second-tap-after-acceptance-sends-nothing") {
+    /* The consequence, asserted directly: with the box empty there is nothing
+       to resend, so a second tap produces no second turn. */
+    const ready = readyTask("task_acc");
+    return mount({
+      realAdapter: true,
+      initial: listPayload([ready]),
+      detail: ready,
+      result: () => ({ payload: { task: ready } })
+    }).then(function () {
+      fire("click", openButton("task_acc"));
+      return drain();
+    }).then(function () {
+      field("taskFollowupText", "tek sefer");
+      fire("click", button("taskFollowupSend"));
+      return drain();
+    }).then(function () {
+      fire("click", button("taskFollowupSend"));
+      return drain();
+    }).then(function () {
+      fire("click", button("taskFollowupSend"));
+      return drain().then(function () {
+        const posts = writes().filter((w) => w.path.indexOf("/followups") !== -1);
+        return {
+          posts: posts.length,
+          requestIds: posts.map((w) => w.body.client_request_id),
+          box: valueOf("taskFollowupText"),
+          html: html()
+        };
+      });
+    });
+  }
+
+  if (scenario === "text-typed-while-in-flight-survives-acceptance") {
+    /* The property the clear must not break: what somebody typed *after*
+       pressing Send is their next message, not a leftover of the accepted one. */
+    const ready = readyTask("task_acc");
+    let release = null;
+    return mount({
+      realAdapter: true,
+      initial: listPayload([ready]),
+      detail: ready,
+      onWrite(pathname) {
+        if (pathname.indexOf("/followups") === -1) { return null; }
+        return new Promise(function (resolve) {
+          release = () => resolve({ ok: true, status: 200, payload: { task: ready } });
+        });
+      },
+      result: () => ({ payload: { task: ready } })
+    }).then(function () {
+      fire("click", openButton("task_acc"));
+      return drain();
+    }).then(function () {
+      field("taskFollowupText", "ilk mesaj");
+      fire("click", button("taskFollowupSend"));
+      return drain();
+    }).then(function () {
+      /* Typed while the request is still open. */
+      field("taskFollowupText", "sonraki mesaj");
+      release();
+      return drain().then(function () {
+        return { box: valueOf("taskFollowupText"), keys: Object.keys(storage.data) };
+      });
+    });
+  }
+
+  if (scenario === "a-refused-followup-still-keeps-the-box") {
+    const ready = readyTask("task_acc");
+    return mount({
+      realAdapter: true,
+      initial: listPayload([ready]),
+      detail: ready,
+      onWrite(pathname) {
+        if (pathname.indexOf("/followups") === -1) { return null; }
+        return Promise.resolve({
+          ok: false,
+          status: 409,
+          payload: { error: { code: "task_idempotency_conflict", message: "No." } }
+        });
+      },
+      result: () => ({ payload: { task: ready } })
+    }).then(function () {
+      fire("click", openButton("task_acc"));
+      return drain();
+    }).then(function () {
+      field("taskFollowupText", "reddedildi ama duruyor");
+      fire("click", button("taskFollowupSend"));
+      return drain().then(function () {
+        advance(4000);
+        return drain().then(function () {
+          const posts = writes().filter((w) => w.path.indexOf("/followups") !== -1);
+          return {
+            box: valueOf("taskFollowupText"),
+            keys: Object.keys(storage.data),
+            requestIds: posts.map((w) => w.body.client_request_id)
+          };
+        });
+      });
+    });
+  }
+
+  if (scenario === "accepting-one-task-leaves-another-tasks-draft") {
+    const a = readyTask("task_a");
+    const b = readyTask("task_b");
+    let current = a;
+    const behaviour = {
+      realAdapter: true,
+      initial: listPayload([a, b]),
+      detail: () => current,
+      result: () => ({ payload: { task: current } })
+    };
+    return mount(behaviour).then(function () {
+      fire("click", openButton("task_b"));
+      return drain();
+    }).then(function () {
+      current = b;
+      field("taskFollowupText", "b için taslak");
+      advance(4000);
+      return drain();
+    }).then(function () {
+      fire("click", button("taskBack"));
+      return drain();
+    }).then(function () {
+      current = a;
+      fire("click", openButton("task_a"));
+      return drain();
+    }).then(function () {
+      field("taskFollowupText", "a gönderiliyor");
+      fire("click", button("taskFollowupSend"));
+      return drain().then(function () {
+        return {
+          keys: Object.keys(storage.data).sort(),
+          boxAfterAcceptOnA: valueOf("taskFollowupText")
+        };
+      });
+    });
+  }
+
+  if (scenario === "an-accepted-answer-leaves-the-followup-draft-alone") {
+    /* The two operations stay separate through an acceptance as well. */
+    const waiting = sdkWaiting();
+    return mount({
+      realAdapter: true,
+      initial: listPayload([waiting]),
+      detail: waiting,
+      clarifications: [clarificationPayload({ allows_free_text: true })],
+      result: () => ({ payload: { task: waiting } })
+    }).then(function () {
+      fire("click", openButton("task_sdk"));
+      return drain();
+    }).then(function () {
+      field("taskAnswerText", "cevap metni");
+      advance(12000);
+      return drain();
+    }).then(function () {
+      /* A follow-up draft filed under the same task, by hand, so the
+         acceptance below has something of the other kind to leave alone. */
+      storage.setItem("cofferdam.taskdraft.followup.task_sdk", "sonraki mesaj");
+      fire("click", button("taskAnswerSend"));
+      return drain().then(function () {
+        return { keys: Object.keys(storage.data).sort() };
       });
     });
   }

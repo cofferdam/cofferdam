@@ -140,5 +140,119 @@ class ScreenshotTests(WorkstationTestCase):
         self.assertEqual(response.json()["error"]["code"], "not_found")
 
 
+class StaticAssetsAreRevalidated(WorkstationTestCase):
+    """A changed frontend file must never be served from a phone's cache blind.
+
+    **Found the hard way.** M2I PR4 fixed a follow-up draft defect, the fix was
+    verified in a real browser, and it then failed on a real phone — which
+    produced three provider turns from one intended message. The file was
+    correct and the file was not on the phone: assets carried no
+    ``Cache-Control`` at all, and a response that says nothing about its own
+    freshness may be given a heuristic lifetime by the browser. iOS Safari does
+    exactly that.
+
+    ``no-cache`` is the fix and is not ``no-store``: the copy may be kept, it
+    just may not be used without asking. With the ``ETag`` Starlette already
+    sends, the ordinary case is a 304 with no body.
+    """
+
+    SHELL = (
+        "/index.html",
+        "/app.js",
+        "/tasks.js",
+        "/styles.css",
+        "/sw.js",
+        "/manifest.webmanifest",
+    )
+
+    def test_every_shell_asset_requires_revalidation(self) -> None:
+        for path in self.SHELL:
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.headers.get("cache-control"), "no-cache")
+
+    def test_the_directory_index_is_covered_too(self) -> None:
+        """``/`` serves index.html through the same handler, so it must match."""
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("cache-control"), "no-cache")
+
+    def test_an_asset_still_carries_a_validator(self) -> None:
+        """Revalidation is only cheap if there is something to revalidate against."""
+        response = self.client.get("/tasks.js")
+        self.assertTrue(
+            response.headers.get("etag") or response.headers.get("last-modified"),
+            "no ETag or Last-Modified, so every load would be a full download",
+        )
+
+    def test_a_conditional_request_is_answered_304_and_still_says_no_cache(self) -> None:
+        """The 304 refreshes stored freshness, so it must carry the rule as well.
+
+        A ``Not Modified`` that omitted the directive would hand back a copy the
+        browser may then use without asking again — which is the original defect
+        with an extra step.
+        """
+        first = self.client.get("/tasks.js")
+        etag = first.headers.get("etag")
+        if not etag:  # pragma: no cover - Starlette always sends one today
+            self.skipTest("no ETag to revalidate against")
+        second = self.client.get("/tasks.js", headers={"If-None-Match": etag})
+        self.assertEqual(second.status_code, 304)
+        self.assertEqual(second.headers.get("cache-control"), "no-cache")
+
+    def test_no_asset_is_given_an_indefinite_lifetime(self) -> None:
+        """The failure mode this class exists to prevent, stated as a rule.
+
+        ``max-age`` without revalidation is how an asset becomes unreachable by a
+        deploy. If one is ever introduced it has to be paired with ``no-cache``
+        or ``must-revalidate``, and this fails until it is.
+        """
+        for path in self.SHELL:
+            with self.subTest(path=path):
+                directive = (self.client.get(path).headers.get("cache-control") or "").lower()
+                if "max-age" in directive:
+                    self.assertTrue(
+                        "no-cache" in directive or "must-revalidate" in directive,
+                        directive + " lets a stale asset be used without asking",
+                    )
+
+    def test_a_changed_file_is_served_as_changed(self) -> None:
+        """End to end: edit an asset, and the next conditional request is a 200.
+
+        Written against a real file in the served directory rather than a mock,
+        because the property under test is the whole path — handler, validator
+        and header together.
+        """
+        from cofferdam.workstation.service import WEB_ROOT
+
+        target = WEB_ROOT / "sw.js"
+        original = target.read_text(encoding="utf-8")
+        self.addCleanup(target.write_text, original, encoding="utf-8")
+
+        first = self.client.get("/sw.js")
+        etag = first.headers.get("etag")
+        target.write_text(original + "\n/* changed */\n", encoding="utf-8")
+
+        again = self.client.get("/sw.js", headers={"If-None-Match": etag or ""})
+        self.assertEqual(again.status_code, 200, "a changed asset was answered 304")
+        self.assertIn("/* changed */", again.text)
+        self.assertEqual(again.headers.get("cache-control"), "no-cache")
+
+    def test_task_content_is_still_no_store_not_merely_no_cache(self) -> None:
+        """The two rules are different and must not be collapsed into one.
+
+        An asset may be stored and revalidated. A task's prompt, question or
+        result may not be written to disk at all.
+        """
+        from cofferdam.workstation.service import (
+            STATIC_ASSET_HEADERS,
+            TASK_CONTENT_HEADERS,
+        )
+
+        self.assertEqual(STATIC_ASSET_HEADERS["Cache-Control"], "no-cache")
+        self.assertEqual(TASK_CONTENT_HEADERS["Cache-Control"], "no-store")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

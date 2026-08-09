@@ -973,14 +973,41 @@ class Cancellation(TaskTestCase):
                 continue
             # The Agent SDK launcher (M2I PR2) owns one child process, for the
             # same reason the CLI adapter owns one: the SDK cannot be given a
-            # bounded environment any other way. Its replacement rule is
-            # stricter than what it gives up and lives in
-            # ``tests/test_task_mutation.py`` — it may stop only the object
-            # ``Popen`` returned, so there is no pid, no group and no name to get
-            # wrong, and ``os.kill`` stays forbidden to it below.
+            # bounded environment any other way.
+            #
+            # Until M2I PR4 it was held to a stricter-looking rule — it could
+            # stop only the object ``Popen`` returned, so there was no pid, no
+            # group and no name to get wrong. That rule turned out to be
+            # stricter about the wrong thing. ``Popen.terminate`` signals the
+            # helper alone, and the helper is not the only process: the SDK
+            # starts a CLI of its own inside the helper's process group, so a
+            # terminated helper could leave that CLI orphaned with a live
+            # subscription session. Being unable to name a group did not prevent
+            # a leak; it prevented the *cleanup* of one.
+            #
+            # So this file now signals a group, and inherits the CLI adapter's
+            # ownership rule to do it: pid, start time and group id are recorded
+            # at launch and all three re-verified immediately before every
+            # signal — see ``OwnedChild.still_ours``. What stays forbidden is
+            # everything that would make a stop *broad*: ``os.kill`` on a bare
+            # pid, and the process-name matching already banned above for every
+            # file.
+            #
+            # Matched on tokens rather than on substrings, because
+            # ``python_code_only`` puts each token on its own line — ``os.killpg``
+            # reads as ``os``, ``.``, ``killpg``. A substring check for
+            # ``"os.kill"`` can never match this text and would pass whatever the
+            # file did, which is the quietest way for a guard to be worthless.
             if path.name == "hostclient.py":
-                for still_forbidden in ("os.kill", "signal.", "SIGTERM", "SIGKILL"):
-                    self.assertNotIn(still_forbidden, source, str(path))
+                tokens = source.split("\n")
+                self.assertIn("killpg", tokens, str(path))
+                self.assertIn("still_ours", tokens, str(path))
+                # The bare `kill` attribute on a pid is what stays forbidden:
+                # `os.kill(pid, …)` reaches one process by number with none of
+                # the identity re-verification `killpg` is gated behind here.
+                self.assertNotIn(
+                    "os\n.\nkill\n(", source.replace("\n\n", "\n"), str(path)
+                )
                 continue
             for forbidden in (
                 "os.kill",

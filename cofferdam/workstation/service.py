@@ -456,6 +456,61 @@ _MEDIA_SEARCH_STATUS = {
 # room for multi-byte text without leaving room for anything else.
 MAX_TASK_BODY_BYTES = 32 * 1024
 
+#: Response headers for every route whose body carries **task content** — the
+#: prompt somebody wrote, an agent's question, a turn's result, the event stream
+#: that quotes all three.
+#:
+#: ``no-store`` rather than ``no-cache``: no-cache still permits writing the body
+#: to disk and revalidating it later, which for this content means somebody's
+#: private instruction to an agent sitting in a browser cache directory after the
+#: sign-out that was supposed to remove it. It is also the correctness half —
+#: these bodies change as turns complete and questions close, and a task screen
+#: served from a cache would offer an answer box for a question that is already
+#: superseded.
+#:
+#: Not applied to the routes that carry no task content: the adapter capability
+#: list, the health endpoint and the registries say the same thing to everyone
+#: and there is nothing private in them to keep out of a cache.
+TASK_CONTENT_HEADERS = {"Cache-Control": "no-store"}
+
+#: What every static asset says about its own freshness.
+#:
+#: ``no-cache`` does **not** mean "do not store" — that is ``no-store``, which is
+#: for the task-content routes above. It means "store it, but ask before you use
+#: it". Paired with the ``ETag`` and ``Last-Modified`` Starlette already sends,
+#: an unchanged asset costs one conditional request and a 304 with no body, and a
+#: changed one is picked up on the next load. Always.
+#:
+#: **This exists because a phone served a stale UI.** M2I PR4's follow-up draft
+#: fix was verified in a real browser and then failed on a real phone, because
+#: the asset carried no ``Cache-Control`` at all and iOS Safari is free to apply
+#: heuristic freshness to a response that does not say otherwise. The fix was in
+#: the file; the file was not on the phone. A UI change that cannot be trusted to
+#: reach a device is a UI change that cannot be validated, and "tell the user to
+#: clear their cache" is not a deployment mechanism.
+#:
+#: Chosen over versioned asset URLs deliberately. Versioning nine ``<script>``
+#: and ``<link>`` references means a build step or template rewriting, and it
+#: fails silently the first time somebody adds an asset and forgets to version
+#: it. Revalidation is one header, applies to every file in the directory
+#: including ones added later, and cannot drift.
+STATIC_ASSET_HEADERS = {"Cache-Control": "no-cache"}
+
+
+class RevalidatedStaticFiles(StaticFiles):
+    """``StaticFiles`` that requires a revalidation before a cached copy is used.
+
+    The header is applied to the 304 as well as the 200: a ``Not Modified``
+    response refreshes the stored freshness metadata, and one that omitted the
+    directive would hand the browser back a copy it may then use blind.
+    """
+
+    def file_response(self, *args: Any, **kwargs: Any) -> Response:
+        response = super().file_response(*args, **kwargs)
+        for name, value in STATIC_ASSET_HEADERS.items():
+            response.headers[name] = value
+        return response
+
 # Refusal code -> HTTP status for Task Core.
 #
 # The split that matters here is 404/409/422. 404 is "there is no such thing".
@@ -646,6 +701,15 @@ def create_app(
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+            # Close every delegated session this process owns, on the way out.
+            #
+            # Only adapters that hold a process do anything here, and each closes
+            # the children *it* launched — see `AdapterRegistry.shutdown`. There
+            # is no process scan on this path and no signal to anything Cofferdam
+            # did not start: a workstation stopping its own daemon must not
+            # disturb a Claude Desktop window or a Remote Control session that
+            # has nothing to do with it.
+            await run_in_threadpool(tasks.adapters.shutdown)
 
     app = FastAPI(
         title="Cofferdam workstation",
@@ -1979,7 +2043,7 @@ def create_app(
         )
 
     @app.get("/api/tasks/{task_id}", dependencies=[Depends(require_token)])
-    async def get_task(task_id: str) -> Dict[str, Any]:
+    async def get_task(task_id: str) -> JSONResponse:
         # `refresh_task`, not `get_task`. An adapter whose work happens inside a
         # process has to be *asked* what it saw, and opening the detail view is
         # when Cofferdam asks. For a synchronous adapter it is a no-op returning
@@ -1989,12 +2053,12 @@ def create_app(
         # The detail view is the one place the prompt is published, and only to
         # the authenticated client that already sent it.
         payload["prompt"] = row.prompt
-        return {"task": payload}
+        return JSONResponse(content={"task": payload}, headers=TASK_CONTENT_HEADERS)
 
     @app.get("/api/tasks/{task_id}/events", dependencies=[Depends(require_token)])
     async def get_task_events(
         task_id: str, after: int = 0, limit: int = DEFAULT_EVENT_PAGE
-    ) -> Dict[str, Any]:
+    ) -> JSONResponse:
         """Events after a sequence cursor. Bounded, and never an offset scan."""
         if after < 0:
             raise ApiError(
@@ -2009,12 +2073,15 @@ def create_app(
             after=after,
             limit=max(1, min(int(limit), MAX_EVENT_PAGE)),
         )
-        return {
-            "task_id": row.task_id,
-            "events": [event.to_dict() for event in events],
-            "cursor": events[-1].sequence if events else after,
-            "event_cursor": row.event_cursor,
-        }
+        return JSONResponse(
+            content={
+                "task_id": row.task_id,
+                "events": [event.to_dict() for event in events],
+                "cursor": events[-1].sequence if events else after,
+                "event_cursor": row.event_cursor,
+            },
+            headers=TASK_CONTENT_HEADERS,
+        )
 
     @app.post("/api/tasks/{task_id}/followups", dependencies=[Depends(require_token)])
     async def send_task_followup(task_id: str, request: Request) -> Dict[str, Any]:
@@ -2065,7 +2132,7 @@ def create_app(
         result = await _run_task(tasks.get_result, task_id)
         return JSONResponse(
             content={"result": result.to_dict()},
-            headers={"Cache-Control": "no-store"},
+            headers=TASK_CONTENT_HEADERS,
         )
 
     @app.post("/api/tasks/{task_id}/finish", dependencies=[Depends(require_token)])
@@ -2114,7 +2181,7 @@ def create_app(
     @app.get(
         "/api/tasks/{task_id}/clarifications", dependencies=[Depends(require_token)]
     )
-    async def list_task_clarifications(task_id: str) -> Dict[str, Any]:
+    async def list_task_clarifications(task_id: str) -> JSONResponse:
         """The questions this task is waiting on. Bounded, normalized, no payload.
 
         `refresh_task` first, for the same reason the detail view does it: a
@@ -2124,16 +2191,24 @@ def create_app(
 
         The response carries no provider session id, no tool input and no raw
         provider payload — see `PendingClarification.to_dict`.
+
+        `no-store` for the same reason the result route sets it: the body is a
+        question an agent asked about somebody's private work, and a question
+        that has since been answered or superseded must not come back out of a
+        cache and be offered again.
         """
         row = await _run_task(tasks.refresh_task, task_id)
         pending = await run_in_threadpool(tasks.pending_clarifications, row.task_id)
-        return {
-            "version": TASK_API_VERSION,
-            "task_id": row.task_id,
-            "state": row.state,
-            "waiting_reason": row.waiting_reason,
-            "clarifications": [item.to_dict() for item in pending],
-        }
+        return JSONResponse(
+            content={
+                "version": TASK_API_VERSION,
+                "task_id": row.task_id,
+                "state": row.state,
+                "waiting_reason": row.waiting_reason,
+                "clarifications": [item.to_dict() for item in pending],
+            },
+            headers=TASK_CONTENT_HEADERS,
+        )
 
     @app.post(
         "/api/tasks/{task_id}/clarifications/{question_id}/answer",
@@ -2387,6 +2462,6 @@ def create_app(
     # -- the PWA -------------------------------------------------------------
 
     if WEB_ROOT.is_dir():
-        app.mount("/", StaticFiles(directory=str(WEB_ROOT), html=True), name="web")
+        app.mount("/", RevalidatedStaticFiles(directory=str(WEB_ROOT), html=True), name="web")
 
     return app

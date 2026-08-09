@@ -39,6 +39,8 @@ as stopped because stopping it was requested.
 
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 import sys
 import threading
@@ -121,6 +123,11 @@ class HostSession(DelegatedSession):
         self._lock = threading.RLock()
         self._buffer: Deque[DelegatedEvent] = deque(maxlen=MAX_BUFFERED_EVENTS)
         self._process: Any = None
+        #: Who the child was, read once at launch. See :class:`OwnedChild`: this
+        #: is what every later signal is checked against, and recording it here
+        #: rather than at stop time is what makes "the thing we signal is the
+        #: thing we started" a fact about this object rather than an inference.
+        self._owned: Optional[OwnedChild] = None
         self._reader: Optional[threading.Thread] = None
         self._ready = threading.Event()
         self._started = threading.Event()
@@ -200,6 +207,12 @@ class HostSession(DelegatedSession):
                 + type(exc).__name__
                 + ")"
             )
+
+        # Immediately, and before anything else can happen to the child: the
+        # pid, its `/proc` start time and the group it leads, as they are right
+        # now. Every signal this session ever sends is checked against these
+        # three, and none is sent if any has changed.
+        self._owned = OwnedChild(self._process)
 
         self._reader = threading.Thread(
             target=self._read,
@@ -363,7 +376,7 @@ class HostSession(DelegatedSession):
         except OSError:  # pragma: no cover
             pass
 
-        released = _stop_process(process)
+        released = _stop_process(process, self._owned)
         thread = self._reader
         if thread is not None and thread.is_alive():
             thread.join(TERMINATE_TIMEOUT_SECONDS)
@@ -551,19 +564,159 @@ def _spawn_helper(*, project_root: Path) -> Any:
     )
 
 
-def _stop_process(process: Any) -> bool:
-    """Wait, then terminate, then kill. Bounded at every step."""
+def read_start_time(pid: int) -> Optional[int]:
+    """Field 22 of ``/proc/<pid>/stat``: the process start time, in clock ticks.
+
+    Duplicated from the Claude Code adapter rather than imported from it, and the
+    duplication is deliberate — this package must not import that one. Task Core
+    asserts the boundary, and an adapter that reached into a sibling would be
+    stranded the day that sibling is retired, which the roadmap says it will be.
+    Fifteen lines is a smaller cost than that coupling.
+
+    Parsed by splitting on the **last** ``)``, because field 2 is the executable
+    name in parentheses and may itself contain spaces and parentheses.
+    """
+    try:
+        with open("/proc/" + str(int(pid)) + "/stat", "r", encoding="utf-8") as handle:
+            raw = handle.read()
+    except (OSError, ValueError):
+        return None
+    _, _, tail = raw.rpartition(")")
+    fields = tail.split()
+    # After the closing paren, fields[0] is state (field 3), so start time
+    # (field 22) is at index 19.
+    if len(fields) <= 19:
+        return None
+    try:
+        return int(fields[19])
+    except ValueError:
+        return None
+
+
+class OwnedChild:
+    """The identity of one helper process, recorded at launch and re-checked.
+
+    The same four-fact rule the Claude Code adapter has enforced since M2G, and
+    it is here for the same reason: **a pid is a small integer the kernel
+    reuses.** Between recording one and signalling it, the helper can exit and
+    somebody's editor can be given the same number. On a personal workstation
+    that editor is the thing this whole codebase exists not to disturb.
+
+    So a signal is sent only when the pid, the start time read from
+    ``/proc/<pid>/stat``, and the process group all still agree with what was
+    recorded at launch. The start time is the clause that does the work: the
+    kernel assigns it at exec and a recycled pid cannot reproduce it.
+
+    The **group** is what is signalled rather than the pid, because
+    :func:`_spawn_helper` passes ``start_new_session=True`` and the CLI the SDK
+    starts runs inside that group. Signalling the helper alone would stop the
+    helper and leave its CLI grandchild running — an orphan holding a
+    subscription session, which is precisely the leak this milestone names.
+
+    Nothing here enumerates processes, reads a process name, or names a group
+    Cofferdam did not create.
+
+    **Recorded at launch, in :meth:`HostSession.start`, immediately after
+    ``Popen`` returns.** Building it later — at the moment of stopping — would
+    also be sound, because a pid cannot be recycled until its parent reaps it and
+    this process is the parent; but "sound because of something happening
+    elsewhere" is a worse property than "recorded when it was true", and the
+    first reading of the code should not have to reconstruct that argument.
+    """
+
+    def __init__(self, process: Any) -> None:
+        self.process = process
+        self.pid: Optional[int] = None
+        self.start_time: Optional[int] = None
+        self.pgid: Optional[int] = None
+
+        pid = getattr(process, "pid", None)
+        if not isinstance(pid, int) or pid <= 0:
+            # A test double without a pid. It is stopped through its own
+            # `terminate`/`kill`, and no signal is sent to anything.
+            return
+        self.pid = pid
+        self.start_time = read_start_time(pid)
+        try:
+            self.pgid = os.getpgid(pid)
+        except OSError:  # pragma: no cover - the child exited immediately
+            self.pgid = None
+
+    def still_ours(self) -> bool:
+        """Whether the recorded pid still refers to the process that was launched.
+
+        Every clause matters, and the group clause is the one that makes a signal
+        *targetable*: it confirms the group about to be signalled is the group
+        this child leads, rather than whatever group that pid now belongs to.
+        """
+        if self.pid is None or self.start_time is None or self.pgid is None:
+            return False
+        if self.process.poll() is not None:
+            return False
+        if read_start_time(self.pid) != self.start_time:
+            return False
+        try:
+            return os.getpgid(self.pid) == self.pgid
+        except OSError:
+            return False
+
+    def signal_group(self, signal_number: int) -> bool:
+        """Signal the owned group, after re-verifying it is still owned.
+
+        ``False`` means nothing was signalled — either the identity no longer
+        matches, or the process is already gone. Both are safe answers and
+        neither is a reason to broaden the search.
+        """
+        if not self.still_ours() or self.pgid is None:
+            return False
+        try:
+            os.killpg(self.pgid, signal_number)
+        except OSError:
+            return False
+        return True
+
+
+def _stop_process(process: Any, owned: Optional[OwnedChild] = None) -> bool:
+    """Wait, then signal the owned group, terminate-then-kill. Bounded throughout.
+
+    ``owned`` is the identity recorded when the process was launched. It is
+    optional only so that a caller holding nothing but a ``Popen`` — which is
+    what the process-level tests hold — still gets the group behaviour rather
+    than silently falling back; the identity it builds here is the same one, read
+    a moment later.
+
+    The graceful step comes first and waits longest, for the reason the Claude
+    Code adapter's escalation is shaped the same way: an agent killed mid-write
+    is one that did not finish writing the file it was editing.
+
+    Every branch ends in a ``wait``, so the child is reaped rather than left as a
+    zombie holding a slot in the process table — a helper that is gone and never
+    waited for is still a process as far as the kernel is concerned.
+
+    A double with no pid falls through to its own ``terminate``/``kill``, which
+    is what the tests exercise and what a non-POSIX host would get.
+    """
     try:
         process.wait(timeout=CLOSE_TIMEOUT_SECONDS)
         return True
     except Exception:
         pass
-    for stop in ("terminate", "kill"):
-        action = getattr(process, stop, None)
-        if not callable(action):  # pragma: no cover - a double without one
-            continue
+
+    if owned is None:
+        owned = OwnedChild(process)
+    for signal_number, fallback in (
+        (signal.SIGTERM, "terminate"),
+        (signal.SIGKILL, "kill"),
+    ):
+        if not owned.signal_group(signal_number):
+            action = getattr(process, fallback, None)
+            if not callable(action):  # pragma: no cover - a double without one
+                continue
+            try:
+                action()
+            except Exception:
+                continue
         try:
-            action()
             process.wait(timeout=TERMINATE_TIMEOUT_SECONDS)
             return True
         except Exception:
@@ -573,6 +726,8 @@ def _stop_process(process: Any) -> bool:
 
 __all__ = [
     "CLOSE_TIMEOUT_SECONDS",
+    "OwnedChild",
+    "read_start_time",
     "HOST_MODULE",
     "MAX_BUFFERED_EVENTS",
     "FOLLOWUP_ACK_TIMEOUT_SECONDS",

@@ -223,6 +223,13 @@ class ClaudeAgentSdkAdapter(TaskAdapter):
         described["limitations"] = list(LIMITATIONS)
         described["max_concurrent_tasks"] = self._max_concurrent
         described["tools"] = list(option_policy.PROFILE_TOOLS)
+        # The whole shipped profile, by name and in full. Published rather than
+        # left in a docstring for the same reason ``limitations`` is: somebody
+        # deciding whether to enable this adapter should be able to read exactly
+        # what it permits from the running build, not from a document that may
+        # describe a different version. It carries no path, no environment value
+        # and no session identifier — see ``options.describe_profile``.
+        described["profile"] = option_policy.describe_profile()
         described["provider"] = PROVIDER
         # The installed version, not the verified one: a capability report should
         # say what is actually there. ``None`` when the SDK is absent, which is
@@ -341,6 +348,27 @@ class ClaudeAgentSdkAdapter(TaskAdapter):
                 # The session ended without ever producing a result. Exit is not
                 # a result: something ran and reported nothing, and calling that
                 # a completed task would be inventing an outcome.
+                #
+                # Before the task is failed, the session is given its one chance
+                # to say *why* it is gone. A helper that died — its process
+                # exited, its pipe hit EOF, its output stopped being readable —
+                # knows that about itself, and `note_lost` is how it records it.
+                # Without this call the loss was real and the history said only
+                # "ended without producing a result", which is true of a crashed
+                # helper and equally true of one that simply had nothing to say.
+                # Those are different facts and an operator reading a task
+                # afterwards needs the difference.
+                #
+                # Not called for a cancelled session: `cancel` records that path
+                # through `note_cancelled`, and a task somebody stopped must
+                # never be reported as a transport failure.
+                lost = getattr(session, "note_lost", None)
+                if callable(lost) and not getattr(session, "cancel_requested", False):
+                    lost()
+                    events.extend(self._collect(context.task_id, session)[0])
+                    settled = log.terminal_event
+                    if settled is not None:
+                        return self._settle(context.task_id, settled, events)
                 self._retire(context.task_id)
                 return AdapterOutcome(
                     events=tuple(events),

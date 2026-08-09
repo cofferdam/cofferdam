@@ -3,8 +3,10 @@
 Accurate as of **2026-08-09** (**M2H is complete and merged**, closing the M1 post-reboot gate;
 M2F Agent Task Core and M2G the Claude Code adapter merged; the isolated Custom GPT Actions mobile
 probe passed; client architecture and the active roadmap recorded as
-[`DECISIONS.md`](DECISIONS.md) D-2026-08-08-1 … -6). **M2I PR1 — the Claude Agent SDK foundation —
-is on a branch.** Update this file when a category changes, not on every commit.
+[`DECISIONS.md`](DECISIONS.md) D-2026-08-08-1 … -6). **M2I PR1–PR3 are merged; M2I PR4 — the
+phone surface, helper cleanup, startup reconciliation and asset revalidation — is on a branch and
+real-phone validated, which completes M2I's own goal.** Update this file when a category changes,
+not on every commit.
 
 ## Merged (on `main`)
 
@@ -84,8 +86,9 @@ says "on branch, not merged" it is describing the moment it was written, correct
 each milestone *did not* do, and which validations are still outstanding, is still current and is
 why these records are kept rather than collapsed into one line.
 
-**M2I PR1 is in progress on a branch** — see the entry under *In progress* below. The queued work
-after it is the rest of M2I → M2I.5 → M2J; see [`ROADMAP.md`](ROADMAP.md).
+**M2I PR4 is on a branch, awaiting review** — see the entry under *In progress* below. It is the
+last planned PR of M2I and its real-phone validation has passed, so M2I closes on merge. The queued
+work after that is M2I.5 → M2J; see [`ROADMAP.md`](ROADMAP.md).
 
 - **M2G — Claude Code adapter.** Merged as PR #21. The first
   adapter that runs a real program, built on the merged M2F foundation. A phone picks an approved
@@ -627,6 +630,108 @@ bind logic. Neither does M2B3A, M2B3A.1, M2C, M2D, M2E, M2F, or M2G. **M2H does*
 the gate closes there.
 
 ## In progress (on a branch, not merged)
+
+### M2I PR4 — the phone surface, helper cleanup and startup reconciliation
+
+On `feat/m2i-production-readiness`. **Not deployed, off by default, and no live SDK call was made
+from this repository.** PR1 merged as #28, PR2 as #29, PR3 as #30.
+
+**The headline feature of M2I could not be used from a phone, and that was the finding.** PR2
+shipped the clarification routes and nothing called them: the PWA rendered a generic "Your answer"
+box for any `waiting_for_user` and posted it to `/followups`, a route the server refuses outright
+while a question is open. The two routes had been apart on the wire since PR2 and together on the
+screen ever since. The panel now reads `/clarifications`, renders the normalized question with its
+options, and answers through the dedicated route with a body of exactly `answer` and `option_ids`.
+While a question is open there is no follow-up box. **There is still no approval control and no
+route for one**, and the panel says on screen that answering is information, not permission.
+
+**Drafts survive the page, not just the poll.** The old rule was "the panel stores nothing", which
+was right while it had nothing worth keeping and wrong once the thing not kept was somebody's
+half-written instruction to an agent — iOS discards a backgrounded tab whenever it likes. Drafts
+are now keyed `cofferdam.taskdraft.<operation>.<task_id>`, so a clarification answer can never
+reappear as a follow-up and one task's words never land in another's box. One writer, one storage
+mechanism, every access guarded the way `app.js` learned from a real device. Drafts go on a
+terminal state and **all of them go on sign-out**. No token, no provider session id, no provider
+payload is stored, and there is no second `setItem` through which one could arrive.
+
+**A retry is recognisable as one.** One module-level slot held the request key for every write and
+was cleared on *any* response, including a refusal — which is exactly when somebody presses the
+button again, so the retry arrived at the server as a second, unrelated message. Keys are now
+scoped by operation and task, retained across a refusal, and regenerated only when the words
+change. Unlocking the phone triggers **one** foreground read rather than a new timer, and polling
+stays stopped while hidden.
+
+**Two things Cofferdam owned could outlive their owner.** `ClaudeAgentSdkAdapter.shutdown` was
+implemented in PR1 and never called, so a daemon stopped with a live task left its helper to work
+that out for itself; the registry now asks every adapter from the daemon's lifespan. And
+termination reached only the helper, while the SDK's own CLI runs inside the helper's process
+group — a terminated helper could orphan that CLI with a live subscription session. The stop now
+signals the **group**, under the Claude Code adapter's ownership rule: pid, `/proc` start time and
+group id recorded at launch and **all three** re-verified before every signal. Nothing enumerates
+processes or matches a name. `HostSession.note_lost` also had no caller, so a helper that died and
+one that merely had nothing to say produced the same history line; they no longer do.
+
+**The structural guard got narrower about the right thing.** `hostclient.py` used to be barred from
+naming a pid or a group at all. That sounds stricter and prevented cleanup rather than leakage.
+What stays forbidden is everything that makes a stop *broad* — `os.kill` on a bare pid, `psutil`,
+`pkill`, `killall`, `pidof`, any process-name match — and a test asserts the identity check appears
+before the signal.
+
+**Restart reconciliation now covers the states M2I added.** `ready_for_followup` with no live
+helper and a pending question are the two where being wrong is least visible, because both read as
+"waiting for you" with nothing on the other end. Both become `interrupted`; the question closes as
+superseded in the same write; earlier completed turns stay retrievable; terminal tasks are not
+touched; and running it four times settles one task once.
+
+**The profile has a name.** `cofferdam-project-edit-v1`, published as data and carried in the
+capability description, so it can be read off a running build rather than a document. Values are
+unchanged. The filesystem claim is deliberately the weaker true one: `cwd` with empty `add_dirs` is
+a configuration boundary the CLI is asked to respect, **not a kernel sandbox**, and this build does
+not claim otherwise. What it does claim is that there is no shell, so there is no general execution
+primitive to escape with.
+
+**Every task-content route is `no-store`** — detail, events, questions, result — and the adapter
+list deliberately is not, so the header means something.
+
+**Tests.** Focused additions across the SDK suite, the PWA suite, the browser harness and the
+clarification API. Process ownership is proved against **real short-lived processes**, because it
+is the one property a double cannot prove; everything else runs against doubles. No test calls
+Anthropic, uses the network, consumes model usage, inspects a transcript, modifies the live
+registry, starts Remote Control or touches production.
+
+**Validated on a real phone, over three supervised runs, and the first two failed.** Each ran on a
+temporary tailnet-only daemon with its own `COFFERDAM_HOME`, one-project registry and token, from a
+**disposable worktree** so the PR branch stayed byte-clean, with the session narrowed below the
+shipped profile and restored by deleting the worktree.
+
+Run 1 exercised the whole workflow and passed sixteen of seventeen checks — structured question
+answered through the clarification route, both drafts surviving a locked screen, neither
+auto-submitting, immediate foreground refresh, one provider session, nothing leaked to the phone.
+It failed one: **an accepted follow-up did not clear its draft**, and that was not cosmetic. The
+draft is deliberately not in the markup, so clearing the store left the live textarea holding the
+accepted text and the next render's `captureDraft` wrote it back; with the request id released
+alongside, the next tap resent the same words under a new key. One intended message produced **three
+provider turns**.
+
+Run 2 rechecked the fix and produced three turns again — from a daemon serving the corrected file.
+The cause was isolated with **no provider call**: the real `tasks.js` was run in a real browser
+against a stubbed API at both commits. Pre-fix the box kept its text and a second tap posted twice;
+fixed, it emptied and posted once. The DOM fix was sound; **the phone was running the old file.**
+Assets carried `ETag` and `Last-Modified` but **no `Cache-Control` at all**, and a response silent
+about its freshness may be given a heuristic lifetime — iOS Safari does exactly that. Every static
+asset now says `Cache-Control: no-cache`: keep it, but ask before using it.
+
+Run 3, on `935d455` with a visible build marker, **passed**: one task, two turns (`Ready.` then
+`Atlas.`), one accepted follow-up under one request id, one provider session, no tool or
+clarification event, the follow-up field empty after acceptance and still empty after a reload, and
+an empty Send producing only the local refusal.
+
+The middle run is the one worth remembering: a fix that is correct in the repository, correct under
+test and correct in a browser is still not a fix a device has received.
+
+**No production change.** No unit, drop-in, installer or registry file was edited; the SDK is not
+installed in the production slot and the adapter is not enabled there. The **Claude Code adapter
+remains the production transport and the fallback**, unchanged.
 
 ### M2I PR3 — same-session follow-up and the `get_result` boundary
 

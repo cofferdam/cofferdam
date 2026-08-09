@@ -27,13 +27,16 @@ spike recorded in a pull request.
 from __future__ import annotations
 
 import ast
+import json
 import re
+import time
 import unittest
 from pathlib import Path
 
 from ._agent_sdk_doubles import (
     AssistantMessage,
     FakeClaudeAgentOptions,
+    FakeHelperProcess,
     FakeSdkModule,
     FakeSession,
     ResultMessage,
@@ -63,6 +66,8 @@ from cofferdam.workstation.tasks.adapters.claude_agent_sdk import (
     ClaudeAgentSdkAdapter,
 )
 from cofferdam.workstation.tasks.adapters.claude_agent_sdk import (
+    hostclient,
+    hostenv,
     normalize,
     options as option_policy,
     sdk as sdk_boundary,
@@ -1872,6 +1877,951 @@ class TaskCoreIntegrationTests(TaskTestCase):
         capabilities = ClaudeCodeAdapter(executable=None).capabilities()
         self.assertTrue(capabilities.followup)
         self.assertTrue(capabilities.authentication_waits)
+
+
+# -- 6. what a restart finds (M2I PR4) ---------------------------------------
+
+
+class StartupReconciliation(TaskTestCase):
+    """Every unfinished state a restart can land on, and what it becomes.
+
+    ``recover_after_restart`` shipped in Task Core and was substantively right.
+    What it did not have was coverage of the two states M2I *added* —
+    ``ready_for_followup`` and a pending question — and those are the two where
+    getting it wrong is least visible: both look like "the task is waiting for
+    you", and after a restart there is nothing on the other end of either.
+
+    Nothing here restarts a service, reads the live daemon or starts a process.
+    ``restart()`` builds a second :class:`TaskService` over the same database
+    file, which is what a daemon coming back up actually is — and it is why the
+    session is genuinely gone rather than merely marked absent: the new service
+    has a new adapter instance whose session table is empty.
+    """
+
+    enable_validation_adapter = False
+    project_adapters = (ADAPTER_ID,)
+
+    def setUp(self) -> None:
+        self.sessions = []
+        super().setUp()
+        self.install_adapter(self._adapter())
+
+    def _adapter(self, *, question: bool = False) -> ClaudeAgentSdkAdapter:
+        """A session that ends its first turn and stays open, or asks first."""
+
+        def factory(*, task_id, project_root, cli_path):
+            batches = [
+                [
+                    event(KIND_SESSION_STARTED, 1, text="Claude session ready."),
+                    event(
+                        KIND_CLARIFICATION_REQUESTED,
+                        2,
+                        text="Which branch?",
+                        provider_event_id="q-1",
+                        clarification=clarification_request(),
+                    ),
+                ]
+            ] if question else [
+                [event(KIND_SESSION_STARTED, 1, text="Claude session ready.")],
+                [event(KIND_SUCCEEDED, 2, text="first", result="ilk turun sonucu")],
+            ]
+            session = FakeSession(task_id=task_id, batches=batches)
+            if question:
+                session.pending_token = "q-1"
+            self.sessions.append(session)
+            return session
+
+        return ClaudeAgentSdkAdapter(
+            session_factory=factory, availability=lambda: True
+        )
+
+    def _ready_for_followup(self):
+        """A task whose first turn produced a result on a session still open."""
+        row = self.create(adapter_id=ADAPTER_ID)
+        self.service.refresh_task(row.task_id)
+        self.sessions[-1].complete_turn()
+        settled = self.service.refresh_task(row.task_id)
+        self.assertEqual(settled.state, STATE_READY_FOR_FOLLOWUP)
+        return row
+
+    # -- ready_for_followup --------------------------------------------------
+
+    def test_ready_for_followup_without_a_helper_becomes_interrupted(self) -> None:
+        """The state that most needed this, because it is the most inviting.
+
+        ``ready_for_followup`` renders a box somebody types into. The process
+        that would receive what they typed died with the daemon, and there is no
+        reattach: leaving the state alone would offer a conversation that cannot
+        be continued.
+        """
+        row = self._ready_for_followup()
+        service = self.restart()
+        service._adapters._adapters[ADAPTER_ID] = self._adapter()
+        settled = service.recover_after_restart()
+
+        self.assertEqual([task.task_id for task in settled], [row.task_id])
+        self.assertEqual(service.store.get(row.task_id).state, "interrupted")
+
+    def test_a_follow_up_after_the_restart_is_refused_rather_than_delivered(
+        self,
+    ) -> None:
+        """The surface is fully wired and the answer is still no.
+
+        The adapter is re-installed first, so the refusal is about the *task*
+        rather than about a missing adapter — the distinction that makes this
+        test worth having.
+        """
+        from cofferdam.workstation.tasks.errors import (
+            FollowupNotWaiting,
+            TaskAlreadyFinished,
+        )
+
+        row = self._ready_for_followup()
+        service = self.restart()
+        replacement = self._adapter()
+        service._adapters._adapters[ADAPTER_ID] = replacement
+        service.recover_after_restart()
+
+        with self.assertRaises((FollowupNotWaiting, TaskAlreadyFinished)):
+            service.send_followup(row.task_id, "devam et")
+        self.assertEqual(replacement.active_task_ids(), ())
+
+    def test_the_completed_turns_result_is_still_retrievable_afterwards(self) -> None:
+        """Interrupting a task must not delete what it already produced.
+
+        The turn *completed*. A restart ended the conversation, not the answer,
+        and ``get_result`` says both: the text, and that the task is terminal so
+        no follow-up is on offer.
+        """
+        row = self._ready_for_followup()
+        service = self.restart()
+        service._adapters._adapters[ADAPTER_ID] = self._adapter()
+        service.recover_after_restart()
+
+        result = service.get_result(row.task_id)
+        self.assertEqual(result.result, "ilk turun sonucu")
+        self.assertEqual(result.turn_count, 1)
+        self.assertFalse(result.follow_up_available)
+
+    # -- a question nobody can answer ----------------------------------------
+
+    def test_a_pending_question_becomes_interrupted_and_superseded(self) -> None:
+        from cofferdam.workstation.tasks import clarifications as clar
+
+        self.install_adapter(self._adapter(question=True))
+        row = self.create(adapter_id=ADAPTER_ID)
+        waiting = self.service.refresh_task(row.task_id)
+        self.assertEqual(waiting.state, "waiting_for_user")
+        pending = self.service.pending_clarifications(row.task_id)
+        self.assertEqual(len(pending), 1)
+
+        service = self.restart()
+        service._adapters._adapters[ADAPTER_ID] = self._adapter(question=True)
+        service.recover_after_restart()
+
+        self.assertEqual(service.store.get(row.task_id).state, "interrupted")
+        stored = service.store.find_clarification(
+            row.task_id, pending[0].question_id
+        )
+        self.assertEqual(stored.status, clar.STATUS_SUPERSEDED)
+        self.assertEqual(service.pending_clarifications(row.task_id), [])
+
+    def test_the_question_cannot_be_answered_after_the_restart(self) -> None:
+        from cofferdam.workstation.tasks import clarifications as clar
+        from cofferdam.workstation.tasks import errors as task_errors
+
+        self.install_adapter(self._adapter(question=True))
+        row = self.create(adapter_id=ADAPTER_ID)
+        self.service.refresh_task(row.task_id)
+        pending = self.service.pending_clarifications(row.task_id)[0]
+
+        service = self.restart()
+        replacement = self._adapter(question=True)
+        service._adapters._adapters[ADAPTER_ID] = replacement
+        service.recover_after_restart()
+
+        with self.assertRaises(
+            (task_errors.ClarificationClosed, task_errors.TaskAlreadyFinished)
+        ):
+            service.answer_clarification(
+                row.task_id,
+                pending.question_id,
+                {"option_ids": ["opt1"]},
+                source=clar.SOURCE_INTERNAL_TEST,
+            )
+
+    # -- what must not move --------------------------------------------------
+
+    def test_a_terminal_task_is_not_touched_by_a_restart(self) -> None:
+        """Completed is completed. A restart is not an event in its history."""
+        row = self.create(adapter_id=ADAPTER_ID)
+        self.service.refresh_task(row.task_id)
+        done = self.service.refresh_task(row.task_id)
+        self.assertEqual(done.state, STATE_COMPLETED)
+        before = self.store.get(row.task_id)
+        history_before = len(self.store.events(row.task_id, limit=500))
+
+        service = self.restart()
+        service._adapters._adapters[ADAPTER_ID] = self._adapter()
+        self.assertEqual(service.recover_after_restart(), [])
+
+        after = service.store.get(row.task_id)
+        self.assertEqual(after.state, before.state)
+        self.assertEqual(after.final_result, before.final_result)
+        self.assertEqual(after.completed_at, before.completed_at)
+        self.assertEqual(
+            len(service.store.events(row.task_id, limit=500)), history_before
+        )
+
+    def test_reconciliation_is_idempotent(self) -> None:
+        """Run twice — by a crash loop, or by a supervisor restarting fast.
+
+        The second pass must settle nothing and write nothing, because an
+        already-interrupted task is terminal and never enters the path.
+        """
+        row = self._ready_for_followup()
+        service = self.restart()
+        service._adapters._adapters[ADAPTER_ID] = self._adapter()
+
+        first = service.recover_after_restart()
+        self.assertEqual([task.task_id for task in first], [row.task_id])
+        snapshot = service.store.get(row.task_id)
+        events_after_first = len(service.store.events(row.task_id, limit=500))
+
+        for _ in range(3):
+            self.assertEqual(service.recover_after_restart(), [])
+        again = service.store.get(row.task_id)
+        self.assertEqual(again.state, snapshot.state)
+        self.assertEqual(again.completed_at, snapshot.completed_at)
+        self.assertEqual(
+            len(service.store.events(row.task_id, limit=500)), events_after_first
+        )
+
+    def test_the_adapter_never_claims_it_can_reattach(self) -> None:
+        """Which is what routes every state above to ``interrupted``.
+
+        A helper process is gone when the daemon that launched it is gone, and
+        there is no provider-side resume this build has evidence for. Claiming
+        the capability would send these tasks to ``recovery_required`` — a state
+        that promises somebody a way back.
+        """
+        adapter = self.service.adapters.get(ADAPTER_ID)
+        self.assertFalse(adapter.capabilities().recover_after_restart)
+
+    def test_the_claude_code_adapter_recovers_exactly_as_it_did_before(self) -> None:
+        """The production adapter, unchanged by any of this.
+
+        Same capability answer, same resulting state, and it is asserted here
+        rather than only in its own file because M2I PR4 touched the registry
+        and the shutdown path both adapters now share.
+        """
+        from cofferdam.workstation.tasks.adapters.claude_code import ClaudeCodeAdapter
+
+        self.assertFalse(
+            ClaudeCodeAdapter(executable=None).capabilities().recover_after_restart
+        )
+        row = self.create(adapter_id=ADAPTER_ID)
+        service = self.restart()
+        service._adapters._adapters[ADAPTER_ID] = self._adapter()
+        service.recover_after_restart()
+        self.assertEqual(service.store.get(row.task_id).state, "interrupted")
+
+    def test_nothing_in_this_file_started_a_process(self) -> None:
+        """The control for the whole section.
+
+        Every session above is a double. If one of these tests ever launches a
+        helper it will be because the factory stopped being used, and that is
+        worth failing on rather than discovering from a stray process.
+        """
+        self._ready_for_followup()
+        self.assertTrue(self.sessions)
+        for session in self.sessions:
+            self.assertIsInstance(session, FakeSession)
+
+
+# -- 7. helper ownership and cleanup (M2I PR4) -------------------------------
+
+
+class OwnedChildTests(unittest.TestCase):
+    """The identity rule, against real processes.
+
+    These start short-lived Python interpreters. Nothing here calls a model,
+    reaches a network, reads a transcript or touches production — the processes
+    exist because process ownership is the one property a double cannot prove.
+    """
+
+    def setUp(self) -> None:
+        import subprocess
+        import sys
+
+        self.subprocess = subprocess
+        self.children = []
+        # Restored from what the module actually holds, not from a literal: a
+        # test that put back a number it had memorised would silently reconfigure
+        # every later test the day the shipped timeout changes.
+        original = hostclient.CLOSE_TIMEOUT_SECONDS
+        self.addCleanup(setattr, hostclient, "CLOSE_TIMEOUT_SECONDS", original)
+
+        def spawn(sleep_for="30"):
+            child = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(" + sleep_for + ")"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            self.children.append(child)
+            return child
+
+        self.spawn = spawn
+
+    def tearDown(self) -> None:
+        for child in self.children:
+            try:
+                child.kill()
+                child.wait(timeout=5)
+            except Exception:  # pragma: no cover - already gone
+                pass
+
+    def test_a_freshly_spawned_child_is_recognised_as_owned(self) -> None:
+        child = self.spawn()
+        owned = hostclient.OwnedChild(child)
+        self.assertEqual(owned.pid, child.pid)
+        self.assertIsNotNone(owned.start_time)
+        self.assertEqual(owned.pgid, child.pid, "start_new_session did not lead a group")
+        self.assertTrue(owned.still_ours())
+
+    def test_an_exited_child_is_not_owned_any_more(self) -> None:
+        """The clause that makes a recycled pid unreachable."""
+        child = self.spawn(sleep_for="0")
+        owned = hostclient.OwnedChild(child)
+        child.wait(timeout=10)
+        self.assertFalse(owned.still_ours())
+        self.assertFalse(owned.signal_group(15))
+
+    def test_stopping_signals_only_the_group_it_created(self) -> None:
+        """Assert on the call, not only on the survivors."""
+        import os
+        import signal
+
+        child = self.spawn()
+        seen = []
+        real_killpg = os.killpg
+
+        def record(pgid, number):
+            seen.append((pgid, number))
+            return real_killpg(pgid, number)
+
+        os.killpg = record
+        self.addCleanup(setattr, os, "killpg", real_killpg)
+        hostclient.CLOSE_TIMEOUT_SECONDS = 0.2
+        self.assertTrue(hostclient._stop_process(child))
+
+        self.assertTrue(seen, "nothing was signalled")
+        for pgid, number in seen:
+            self.assertEqual(pgid, child.pid)
+            self.assertIn(number, (signal.SIGTERM, signal.SIGKILL))
+
+    def test_an_unrelated_process_is_never_signalled(self) -> None:
+        """A bystander in its own group — somebody's own Claude, or an editor."""
+        bystander = self.spawn()
+        owned = self.spawn()
+        hostclient.CLOSE_TIMEOUT_SECONDS = 0.2
+        hostclient._stop_process(owned)
+        self.assertIsNone(bystander.poll(), "an unrelated process was signalled")
+
+    def test_no_zombie_is_left_behind(self) -> None:
+        """A process that is gone and never waited for is still a process."""
+        child = self.spawn()
+        hostclient.CLOSE_TIMEOUT_SECONDS = 0.2
+        hostclient._stop_process(child)
+        self.assertIsNotNone(child.returncode, "the child was signalled but not reaped")
+
+    def test_the_start_time_reader_declines_a_pid_that_is_not_there(self) -> None:
+        self.assertIsNone(hostclient.read_start_time(-1))
+
+    def test_the_identity_is_recorded_at_launch_not_at_stop(self) -> None:
+        """Where the identity is read from is the whole claim.
+
+        Reading it at stop time would also be sound — a pid cannot be recycled
+        until its parent reaps it, and this process is the parent — but that is
+        an argument about something happening elsewhere, and a reader should not
+        have to reconstruct it. So the session records the child the instant
+        ``Popen`` returns, and this asserts that the object it later signals
+        against is that one rather than a fresh reading.
+        """
+        child = self.spawn()
+        session = hostclient.HostSession(
+            task_id="task-owned",
+            project_root=REPO_ROOT,
+            launcher=lambda **_: child,
+        )
+        # `start` waits for the helper's acknowledgements, which a bare `sleep`
+        # will never send. The launch step is what is under test, so it is
+        # driven directly and the reader thread is never started.
+        session._process = session._launcher(project_root=REPO_ROOT)
+        session._owned = hostclient.OwnedChild(session._process)
+
+        owned = session._owned
+        self.assertEqual(owned.pid, child.pid)
+        self.assertEqual(owned.pgid, child.pid)
+        self.assertIsNotNone(owned.start_time)
+        self.assertTrue(owned.still_ours())
+
+        # And the stop path uses that recorded identity rather than making a
+        # new one: passing it explicitly is what `close` does.
+        hostclient.CLOSE_TIMEOUT_SECONDS = 0.2
+        self.assertTrue(hostclient._stop_process(child, owned))
+        self.assertIsNotNone(child.returncode)
+        self.assertFalse(owned.still_ours(), "the recorded child is gone, and says so")
+
+
+class HelperLossTests(unittest.TestCase):
+    """A helper that goes away is reported as having gone away.
+
+    ``note_lost`` existed from M2I PR2 and had **no caller**: a helper whose
+    process died produced "ended without producing a result", which is equally
+    true of a helper that simply had nothing to say. Those are different facts
+    and the difference is what an operator reads a task history for.
+    """
+
+    def _adapter(self, helper):
+        def factory(*, task_id, project_root, cli_path):
+            return hostclient.HostSession(
+                task_id=task_id,
+                project_root=project_root,
+                launcher=lambda **_: helper,
+            )
+
+        return ClaudeAgentSdkAdapter(session_factory=factory, availability=lambda: True)
+
+    def _context(self, task_id="task-loss"):
+        """The module's own builder, so a change to ``TaskContext`` lands once.
+
+        The project root is this repository's own directory and is never read:
+        the launcher is a lambda returning a double, so nothing here starts a
+        process, resolves a path on disk or reaches the registry.
+        """
+        return context(REPO_ROOT, task_id=task_id, prompt="do the thing")
+
+    def _await(self, predicate, timeout: float = 5.0) -> None:
+        """The helper speaks on a queue a real thread drains, so this polls.
+
+        A fixed sleep here is either a flake on a loaded machine or a delay on
+        every other run, and the failure mode of polling is a named timeout.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.005)
+        self.fail("the session never reached the expected state")
+
+    def test_an_unexpected_exit_is_reported_as_a_transport_failure(self) -> None:
+        helper = FakeHelperProcess()
+        adapter = self._adapter(helper)
+        context = self._context()
+        adapter.start(context)
+        helper.exit(1)
+        self._await(lambda: adapter._sessions[context.task_id].finished)
+
+        outcome = adapter.inspect(context)
+        self.assertEqual(outcome.requested_state, "failed")
+        self.assertEqual(outcome.failure_code, "transport_error")
+        self.assertIn("ended unexpectedly", (outcome.failure_message or ""))
+
+    def test_a_cancelled_session_is_never_reported_as_a_transport_failure(self) -> None:
+        """A task somebody stopped did not break."""
+        helper = FakeHelperProcess()
+        adapter = self._adapter(helper)
+        context = self._context()
+        adapter.start(context)
+        outcome = adapter.cancel(context)
+        self.assertEqual(outcome.requested_state, "cancelled")
+        self.assertIsNone(outcome.failure_code)
+
+    def test_repeated_cancellation_stays_truthful(self) -> None:
+        helper = FakeHelperProcess()
+        adapter = self._adapter(helper)
+        context = self._context()
+        adapter.start(context)
+        adapter.cancel(context)
+        with self.assertRaises(AdapterRefusal):
+            # The session was retired by the first cancel. A second one has
+            # nothing to reach, and says so rather than reporting success.
+            adapter.cancel(context)
+
+    def test_a_late_event_cannot_resurrect_a_finished_task(self) -> None:
+        """A success that arrives after the stop changes nothing.
+
+        A short settle window rather than a poll, because the assertion is a
+        negative one: there is no state to wait for, only a window in which the
+        wrong thing could have happened. It is generous enough to catch the
+        failure — the reader thread would have absorbed the line in microseconds
+        — and the assertion below does not depend on how long it was.
+        """
+        helper = FakeHelperProcess()
+        adapter = self._adapter(helper)
+        context = self._context()
+        adapter.start(context)
+        cancelled = adapter.cancel(context)
+        self.assertEqual(cancelled.requested_state, "cancelled")
+
+        helper.emit_event(
+            event(KIND_SUCCEEDED, 500, text="done anyway", result="done anyway")
+        )
+        time.sleep(0.1)
+        # The session is gone from the adapter's table, so there is nothing left
+        # for a late event to be recorded against — inspect reports nothing and
+        # the durable result is still the cancellation.
+        self.assertEqual(adapter.inspect(context).requested_state, None)
+        self.assertEqual(adapter.active_task_ids(), ())
+        remembered = adapter.result_for(context.task_id)
+        self.assertNotEqual(
+            getattr(remembered, "result", None),
+            "done anyway",
+            "a late success overwrote a cancelled task's outcome",
+        )
+
+    def test_shutdown_closes_every_owned_helper_and_no_other(self) -> None:
+        first, second = FakeHelperProcess(), FakeHelperProcess(session_id="sess-2")
+        helpers = {"task-a": first, "task-b": second}
+
+        def factory(*, task_id, project_root, cli_path):
+            return hostclient.HostSession(
+                task_id=task_id,
+                project_root=project_root,
+                launcher=lambda **_: helpers[task_id],
+            )
+
+        adapter = ClaudeAgentSdkAdapter(
+            session_factory=factory, availability=lambda: True, max_concurrent=2
+        )
+        adapter.start(self._context("task-a"))
+        adapter.start(self._context("task-b"))
+        self.assertEqual(sorted(adapter.active_task_ids()), ["task-a", "task-b"])
+
+        adapter.shutdown()
+        self.assertEqual(first.closed, 1)
+        self.assertEqual(second.closed, 1)
+        self.assertEqual(adapter.active_task_ids(), ())
+
+    def test_the_registry_shuts_every_adapter_down_without_raising(self) -> None:
+        """One adapter's failure must not leave the next one's children running."""
+        from cofferdam.workstation.tasks.adapters import AdapterRegistry
+        from cofferdam.workstation.tasks.adapters.validation import ValidationTaskAdapter
+
+        class Angry(ValidationTaskAdapter):
+            adapter_id = "angry"
+
+            def shutdown(self):
+                raise RuntimeError("no")
+
+        helper = FakeHelperProcess()
+        sdk = self._adapter(helper)
+        sdk.start(self._context("task-a"))
+        registry = AdapterRegistry((Angry(), sdk))
+        registry.shutdown()
+        self.assertEqual(helper.closed, 1)
+
+    def test_the_base_adapter_shutdown_does_nothing_and_never_raises(self) -> None:
+        from cofferdam.workstation.tasks.adapters.protocol import TaskAdapter
+
+        self.assertIsNone(TaskAdapter().shutdown())
+
+
+class HelperLifecycleTests(unittest.TestCase):
+    """Every way one helper can end, at the parent side of the pipe.
+
+    Driven against the protocol double, so there is no process, no SDK and no
+    network — the process-level facts are proved separately by
+    :class:`OwnedChildTests`, which is the one place a double cannot substitute.
+
+    The cases are enumerated rather than sampled because the failure they share
+    is silence: a helper that goes away without the parent noticing leaves a task
+    that never moves, and every row below is a different way of going away.
+    """
+
+    def session(self, **kwargs):
+        helper = FakeHelperProcess(**kwargs)
+        session = hostclient.HostSession(
+            task_id="task_" + kwargs.get("session_id", "sess-1"),
+            project_root=REPO_ROOT,
+            launcher=lambda **_: helper,
+        )
+        self.addCleanup(helper.exit)
+        return session, helper
+
+    def started(self, **kwargs):
+        session, helper = self.session(**kwargs)
+        session.start("do the thing")
+        return session, helper
+
+    def _await(self, predicate, timeout: float = 5.0) -> None:
+        """Poll rather than sleep: a fixed wait is either a flake or a delay."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.005)
+        self.fail("the session never reached the expected state")
+
+    # -- ending on purpose ---------------------------------------------------
+
+    def test_an_expected_close_asks_first_and_needs_no_signal(self) -> None:
+        """The graceful path, and the reason it comes first.
+
+        An agent killed mid-write is one that did not finish writing the file it
+        was editing. So ``close`` sends the protocol's own ``close``, shuts
+        stdin, and only escalates if the helper does not take the hint.
+        """
+        session, helper = self.started()
+        helper.returncode = 0
+        self.assertTrue(session.close())
+        self.assertEqual(helper.closed, 1)
+        self.assertEqual(helper.terminated, 0)
+        self.assertEqual(helper.killed, 0)
+        self.assertTrue(session.finished)
+
+    def test_a_repeated_close_is_quiet_and_still_true(self) -> None:
+        """A shutdown path that fails the second time is one nobody can retry."""
+        session, helper = self.started()
+        helper.returncode = 0
+        self.assertTrue(session.close())
+        for _ in range(3):
+            self.assertTrue(session.close())
+        self.assertTrue(session.finished)
+
+    def test_a_helper_that_will_not_exit_is_escalated_and_bounded(self) -> None:
+        """The double never sets a returncode, so every wait times out.
+
+        It has no pid, so the group path declines and the fallback runs — which
+        is exactly what a non-POSIX host would get, and what proves the fallback
+        is still wired.
+        """
+        session, helper = self.started()
+        original = hostclient.CLOSE_TIMEOUT_SECONDS
+        hostclient.CLOSE_TIMEOUT_SECONDS = 0.05
+        self.addCleanup(setattr, hostclient, "CLOSE_TIMEOUT_SECONDS", original)
+
+        self.assertTrue(session.close())
+        self.assertEqual(helper.terminated, 1)
+        self.assertEqual(helper.killed, 0, "it let go on SIGTERM; kill was not needed")
+
+    def test_closing_one_session_leaves_another_alone(self) -> None:
+        """Two tasks, two helpers, and a stop that reaches one of them."""
+        first, first_helper = self.started(session_id="sess-1")
+        second, second_helper = self.started(session_id="sess-2")
+        first_helper.returncode = 0
+
+        first.close()
+        self.assertEqual(first_helper.closed, 1)
+        self.assertEqual(second_helper.closed, 0)
+        self.assertEqual(second_helper.terminated, 0)
+        self.assertFalse(second.finished)
+        self.assertEqual(second.provider_session_id, "sess-2")
+
+    # -- ending by accident --------------------------------------------------
+
+    def test_an_eof_on_the_pipe_ends_the_session(self) -> None:
+        """The helper stopped speaking. Nothing else has to happen for that to
+        be true, and the parent must not wait for a message that is not coming."""
+        session, helper = self.started()
+        helper.finish()
+        self._await(lambda: session.finished)
+        # Ended, and nothing invented on the way out: the parent does not
+        # manufacture a result for a helper that stopped talking.
+        self.assertEqual(session.drain(), [])
+
+    def test_a_lost_helper_records_why_rather_than_only_that(self) -> None:
+        session, helper = self.started()
+        helper.exit(1)
+        self._await(lambda: session.finished)
+
+        session.note_lost()
+        events = session.drain()
+        self.assertEqual([item.kind for item in events], [KIND_PROVIDER_FAILED])
+        self.assertEqual(events[0].failure_code, "transport_error")
+        self.assertIn("ended unexpectedly", events[0].text or "")
+
+    def test_a_cancelled_session_records_a_cancellation_instead(self) -> None:
+        """The pair of the test above: two ways to stop, two different records."""
+        session, helper = self.started()
+        self.assertTrue(session.request_cancel())
+        session.drain()
+        helper.exit(0)
+        self._await(lambda: session.finished)
+
+        session.note_cancelled()
+        events = session.drain()
+        self.assertEqual([item.kind for item in events], [KIND_CANCELLED])
+
+    def test_a_loss_note_carries_no_prompt_or_provider_payload(self) -> None:
+        """A transport failure is where raw provider text most wants to leak."""
+        session, helper = self.started()
+        helper.exit(1)
+        self._await(lambda: session.finished)
+        session.note_lost()
+
+        blob = json.dumps([item.to_dict() for item in session.drain()])
+        for forbidden in ("do the thing", "claude-agent-sdk-cli", "tool_input"):
+            self.assertNotIn(forbidden, blob, forbidden + " reached a loss event")
+
+    # -- unreadable output ---------------------------------------------------
+
+    def test_malformed_output_is_dropped_and_the_session_survives(self) -> None:
+        """A helper from a different build should cost an unread line, not a task.
+
+        Nothing here is decoded into a default, coerced or guessed at: the line
+        is dropped, and the session that was working before it keeps working.
+        """
+        session, helper = self.started()
+        for junk in (
+            "not json at all\n",
+            "{\n",
+            '{"message": "nonsense-this-build-never-heard-of"}\n',
+            '{"v": 99, "message": "ready"}\n',
+            "\n",
+        ):
+            helper.queue.put(junk)
+        helper.complete_turn()
+        self._await(lambda: session.turn_complete)
+
+        self.assertFalse(session.finished)
+        self.assertEqual(session.drain(), [])
+        self.assertEqual(session.provider_session_id, "sess-1")
+
+    def test_an_oversized_line_is_dropped_rather_than_buffered(self) -> None:
+        """The bound is on the reader, so a helper cannot make the parent grow."""
+        from cofferdam.workstation.tasks.adapters.claude_agent_sdk import hostproto
+
+        session, helper = self.started()
+        helper.queue.put("x" * (hostproto.MAX_LINE_BYTES + 10) + "\n")
+        helper.complete_turn()
+        self._await(lambda: session.turn_complete)
+        self.assertEqual(session.drain(), [])
+        self.assertFalse(session.finished)
+
+    def test_the_event_buffer_is_bounded(self) -> None:
+        """A task nobody reads must not be able to consume the daemon's memory."""
+        session, helper = self.started()
+        for index in range(hostclient.MAX_BUFFERED_EVENTS + 50):
+            helper.emit_event(event(KIND_ACTIVITY, 1000 + index, text="tick"))
+        self._await(
+            lambda: len(session._buffer) == hostclient.MAX_BUFFERED_EVENTS
+        )
+        self.assertEqual(len(session.drain()), hostclient.MAX_BUFFERED_EVENTS)
+
+
+# -- 8. the shipped profile (M2I PR4) ----------------------------------------
+
+
+class ShippedProfileTests(unittest.TestCase):
+    """The profile, named and published rather than described in a docstring.
+
+    Every assertion here reads the constants rather than restating them, except
+    the ones that deliberately hard-code a value — the tool list, the permission
+    mode and the two bounds. Those are the numbers somebody would change without
+    meaning to change policy, so they are written out and a change to them fails
+    a test with the old value in the message.
+    """
+
+    def setUp(self) -> None:
+        self.profile = option_policy.describe_profile()
+
+    def test_the_profile_has_exactly_one_name(self) -> None:
+        self.assertEqual(self.profile["profile"], "cofferdam-project-edit-v1")
+        self.assertEqual(option_policy.PROFILE_NAME, self.profile["profile"])
+
+    def test_the_tools_are_the_five_plus_the_question(self) -> None:
+        self.assertEqual(
+            self.profile["tools"],
+            ["Read", "Write", "Edit", "Glob", "Grep", "AskUserQuestion"],
+        )
+
+    def test_there_is_no_shell_and_no_web(self) -> None:
+        for absent in ("Bash", "BashOutput", "KillShell", "WebFetch", "WebSearch", "Task"):
+            self.assertNotIn(absent, self.profile["tools"])
+            self.assertIn(absent, self.profile["disallowed_tools"])
+
+    def test_the_permission_mode_is_fixed_and_bypass_is_forbidden(self) -> None:
+        self.assertEqual(self.profile["permission_mode"], "acceptEdits")
+        self.assertIn("bypassPermissions", self.profile["forbidden_permission_modes"])
+
+    def test_nothing_is_auto_approved(self) -> None:
+        self.assertEqual(self.profile["auto_approved_tools"], [])
+
+    def test_the_bounds_are_the_shipped_ones(self) -> None:
+        self.assertEqual(self.profile["max_turns"], 24)
+        self.assertEqual(self.profile["max_budget_usd"], 2.00)
+
+    def test_no_option_is_caller_settable(self) -> None:
+        self.assertEqual(self.profile["caller_settable_options"], [])
+
+    def test_the_profile_names_no_path_environment_value_or_session(self) -> None:
+        """It describes the policy, which is the same on every host.
+
+        What is banned is a *value*: a filesystem path, a credential's name, a
+        session identifier. Not the vocabulary — the profile has to be able to
+        say the words "cwd" and "session" to explain what the boundary is and
+        what it is not, and a guard that failed on the explanation would be
+        repaired by deleting the explanation. So paths are matched as paths and
+        credentials as environment names, and the two keys that could carry a
+        real identifier are asserted absent by key rather than by substring.
+        """
+        blob = json.dumps(self.profile)
+        self.assertIsNone(
+            re.search(r"(?:^|[\s\"'])(?:/[A-Za-z_.][\w.-]*)+/?", blob),
+            "an absolute path is published in the profile: " + blob,
+        )
+        for credential in (
+            "COFFERDAM_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "AWS_SECRET_ACCESS_KEY",
+        ):
+            self.assertNotIn(credential, blob, credential + " is published")
+        # A profile is policy. An identifier belongs to one launch, so there is
+        # no key here for one to arrive under.
+        for key in ("session_id", "provider_session_id", "task_id", "project_id"):
+            self.assertNotIn(key, self.profile, key + " is a profile field")
+
+    def test_the_filesystem_limitation_is_stated_rather_than_a_sandbox_claimed(
+        self,
+    ) -> None:
+        """Section 7: if the boundary is configuration, say configuration.
+
+        The CLI is *told* one directory and given no second one. That is not the
+        same as a kernel sandbox, and this build does not have evidence for the
+        stronger claim — so the weaker true one is what is published.
+        """
+        limitations = " ".join(self.profile["limitations"]).lower()
+        self.assertIn("not a kernel sandbox", limitations)
+        self.assertIn("does not claim", limitations)
+        self.assertNotIn("sandboxed", limitations)
+
+    def test_the_profile_is_buildable_without_the_sdk_installed(self) -> None:
+        """Which is the machine the stdlib-only job runs on."""
+        self.assertIsInstance(option_policy.describe_profile(), dict)
+
+    def test_the_adapter_publishes_the_profile_it_runs(self) -> None:
+        adapter = ClaudeAgentSdkAdapter(availability=lambda: True)
+        described = adapter.describe()
+        self.assertEqual(described["profile"], option_policy.describe_profile())
+        self.assertEqual(described["tools"], described["profile"]["tools"])
+
+
+# -- 9. deployment readiness (M2I PR4) ---------------------------------------
+
+
+class DeploymentReadinessTests(unittest.TestCase):
+    """What has to remain true for this adapter to be safe to *ship* disabled.
+
+    Everything here reads the repository. Nothing reads, writes or restarts the
+    live workstation: a test that consulted the running host would pass or fail
+    on machine state rather than on the tree under review, which is the opposite
+    of what a deployment guard is for.
+    """
+
+    def setUp(self) -> None:
+        self.deploy = REPO_ROOT / "deploy"
+
+    def test_the_adapter_is_off_unless_a_host_flag_turns_it_on(self) -> None:
+        from cofferdam.workstation.tasks.adapters import build_registry
+
+        self.assertEqual(build_registry().ids(), ())
+        self.assertNotIn(ADAPTER_ID, build_registry(enable_claude_code_adapter=True).ids())
+
+    def test_no_shipped_unit_or_drop_in_enables_the_agent_sdk(self) -> None:
+        """The production unit is not modified to add this flag, in this PR or
+        any other, until the adapter has earned it."""
+        for path in sorted(self.deploy.rglob("*")):
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            self.assertNotIn("--enable-claude-agent-sdk-adapter", text, str(path))
+
+    def test_the_installer_does_not_require_the_sdk_extra(self) -> None:
+        """A production venv that has never seen the SDK is a supported venv."""
+        script = (self.deploy / "install-workstation-service.sh").read_text("utf-8")
+        self.assertNotIn("agent-sdk", script)
+
+    def test_enabling_the_flag_without_the_dependency_fails_precisely(self) -> None:
+        from cofferdam.workstation.tasks.adapters import build_registry
+        from cofferdam.workstation.tasks.errors import AdapterUnknown
+
+        registry = build_registry(enable_claude_agent_sdk_adapter=True)
+        self.assertIn(ADAPTER_ID, registry.ids())
+        adapter = registry.find(ADAPTER_ID)
+        adapter._availability = lambda: False
+        # Registered, described, and refused with a sentence rather than an
+        # ImportError from the middle of somebody's task.
+        self.assertFalse(adapter.available())
+        self.assertTrue(adapter.unavailable_reason())
+        with self.assertRaises(AdapterUnknown):
+            registry.get(ADAPTER_ID)
+
+    def test_enabling_both_claude_adapters_replaces_neither(self) -> None:
+        from cofferdam.workstation.tasks.adapters import build_registry
+        from cofferdam.workstation.tasks.adapters.claude_code import (
+            ADAPTER_ID as CLI_ADAPTER_ID,
+        )
+
+        ids = build_registry(
+            enable_claude_code_adapter=True, enable_claude_agent_sdk_adapter=True
+        ).ids()
+        self.assertIn(CLI_ADAPTER_ID, ids)
+        self.assertIn(ADAPTER_ID, ids)
+
+    def test_two_adapters_with_one_id_is_a_build_failure(self) -> None:
+        from cofferdam.workstation.tasks.adapters import (
+            AdapterRegistry,
+            DuplicateAdapterId,
+        )
+
+        with self.assertRaises(DuplicateAdapterId):
+            AdapterRegistry(
+                (
+                    ClaudeAgentSdkAdapter(availability=lambda: True),
+                    ClaudeAgentSdkAdapter(availability=lambda: True),
+                )
+            )
+
+    def test_every_helper_module_is_inside_a_declared_package(self) -> None:
+        """A wheel that omitted the helper would fail at the first task."""
+        import tomllib
+
+        declared = tomllib.loads(
+            (REPO_ROOT / "pyproject.toml").read_text("utf-8")
+        )["tool"]["setuptools"]["packages"]
+        self.assertIn("cofferdam.workstation.tasks.adapters.claude_agent_sdk", declared)
+        for name in ("host", "hostclient", "hostenv", "hostproto", "options", "session"):
+            self.assertTrue((PACKAGE_ROOT / (name + ".py")).is_file(), name)
+
+    def test_the_python_marker_on_the_extra_is_still_valid(self) -> None:
+        """The SDK needs 3.10; Cofferdam supports 3.9. On 3.9 the extra installs
+        nothing and the adapter reports itself unavailable, which is truthful
+        rather than a failed install."""
+        text = (REPO_ROOT / "pyproject.toml").read_text("utf-8")
+        self.assertIn("python_version >= '3.10'", text)
+        self.assertIn("claude-agent-sdk>=", text)
+
+    def test_no_machine_specific_path_is_committed_in_this_package(self) -> None:
+        for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+            text = path.read_text("utf-8")
+            for forbidden in ("/home/", "/Users/", "100.", "cofferdam/slots/"):
+                self.assertNotIn(forbidden, text, str(path) + " names " + forbidden)
+
+    def test_the_child_environment_is_still_only_the_allowlist(self) -> None:
+        built = hostenv.build_child_environment(
+            {"HOME": "/h", "PATH": "/b", "COFFERDAM_TOKEN": "secret", "AWS_SECRET_ACCESS_KEY": "k"}
+        )
+        self.assertNotIn("COFFERDAM_TOKEN", built)
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", built)
+        self.assertEqual(
+            set(built) - set(hostenv.CHILD_ENVIRONMENT_FORCED) - {"PYTHONPATH"},
+            {"HOME", "PATH"},
+        )
 
 
 if __name__ == "__main__":

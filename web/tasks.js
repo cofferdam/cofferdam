@@ -51,6 +51,33 @@
   var MAX_PROMPT_CHARS = 8000;
   var MAX_FOLLOWUP_CHARS = 4000;
 
+  /* The two things a person can be asked to write about an existing task, named
+     as a closed set because everything below is keyed by one of them.
+
+     They are separate all the way down — separate drafts, separate request ids,
+     separate routes — for the same reason the backend keeps them separate: a
+     follow-up is a new instruction and an answer resolves something the agent is
+     blocked on. A single "message" concept here would have to decide which at
+     the moment of sending, which is the worst possible moment to decide it. */
+  var OP_FOLLOWUP = "followup";
+  var OP_CLARIFICATION = "clarification";
+
+  /* The longest draft this panel will keep. Equal to the server's own follow-up
+     bound, so a draft that is kept is a draft that could be sent — keeping more
+     would mean storing text whose only future is a 422. */
+  var MAX_DRAFT_CHARS = MAX_FOLLOWUP_CHARS;
+
+  /* The storage key prefix. Namespaced so this panel's keys are recognisable,
+     removable, and impossible to confuse with the token app.js stores.
+
+     **What may be under one of these keys is a closed list: text a person typed
+     into a task box, and nothing else.** No token, no provider session id, no
+     provider event, no tool approval, no result. That is not a convention this
+     file merely follows — `writeDraft` is the only writer, it takes a task id, an
+     operation from the two above, and a string, and there is no second writer to
+     add anything else through. */
+  var DRAFT_PREFIX = "cofferdam.taskdraft.";
+
   /* States, mirrored from the backend's closed vocabulary. Rendering branches on
      these strings, so an unrecognised one must degrade to something honest
      rather than to an empty row — see `stateLabel`. */
@@ -59,6 +86,9 @@
   var snapshot = null;          /* the task list payload */
   var detail = null;            /* the open task, in full */
   var detailEvents = [];        /* its event history, oldest first */
+  var detailQuestions = [];     /* the questions it is waiting on, if any */
+  var detailResult = null;      /* the latest completed turn, when asked for */
+  var chosenOptions = {};       /* question_id -> the option ids ticked */
   var adapters = null;
   var projects = null;
   var loadError = null;
@@ -70,6 +100,7 @@
 
   var timer = null;
   var timerInterval = null;
+  var visibilityHandler = null;
   var pending = null;
   var pendingTimer = null;
   var actionError = null;
@@ -102,15 +133,11 @@
   var appliedDetailGeneration = 0;
   var inflightRefresh = null;
 
-  /* Unsent follow-up text, **keyed by task id**, and local until the person
-     presses send. It is deliberately not written to the task database on every
-     keystroke: a draft is not a follow-up, and a half-typed sentence is not
-     something to persist into an append-only history.
-
-     Keyed rather than single, because a single field would carry one task's
-     draft into another task's box the moment somebody navigated — which is a
-     quieter and worse bug than losing it. */
-  var followupDrafts = {};
+  /* Where the caret was, so a re-render can put it back. The draft *text* lives
+     in browser storage — see the draft section below — and is deliberately not
+     written to the task database on every keystroke: a draft is not a follow-up,
+     and a half-typed sentence is not something to persist into an append-only
+     history. */
   var followupFocus = null;
 
   /* The last markup written to the panel. Re-rendering identical markup would
@@ -119,12 +146,167 @@
      what makes an idle poll cost nothing visible. */
   var lastMarkup = null;
 
-  /* One key per created task, minted here and sent with the request, so a
-     double tap and a retry are the same request to the server rather than two.
-     The server is authoritative; this is what lets it recognise the repeat. */
-  var pendingRequestId = null;
 
   function esc(value) { return deps.escapeHtml(value); }
+
+  /* --------------------------------------------------------------- drafts
+   *
+   * Unsent text somebody typed, kept so that backgrounding a phone, losing a
+   * connection or reloading the PWA does not throw it away. Until M2I PR4 these
+   * lived only in `followupDrafts` above, which survived a poll and nothing
+   * else: iOS discards a backgrounded tab's page whenever it feels like it, and
+   * the person who came back to an empty box had no way to know their sentence
+   * had ever existed.
+   *
+   * **What goes in browser storage, exactly.** Text a person typed into a task
+   * box, under a key naming the task and which of the two boxes it was. That is
+   * the whole list. There is no code path here that writes a token — app.js owns
+   * the token and this file never reads it — no provider session id, no provider
+   * event, no tool approval, and no result. A task's *result* is the workstation's
+   * to hold; a half-written question is only ever the person's.
+   *
+   * Every access is wrapped, for the reason app.js records: on iOS Safari the
+   * `localStorage` property access itself throws under Private Browsing and some
+   * MDM configurations. When storage is unusable the drafts live in memory for
+   * the session, exactly as the token does — the panel still works, it just
+   * cannot survive a reload, and nothing pretends otherwise.
+   */
+
+  var draftMemory = {};
+  var storageWorks = null;
+
+  function storageAvailable() {
+    if (storageWorks !== null) { return storageWorks; }
+    try {
+      var probe = DRAFT_PREFIX + "probe";
+      global.localStorage.setItem(probe, "1");
+      global.localStorage.removeItem(probe);
+      storageWorks = true;
+    } catch (error) {
+      storageWorks = false;
+    }
+    return storageWorks;
+  }
+
+  /* One key per task **and** per operation. Both halves are load-bearing: a key
+     without the task id carries one task's words into another task's box, and a
+     key without the operation lets a half-typed answer to a question reappear as
+     a follow-up after the question has been answered and closed. */
+  function draftKey(taskId, operation) {
+    return DRAFT_PREFIX + operation + "." + taskId;
+  }
+
+  function readDraft(taskId, operation) {
+    if (!taskId) { return ""; }
+    var key = draftKey(taskId, operation);
+    if (Object.prototype.hasOwnProperty.call(draftMemory, key)) {
+      return draftMemory[key];
+    }
+    if (!storageAvailable()) { return ""; }
+    try {
+      var stored = global.localStorage.getItem(key);
+      return typeof stored === "string" ? stored.slice(0, MAX_DRAFT_CHARS) : "";
+    } catch (error) {
+      storageWorks = false;
+      return "";
+    }
+  }
+
+  function writeDraft(taskId, operation, text) {
+    if (!taskId) { return; }
+    var key = draftKey(taskId, operation);
+    /* Bounded here rather than trusted from the caller. A textarea has a
+       `maxlength`, and a `maxlength` is a hint a paste can exceed. */
+    var value = String(text || "").slice(0, MAX_DRAFT_CHARS);
+    if (!value) { clearDraft(taskId, operation); return; }
+    draftMemory[key] = value;
+    if (!storageAvailable()) { return; }
+    try {
+      global.localStorage.setItem(key, value);
+    } catch (error) {
+      /* A quota refusal is not a data-loss event: the memory copy above is
+         already holding it for this session. */
+      storageWorks = false;
+    }
+  }
+
+  function clearDraft(taskId, operation) {
+    if (!taskId) { return; }
+    var key = draftKey(taskId, operation);
+    delete draftMemory[key];
+    if (!storageAvailable()) { return; }
+    try {
+      global.localStorage.removeItem(key);
+    } catch (error) {
+      storageWorks = false;
+    }
+  }
+
+  /* Every draft this panel owns, dropped. Called on sign-out, where the rule is
+     the same one that governs everything else here: what somebody asked the
+     workstation to do is the most personal content in this product, and a
+     signed-out device keeps none of it.
+
+     It enumerates by prefix rather than by remembering which keys it wrote,
+     because the keys that matter most to remove are the ones written by a
+     *previous* page load — the ones an in-memory list would have forgotten. */
+  function clearAllDrafts() {
+    draftMemory = {};
+    if (!storageAvailable()) { return; }
+    try {
+      var doomed = [];
+      for (var index = 0; index < global.localStorage.length; index += 1) {
+        var key = global.localStorage.key(index);
+        if (typeof key === "string" && key.indexOf(DRAFT_PREFIX) === 0) {
+          doomed.push(key);
+        }
+      }
+      for (var removed = 0; removed < doomed.length; removed += 1) {
+        global.localStorage.removeItem(doomed[removed]);
+      }
+    } catch (error) {
+      storageWorks = false;
+    }
+  }
+
+  /* ------------------------------------------------------------ request ids
+   *
+   * One key per task and operation, kept until the server has actually accepted
+   * the thing it identifies.
+   *
+   * The previous shape was a single module-level slot shared by every write and
+   * cleared on any response at all — including a refusal. That is backwards: a
+   * refusal is precisely when somebody retries, and a retry carrying a *new* key
+   * is a retry the server cannot recognise as one. It is kept through a refusal,
+   * through a timeout and through a dropped connection, and released only when
+   * the write was accepted.
+   *
+   * The content that minted it is kept beside it, so editing the text after a
+   * conflict mints a new key rather than reusing one the server has already
+   * bound to different words — which is the case the server answers with
+   * `IdempotencyConflict`, and answering it by changing the key is the honest
+   * resolution.
+   */
+
+  var requestKeys = {};
+
+  function requestScope(operation, taskId) {
+    return operation + ":" + (taskId || "");
+  }
+
+  function requestIdFor(operation, taskId, content) {
+    var scope = requestScope(operation, taskId);
+    var held = requestKeys[scope];
+    if (held && held.content === content) { return held.id; }
+    var id = "pwa-" + Date.now().toString(36) + "-" +
+      Math.floor(Math.random() * 1e9).toString(36);
+    requestKeys[scope] = { id: id, content: content };
+    return id;
+  }
+
+  function releaseRequestId(operation, taskId) {
+    delete requestKeys[requestScope(operation, taskId)];
+  }
 
   /* ---------------------------------------------------------- reading state */
 
@@ -410,8 +592,113 @@
       SECRET_WAITING_REASONS.indexOf(task.waiting_reason) !== -1;
   }
 
+  /* The question this task is blocked on, or null.
+
+     Read from the clarifications route rather than inferred from the task state,
+     because the two answer different questions. `waiting_for_user(clarification)`
+     says the server is waiting for somebody; only the question itself carries the
+     words, the options and — critically — the `question_id` an answer has to be
+     addressed to. A panel that inferred one from the other would have a box with
+     nowhere to send what was typed into it, which is exactly what this panel had
+     before M2I PR4: it rendered "Your answer" for a clarification and posted it
+     to `/followups`, a route the server refuses outright while a question is
+     open. */
+  function pendingQuestion() {
+    for (var index = 0; index < detailQuestions.length; index += 1) {
+      if (detailQuestions[index].status === "pending") { return detailQuestions[index]; }
+    }
+    return null;
+  }
+
+  /* One question, as a form.
+
+     Everything rendered comes from the normalized clarification the server sent:
+     bounded question text, Cofferdam's own option ids, and its own answer-mode
+     vocabulary. Nothing here reads a provider field, because there is none in the
+     payload to read — `PendingClarification.to_dict` carries no session id, no
+     tool input and no raw provider object.
+
+     The three modes get three different controls, and an unrecognised one falls
+     back to a text box rather than to nothing: a question this build cannot
+     classify is still a question somebody should be able to answer. */
+  function questionForm(question) {
+    var mode = question.answer_mode;
+    var options = question.options || [];
+    var chosen = chosenOptions[question.question_id] || [];
+    var multiple = mode === "multiple_choice";
+    var html = '<div class="task-question" data-question="' +
+      esc(question.question_id) + '">' +
+      '<p class="task-question-text">' + esc(question.question) + "</p>";
+
+    if (options.length) {
+      html += '<ul class="task-options">' + options.map(function (option) {
+        var ticked = chosen.indexOf(option.option_id) !== -1;
+        return '<li class="task-option">' +
+          '<label><input type="' + (multiple ? "checkbox" : "radio") + '"' +
+          ' name="taskOption" class="task-option-input"' +
+          ' value="' + esc(option.option_id) + '"' +
+          (ticked ? " checked" : "") + (locked() ? " disabled" : "") + ">" +
+          '<span class="task-option-label">' + esc(option.label) + "</span>" +
+          (option.description
+            ? '<span class="muted">' + esc(option.description) + "</span>"
+            : "") +
+          "</label></li>";
+      }).join("") + "</ul>";
+    }
+
+    /* The free-text box appears when the server says this question accepts one.
+       Withheld otherwise, so a fixed-choice question does not get a field whose
+       contents the server would refuse. */
+    if (question.allows_free_text || !options.length) {
+      html += '<label class="field"><span class="field-label">Your answer</span>' +
+        '<textarea id="taskAnswerText" rows="3" maxlength="' + MAX_DRAFT_CHARS + '"' +
+        (locked() ? " disabled" : "") + "></textarea></label>";
+    }
+
+    /* Said once, on the screen where somebody is about to type. The backend
+       enforces it — an approval-shaped field is refused by name — and saying so
+       here is what stops somebody trying.
+
+       "the agent", not a provider's name. This panel names no specific agent
+       anywhere: which one is running is a fact the backend supplies through the
+       adapter catalogue, and a sentence that hard-coded one would be wrong the
+       first time a second adapter asked a question. A test asserts the whole
+       file contains neither word. */
+    html += '<p class="muted hint">Answering a question gives the agent ' +
+      "information, not permission. It cannot approve a tool, and Cofferdam " +
+      "will not ask you to.</p>";
+
+    if (!question.schema_verified) {
+      /* The honest half of the question channel. A shape this build has not seen
+         against a real provider session is rendered, and labelled as such,
+         rather than presented as though it were the verified one. */
+      html += '<p class="media-note warn">Cofferdam has not verified this ' +
+        "question's shape against a real session. Read it before answering.</p>";
+    }
+
+    html += '<button id="taskAnswerSend" class="primary"' +
+      (locked() ? " disabled" : "") + ">" +
+      (busy("answer") ? "Sending…" : "Send answer") + "</button></div>";
+    return html;
+  }
+
   function detailActions(task) {
     var buttons = [];
+    var question = pendingQuestion();
+    if (question && !waitingForSecret(task)) {
+      /* A real question, with a real place to send the answer. This branch comes
+         first because it is the one that must win: while a question is open the
+         follow-up route refuses, so offering a follow-up box here would offer a
+         button whose only outcome is a refusal. */
+      buttons.push(questionForm(question));
+      if (!task.terminal && capabilityOf(task, "cancel")) {
+        buttons.push(
+          '<button id="taskCancel" class="ghost"' + (locked() ? " disabled" : "") + ">" +
+          (busy("cancel") ? "Cancelling…" : "Cancel task") + "</button>"
+        );
+      }
+      return '<div class="task-actions">' + buttons.join("") + "</div>";
+    }
     if (waitingForSecret(task)) {
       buttons.push(
         '<p class="media-note warn task-secret-wait">' +
@@ -420,9 +707,32 @@
         "one-time code, passkey or token into a task." +
         "</p>"
       );
+    } else if (
+      task.state === "waiting_for_user" && capabilityOf(task, "clarifications")
+    ) {
+      /* The adapter asks structured questions, the task is waiting on one, and
+         this panel has not got it yet — the questions are a separate authenticated
+         read and it may not have landed, or a restart may have closed the question
+         between the two.
+
+         No box. An answer to a structured question is addressed to a specific
+         `question_id`, and there is nowhere to send text typed without one; the
+         follow-up route would refuse it, by design, for exactly as long as the
+         question is open. Saying so is better than offering a control that can
+         only fail. */
+      buttons.push(
+        '<p class="media-note warn task-question-missing">' +
+        "<strong>This task is waiting on a question.</strong> " +
+        "Cofferdam is fetching it — pull to refresh if it does not appear. " +
+        "If Cofferdam restarted, the question was closed with the session and " +
+        "cannot be answered.</p>"
+      );
     } else if (task.state === "waiting_for_user" && capabilityOf(task, "followup")) {
-      /* Claude actually asked something. "Your answer" is true here and only
-         here. */
+      /* An adapter that waits for a person without asking a *structured*
+         question — the Claude Code transport has no channel for one, so its wait
+         is answered by an ordinary follow-up. Unchanged from M2G, and the
+         `clarifications` check above is what keeps the two apart: a structured
+         question must never be answered through this route. */
       buttons.push(
         '<div class="task-followup">' +
         '<label class="field"><span class="field-label">Your answer</span>' +
@@ -459,6 +769,19 @@
     }
     if (task.final_result) {
       buttons.push('<button id="taskCopyResult" class="ghost">Copy result</button>');
+      /* The result route, on demand rather than on every poll.
+
+         What it adds over the result already on the task is the *turn* the answer
+         came from and how many turns there have been — which is the difference
+         between "here is a result" and "here is the latest completed turn's
+         result", and the second is what the route actually means. Asking for it
+         is a read: it changes no state and drives no adapter, which is why it is
+         safe to offer as a button. Polling it as well would be a third request
+         per tick to tell a phone something it can already see. */
+      buttons.push(
+        '<button id="taskShowResult" class="ghost"' + (locked() ? " disabled" : "") + ">" +
+        (busy("result") ? "Checking…" : "Latest result") + "</button>"
+      );
     }
     return buttons.length ? '<div class="task-actions">' + buttons.join("") + "</div>" : "";
   }
@@ -474,6 +797,38 @@
         "decision.</strong> Cofferdam will not resume it on its own.</p>";
     }
     return "";
+  }
+
+  /* What the result route said, when somebody asked it.
+
+     Rendered as the server's own words rather than reinterpreted: `result_meaning`
+     says which of the two things a reader is holding — the latest completed turn,
+     or the final outcome of a task that is over — and `task_terminal` says which
+     without anybody having to infer it from the state name. Reproducing that
+     reasoning here would be a second implementation of a distinction the backend
+     already publishes as fields. */
+  function resultBlock(task) {
+    if (!detailResult || detailResult.task_id !== task.task_id) { return ""; }
+    var turns = detailResult.turn_count;
+    var facts = [];
+    if (typeof turns === "number") {
+      facts.push(turns + (turns === 1 ? " turn" : " turns"));
+    }
+    if (detailResult.turn_number) { facts.push("turn " + detailResult.turn_number); }
+    facts.push(detailResult.task_terminal ? "task finished" : "task still open");
+    if (detailResult.follow_up_available) { facts.push("follow-up available"); }
+    return '<div class="task-block task-result-detail"><h4>Latest result</h4>' +
+      '<p class="muted">' + esc(facts.join(" · ")) + "</p>" +
+      (detailResult.result_meaning
+        ? '<p class="muted hint">' + esc(detailResult.result_meaning) + "</p>"
+        : "") +
+      (detailResult.result
+        ? '<pre class="task-text">' + esc(detailResult.result) + "</pre>"
+        : '<p class="muted">This task produced no result text.</p>') +
+      (detailResult.failure_summary
+        ? '<p class="media-note err">' + esc(detailResult.failure_summary) + "</p>"
+        : "") +
+      "</div>";
   }
 
   function detailView() {
@@ -521,6 +876,7 @@
         ? '<div class="task-block"><h4>Result</h4><pre class="task-text" id="taskResultText">' +
           esc(task.final_result) + "</pre></div>"
         : "") +
+      resultBlock(task) +
       detailActions(task) +
       /* The raw stream, behind a disclosure. Available for when the summary is
          not enough, and never the first thing anybody has to read. */
@@ -575,40 +931,108 @@
        follow-up form is on screen. Fabricating an empty one and storing its
        value **erased the draft** every time the panel rendered a view without
        the form, which is exactly what happens on the way back to a task. */
-    var box = followupBox();
+    var operation = openOperation();
+    var box = draftBox(operation);
     if (!box || typeof box.value !== "string") { return; }
-    followupDrafts[openTaskId] = box.value;
+    writeDraft(openTaskId, operation, box.value);
     followupFocus = null;
     var doc = deps.doc ? deps.doc() : (global.document || null);
     var focused = doc && doc.activeElement;
-    if (focused === box || (focused && focused.id === "taskFollowupText")) {
+    if (focused === box || (focused && focused.id === draftBoxId(operation))) {
       followupFocus = {
+        id: draftBoxId(operation),
         start: typeof box.selectionStart === "number" ? box.selectionStart : null,
         end: typeof box.selectionEnd === "number" ? box.selectionEnd : null
       };
     }
   }
 
-  /* The live follow-up box, or null when the panel is not showing one. */
-  function followupBox() {
+  /* Which of the two boxes the open task is currently showing.
+
+     Driven by whether the server says a question is open, never by which box
+     happens to be in the DOM: the DOM lags the server by one render, and the
+     draft has to be filed under the operation the *server* is waiting for or a
+     poll that arrives mid-sentence files it under the wrong one. */
+  function openOperation() {
+    return pendingQuestion() ? OP_CLARIFICATION : OP_FOLLOWUP;
+  }
+
+  function draftBoxId(operation) {
+    return operation === OP_CLARIFICATION ? "taskAnswerText" : "taskFollowupText";
+  }
+
+  /* The live box for one operation, or null when the panel is not showing it. */
+  function draftBox(operation) {
     var doc = global.document;
     if (doc && typeof doc.getElementById === "function") {
-      return doc.getElementById("taskFollowupText");
+      return doc.getElementById(draftBoxId(operation));
     }
     return null;
   }
 
-  function draftFor(taskId) {
-    return (taskId && followupDrafts[taskId]) || "";
+  function draftFor(taskId, operation) {
+    return readDraft(taskId, operation || OP_FOLLOWUP);
+  }
+
+  /* A task that has ended keeps no unsent drafts.
+
+     Called wherever the server's own view of a task is adopted. The alternative
+     — leaving them — is the quietly dishonest one: a cancelled task would still
+     have somebody's half-written follow-up waiting under it, and the next time
+     they opened it the panel would show text that can no longer be sent
+     anywhere. Clearing it here means "the box is gone because the task is over",
+     which is true, rather than "the box is gone because you cannot see it",
+     which is what an unrendered draft amounts to.
+
+     The held request ids go with them. A key identifies an attempt at a task
+     that can still take one. */
+  function settleTerminalDrafts(task) {
+    if (!task || !task.task_id || !isTerminal(task.state)) { return; }
+    clearDraft(task.task_id, OP_FOLLOWUP);
+    clearDraft(task.task_id, OP_CLARIFICATION);
+    releaseRequestId(OP_FOLLOWUP, task.task_id);
+    delete chosenOptions[task.task_id];
+  }
+
+  /* Drop a draft the server has **accepted**, at every layer it lives in.
+
+     This exists because clearing the store is not enough, and the phone found
+     out the hard way. The draft text is deliberately not part of the markup —
+     see `render` — so `clearDraft` empties memory and storage while the live
+     textarea keeps holding the accepted words. The next `render` then calls
+     `captureDraft`, which reads that node and writes them straight back. The
+     draft came back, and because the request id had been released with it, the
+     next tap on Send submitted the same sentence under a new key: a second
+     provider turn, real model usage, and nothing on screen to suggest it had
+     happened.
+
+     So the node is cleared first, and only then the store.
+
+     `accepted` is the text the server took. Anything else in the box now is
+     newer than the answer — somebody's next message typed while the request was
+     in flight — and is left alone. Returns whether it cleared, so a caller can
+     be tested on the distinction rather than assuming it. */
+  function clearAcceptedDraft(taskId, operation, accepted) {
+    /* Only ever the box belonging to the task that was accepted. A different
+       task open on screen has its own draft and its own box. */
+    var box = openTaskId === taskId ? draftBox(operation) : null;
+    var current = box && typeof box.value === "string"
+      ? box.value
+      : draftFor(taskId, operation);
+    if (current !== accepted) { return false; }
+    if (box) { box.value = ""; }
+    clearDraft(taskId, operation);
+    return true;
   }
 
   /* Copy the stored draft into the freshly built textarea. */
   function applyDraft() {
     if (!openTaskId) { return; }
-    var box = followupBox();
+    var operation = openOperation();
+    var box = draftBox(operation);
     if (!box || typeof box.value !== "string") { return; }
-    var draft = draftFor(openTaskId);
-    if (box.value !== draft) { box.value = draft; }
+    var stored = draftFor(openTaskId, operation);
+    if (box.value !== stored) { box.value = stored; }
   }
 
   /* Put the person back where they were. The textarea is a new node after a
@@ -616,7 +1040,10 @@
      interrupt typing even though the text survived. */
   function restoreFocus() {
     if (!followupFocus || !deps) { return; }
-    var box = followupBox();
+    var doc = global.document;
+    var box = doc && typeof doc.getElementById === "function"
+      ? doc.getElementById(followupFocus.id)
+      : null;
     if (!box || typeof box.focus !== "function") { followupFocus = null; return; }
     box.focus();
     if (followupFocus.start !== null && typeof box.setSelectionRange === "function") {
@@ -786,12 +1213,38 @@
       if (openTaskId !== requested) { return null; }
       appliedDetailGeneration = generation;
       detail = response.payload.task;
+      settleTerminalDrafts(detail);
       return deps.api(
         "/api/tasks/" + encodeURIComponent(taskId) + "/events?after=0&limit=200"
       );
     }).then(function (response) {
       if (response && response.ok && openTaskId === requested) {
         detailEvents = response.payload.events || [];
+      }
+      /* Questions are read only when the task says it is waiting on one, and
+         only for an adapter that asks them. Two conditions rather than one
+         because they cost different things: the state check keeps this off every
+         ordinary poll, and the capability check keeps it off adapters whose
+         transport has no question channel — the Claude Code adapter waits for
+         people too, and asking it for structured questions would be a request
+         per poll that can only ever return an empty list. */
+      if (
+        openTaskId === requested && detail &&
+        detail.state === "waiting_for_user" &&
+        capabilityOf(detail, "clarifications")
+      ) {
+        return deps.api(
+          "/api/tasks/" + encodeURIComponent(taskId) + "/clarifications"
+        );
+      }
+      /* Not waiting any more: whatever was on screen is history. Clearing it
+         here rather than leaving it is what stops an answered question from
+         still offering its form after the turn has moved on. */
+      if (openTaskId === requested) { detailQuestions = []; }
+      return null;
+    }).then(function (response) {
+      if (response && response.ok && openTaskId === requested) {
+        detailQuestions = (response.payload && response.payload.clarifications) || [];
       }
       render();
       reschedule();
@@ -853,18 +1306,6 @@
     };
   }
 
-  /* A per-attempt key. Generated once when the composer's Start is first
-     pressed and *kept* until that attempt resolves, so a second tap, a retry
-     after a timeout, and a flaky connection all carry the same key — which is
-     what lets the server recognise them as one request rather than three. */
-  function requestId() {
-    if (pendingRequestId === null) {
-      pendingRequestId = "pwa-" + Date.now().toString(36) + "-" +
-        Math.floor(Math.random() * 1e9).toString(36);
-    }
-    return pendingRequestId;
-  }
-
   function startTask() {
     if (!draft.projectId || !draft.adapterId) {
       formError = "Choose a project and an adapter first.";
@@ -884,21 +1325,31 @@
     if (!beginPending("create", CREATE_TIMEOUT_MS)) { return Promise.resolve(null); }
 
     var generation = nextGeneration();
+    /* Keyed on the prompt, with no task id: there is no task yet, and the whole
+       point of the key is that the server can recognise a repeat before one
+       exists. Editing the prompt after a refusal mints a new key, because it is
+       a different request — the server would otherwise answer the second attempt
+       with an idempotency conflict rather than creating anything. */
+    var content = draft.projectId + "|" + draft.adapterId + "|" + draft.prompt;
     return deps.api("/api/tasks", {
       body: {
         project_id: draft.projectId,
         adapter_id: draft.adapterId,
         prompt: draft.prompt,
-        client_request_id: requestId()
+        client_request_id: requestIdFor("create", null, content)
       }
     }).then(function (response) {
       endPending();
       if (!response.ok) {
         actionError = failureOf(response);
-        pendingRequestId = null;
+        /* The key is kept. A refusal is exactly when somebody presses the button
+           again, and a retry carrying a new key is a retry the server cannot
+           recognise as one — which is how a "that timed out" turns into two
+           tasks. It is released when the prompt changes, or when a create is
+           accepted. */
         return load().then(function () { return null; });
       }
-      pendingRequestId = null;
+      releaseRequestId("create", null);
       var payload = response.payload || {};
       /* The server's own verdict on whether anything was created. A retry that
          matched an earlier request says so rather than implying a second task. */
@@ -909,6 +1360,7 @@
       composerOpen = false;
       openTaskId = payload.task ? payload.task.task_id : null;
       detail = payload.task || null;
+      settleTerminalDrafts(detail);
       detailEvents = [];
       appliedGeneration = generation;
       render();
@@ -929,12 +1381,26 @@
   function sendFollowup() {
     if (!openTaskId) { return Promise.resolve(null); }
     var taskId = openTaskId;
+    /* Refused here as well as by the server. While a question is open the
+       follow-up route answers `task_clarification_pending`, and a panel that
+       could send one anyway would be a panel that turns somebody's answer into
+       a refusal for reasons they cannot see. */
+    if (pendingQuestion()) {
+      actionError = {
+        message: "This task is waiting for an answer to a question.",
+        detail: "Answer the question above — a follow-up cannot answer it."
+      };
+      render();
+      return Promise.resolve(null);
+    }
     /* The live box first, the stored draft second. They agree except in the
        moment between a keystroke and the next capture. */
-    var box = followupBox();
-    var text = box && typeof box.value === "string" ? box.value : draftFor(taskId);
-    text = String(text || "");
-    followupDrafts[taskId] = text;
+    var box = draftBox(OP_FOLLOWUP);
+    var text = box && typeof box.value === "string"
+      ? box.value
+      : draftFor(taskId, OP_FOLLOWUP);
+    text = String(text || "").slice(0, MAX_DRAFT_CHARS);
+    writeDraft(taskId, OP_FOLLOWUP, text);
 
     if (!text.trim()) {
       actionError = { message: "Write something to send first.", detail: null };
@@ -949,23 +1415,33 @@
        after the server accepts it, and only then. */
     var sent = text;
     return deps.api("/api/tasks/" + encodeURIComponent(taskId) + "/followups", {
-      body: { followup: sent, client_request_id: requestId() }
+      body: {
+        followup: sent,
+        /* Keyed on the text as well as the task, so a retry of *this* message
+           reuses one key and an edited message gets a new one. The server binds
+           a key to a payload hash and answers the same key with different words
+           as a conflict, which is the case this keying makes unreachable. */
+        client_request_id: requestIdFor(OP_FOLLOWUP, taskId, sent)
+      }
     }).then(function (response) {
       endPending();
-      pendingRequestId = null;
       if (!response.ok) {
+        /* Key kept, draft kept. Both survive a refusal for the same reason: the
+           person is about to try again, and neither their words nor the server's
+           ability to recognise the repeat should depend on the first attempt
+           having succeeded. */
         actionError = failureOf(response);
         render();
         return loadDetail(taskId);
       }
-      /* Accepted. Cleared once, and only if the box still holds the text that
-         was accepted — anything typed while the request was in flight is newer
-         than the answer and is somebody's next message, not a leftover. */
-      if (followupDrafts[taskId] === sent) {
-        delete followupDrafts[taskId];
-      }
+      releaseRequestId(OP_FOLLOWUP, taskId);
+      /* Accepted. Cleared at the node as well as the store — see
+         `clearAcceptedDraft` — and only if what is there is still the text the
+         server took. */
+      clearAcceptedDraft(taskId, OP_FOLLOWUP, sent);
       actionNote = "Sent.";
       detail = response.payload.task;
+      settleTerminalDrafts(detail);
       render();
       return loadDetail(taskId).then(function () { return load(); });
     }).catch(function (error) {
@@ -975,6 +1451,137 @@
       render();
       return null;
     });
+  }
+
+  /* Answer one specific question on one specific task.
+
+     A different route, a different body and a different draft from a follow-up,
+     all the way down — which is the point. The body is two fields and there is no
+     third: no session id, no tool, no path, no allow/deny. The server refuses an
+     unexpected key rather than ignoring it, and refuses an approval-shaped one by
+     name; this panel has nowhere to put one because nothing here constructs one.
+
+     There is deliberately **no** `client_request_id`. The answer route does not
+     accept one and does not need one: a question is single-use, so a repeat
+     arrives at a question whose status is no longer `pending` and is refused
+     truthfully. That refusal *is* the idempotency, and it is the server's, which
+     is where it belongs. */
+  function answerClarification() {
+    if (!openTaskId) { return Promise.resolve(null); }
+    var question = pendingQuestion();
+    if (!question) {
+      actionError = {
+        message: "There is no open question on this task any more.",
+        detail: "It may have been answered, superseded, or closed by a restart."
+      };
+      render();
+      return Promise.resolve(null);
+    }
+    var taskId = openTaskId;
+    var questionId = question.question_id;
+    var box = draftBox(OP_CLARIFICATION);
+    var text = box && typeof box.value === "string"
+      ? box.value
+      : draftFor(taskId, OP_CLARIFICATION);
+    text = String(text || "").slice(0, MAX_DRAFT_CHARS);
+    writeDraft(taskId, OP_CLARIFICATION, text);
+
+    var picked = (chosenOptions[questionId] || []).slice(0);
+    if (!picked.length && !text.trim()) {
+      actionError = {
+        message: (question.options || []).length
+          ? "Choose an option, or write an answer."
+          : "Write an answer first.",
+        detail: null
+      };
+      render();
+      return Promise.resolve(null);
+    }
+    if (!beginPending("answer")) { return Promise.resolve(null); }
+
+    var body = {};
+    if (text.trim()) { body.answer = text; }
+    if (picked.length) { body.option_ids = picked; }
+    var sent = text;
+
+    return deps.api(
+      "/api/tasks/" + encodeURIComponent(taskId) +
+      "/clarifications/" + encodeURIComponent(questionId) + "/answer",
+      { body: body }
+    ).then(function (response) {
+      endPending();
+      if (!response.ok) {
+        /* Draft kept, exactly as for a follow-up. A refused answer is still
+           somebody's words about a question that may still be open. */
+        actionError = failureOf(response);
+        render();
+        return loadDetail(taskId);
+      }
+      /* The same clear, through the same helper. The question form usually
+         disappears on the next render, which hid this instance of the defect on
+         the phone — the node was gone before `captureDraft` could read it. That
+         is luck, not a difference in the code, and the two paths should not
+         differ on it. */
+      clearAcceptedDraft(taskId, OP_CLARIFICATION, sent);
+      delete chosenOptions[questionId];
+      actionNote = "Answer sent.";
+      detail = response.payload.task;
+      settleTerminalDrafts(detail);
+      detailQuestions = [];
+      render();
+      return loadDetail(taskId).then(function () { return load(); });
+    }).catch(function (error) {
+      endPending();
+      if (error && error.message === "unauthorized") { return null; }
+      actionError = { message: "Cofferdam could not reach the workstation.", detail: null };
+      render();
+      return null;
+    });
+  }
+
+  /* Ask the result route what the latest completed turn produced.
+
+     A read: it changes nothing, drives no adapter, and is the reason it is safe
+     to offer as a button rather than fold into the poll. The provider session id
+     the response carries is dropped here rather than merely left unrendered — a
+     field that never enters this panel's state is one no future render can put on
+     a screen. */
+  function showResult() {
+    if (!openTaskId) { return Promise.resolve(null); }
+    if (!beginPending("result")) { return Promise.resolve(null); }
+    var taskId = openTaskId;
+    return deps.api("/api/tasks/" + encodeURIComponent(taskId) + "/result")
+      .then(function (response) {
+        endPending();
+        if (!response.ok) {
+          actionError = failureOf(response);
+          render();
+          return null;
+        }
+        var payload = (response.payload && response.payload.result) || {};
+        detailResult = {
+          task_id: payload.task_id,
+          task_state: payload.task_state,
+          task_terminal: payload.task_terminal,
+          outcome: payload.outcome,
+          turn_number: payload.turn_number,
+          turn_count: payload.turn_count,
+          result: payload.result,
+          failure_summary: payload.failure_summary,
+          follow_up_available: payload.follow_up_available,
+          result_meaning: payload.result_meaning
+        };
+        render();
+        return detailResult;
+      }).catch(function (error) {
+        endPending();
+        if (error && error.message === "unauthorized") { return null; }
+        actionError = {
+          message: "Cofferdam could not reach the workstation.", detail: null
+        };
+        render();
+        return null;
+      });
   }
 
   function finishTask() {
@@ -991,6 +1598,7 @@
         return loadDetail(taskId);
       }
       detail = response.payload.task;
+      settleTerminalDrafts(detail);
       /* Repeated, not upgraded, for the same reason cancel repeats: the
          server's observed state is the only one worth showing. */
       actionNote = detail.state === "completed"
@@ -1021,6 +1629,7 @@
         return loadDetail(taskId);
       }
       detail = response.payload.task;
+      settleTerminalDrafts(detail);
       /* The server's observed state, repeated rather than upgraded: a task that
          is still `cancelling` is not cancelled, and saying so is the point. */
       actionNote = detail.state === "cancelled"
@@ -1120,11 +1729,37 @@
             load();
             return;
           case "taskFollowupSend": sendFollowup(); return;
+          case "taskAnswerSend": answerClarification(); return;
           case "taskFinish": finishTask(); return;
           case "taskCancel": cancelTask(); return;
           case "taskCopyResult": copyResult(); return;
+          case "taskShowResult": showResult(); return;
           default: return;
         }
+      });
+
+      /* Which options are ticked, held here rather than read off the DOM at
+         submit time. The DOM is destroyed on every render that changes anything,
+         so a choice made before a poll would be a choice lost by it — the same
+         defect the draft store exists to fix, in a control that cannot hold its
+         own text. */
+      root.addEventListener("change", function (event) {
+        var target = event.target;
+        if (!target || target.className !== "task-option-input") { return; }
+        var question = pendingQuestion();
+        if (!question) { return; }
+        var id = String(target.value || "");
+        if (!id) { return; }
+        var multiple = question.answer_mode === "multiple_choice";
+        var current = chosenOptions[question.question_id] || [];
+        if (!multiple) {
+          chosenOptions[question.question_id] = target.checked ? [id] : [];
+          return;
+        }
+        var without = current.filter(function (entry) { return entry !== id; });
+        chosenOptions[question.question_id] = target.checked
+          ? without.concat([id])
+          : without;
       });
 
       root.addEventListener("input", function (event) {
@@ -1154,6 +1789,29 @@
       }, true);
     }
 
+    /* Coming back to the app refreshes immediately.
+
+       Polling has always stopped while the tab is hidden, which is right — a
+       phone in a pocket is not asking for anything. What was missing is the
+       other half: on returning, the panel waited out the rest of an interval
+       before asking, so somebody who unlocked their phone to check on a task saw
+       state up to ten seconds stale and had no way to know it. A task that
+       finished while the screen was off is exactly the case somebody opens the
+       app to see.
+
+       One refresh, not a new timer: `reschedule` is still the only thing that
+       creates an interval, and `beginPending` still suppresses reads while a
+       write is in flight. */
+    var doc = global.document;
+    if (doc && typeof doc.addEventListener === "function") {
+      visibilityHandler = function () {
+        if (stopped || pending !== null || !visible()) { return; }
+        if (openTaskId) { loadDetail(openTaskId); }
+        load();
+      };
+      doc.addEventListener("visibilitychange", visibilityHandler);
+    }
+
     reschedule();
     return loadCatalogues().then(function () { return load(); });
   }
@@ -1170,6 +1828,9 @@
     snapshot = null;
     detail = null;
     detailEvents = [];
+    detailQuestions = [];
+    detailResult = null;
+    chosenOptions = {};
     adapters = null;
     projects = null;
     loadError = null;
@@ -1179,7 +1840,17 @@
     openTaskId = null;
     composerOpen = false;
     draft = { projectId: null, adapterId: null, prompt: "" };
-    pendingRequestId = null;
+    requestKeys = {};
+    /* Including what is on disk. A draft is the one thing this panel keeps
+       outside its own memory, so it is the one thing that would otherwise
+       survive a sign-out — and "the previous person's half-written instruction
+       to an agent" is precisely the content that must not. */
+    clearAllDrafts();
+    var doc = global.document;
+    if (visibilityHandler && doc && typeof doc.removeEventListener === "function") {
+      doc.removeEventListener("visibilitychange", visibilityHandler);
+    }
+    visibilityHandler = null;
     render();
   }
 

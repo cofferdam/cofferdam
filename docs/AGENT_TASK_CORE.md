@@ -673,7 +673,8 @@ Prompts, follow-ups and results are **user content and may be sensitive**.
 | No prompts, follow-ups or results in daemon logs | Task Core contains no `logging`, `logger`, `print`, `stdout` or `stderr` call at all — asserted over every file |
 | No task content in the browser console | `web/tasks.js` contains no `console` call |
 | No task content in turn records | a turn keeps what the *provider* produced; what a person typed lives on the task, once |
-| `no-store` on the result response | it carries the answer to somebody's private prompt |
+| `no-store` on **every** task-content response (M2I PR4) | the detail view, the event stream, the question list and the result all carry somebody's private prompt, question or answer. `no-store` rather than `no-cache`, which still permits writing the body to disk. The adapter list is deliberately unmarked — it carries no task content, and marking everything would make the header mean nothing |
+| Only drafts in browser storage, namespaced (M2I PR4) | one writer, taking a task, an operation and a string; keys are `cofferdam.taskdraft.<operation>.<task_id>`; no token, provider session id or provider payload can reach it, and every draft is removed on sign-out |
 | No task content in URLs or query strings | content travels in bodies; paths carry ids |
 | No task content in process argv | Task Core starts no process |
 | No task content in systemd unit names | Task Core creates no unit |
@@ -756,11 +757,34 @@ box when the adapter supports it, Cancel when it does, Copy result, and refresh.
 behind an *Advanced* disclosure — a log is where you go when the summary is not
 enough, not the first thing you have to read.
 
+**Structured questions (M2I PR4)** — when an adapter asks one, the panel reads
+`GET /api/tasks/{id}/clarifications`, renders the question with its options, and
+answers through `POST /api/tasks/{id}/clarifications/{qid}/answer`. A
+fixed-choice question gets no free-text box, because a field whose contents the
+server would refuse is not a field, and no follow-up box is offered while a
+question is open. Answering is labelled on screen as **information, not
+permission**: there is no approval control anywhere in the panel, and no route
+for one. A question whose shape this build has not verified is labelled as
+unverified rather than presented as verified.
+
 Behaviour: bounded polling (10s, 4s while something is active), stopped while
-the tab is hidden and after sign-out; one action at a time with a timeout that
-gives the panel back; a monotonic generation guard so an older response can
-never overwrite a newer verified one; no optimistic success anywhere. Signing
-out clears every task from memory.
+the tab is hidden and after sign-out; **one immediate read when the tab is
+foregrounded** (M2I PR4), so unlocking a phone shows the truth rather than a
+ten-second-old copy — a single read, not a new timer; one action at a time with a
+timeout that gives the panel back; a monotonic generation guard so an older
+response can never overwrite a newer verified one; no optimistic success
+anywhere. Signing out clears every task from memory **and every draft from
+storage**.
+
+**Drafts and retries (M2I PR4)** — a half-written follow-up or answer is kept in
+`localStorage` under a key naming the task *and* the operation, so it survives
+the page being discarded, cannot leak from one task into another, and cannot
+reappear in the wrong box. Every access is guarded, because on iOS Safari the
+`localStorage` property access itself can throw; a refusal costs the durability
+and leaves the panel working. A restored draft is text, never a message —
+returning to the app submits nothing. Request keys are scoped by operation and
+task, **retained across a refusal** so a retry is recognisable as one, and
+regenerated only when the words change.
 
 Event delivery is authenticated polling with an `after=<sequence>` cursor. The
 event model is designed so a future push transport can deliver the same events

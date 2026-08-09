@@ -1925,6 +1925,81 @@ class ClarificationApiTests(TaskTestCase):
         )
         self.assertEqual(response.status_code, 401)
 
+    # -- caching -------------------------------------------------------------
+
+    def test_the_question_list_is_no_store(self) -> None:
+        """M2I PR4. A question is task content, and a stale one is worse than none.
+
+        The PWA reads this route on every poll. Without ``no-store`` a question
+        that has since been answered or superseded can come back out of a cache,
+        and the panel would render an answer box whose only possible outcome is a
+        refusal — the same false "needs you" that restart reconciliation exists
+        to avoid.
+        """
+        task_id, _ = self.waiting()
+        response = self.client.get(self.list_path(task_id), headers=self.auth)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("cache-control"), "no-store")
+
+    def test_every_task_content_route_is_no_store(self) -> None:
+        """Enumerated, because the property is only worth having if it is total.
+
+        One cacheable route carrying a prompt, a question or a result is enough
+        to leave somebody's private instruction to an agent in a browser cache
+        directory after the sign-out that was supposed to remove it.
+
+        ``/result`` is here as a refusal rather than a result — this task has no
+        completed turn — which is why it is asserted separately below. A refusal
+        body carries a code and a state, and there is nothing in it to keep out
+        of a cache. ``test_the_result_response_is_no_store`` in
+        ``tests/test_task_followups.py`` covers the header on the answer itself.
+        """
+        task_id, _ = self.waiting()
+        for path in (
+            "/api/tasks/" + task_id,
+            "/api/tasks/" + task_id + "/events",
+            "/api/tasks/" + task_id + "/clarifications",
+        ):
+            response = self.client.get(path, headers=self.auth)
+            self.assertEqual(response.status_code, 200, path)
+            self.assertEqual(
+                response.headers.get("cache-control"), "no-store", path
+            )
+
+        refusal = self.client.get("/api/tasks/" + task_id + "/result", headers=self.auth)
+        self.assertEqual(refusal.status_code, 409)
+        self.assertNotIn(TURKISH_PROMPT, refusal.text)
+        self.assertNotIn("Which", refusal.text, "a refusal quoted the question")
+
+    def test_a_route_carrying_no_task_content_is_left_alone(self) -> None:
+        """The control. ``no-store`` everywhere would say nothing about anything.
+
+        The adapter list is the same sentence for every caller and holds no
+        prompt, question or result, so it is deliberately not marked — which is
+        what makes the header meaningful on the four routes above.
+        """
+        response = self.client.get("/api/task-adapters", headers=self.auth)
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.headers.get("cache-control"))
+
+    def test_no_task_content_route_carries_a_provider_session_id(self) -> None:
+        """Section 5: the id exists server-side and leaves through no route."""
+        task_id, _ = self.waiting()
+        for path in (
+            "/api/tasks/" + task_id,
+            "/api/tasks/" + task_id + "/events",
+            "/api/tasks/" + task_id + "/clarifications",
+        ):
+            body = self.client.get(path, headers=self.auth).text
+            for forbidden in (
+                "provider_session_id",
+                "tool_input",
+                "raw_payload",
+                "thinking",
+                "permission_mode",
+            ):
+                self.assertNotIn(forbidden, body, forbidden + " is published by " + path)
+
     # -- listing -------------------------------------------------------------
 
     def test_the_list_publishes_bounded_normalized_questions(self) -> None:
