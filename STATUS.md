@@ -4,8 +4,9 @@ Accurate as of **2026-08-09** (**M2H is complete and merged**, closing the M1 po
 M2F Agent Task Core and M2G the Claude Code adapter merged; the isolated Custom GPT Actions mobile
 probe passed; client architecture and the active roadmap recorded as
 [`DECISIONS.md`](DECISIONS.md) D-2026-08-08-1 … -6). **M2I PR1–PR3 are merged; M2I PR4 — the
-phone surface, helper cleanup and startup reconciliation — is on a branch.** Update this file when
-a category changes, not on every commit.
+phone surface, helper cleanup, startup reconciliation and asset revalidation — is on a branch and
+real-phone validated, which completes M2I's own goal.** Update this file when a category changes,
+not on every commit.
 
 ## Merged (on `main`)
 
@@ -85,9 +86,9 @@ says "on branch, not merged" it is describing the moment it was written, correct
 each milestone *did not* do, and which validations are still outstanding, is still current and is
 why these records are kept rather than collapsed into one line.
 
-**M2I PR4 is in progress on a branch** — see the entry under *In progress* below. It is the last
-planned PR of M2I, and M2I closes only after the outstanding real-phone validation. The queued work
-after that is M2I.5 → M2J; see [`ROADMAP.md`](ROADMAP.md).
+**M2I PR4 is on a branch, awaiting review** — see the entry under *In progress* below. It is the
+last planned PR of M2I and its real-phone validation has passed, so M2I closes on merge. The queued
+work after that is M2I.5 → M2J; see [`ROADMAP.md`](ROADMAP.md).
 
 - **M2G — Claude Code adapter.** Merged as PR #21. The first
   adapter that runs a real program, built on the merged M2F foundation. A phone picks an approved
@@ -698,40 +699,35 @@ is the one property a double cannot prove; everything else runs against doubles.
 Anthropic, uses the network, consumes model usage, inspects a transcript, modifies the live
 registry, starts Remote Control or touches production.
 
-**One supervised real-phone run, and it found a defect.** A temporary non-production daemon on a
-tailnet-only bind, its own `COFFERDAM_HOME`, its own one-project registry and its own token, with the
-session narrowed below the shipped profile for the run (`tools: ["AskUserQuestion"]`,
-`permission_mode: "default"`, 4 turns, USD 0.50) in a **disposable worktree** so the PR branch stayed
-byte-clean. Sixteen of the seventeen checks passed: the structured question rendered and was answered
-through the clarification route, both drafts survived locking and reload, neither auto-submitted,
-foregrounding refreshed immediately, both turns ran in one provider session, and no provider session
-id, raw payload, tool input or debug data reached the phone.
+**Validated on a real phone, over three supervised runs, and the first two failed.** Each ran on a
+temporary tailnet-only daemon with its own `COFFERDAM_HOME`, one-project registry and token, from a
+**disposable worktree** so the PR branch stayed byte-clean, with the session narrowed below the
+shipped profile and restored by deleting the worktree.
 
-The defect: **an accepted follow-up did not clear its draft**, and that was worse than it looked. The
+Run 1 exercised the whole workflow and passed sixteen of seventeen checks — structured question
+answered through the clarification route, both drafts surviving a locked screen, neither
+auto-submitting, immediate foreground refresh, one provider session, nothing leaked to the phone.
+It failed one: **an accepted follow-up did not clear its draft**, and that was not cosmetic. The
 draft is deliberately not in the markup, so clearing the store left the live textarea holding the
-accepted text, and the next render's `captureDraft` wrote it back. With the request id released
-alongside, the next tap resent the same words under a new key — one intended message produced
-**three provider turns**. Fixed with a single helper that clears the node before the store; the
-regression tests reproduce the three-turn outcome exactly and assert one.
+accepted text and the next render's `captureDraft` wrote it back; with the request id released
+alongside, the next tap resent the same words under a new key. One intended message produced **three
+provider turns**.
 
-**The narrow recheck then failed too — and found a second, larger defect.** The daemon was serving
-the corrected file and the phone produced three turns again. The cause was isolated with **no
-provider call**: the real `tasks.js` was run in a real browser against a stubbed API, once at the
-pre-fix commit and once at the fixed one. Pre-fix the box kept its text and a second tap posted twice
-under two keys; fixed, it emptied and a second tap posted nothing. The DOM fix was sound — **the
-phone had been running the old file.**
+Run 2 rechecked the fix and produced three turns again — from a daemon serving the corrected file.
+The cause was isolated with **no provider call**: the real `tasks.js` was run in a real browser
+against a stubbed API at both commits. Pre-fix the box kept its text and a second tap posted twice;
+fixed, it emptied and posted once. The DOM fix was sound; **the phone was running the old file.**
+Assets carried `ETag` and `Last-Modified` but **no `Cache-Control` at all**, and a response silent
+about its freshness may be given a heuristic lifetime — iOS Safari does exactly that. Every static
+asset now says `Cache-Control: no-cache`: keep it, but ask before using it.
 
-Assets were served with `ETag` and `Last-Modified` but **no `Cache-Control` at all**, and a response
-that says nothing about its freshness may be given a heuristic lifetime; iOS Safari does exactly
-that, and both temporary daemons shared one origin. Every static asset now carries
-`Cache-Control: no-cache` — store it, but ask before using it — which with the existing validator
-costs a 304. A frontend change that cannot be trusted to reach a device cannot be validated on one,
-and "clear your cache" is not a release mechanism.
+Run 3, on `935d455` with a visible build marker, **passed**: one task, two turns (`Ready.` then
+`Atlas.`), one accepted follow-up under one request id, one provider session, no tool or
+clarification event, the follow-up field empty after acceptance and still empty after a reload, and
+an empty Send producing only the local refusal.
 
-**A narrow real-phone recheck is still outstanding**, and **M2I cannot close truthfully until it
-passes.** The validation adapter cannot substitute for it: it can never request `ready_for_followup`
-and its `send_followup` completes the task, so the box unmounts and the condition under test does not
-occur.
+The middle run is the one worth remembering: a fix that is correct in the repository, correct under
+test and correct in a browser is still not a fix a device has received.
 
 **No production change.** No unit, drop-in, installer or registry file was edited; the SDK is not
 installed in the production slot and the adapter is not enabled there. The **Claude Code adapter

@@ -1107,28 +1107,65 @@ draft was saved" from "the draft was still in a variable".
 What the tests still do **not** prove, said plainly:
 
 - the three unobserved variants in `SCHEMA_EVIDENCE_OUTSTANDING`;
-- that any of the PR4 phone work has been exercised on a **real phone**. Every
-  scenario above runs against a DOM double. Real-device validation is a separate,
-  separately approved step and had not been performed when this was written;
-- anything about production. The spike ran on a non-production daemon, and no
+- anything about production. Every run was on a non-production daemon, and no
   claim is made about the live service.
+
+## The real-phone validation
+
+Three supervised runs, each on a temporary tailnet-only daemon with its own
+`COFFERDAM_HOME`, one-project registry and token, from a **disposable worktree**
+so the PR branch stayed byte-clean. The session was narrowed below the shipped
+profile for every run and restored by deleting the worktree.
+
+**Run 1** exercised the full workflow — structured question, answer through the
+clarification route, drafts surviving a locked screen, foreground refresh — and
+found the accepted-follow-up draft defect. Sixteen checks passed; one failed, and
+the failure produced three provider turns from one message.
+
+**Run 2** rechecked the fix and failed again with three turns, from a daemon that
+was serving the corrected file. That is what exposed the stale-asset defect.
+
+**Run 3**, on `935d455` with a visible `validation build 935d455` marker and
+every asset carrying `Cache-Control: no-cache`, passed:
+
+| | |
+|---|---|
+| Tasks | 1 |
+| Turns | 2 — `Ready.` then `Atlas.` |
+| Accepted follow-ups | 1, under **one** request id |
+| Provider session across both turns | one |
+| Tool or clarification events | none |
+| Follow-up field after acceptance | empty |
+| After reload | still empty, marker still shown |
+| Send on an empty field | local refusal, no request |
+
+**The middle run is the one worth keeping in mind.** A fix that is correct in the
+repository, correct under test and correct in a browser is still not a fix a
+device has received, and for two runs nobody could tell the difference from the
+outside. The build marker exists because of it.
+
+No token, provider session id, raw payload, transcript, hidden reasoning or
+environment value was recorded from any run. Production's pid, start time, start
+ticks, drop-in hash, registry hash and SDK absence were compared before and after
+each and were unchanged throughout.
 
 ## Can M2I close?
 
-Not on the strength of this PR alone, and the distinction is worth being precise
-about.
+Yes — the milestone's own goal is met, and the distinction below is what that
+does and does not mean.
 
 **What is finished.** The transport, the structured question channel, same-session
 follow-up, the result boundary, the phone surface for all three, helper ownership
-and cleanup, and startup reconciliation — each with automated coverage that calls
-nothing.
+and cleanup, startup reconciliation, and asset revalidation — each with automated
+coverage that calls nothing, and all of it exercised on a real phone against a
+temporary non-production daemon.
 
-**What is outstanding.** One real-phone validation run against a temporary
-non-production daemon: open a task, receive a structured question on the phone,
-answer it, receive the result, send a follow-up, and confirm a draft survives the
-screen locking. That run is what would let M2I close truthfully, and it needs its
-own approval because it involves a live provider call and exposing a daemon over
-Tailscale.
+**What is still outstanding, and is not M2I's to close.** The three unobserved
+question variants in `SCHEMA_EVIDENCE_OUTSTANDING`; a `multiSelect` question and a
+free-text-only question have never been produced by a real session, so the panel
+marks any unverified shape rather than presenting it as verified. Parity with the
+Claude Code adapter is a separate judgement the roadmap's retirement rule governs,
+and nothing here asks for that adapter to be retired.
 
 **What closing M2I would not mean.** It would not deploy this adapter. The Agent
 SDK adapter stays **off by default and undeployed**: it is a separate host flag,
