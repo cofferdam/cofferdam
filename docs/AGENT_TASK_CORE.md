@@ -234,6 +234,16 @@ reasons are specific:
 
 Adding it costs no dependency, so the stdlib-only CI path is unchanged.
 
+**Schema version 2** (M2I PR2) adds one table, `task_clarifications`, holding the
+questions a delegated session asked and the answers given. The change is
+**additive only** — no existing column moved, changed type or gained a constraint
+— so the upgrade is the schema script's own `CREATE TABLE IF NOT EXISTS` plus a
+version row. A question and the state change it causes are written in **one
+transaction**, through the same `transition()` that already refused to write a
+state without its event: a task saying `waiting_for_user` with no question, or a
+pending question on a cancelled task, is a disagreement between two rows that
+somebody would have to resolve by guessing.
+
 | Property | Choice |
 | --- | --- |
 | Journaling | WAL — a polling reader must not block an adapter writing progress |
@@ -301,6 +311,12 @@ bounded individually, so a hostile or buggy adapter cannot make a response large
 The vocabulary is wider than what this milestone can do, reserved so that the
 day an adapter needs to say "waiting for a password" there is already a truthful
 word for it — and no temptation to reuse `clarification` for a secret.
+
+`clarification` became answerable in **M2I PR2**, through its own pair of
+authenticated routes and its own durable table. `approval` did not, and is not
+going to: there is no approval table, no approval route and no field an approval
+could be written into, and that absence is asserted by test rather than
+documented. The two words stay two words.
 
 ---
 
@@ -501,7 +517,16 @@ POST /api/tasks/{task_id}/followups    answer a waiting task
 POST /api/tasks/{task_id}/cancel       ask that task's adapter to stop
 GET  /api/task-adapters                registered adapters and capabilities
 GET  /api/task-projects                configured projects, names only
+
+GET  /api/tasks/{id}/clarifications                     questions being waited on
+POST /api/tasks/{id}/clarifications/{qid}/answer        answer one question
 ```
+
+The last two are **M2I PR2**. They carry information, never permission: the
+answer body accepts exactly `answer` and `option_ids`, and there is no route in
+this API — disabled, stubbed or otherwise — through which a tool approval could
+be granted. See
+[The Claude Agent SDK adapter](CLAUDE_AGENT_SDK_ADAPTER.md#clarification-is-not-approval).
 
 Event paging is by **sequence cursor**, never offset:
 

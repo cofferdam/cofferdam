@@ -55,6 +55,18 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from ..runtime.identity import now_iso
+from .clarifications import (
+    ANSWER_SOURCES,
+    CLARIFICATION_STATUSES,
+    MAX_ANSWER_CHARS,
+    MAX_PENDING_PER_TASK,
+    OUTCOME_ACCEPTED,
+    STATUS_PENDING,
+    AnswerProvenance,
+    ClarificationAnswer,
+    PendingClarification,
+)
+from .delegated import ANSWER_MODES, ANSWER_MODE_UNKNOWN, ClarificationOption
 from .errors import IdempotencyConflict, StoreUnavailable, TaskUnknown
 from .identity import new_correlation_id, new_task_id
 from .lifecycle import IllegalTransition, check_transition
@@ -84,7 +96,16 @@ from .models import (
 #: Bumped whenever the schema below changes shape. A database written by a newer
 #: build than the one reading it is refused rather than migrated backwards: a
 #: rollback that silently dropped columns would lose task history.
-SCHEMA_VERSION = 1
+#:
+#: Version 2 adds ``task_clarifications``. The change is **additive only** — no
+#: column of an existing table moved, changed type or gained a constraint — which
+#: is what makes the upgrade a ``CREATE TABLE IF NOT EXISTS`` and the downgrade
+#: survivable: an older build opening a version-2 database sees every table it
+#: knows about, exactly as it left them, and simply never looks at the new one.
+#: The version is still refused in that direction, because "survivable" is not
+#: "correct" and a build that cannot see pending questions should not be quietly
+#: answering tasks that have them.
+SCHEMA_VERSION = 2
 
 #: Where the database lives, under COFFERDAM_HOME. Its own directory so the file
 #: and its WAL/shm siblings stay together and can be permissioned as a unit.
@@ -162,6 +183,51 @@ CREATE TABLE IF NOT EXISTS idempotency (
 );
 
 CREATE INDEX IF NOT EXISTS idempotency_by_age ON idempotency (created_ts);
+
+-- One question a delegated session asked, and the answer if one was given.
+--
+-- Its own table rather than columns on `tasks`, for three reasons that are all
+-- about honesty rather than tidiness. A task can be asked more than one thing
+-- over its life and the earlier questions are history worth keeping. A question
+-- has its own status that is not the task's — `superseded` is a thing that
+-- happens to a question, not to a task. And a row here is written inside the
+-- same transaction as the state change it causes, which is only expressible if
+-- it is a row.
+--
+-- There is deliberately **no tool approval table**, and there is not going to be
+-- one. A tool approval is decided on a trusted surface at the workstation; the
+-- way to keep that true under later refactoring is to give the
+-- remotely-answerable path no row to write into.
+CREATE TABLE IF NOT EXISTS task_clarifications (
+    task_id             TEXT NOT NULL,
+    question_id         TEXT NOT NULL,
+    provider            TEXT NOT NULL,
+    provider_session_id TEXT,
+    provider_event_id   TEXT,
+    provider_sequence   INTEGER NOT NULL DEFAULT 0,
+    question            TEXT NOT NULL,
+    answer_mode         TEXT NOT NULL,
+    options_json        TEXT,
+    schema_verified     INTEGER NOT NULL DEFAULT 0,
+    requested_at        TEXT NOT NULL,
+    status              TEXT NOT NULL,
+    answered_at         TEXT,
+    answer_json         TEXT,
+    PRIMARY KEY (task_id, question_id),
+    FOREIGN KEY (task_id) REFERENCES tasks (task_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS clarifications_by_status
+    ON task_clarifications (task_id, status, provider_sequence);
+
+-- Duplicate suppression, enforced by the database rather than by a check the
+-- caller has to remember. A provider that re-sends the same question event
+-- cannot open a second pending question for it. SQLite permits many NULLs in a
+-- unique index, so a question that arrived without a provider event id simply
+-- has no suppression — the safe direction, since the alternative would be
+-- inventing an id and suppressing something that was not a duplicate.
+CREATE UNIQUE INDEX IF NOT EXISTS clarifications_by_provider_event
+    ON task_clarifications (task_id, provider_event_id);
 """
 
 
@@ -308,6 +374,126 @@ def _evidence_from_json(raw: Optional[str]) -> Tuple[EvidenceReference, ...]:
     )
 
 
+def _clarification_options_json(
+    options: Sequence[ClarificationOption],
+) -> Optional[str]:
+    """Options, capped and normalized field by field.
+
+    Never ``json.dumps`` of whatever an adapter handed over — the same rule
+    :func:`_bounded_evidence` follows, for the same reason: an adapter that
+    returned a large nested object would otherwise put it in the database and
+    then in every clarification response.
+    """
+    if not options:
+        return None
+    return json.dumps(
+        [
+            {
+                "option_id": option.option_id,
+                "label": bounded_line(option.label, 120),
+                "value": bounded_line(option.value, 120),
+                "description": bounded_line(option.description, 240),
+            }
+            for option in list(options)[:8]
+        ],
+        ensure_ascii=False,
+    )
+
+
+def _clarification_options_from_json(raw: Optional[str]) -> Tuple[ClarificationOption, ...]:
+    if not raw:
+        return ()
+    try:
+        parsed = json.loads(raw)
+    except ValueError:  # pragma: no cover - written by this module only
+        return ()
+    if not isinstance(parsed, list):  # pragma: no cover
+        return ()
+    return tuple(
+        ClarificationOption(
+            label=str(item.get("label") or ""),
+            value=str(item.get("value") or item.get("label") or ""),
+            option_id=item.get("option_id"),
+            description=item.get("description"),
+        )
+        for item in parsed
+        if isinstance(item, dict) and item.get("label")
+    )
+
+
+def _answer_json(answer: Optional[ClarificationAnswer]) -> Optional[str]:
+    """One answer, bounded field by field. Never a whole request body.
+
+    The provenance is written as three closed-vocabulary words and a timestamp.
+    There is no branch here that could store a header, a token, an address or a
+    caller-supplied name, because there is no field on the dataclass holding one.
+    """
+    if answer is None:
+        return None
+    provenance = answer.provenance
+    return json.dumps(
+        {
+            "option_ids": list(answer.option_ids[:8]),
+            "text": bounded_text(answer.text, MAX_ANSWER_CHARS),
+            "provenance": {
+                "actor": provenance.actor if provenance else None,
+                "source": provenance.source if provenance else None,
+                "received_at": provenance.received_at if provenance else None,
+                "outcome": provenance.outcome if provenance else None,
+                "rejection_reason": provenance.rejection_reason if provenance else None,
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
+def _answer_from_json(raw: Optional[str]) -> Optional[ClarificationAnswer]:
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except ValueError:  # pragma: no cover
+        return None
+    if not isinstance(parsed, dict):  # pragma: no cover
+        return None
+    record = parsed.get("provenance")
+    provenance = None
+    if isinstance(record, dict) and record.get("source") in ANSWER_SOURCES:
+        provenance = AnswerProvenance(
+            actor=str(record.get("actor") or "user"),
+            source=str(record.get("source")),
+            received_at=str(record.get("received_at") or ""),
+            outcome=str(record.get("outcome") or OUTCOME_ACCEPTED),
+            rejection_reason=record.get("rejection_reason"),
+        )
+    ids = parsed.get("option_ids")
+    return ClarificationAnswer(
+        option_ids=tuple(str(item) for item in ids) if isinstance(ids, list) else (),
+        text=parsed.get("text"),
+        provenance=provenance,
+    )
+
+
+def _row_to_clarification(row: sqlite3.Row) -> PendingClarification:
+    mode = row["answer_mode"]
+    return PendingClarification(
+        question_id=row["question_id"],
+        task_id=row["task_id"],
+        provider=row["provider"],
+        question=row["question"],
+        answer_mode=mode if mode in ANSWER_MODES else ANSWER_MODE_UNKNOWN,
+        options=_clarification_options_from_json(row["options_json"]),
+        provider_session_id=row["provider_session_id"],
+        provider_event_id=row["provider_event_id"],
+        provider_sequence=int(row["provider_sequence"] or 0),
+        schema_verified=bool(row["schema_verified"]),
+        requested_at=row["requested_at"],
+        status=row["status"],
+        answered_at=row["answered_at"],
+        answer=_answer_from_json(row["answer_json"]),
+    )
+
+
 class TaskStore:
     """The durable home of every task, and the only thing that changes a state.
 
@@ -405,6 +591,18 @@ class TaskStore:
             # rows the newer schema will not understand.
             raise StoreUnavailable(
                 "the task database was written by a newer version of Cofferdam"
+            )
+        if found < SCHEMA_VERSION:
+            # The upgrade already happened: the schema script above runs
+            # ``CREATE TABLE IF NOT EXISTS`` on every start, so an older database
+            # gained the new tables a moment ago. All this does is record that it
+            # did, so the next start does not think it is still on the old
+            # version. Nothing is altered, dropped or rewritten — an additive
+            # schema is the only kind this line is correct for, and
+            # :data:`SCHEMA_VERSION` says so.
+            connection.execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                (str(SCHEMA_VERSION),),
             )
 
     def _tighten_new_siblings(self) -> None:
@@ -808,6 +1006,8 @@ class TaskStore:
         failure: Optional[TaskFailure] = None,
         cancellation: Optional[Dict[str, Any]] = None,
         evidence: Sequence[EvidenceReference] = (),
+        open_clarification: Optional[PendingClarification] = None,
+        close_clarifications: Sequence[PendingClarification] = (),
     ) -> "TaskRow":
         """Move a task to ``new_state`` and record the event. One transaction.
 
@@ -819,6 +1019,14 @@ class TaskStore:
         ``expected_state`` gives a caller optimistic concurrency: a cancel that
         was decided against ``running`` will not apply to a task that has since
         completed.
+
+        ``open_clarification`` and ``close_clarifications`` extend that guarantee
+        to questions, and they are parameters of *this* method rather than
+        separate calls for exactly one reason: a task that says
+        ``waiting_for_user`` with no pending question, or a pending question on a
+        task that says ``cancelled``, is a disagreement between two rows that a
+        person would have to resolve by guessing. Passing them here makes the
+        state change and the question one write or neither.
         """
         with self._write() as connection:
             row = connection.execute(
@@ -880,11 +1088,149 @@ class TaskStore:
                 detail=detail,
                 evidence=evidence,
             )
+            for closing in close_clarifications:
+                self._save_clarification_locked(connection, closing)
+            if open_clarification is not None:
+                self._save_clarification_locked(connection, open_clarification)
             self._refresh_activity_locked(connection, task_id, event_type, text)
             updated = connection.execute(
                 "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
             ).fetchone()
             return _row_to_task(updated)
+
+    # -- clarifications ------------------------------------------------------
+
+    def _save_clarification_locked(
+        self, connection: sqlite3.Connection, clarification: PendingClarification
+    ) -> None:
+        """Insert or update one question. The caller holds the transaction.
+
+        ``INSERT OR REPLACE`` on the natural key, because both callers want the
+        same thing: the row for this task and this question id, as it is now. The
+        *rules* about which transitions are legal — a pending question cannot be
+        answered twice, a closed one cannot reopen — live in
+        :mod:`.clarifications` and are applied before a value reaches here, which
+        keeps this method a write rather than a second policy.
+        """
+        if clarification.status not in CLARIFICATION_STATUSES:  # pragma: no cover
+            raise StoreUnavailable("unknown clarification status")
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO task_clarifications (
+                task_id, question_id, provider, provider_session_id,
+                provider_event_id, provider_sequence, question, answer_mode,
+                options_json, schema_verified, requested_at, status,
+                answered_at, answer_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                clarification.task_id,
+                clarification.question_id,
+                clarification.provider,
+                clarification.provider_session_id,
+                clarification.provider_event_id,
+                int(clarification.provider_sequence),
+                bounded_text(clarification.question, MAX_OUTPUT_CHARS),
+                clarification.answer_mode,
+                _clarification_options_json(clarification.options),
+                1 if clarification.schema_verified else 0,
+                clarification.requested_at,
+                clarification.status,
+                clarification.answered_at,
+                _answer_json(clarification.answer),
+            ),
+        )
+
+    def save_clarification(self, clarification: PendingClarification) -> None:
+        """Write one question outside a state change.
+
+        Used where a question changes but the task does not — a supersession, an
+        answer that is being recorded before the adapter has said what happens
+        next. State changes carry their questions with them through
+        :meth:`transition`; this is for the rest.
+        """
+        with self._write() as connection:
+            row = connection.execute(
+                "SELECT task_id FROM tasks WHERE task_id = ?",
+                (clarification.task_id,),
+            ).fetchone()
+            if row is None:
+                raise TaskUnknown()
+            self._save_clarification_locked(connection, clarification)
+
+    def clarifications(
+        self, task_id: str, *, status: Optional[str] = None
+    ) -> List[PendingClarification]:
+        """Every question asked of one task, oldest first, optionally filtered."""
+        with self._read() as connection:
+            if status is None:
+                rows = connection.execute(
+                    "SELECT * FROM task_clarifications WHERE task_id = ?"
+                    " ORDER BY provider_sequence ASC, requested_at ASC",
+                    (task_id,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM task_clarifications WHERE task_id = ? AND status = ?"
+                    " ORDER BY provider_sequence ASC, requested_at ASC",
+                    (task_id, status),
+                ).fetchall()
+            return [_row_to_clarification(row) for row in rows]
+
+    def pending_clarifications(self, task_id: str) -> List[PendingClarification]:
+        return self.clarifications(task_id, status=STATUS_PENDING)
+
+    def find_clarification(
+        self, task_id: str, question_id: object
+    ) -> Optional[PendingClarification]:
+        """One question of one task, or ``None``.
+
+        Scoped to the task in the query itself rather than fetched and then
+        checked. That is what makes "an answer cannot target another task"
+        structural: a question id from a different task does not match a row
+        here, so there is nothing to compare and nothing to get wrong.
+        """
+        if not isinstance(question_id, str):
+            return None
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM task_clarifications WHERE task_id = ? AND question_id = ?",
+                (task_id, question_id),
+            ).fetchone()
+            return _row_to_clarification(row) if row is not None else None
+
+    def clarification_for_provider_event(
+        self, task_id: str, provider_event_id: object
+    ) -> Optional[PendingClarification]:
+        """The question a provider event already produced, if it produced one.
+
+        The read half of duplicate suppression. The write half is the unique
+        index, which is what actually stops a second row; this exists so the
+        caller can recognise the repeat and say nothing new happened rather than
+        catching a constraint error and guessing what it meant.
+        """
+        if not isinstance(provider_event_id, str) or not provider_event_id:
+            return None
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM task_clarifications"
+                " WHERE task_id = ? AND provider_event_id = ?",
+                (task_id, provider_event_id),
+            ).fetchone()
+            return _row_to_clarification(row) if row is not None else None
+
+    def pending_clarification_count(self, task_id: str) -> int:
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS total FROM task_clarifications"
+                " WHERE task_id = ? AND status = ?",
+                (task_id, STATUS_PENDING),
+            ).fetchone()
+            return int(row["total"]) if row is not None else 0
+
+    def clarification_room(self, task_id: str) -> bool:
+        """Whether one more question may be recorded for this task."""
+        return self.pending_clarification_count(task_id) < MAX_PENDING_PER_TASK
 
     # -- reading -------------------------------------------------------------
 

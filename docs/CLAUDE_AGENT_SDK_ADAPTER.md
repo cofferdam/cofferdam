@@ -1,4 +1,4 @@
-# The Claude Agent SDK adapter — M2I PR1 foundation
+# The Claude Agent SDK adapter — M2I PR1 foundation and PR2 clarifications
 
 A second Lane B transport to the same agent, on the same provider-neutral
 [Agent Task Core](AGENT_TASK_CORE.md). Where the
@@ -6,12 +6,18 @@ A second Lane B transport to the same agent, on the same provider-neutral
 stdout, this one drives the official **Claude Agent SDK** and receives typed
 messages — which is what makes a structured question channel possible at all.
 
-This document describes what was built in **M2I PR1**, and is deliberately clear
+This document describes what was built in **M2I PR1** (the foundation) and
+**M2I PR2** (the structured clarification round trip), and is deliberately clear
 about what was not.
 
-> **This adapter is off by default, is not deployed, and has not been run
-> against Anthropic from this repository.** Everything below is evidenced by the
-> published SDK distribution and by automated tests that call nothing.
+> **This adapter is off by default and is not deployed.** Everything below is
+> evidenced by the published SDK distribution and by automated tests that call
+> nothing — except the clarification schema and round trip, which were settled by
+> a **supervised live spike** in a disposable project against a non-production
+> daemon, recorded in
+> [The question schema](#the-question-schema-verified-by-the-m2i-pr2-live-spike).
+> Where a claim would need evidence nobody has gathered, it is marked
+> **outstanding** and is not made.
 
 ## What is *not* here
 
@@ -23,19 +29,28 @@ transport is what it cannot do and what it does not yet replace.
   validated live from a phone against this host. `ROADMAP.md` holds the
   retirement rule: the CLI adapter goes only after verified parity.
 - **No production change.** No systemd unit, drop-in, installer or registry file
-  in this repository enables it, and none was edited by this PR.
-- **No question round trip.** A clarification can be *represented* and
-  *recorded*; there is no answer route, no PWA question UI, and no way to reply.
-  That is M2I PR2.
-- **No follow-up.** A task runs one turn and reports its result. The seam is in
-  place — the provider session id is preserved and `send_followup` refuses
-  truthfully — but the flow is not implemented and the adapter does not claim
-  the capability.
+  in this repository enables it, and none was edited by PR1 or PR2.
+- **No production validation.** The live spike ran against a *non-production*
+  daemon with a temporary `COFFERDAM_HOME` and a temporary registry copy. The
+  live service, its drop-in and the live registry were never touched, and nothing
+  here claims the adapter has been validated in production.
+- **Three schema variants remain unobserved** — multiple questions in one input,
+  a genuinely multiple-choice question, and a free-text question. The reader
+  handles all three conservatively; nobody has seen the provider produce them.
+- **No PWA question UI.** PR2 validates the round trip through the authenticated
+  API. Rendering it on a phone is separate work.
+- **No follow-up.** A task runs one turn, asks what it needs to, and reports its
+  result. Answering a question is not a follow-up — see
+  [Two channels, not one](#two-channels-not-one).
 - **No tool approval from a phone, ever.** Not "not yet": a permission request is
-  denied by a code-owned handler and recorded. See
+  denied by a code-owned handler and recorded, and there is no route, no table
+  and no field through which one could be granted. See
   [Clarification is not approval](#clarification-is-not-approval).
 - **No `get_result` route.** The provider-neutral result *shape* exists and is
   produced; nothing serves it. Claiming otherwise would be claiming M2I.5.
+- **No Custom GPT bridge.** `future_gpt_bridge` is a reserved word in the answer
+  provenance vocabulary and is **not** in the set of sources any route accepts.
+  A vocabulary entry is not an enabled surface.
 - **No shell, no transcript reading, no prompt injection, no auto-resume.** Same
   as Lane B has always been.
 
@@ -80,12 +95,24 @@ transport builds the child environment as
 this adapter is weaker than the CLI one.
 
 **One thing could not be verified.** The SDK package contains no
-`AskUserQuestion` type and no schema for one — that tool belongs to the CLI. The
-normalizer therefore recognises a question tool *conservatively*: a clarification
-is produced only when the tool input carries an unmistakable question string, and
-anything else degrades to ordinary tool activity rather than inventing a
-question. It is unreachable in this build anyway, because the question tool is
-not in the running tool profile. Verifying the schema is PR2's first job.
+`AskUserQuestion` type and no schema for one — checked, not assumed: the string
+does not occur anywhere in the published archive. That tool belongs to the CLI.
+
+Two further facts PR2 read out of the same source, both of which decided a
+design:
+
+**Control requests do not block the read loop.** `Query._spawn_control_request_handler`
+dispatches with `spawn_detached`, so a `can_use_tool` callback that takes its
+time keeps messages arriving and `interrupt()` landing. That is what makes it
+possible to hold a question open while somebody answers.
+
+**A custom `Transport` silently drops the permission wiring.** When
+`can_use_tool` is set, `ClaudeSDKClient` puts `permission_prompt_tool_name="stdio"`
+on a *copy* of the options and hands that copy to its own transport; the client's
+source says plainly that "the materialized options never reach a pre-constructed
+transport". A custom transport must therefore reproduce that undocumented detail
+in its own argv or the callback never fires. See
+[Why a helper process](#why-a-helper-process-and-not-a-custom-transport).
 
 ## The optional dependency boundary
 
@@ -172,7 +199,8 @@ suppression; a second event schema would be a second history for one task.
 
 ## Clarification is not approval
 
-The safety boundary this PR exists to establish.
+The safety boundary this milestone exists to establish, and the one PR2 had to
+carry all the way to an answerable surface without letting it blur.
 
 |  | Clarification | Tool approval |
 |---|---|---|
@@ -180,38 +208,52 @@ The safety boundary this PR exists to establish.
 | Carries | a question, bounded options | a tool name, a coarse category |
 | Cannot carry | any tool field | any question or option field |
 | Waiting reason | `clarification` | `approval` |
-| May be answered remotely | eventually, from the PWA or a Custom GPT | **never** |
+| Adapter capability | `clarifications=True` | `approvals=False` |
+| Durable row | `task_clarifications` | **none, and none planned** |
+| API route | list + answer, authenticated | **none, and none planned** |
+| May be answered remotely | yes, from the PWA today | **never** |
 
 They are two dataclasses with disjoint required fields and disjoint serialized
 shapes. Each `from_dict` refuses three ways: a wrong `category`, the *presence of
 any of the other's fields* even when the category looks right, and a payload with
 nothing usable in it. An event cannot hold both, and a request cannot be attached
-to an unrelated kind. All six refusals are tested in both directions.
+to an unrelated kind. All six refusals are tested in both directions, and the
+same refusal is tested again *over the helper pipe*, so the separation holds on
+the wire and not only in memory.
 
-In this foundation the SDK's permission callback is a code-owned handler that
-**denies and records**. It is handed the tool's input — the command, the path,
-the arguments — and reads only the name; that material is exactly what makes
-approvals worth keeping on a trusted surface, and copying it into an event a
-phone renders would defeat the arrangement. The adapter declares
-`approvals=False`, which is the honest answer.
+The SDK's permission callback is a code-owned handler that **denies and
+records**. It is handed the tool's input — the command, the path, the arguments —
+and reads only the name; that material is exactly what makes approvals worth
+keeping on a trusted surface, and copying it into an event a phone renders would
+defeat the arrangement. `tool_input` appears in exactly one file, as a parameter,
+is never subscripted and never has an attribute read off it, and is passed only
+to the two conservative readers in `question.py` — asserted from the syntax tree.
 
-Neither kind moves the task into `waiting_for_user` yet, and that is a refusal
-rather than an omission. An approval is not a wait — Cofferdam denied it and the
-agent carries on — so reporting "NEEDS YOU" would be false. A clarification
-*would* be a wait, but Task Core's graph has no `waiting_for_user → completed`
-edge on purpose, so a task parked there with no answer channel could never reach
-a terminal state again. Both are recorded truthfully in the history and the state
-is left alone until the PR that builds the channel.
+**Only one of the two is a wait.** The adapter has one code path that can produce
+`waiting_for_user(clarification)` and **no path at all** that can produce
+`waiting_for_user(approval)`. An approval is not a wait: Cofferdam denied it, the
+agent carries on, and reporting "NEEDS YOU" about a request nobody can act on
+would be the same false claim the Claude Code adapter had to unlearn when a
+finished turn was reported as waiting for an answer.
+
+The answer endpoint refuses an approval-shaped body by name — `approval_id`,
+`tool_name`, `tool_input`, `behavior`, `decision`, `allow`, `deny`,
+`permission_mode`, `command`, `path`, `cwd`, `argv`, `env`. The last five are not
+fields of any Cofferdam type at all; they are the shapes somebody would reach for
+if they were trying to make this endpoint approve something, and refusing them by
+name turns "that is not what this route is for" from a comment into a test.
 
 ## The tool profile
 
-Identical to the Claude Code adapter's, and the sameness is the point: two
-transports for one policy, and a difference between them would mean switching
-transport quietly changed what the agent may do. A test asserts they match.
+The **action** tools are identical to the Claude Code adapter's, and the sameness
+is the point: two transports for one policy about what the agent may *do*, and a
+difference there would mean switching transport quietly changed what it could do
+to the workstation. A test asserts they match, and a second asserts the only gap
+between the two profiles is the question tool — which does nothing to a machine.
 
 | Option | Value | Why |
 |---|---|---|
-| `tools` | `Read, Write, Edit, Glob, Grep` | **No Bash.** A shell inside an approved root is still a general shell on the workstation, reachable by writing English into a phone. |
+| `tools` | `Read, Write, Edit, Glob, Grep, AskUserQuestion` | **No Bash.** A shell inside an approved root is still a general shell on the workstation, reachable by writing English into a phone. `AskUserQuestion` acts on nobody and is the reason M2I exists. |
 | `disallowed_tools` | `Bash, BashOutput, KillShell, Task, WebFetch, WebSearch, NotebookEdit` | Redundant by construction, and worth it: this is the list a reader checks first. |
 | `permission_mode` | `acceptEdits` | File edits inside the root, without an interactive prompt nobody could answer headless. Not shell access. |
 | `allowed_tools` | `[]` | Pre-approving a tool is the decision this milestone keeps on a human surface. |
@@ -235,50 +277,373 @@ mapping used for testing. There is no parameter for an executable, a tool list, 
 permission mode, a model, an environment, a flag or a working directory, and the
 signature itself is asserted.
 
-### The environment difference
+### The environment boundary (M2I PR2)
 
-The one place this adapter is weaker than the CLI one, stated rather than papered
-over.
+The one place PR1 was weaker than the CLI adapter, and the first thing PR2 fixed.
 
-The Claude Code adapter calls `Popen` itself and passes a thirteen-name
-allowlist, so a variable reaches the child only when somebody added it on
-purpose. The Agent SDK offers no equivalent: `options.env` is layered *over* the
-daemon's own environment, so the child inherits what the daemon has.
+**The finding.** `subprocess_cli.py` builds its child's environment as
+`{**os.environ, "CLAUDE_CODE_ENTRYPOINT": "sdk-py", **options.env, …}`. So
+`ClaudeAgentOptions.env` is an **override map layered over whatever the calling
+process has**, never a replacement, and there is no option, keyword or seam in
+the supported API that hands the SDK a complete environment. A daemon that ran
+the SDK in-process would give an agent session its own token, its API keys, its
+Cloudflare and Tailscale credentials and everything else in the unit file.
 
-Bounded by three facts. The daemon's environment is host-owned — the systemd unit
-and an optional `EnvironmentFile` — and nothing a client sends reaches it. The
-four forced overrides are applied last and win. And Cofferdam's own
-secret-bearing variable names are explicitly blanked in the child.
+**The fix.** Cofferdam owns the *spawn* instead of the *transport*. The adapter
+starts a helper process with its own `Popen` and a complete code-owned
+environment, and the SDK runs inside it. Because that process's `os.environ`
+**is** the allowlist, the SDK's merge produces the allowlist.
 
-Not blanked: the `ANTHROPIC_*` family. Emptying those would change how the agent
-authenticates, and Cofferdam has not verified what an empty value does to the
-sign-in path — guessing there could break authentication or move spending to a
-different account. Narrowing the inherited environment properly needs a custom
-SDK `Transport`, which is real work and belongs to a later PR.
+| | |
+|---|---|
+| Executable | `sys.executable` — the interpreter already running |
+| Argument vector | `["-m", "cofferdam...claude_agent_sdk.host"]`, three constants |
+| Shell | none; `shell=False` |
+| Environment | `hostenv.build_child_environment()`, by **selection** |
+| Working directory | the server-resolved project root |
+| stderr | discarded, so nothing can corrupt a frame or reach a log |
+| Process group | its own, so a Ctrl-C at the daemon cannot reach a task |
+
+The allowlist is thirteen names and is **identical to the Claude Code adapter's**
+— `HOME`, `PATH`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_ALL`, `LC_CTYPE`,
+`TERM`, `TMPDIR`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME` — plus four
+forced values (`PYTHONIOENCODING`, `NO_COLOR`, `CLAUDE_AGENT_SDK_CLIENT_APP`,
+`CLAUDE_CODE_ENTRYPOINT`). `HOME` is the load-bearing one: it is how the host CLI
+finds its own sign-in. Cofferdam grants *reachability*, never *possession* — it
+never opens a credential file, a keychain or a token store.
+
+`PYTHONPATH` is added only so the helper imports the same Cofferdam that launched
+it, derived from this package's own `__file__`, and the helper **removes it from
+its own environment** before constructing anything from the SDK. So the CLI
+grandchild sees exactly the session environment.
+
+Both halves are enforced and both are tested. The parent passes `env=`; the child
+refuses to run if what arrived is not what that produces
+(`host._verify_own_environment`). A helper started by hand, by a supervisor, or
+by a future caller that forgot the argument stops rather than handing a shell's
+environment to an agent.
+
+**What PR1's mitigation became.** `ENVIRONMENT_BLANKED` is now empty, and the
+emptiness is the change: blanking `COFFERDAM_TOKEN` was a denylist protecting the
+one name somebody thought of, and an allowlist protects every name nobody thought
+of. `LD_PRELOAD` and a variable somebody adds to the unit file next year are both
+absent — not because they are on a list, but because they are not on *the* list.
+
+Errors never carry values. `EnvironmentPolicyError` names the offending **key**
+and nothing else, and `environment_key_names` is the only function that describes
+an environment; there is deliberately no counterpart returning its contents.
+
+### Why a helper process, and not a custom `Transport`
+
+`Transport` *is* a public export and `ClaudeSDKClient` *does* accept one, so this
+choice needs justifying rather than asserting. Three reasons, all from the
+published source:
+
+1. **The vendor documents the ABC as removable.** Its own docstring says it "may
+   change or remove" in any future release and that custom implementations must
+   be updated to match. That is a poor foundation for a security boundary.
+2. **A custom transport silently breaks the permission callback.** The
+   `permission_prompt_tool_name="stdio"` copy never reaches it, so `can_use_tool`
+   stops firing unless Cofferdam reproduces an undocumented internal detail — and
+   that callback is where a tool is denied and a question is intercepted. The
+   failure mode is the safety boundary going quiet without an error.
+3. **It would move the whole profile into copied code.** With a custom transport
+   the SDK applies none of `tools`, `permission_mode`, `setting_sources` or
+   `strict_mcp_config`; every one would have to be re-derived from a ~230-line
+   internal command builder this project does not control.
+
+The helper costs one process and a bounded newline-delimited JSON protocol, and
+buys a guarantee that rests on a mechanism Cofferdam controls and tests. It also
+puts a 91 MB pre-1.0 async dependency out of the daemon's address space, so a
+crash there cannot take the workstation service down.
+
+The protocol is four commands down (`start`, `answer`, `cancel`, `close`) and six
+messages up. **No command carries a path, an executable, an environment, a tool
+name, a permission decision or a CLI flag** — the helper's entire configuration is
+decided at launch. Normalization runs *inside* the helper, so what crosses the
+pipe is already the bounded provider-neutral event shape, rebuilt on the parent
+side through the same constructors that validate an in-process event.
+
+## The structured clarification round trip (M2I PR2)
+
+### The question schema, verified by the M2I PR2 live spike
+
+`AskUserQuestion` is in the tool profile now — it is the one tool the SDK
+transport has that the CLI transport cannot support, because a CLI stream offers
+no channel an answer could travel back on. It acts on nobody: it reads no file,
+writes none, and runs no command, which is why adding it does not weaken the
+"two transports, one policy" rule. A test asserts the gap between the two
+profiles is exactly this one tool.
+
+Its input schema **was not in the SDK distribution** — the string does not occur
+anywhere in the published archive — so PR2 shipped a deliberately conservative
+reader and then settled the question with a supervised live spike. Two runs in
+the disposable `claude-sandbox` project, against a non-production daemon, with
+`tools=["AskUserQuestion"]` and no filesystem tool in the session at all.
+
+The observed input, captured sanitized — key names and **type names**, never a
+value:
+
+```json
+{"questions": [{"header": "str", "multiSelect": "bool",
+                "options": "list", "question": "str"}]}
+```
+
+Options carried `label` and `description`. **No `value` key was present**, which
+is why `read_question` falls back to the label — a guess before the spike, an
+observation after it.
+
+**The reader was not broadened.** The observed shape matched what this file
+already read, field for field. `header` is a real field the build deliberately
+ignores, and a test now says so, so a future change that starts reading it has to
+change that test.
+
+`question.SCHEMA_VERIFIED` is therefore `True`, `OBSERVED_SCHEMA` records the
+shape, and every stored clarification carries the value that was true when it was
+stored — a later build cannot retroactively claim yesterday's questions were
+verified, and PR2's own first spike run left rows saying `false`.
+
+**What the spike did not establish** is kept in `SCHEMA_EVIDENCE_OUTSTANDING`,
+because a verified schema is not a verified variant:
+
+- more than one question in a single tool input;
+- `multiSelect: true` — a genuinely multiple-choice question;
+- a question offering no options, answered as free text.
+
+The reader already handles all three conservatively. What is missing is evidence
+that the provider produces them, and a later spike that sees one should move it
+out of that tuple rather than widen any parsing.
+
+The reader is still allowed to fail. A shape it cannot defend produces **no
+clarification at all** — a bounded observation goes into the history instead and
+the agent is told nobody was asked. A missed question costs a task that keeps
+running with an activity line; an invented one shows somebody a question the
+agent never asked and then sends their answer to a model as though it had. Those
+two mistakes are not the same size.
+
+### What the spike found wrong
+
+One real defect, which is what a spike is for: the durable clarification row was
+being written with a **null `provider_session_id`**. The adapter had the id and
+never passed it, so the one piece of evidence that an answer resumed *the same*
+conversation was not being kept. `AdapterOutcome` now carries
+`clarification_session_id` and `clarification_sequence`, the core stores both,
+and a test asserts them.
+
+One cosmetic artifact, recorded rather than hidden: because Cofferdam answers by
+**declining** the question tool, the turn's tool result comes back as an error and
+the history shows a bounded `A tool reported an error.` line immediately after
+`An answer was delivered to Claude.` That is truthful — the tool genuinely did
+not run — and suppressing it would mean tracking `tool_use_id` through the
+normalizer to know which result belonged to the question.
+
+### Where a clarification comes from
+
+**Only from the permission callback**, never from the message stream. The rule:
+
+> A clarification event is created only where an answer can actually be
+> delivered.
+
+Nothing a reader of `receive_messages` can do will get an answer back to a
+blocked turn. PR1 produced one from the `ToolUseBlock` because there was no
+answer channel at all and recording the question somewhere beat losing it; now
+that there is one, doing both would give a task two pending questions for one
+thing the agent asked, only one of which could ever be answered. The message-block
+path records bounded activity and does not read the tool input.
+
+### How an answer is delivered
+
+As the `message` of a `PermissionResultDeny`. That is the conservative choice and
+it was made from what the source proves:
+
+- it uses only typed, documented API — the SDK turns it into
+  `{"behavior": "deny", "message": …}`, verified in `query.py`;
+- **it grants nothing.** The question tool never executes, so no unverified
+  interactive path is relied on inside a headless session;
+- the session is unchanged — same helper, same client, same provider session id —
+  so continuation is a property of not having torn anything down.
+
+What is *not* claimed: that allowing the tool with an updated input would also
+work. It might; it is unverified, it is unused, and there is no code that does it.
+
+### Two channels, not one
+
+`submit_answer` and `send_followup` are separate methods on the session boundary
+and reach the provider through entirely different channels. An answer resolves a
+question the agent is blocked on; a follow-up is a new instruction to a session
+waiting for nothing. A single method would have to decide which — from state, at
+the worst possible moment. Follow-up is still refused truthfully.
+
+### The durable model
+
+`cofferdam/workstation/tasks/clarifications.py`, provider-neutral, in Task Core.
+One new table in the **same** SQLite database — `task_clarifications`, schema
+version 2, additive only — rather than a second store.
+
+| Field | Note |
+|---|---|
+| `question_id` | Cofferdam-minted, random, opaque. Never derived from the question text or from a provider id. |
+| `task_id`, `provider` | |
+| `provider_session_id`, `provider_event_id`, `provider_sequence` | Kept for provenance; **not published to a client**. |
+| `question` | Bounded, sanitized, ≤1000 chars. |
+| `answer_mode` | `single_choice` · `multiple_choice` · `free_text` · `unknown` |
+| `options` | ≤8, each with a **Cofferdam-generated** `option_id` (`opt1`, `opt2`, …), a bounded label and an optional bounded description. |
+| `schema_verified` | What was known when this was stored. |
+| `requested_at`, `status`, `answered_at`, `answer` | |
+
+`status` is `pending` · `answered` · `cancelled` · `superseded`. The last two stay
+distinct on purpose: one means a person stopped the task, the other means the
+provider moved on, and somebody reading a history deserves to know which.
+
+Duplicate suppression is a **unique index** on `(task_id, provider_event_id)`,
+enforced by the database rather than by a check somebody has to remember.
+
+Malformed or oversized data fails truthfully. Too many questions, too many
+options, an option list that is present and unreadable, a question with no
+question in it — each is refused, and the task is unaffected because a refused
+question was never applied.
+
+### Answer provenance
+
+Every accepted answer records `actor`, a **source from a closed code-owned
+vocabulary**, `received_at`, the accepted/rejected outcome, the bounded answer,
+the resulting transition, and the provider/session identity of the question.
+
+Sources are `workstation_pwa`, `internal_test` and the reserved
+`future_gpt_bridge`. The last is in the vocabulary and **not** in
+`ACCEPTED_ANSWER_SOURCES`, so a route that tried to use it is refused.
+
+`source` is assigned by the route from the authenticated request context and is
+not a body field — a client choosing how its own answer is attributed is the
+opposite of what provenance is for. There is no display name, no header, no
+address, no user agent and no token, and no field one could be put in.
+
+The task history records the *shape* of an answer — "Answer received (1 option(s)
+chosen)" — and never its text, exactly as it already does for a follow-up.
+
+### What the provider actually receives
+
+`clarifications.encode_answer` is the only function that turns an accepted answer
+into text a model will read, and it is deliberately dull: Cofferdam's own
+connecting words, the labels of the options **Cofferdam itself stored** — reached
+through the identifiers the client sent, never through a string the client sent —
+and the person's own text, unaltered.
+
+There is no template read from a payload, no format string, no instruction
+sentence and nothing a client can put into the *structure* of the message rather
+than its content. This matters more here than anywhere else in the codebase: it is
+the one place where text that arrived over the network becomes text a language
+model acts on.
+
+### The lifecycle
+
+```
+running → waiting_for_user (clarification) → running → …terminal
+```
+
+Both edges already existed in Task Core's graph; PR2 added no state and no
+transition. Task Core remains the lifecycle authority — the adapter *reports* a
+question and the core decides whether the task may enter that state, mints the
+question id, and writes the row.
+
+**The question and the state change are one transaction.** `TaskStore.transition`
+takes `open_clarification` and `close_clarifications`, because a task saying
+`waiting_for_user` with no question, or a pending question on a task that says
+`cancelled`, is a disagreement between two rows a person would have to resolve by
+guessing.
+
+Held properties, each with a test:
+
+- one active clarification per provider turn;
+- a duplicate provider question event opens no second question;
+- a stale, superseded or already-answered question cannot be answered;
+- an answer cannot target another task — the lookup is scoped in the query, so a
+  question id from elsewhere simply does not match;
+- cancelling a waiting task closes its question as `cancelled`;
+- an answer after cancellation is refused and never reaches the provider;
+- a late provider result cannot resurrect a cancelled task;
+- an answer the provider did not take is a **refusal**, and the question stays
+  open — recording it would show somebody their answer accepted while the agent
+  sat waiting for it.
+
+### Restart, honestly
+
+A restart while a task is waiting produces `interrupted`, and the question is
+closed as `superseded` **in the same write**.
+
+That is not a limitation being worked around. The session that asked was a
+process, that process is gone, and nothing anybody typed now could reach it.
+Leaving the question `pending` would put a task in the "needs you" bucket with an
+answer box whose only possible outcome is a refusal — which is exactly the false
+claim `interrupted` exists to avoid.
+
+No adapter claims `recover_after_restart`. Cross-process session resume by id
+(`options.resume`) exists in the SDK and is **not used**: it is a separate,
+evidence-backed path and this build has no evidence for it.
+
+### The authenticated routes
+
+```
+GET  /api/tasks/{task_id}/clarifications
+POST /api/tasks/{task_id}/clarifications/{question_id}/answer
+```
+
+Both require the device token. The answer body accepts exactly two fields —
+`answer` and `option_ids` — and an unexpected key is **refused, not ignored**.
+There is no field for a session id, a project, a path, a tool, a command, a
+permission mode or an allow/deny decision, and a body carrying one is refused
+twice: once by the route's allowlist and again by name inside
+`ClarificationAnswer.from_request`.
+
+The list response carries no provider session id, no provider event id, no tool
+input and no filesystem path.
+
+Status codes: `404` unknown question (the same answer whether it never existed or
+belongs to another task), `409` already closed, `422` an answer that does not fit
+or an adapter that does not ask questions, `502` accepted-but-not-delivered.
+
+**There is no approval route.** Not a disabled one, not a stubbed one that always
+refuses — none. And no generic "answer a request" endpoint shared by both
+categories, because that would put the entire distinction inside a single `if`.
 
 ## Where the asynchrony lives
 
-The SDK is `anyio`-based; Task Core is synchronous. One thread per task owns one
-event loop which owns one `ClaudeSDKClient`. The adapter is written against a
-small synchronous boundary — `start`, `drain`, `request_cancel`, `close` — so
-every behaviour worth testing is testable with a double and without a subprocess.
+The SDK is `anyio`-based; Task Core is synchronous. **Inside the helper**, one
+thread owns one event loop which owns one `ClaudeSDKClient`. **In the daemon**,
+`HostSession` presents the same small synchronous boundary — `start`, `drain`,
+`submit_answer`, `request_cancel`, `close` — so from the adapter's point of view
+an out-of-process session and an in-process one are the same object, and every
+behaviour worth testing is testable with a double and without a subprocess.
+
+A blocked question does not stall anything. The SDK dispatches control requests
+with `spawn_detached`, so the callback awaits an `asyncio.Event` while messages
+keep arriving and `interrupt()` keeps working. A cancel wakes it before doing
+anything else, so a callback is never left waiting inside a session being torn
+down.
 
 The reader stops at the first terminal event, disconnects, and the thread exits.
-That is what keeps "no unbounded background task" true rather than intended, and
-it is also why there is no same-session follow-up yet: keeping a session alive
-for another turn is a different lifetime with different failure modes.
+That is what keeps "no unbounded background task" true rather than intended.
 
-Bounds everywhere: a 90 s start, a 15 s cancel, a 20 s close, and a 500-event
-buffer that drops its oldest rather than growing.
+Bounds everywhere: a 90 s start, a 60 s helper-ready wait, a 120 s session start,
+a 15 s cancel, a 20 s close, a 20-minute question timeout, at most eight questions
+per session, a 6-hour helper lifetime ceiling, a 96 KB protocol line, and a
+500-event buffer at each end that drops its oldest rather than growing. A question
+nobody answers within the timeout is **declined truthfully** — the agent is told
+nobody answered — rather than answered with a guess.
 
 ## Cancellation
 
 Task Core remains the authority. `cancel_task` writes `cancellation_requested`
-into the history first, then asks the adapter, which calls the SDK's own
+into the history first, then asks the adapter, which sends a `cancel` command
+down the pipe to *this* task's own helper, which calls the SDK's own
 `interrupt()` on the loop that owns *this* task's client. No signal, no pid, no
 process lookup, no name matching — so "cancel cannot reach another task" is
-structural rather than checked.
+structural rather than checked. The only escalation to a signal is `close()`
+stopping the child object its own `Popen` returned: `terminate` then `kill`, as
+methods on that object, never `os.kill` and never a pid.
 
+- A cancel closes any question that was open, in the same act, so nobody is left
+  looking at an answer box for a task that is stopping.
 - A cancel that did not land is a **refusal**, not a claimed `cancelled`. The
   core leaves the task `cancelling`.
 - A result that had already arrived **wins** over a cancel that arrives after it,
@@ -301,21 +666,48 @@ What exists is the boundary, produced now rather than invented later at the edge
 
 ## Tests
 
-`tests/test_delegated_events.py` and `tests/test_agent_sdk_adapter.py`, plus
-sanitized doubles in `tests/_agent_sdk_doubles.py` whose class and attribute
-names were read from the published distribution — a double that got one wrong
-would let the suite pass while the real stream produced nothing.
+`tests/test_delegated_events.py`, `tests/test_agent_sdk_adapter.py` and
+`tests/test_task_clarifications.py`, plus sanitized doubles in
+`tests/_agent_sdk_doubles.py` whose class and attribute names were read from the
+published distribution — a double that got one wrong would let the suite pass
+while the real stream produced nothing.
+
+PR2 adds 127 focused tests across the environment boundary, the conservative
+schema reader, the bounded observer, clarification/approval separation, the
+lifecycle, provenance, answer encoding, the helper protocol, same-session
+routing, and the two authenticated routes. Three structural guards were made
+*narrower* rather than looser: the package may now spawn exactly one process,
+from exactly one file, with an argument vector and environment asserted from the
+syntax tree — and a new guard fails if any module in the package ever passes
+`os.environ` to anything.
 
 No test calls Anthropic, consumes model usage, requires a login, touches the
 network, starts a subprocess, reads a transcript, modifies the live registry or
 restarts anything.
 
-What the tests do **not** prove, said plainly: that the real session driver works
-against a real SDK. That is evidenced by the published source, and would be
-evidenced further by a supervised live spike recorded in a pull request.
+The live spike settled three things the tests could not: that `can_use_tool`
+fires for `AskUserQuestion`, that the input arrives in the shape this build
+reads, and that the real helper drives a real SDK through a complete round trip.
+`OBSERVED_LIVE_SHAPE` in the test file reconstructs the observed structure with
+invented content, so the reader is now tested against the real field names.
+
+What the tests still do **not** prove, said plainly:
+
+- the three unobserved variants in `SCHEMA_EVIDENCE_OUTSTANDING`;
+- anything about production. The spike ran on a non-production daemon, and no
+  claim is made about the live service.
 
 ## Rollback
 
 Revert the PR. The adapter is off by default, the Claude Code adapter is
 unchanged and remains available, and no production unit, registry entry or
-database migration was touched.
+drop-in was touched.
+
+The one thing a revert does not undo is the **schema version**, which PR2 moved
+from 1 to 2 by adding `task_clarifications`. That is survivable in the direction
+that matters: the change is additive, no existing table moved or changed type, and
+an older build opening the database finds every table it knows about exactly as it
+left them. It will still *refuse* to open it, deliberately — a build that cannot
+see pending questions should not be quietly answering tasks that have them — so a
+rollback that must reopen an upgraded database needs the version row set back to
+`1` by hand.

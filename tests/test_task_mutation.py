@@ -471,23 +471,60 @@ class CancellationGuard(TaskTestCase):
         self.assertNotIn(second.task_id, scripted.cancelled)
         self.assertNotEqual(self.store.get(second.task_id).state, STATE_CANCELLED)
 
+    #: The files allowed to know a process exists, and nothing else is.
+    #:
+    #: ``claude_code`` because that adapter *is* a process launcher, for the
+    #: reason given on the matching guard in ``tests/test_task_core.py``.
+    #: ``hostclient.py`` because M2I PR2 runs the Agent SDK inside a helper
+    #: Cofferdam launches with a bounded environment — the SDK offers no way to
+    #: replace an inherited one, so owning the spawn is how an agent stops
+    #: inheriting the daemon's secrets.
+    #:
+    #: Both are *adapters*. The point of this guard was never "one file": it is
+    #: that Task Core's lifecycle, store, models, errors and service cannot reach
+    #: a process, and that is still exactly true.
+    PROCESS_AWARE_FILES = ("hostclient.py",)
+
     def test_no_broad_process_vocabulary_exists_in_task_core(self):
         """Structural: there is nothing here that *could* kill by name.
 
-        The adapter package is excepted for the reason given on the matching
-        guard in ``tests/test_task_core.py``, and the two words that make this
-        guard about *breadth* rather than about processes — ``pkill`` and
-        ``killall`` — are still forbidden there too, by
-        ``test_adapter_never_matches_a_process_by_name``. Nothing in this
-        repository may kill by name, in any directory.
+        The two words that make this guard about *breadth* rather than about
+        processes — ``pkill`` and ``killall`` — are forbidden **everywhere**,
+        including in the excepted files, and are checked separately below.
+        Nothing in this repository may kill by name, in any directory.
         """
         package = REPO_ROOT / "cofferdam" / "workstation" / "tasks"
         for path in sorted(package.rglob("*.py")):
-            if "claude_code" in path.parts:
-                continue
             source = python_code_only(path.read_text("utf-8"))
-            for forbidden in ("pkill", "killall", "os.kill", "signal", "subprocess"):
+            # No exception, in any file, ever. This is the breadth rule.
+            for never in ("pkill", "killall"):
+                self.assertNotIn(never, source, str(path) + " uses " + never)
+            if "claude_code" in path.parts or path.name in self.PROCESS_AWARE_FILES:
+                continue
+            for forbidden in ("os.kill", "signal", "subprocess"):
                 self.assertNotIn(forbidden, source, str(path) + " uses " + forbidden)
+
+    def test_the_agent_sdk_launcher_signals_only_its_own_child(self):
+        """The excepted file stops a process it holds, never one it looked up.
+
+        ``terminate`` and ``kill`` are called as **methods on the object that
+        ``Popen`` returned**, so the thing being stopped is by construction the
+        thing this object started. There is no ``os.kill``, no ``killpg``, no pid
+        arithmetic and no name matching — so "cancel cannot reach another task"
+        stays structural in the new file too.
+        """
+        launcher = (
+            REPO_ROOT
+            / "cofferdam"
+            / "workstation"
+            / "tasks"
+            / "adapters"
+            / "claude_agent_sdk"
+            / "hostclient.py"
+        )
+        source = python_code_only(launcher.read_text("utf-8"))
+        for forbidden in ("os.kill", "killpg", "getpgid", "psutil", "/proc"):
+            self.assertNotIn(forbidden, source, "hostclient.py uses " + forbidden)
 
 
 # -- 8. prompt content entering audit or log output --------------------------
@@ -553,7 +590,17 @@ class ContentLeakGuard(TaskTestCase):
                 forbidden_here = ("logging", "logger", "journal", "syslog")
             else:
                 forbidden_here = ("logging", "logger", "print(")
-                if "claude_code" not in path.parts:
+                # The Agent SDK helper and its launcher name a *pipe* when they
+                # say `stdout`, exactly as the Claude Code adapter does. For the
+                # helper it is the protocol channel to its parent, and it is the
+                # reason there is no `print(` anywhere in that file: anything
+                # printed would corrupt a frame. `logging` and `logger` stay
+                # forbidden in both, which is the half this test is named for.
+                pipe_owners = ("host.py", "hostclient.py")
+                if (
+                    "claude_code" not in path.parts
+                    and path.name not in pipe_owners
+                ):
                     forbidden_here += ("stdout", "stderr")
             for forbidden in forbidden_here:
                 self.assertNotIn(forbidden, source, str(path) + " uses " + forbidden)

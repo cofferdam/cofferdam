@@ -338,9 +338,186 @@ class FakeSession(DelegatedSession):
         return self._finished
 
 
+# -- helper-process doubles --------------------------------------------------
+
+
+class _FakeStdin:
+    """The write half of a pipe, recording whole protocol lines."""
+
+    def __init__(self, helper: "FakeHelperProcess") -> None:
+        self._helper = helper
+        self.closed = False
+
+    def write(self, data: str) -> int:
+        if self.closed:
+            raise OSError("closed")
+        self._helper.received.append(data)
+        self._helper.handle(data)
+        return len(data)
+
+    def flush(self) -> None:
+        if self.closed:
+            raise OSError("closed")
+
+    def close(self) -> None:
+        self.closed = True
+        self._helper.finish()
+
+
+class _FakeStdout:
+    """The read half, iterated by the parent's reader thread until it ends."""
+
+    def __init__(self, helper: "FakeHelperProcess") -> None:
+        self._helper = helper
+
+    def __iter__(self):
+        while True:
+            line = self._helper.queue.get()
+            if line is None:
+                return
+            yield line
+
+
+class FakeHelperProcess:
+    """A helper that speaks :mod:`.hostproto` without being a process.
+
+    Everything the parent side does — the two acknowledgements, event framing,
+    answer routing, close escalation — is exercised against this, so the whole
+    of ``hostclient.py`` is testable on a machine with no SDK, no CLI and no
+    subprocess. What it cannot prove is that the *real* helper drives the SDK
+    correctly; that is what the option-policy tests and a supervised live spike
+    are for, and saying so here is more useful than pretending otherwise.
+
+    ``session_id`` is reported at start and never changes, so a test can assert
+    that answering a question does not begin a new provider session.
+    """
+
+    def __init__(
+        self,
+        *,
+        session_id: str = "sess-1",
+        ready: bool = True,
+        error: Optional[str] = None,
+        question_token: Optional[str] = None,
+    ) -> None:
+        import queue as _queue
+
+        from cofferdam.workstation.tasks.adapters.claude_agent_sdk import hostproto
+
+        self._hostproto = hostproto
+        self.queue: "_queue.Queue" = _queue.Queue()
+        self.session_id = session_id
+        self.received: List[str] = []
+        self.answers: List[Dict[str, Any]] = []
+        self.cancelled = 0
+        self.closed = 0
+        self.terminated = 0
+        self.killed = 0
+        self.returncode: Optional[int] = None
+        self._question_token = question_token
+        self._error = error
+        self.stdin = _FakeStdin(self)
+        self.stdout = _FakeStdout(self)
+        if ready:
+            self.emit(hostproto.message(hostproto.MESSAGE_READY))
+        if error is not None:
+            self.emit(hostproto.message(hostproto.MESSAGE_ERROR, detail=error))
+
+    # -- speaking ------------------------------------------------------------
+
+    def emit(self, payload: Dict[str, Any]) -> None:
+        self.queue.put(self._hostproto.encode_line(payload))
+
+    def emit_event(self, event: DelegatedEvent) -> None:
+        self.emit(self._hostproto.event_payload(event))
+
+    def finish(self) -> None:
+        self.queue.put(None)
+
+    # -- listening -----------------------------------------------------------
+
+    def handle(self, raw: str) -> None:
+        parsed = self._hostproto.decode_line(raw)
+        if parsed is None:
+            return
+        name = parsed.get("command")
+        if name == self._hostproto.COMMAND_START:
+            if self._error is not None:
+                return
+            self.emit(
+                self._hostproto.message(
+                    self._hostproto.MESSAGE_STARTED,
+                    provider_session_id=self.session_id,
+                )
+            )
+            if self._question_token is not None:
+                self.emit_event(self._clarification())
+        elif name == self._hostproto.COMMAND_ANSWER:
+            self.answers.append(
+                {"token": parsed.get("token"), "answer": parsed.get("answer")}
+            )
+        elif name == self._hostproto.COMMAND_CANCEL:
+            self.cancelled += 1
+        elif name == self._hostproto.COMMAND_CLOSE:
+            self.closed += 1
+
+    def _clarification(self) -> DelegatedEvent:
+        from cofferdam.workstation.tasks.delegated import (
+            KIND_CLARIFICATION_REQUESTED,
+            ClarificationRequest,
+            build_event,
+        )
+
+        return build_event(
+            kind=KIND_CLARIFICATION_REQUESTED,
+            provider="claude-agent-sdk",
+            provider_sequence=1,
+            observed_at="2026-08-09T00:00:00Z",
+            provider_session_id=self.session_id,
+            provider_event_id=self._question_token,
+            text="Which label?",
+            clarification=ClarificationRequest.from_dict(
+                {
+                    "category": "clarification",
+                    "question": "Which label?",
+                    "options": [
+                        {"label": "alpha", "value": "alpha", "option_id": "opt1"},
+                        {"label": "beta", "value": "beta", "option_id": "opt2"},
+                    ],
+                    "answer_mode": "single_choice",
+                }
+            ),
+        )
+
+    # -- the Popen surface ---------------------------------------------------
+
+    def wait(self, timeout: Optional[float] = None) -> int:
+        if self.returncode is None:
+            # Nothing has stopped it: report the timeout a real one would, so
+            # the parent's escalation is genuinely exercised.
+            raise TimeoutError("still running")
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminated += 1
+        self.returncode = -15
+        self.finish()
+
+    def kill(self) -> None:  # pragma: no cover - reached only if terminate fails
+        self.killed += 1
+        self.returncode = -9
+        self.finish()
+
+    def exit(self, code: int = 0) -> None:
+        """Let the helper stop of its own accord."""
+        self.returncode = code
+        self.finish()
+
+
 __all__ = [
     "AssistantMessage",
     "FakeClaudeAgentOptions",
+    "FakeHelperProcess",
     "FakePermissionResultDeny",
     "FakeSdkModule",
     "FakeSession",

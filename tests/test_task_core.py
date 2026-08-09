@@ -62,6 +62,7 @@ from cofferdam.workstation.tasks.projects import (
     load_projects,
     verify_root,
 )
+from cofferdam.workstation.tasks import store as store_module
 from cofferdam.workstation.tasks.store import TaskStore, database_permissions
 
 from ._task_doubles import (
@@ -590,7 +591,50 @@ class TransactionalStorage(TaskTestCase):
             ).fetchone()
         finally:
             connection.close()
-        self.assertEqual(int(row[0]), 1)
+        self.assertEqual(int(row[0]), store_module.SCHEMA_VERSION)
+        # Pinned as a literal too, so a bump is a deliberate edit here rather
+        # than a test that follows whatever the code says.
+        self.assertEqual(store_module.SCHEMA_VERSION, 2)
+
+    def test_an_older_database_gains_the_new_tables_and_records_the_version(self):
+        """M2I PR2's upgrade, which is additive and therefore a create-if-absent.
+
+        Written as a real version-1 database — the version row set back, the new
+        table dropped — rather than as a mock, because the thing under test is
+        what SQLite does when the schema script runs against an existing file.
+        """
+        self.create()
+        connection = sqlite3.connect(str(self.store.path))
+        try:
+            connection.execute("DROP TABLE task_clarifications")
+            connection.execute(
+                "UPDATE schema_meta SET value = '1' WHERE key = 'schema_version'"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        self.store.close()
+
+        # Reopening runs the schema script and the version check.
+        self.store.counts_by_state()
+        connection = sqlite3.connect(str(self.store.path))
+        try:
+            recorded = connection.execute(
+                "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+            ).fetchone()
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+        finally:
+            connection.close()
+        self.assertEqual(int(recorded[0]), store_module.SCHEMA_VERSION)
+        self.assertIn("task_clarifications", tables)
+        # The upgrade added a table and touched nothing else.
+        self.assertIn("tasks", tables)
+        self.assertIn("task_events", tables)
 
     def test_a_newer_schema_is_refused_rather_than_migrated_backwards(self):
         self.create()
@@ -919,18 +963,31 @@ class Cancellation(TaskTestCase):
         """
         package = REPO_ROOT / "cofferdam" / "workstation" / "tasks"
         for path in sorted(package.rglob("*.py")):
+            source = python_code_only(path.read_text("utf-8"))
+            # Never, in any file, including the excepted ones. These are the
+            # words that make a stop *broad* rather than targeted, and breadth is
+            # what this guard is actually about.
+            for never in ("pkill", "killall", "psutil"):
+                self.assertNotIn(never, source, str(path) + " uses " + never)
             if "claude_code" in path.parts:
                 continue
-            source = python_code_only(path.read_text("utf-8"))
+            # The Agent SDK launcher (M2I PR2) owns one child process, for the
+            # same reason the CLI adapter owns one: the SDK cannot be given a
+            # bounded environment any other way. Its replacement rule is
+            # stricter than what it gives up and lives in
+            # ``tests/test_task_mutation.py`` — it may stop only the object
+            # ``Popen`` returned, so there is no pid, no group and no name to get
+            # wrong, and ``os.kill`` stays forbidden to it below.
+            if path.name == "hostclient.py":
+                for still_forbidden in ("os.kill", "signal.", "SIGTERM", "SIGKILL"):
+                    self.assertNotIn(still_forbidden, source, str(path))
+                continue
             for forbidden in (
-                "pkill",
-                "killall",
                 "os.kill",
                 "signal.",
                 "SIGTERM",
                 "SIGKILL",
                 "terminate()",
-                "psutil",
                 "subprocess",
             ):
                 self.assertNotIn(forbidden, source, str(path) + " uses " + forbidden)
@@ -1289,8 +1346,44 @@ class LayerSeparation(unittest.TestCase):
         package = REPO_ROOT / "cofferdam" / "workstation" / "tasks"
         for path in sorted(package.rglob("*.py")):
             source = python_code_only(path.read_text("utf-8")).lower()
-            for forbidden in ("api_key", "openai", "completion(", "chat.completions"):
+            forbidden_here = ("api_key", "openai", "completion(", "chat.completions")
+            if path.name == "hostenv.py":
+                # The one file that names credential variables **in order to
+                # exclude them**. Its ``EXCLUDED_ENVIRONMENT_NAMES`` lists
+                # ``ANTHROPIC_API_KEY``, ``OPENAI_API_KEY`` and the rest so a
+                # reader asking "is my key in there" gets a list saying no rather
+                # than having to reason about the absence of an entry.
+                #
+                # A word-scan cannot tell "uses a key" from "refuses a key", so
+                # the substantive property is asserted directly instead: nothing
+                # in that file requests anything.
+                forbidden_here = ("completion(", "chat.completions", "http", "requests.")
+            for forbidden in forbidden_here:
                 self.assertNotIn(forbidden, source, str(path))
+
+    def test_the_environment_allowlist_names_keys_only_to_exclude_them(self):
+        """The exemption above, paid for: every credential name is on the deny list.
+
+        A scan cannot distinguish naming a key from using one, so this asserts
+        the distinction by hand — each credential-shaped name appears in
+        ``EXCLUDED_ENVIRONMENT_NAMES`` and in **neither** of the two tuples that
+        decide what a child actually receives.
+        """
+        from cofferdam.workstation.tasks.adapters.claude_agent_sdk import hostenv
+
+        credential_shaped = [
+            name
+            for name in hostenv.EXCLUDED_ENVIRONMENT_NAMES
+            if any(
+                word in name.lower()
+                for word in ("key", "token", "secret", "password", "authkey")
+            )
+        ]
+        self.assertGreater(len(credential_shaped), 8)
+        for name in credential_shaped:
+            self.assertNotIn(name, hostenv.CHILD_ENVIRONMENT_ALLOWLIST)
+            self.assertNotIn(name, hostenv.CHILD_ENVIRONMENT_FORCED)
+            self.assertNotIn(name, hostenv.permitted_names())
 
 
 if __name__ == "__main__":  # pragma: no cover

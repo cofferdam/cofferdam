@@ -101,10 +101,21 @@ class NoShellExecutionTests(unittest.TestCase):
         ``sessions/wrapper.py`` (M2H PR2) runs the native Remote Control child
         and reads its stdout, which is the only way to capture the session link —
         an ``execv`` replacement, which is what PR1 used, has nothing left to
-        read with. The property
-        being protected is not "one file" — it is that a request handler, a
-        model, the store, or the service layer can never reach a process, and
-        that is still exactly true.
+        read with.
+
+        ``claude_agent_sdk/hostclient.py`` (M2I PR2) starts the helper process
+        the Agent SDK runs inside. It is here for a reason worth stating rather
+        than waving at: the SDK builds its child's environment as
+        ``{**os.environ, …, **options.env}``, so there is no supported way to
+        hand it a complete environment — and the way to stop an agent inheriting
+        the daemon's secrets is for Cofferdam to own the spawn and pass an
+        allowlist. The argv is three constants, the environment is built by
+        selection in ``hostenv.py``, and ``tests/test_agent_sdk_adapter.py``
+        asserts both from the syntax tree.
+
+        The property being protected is not "one file" — it is that a request
+        handler, a model, the store, or the service layer can never reach a
+        process, and that is still exactly true.
 
         The companion guard above still applies to every one of these files:
         ``shell=`` must be ``False``, and ``os.system``/``os.popen`` are absent
@@ -117,6 +128,8 @@ class NoShellExecutionTests(unittest.TestCase):
             if "claude_code" in path.parts:
                 continue
             if path.name == "wrapper.py" and path.parent.name == "sessions":
+                continue
+            if path.name == "hostclient.py" and path.parent.name == "claude_agent_sdk":
                 continue
             source = path.read_text(encoding="utf-8")
             if "subprocess." in source:

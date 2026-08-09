@@ -50,6 +50,23 @@ CODE_CANCEL_UNSUPPORTED = "task_cancel_unsupported"
 CODE_ADAPTER_FAILED = "task_adapter_failed"
 CODE_STORE_UNAVAILABLE = "task_store_unavailable"
 
+# -- clarifications ----------------------------------------------------------
+#
+# Five codes for one small surface, and each one sends somebody somewhere
+# different. "That question is not open any more" and "that answer is not the
+# shape the question wanted" are the same HTTP status and completely different
+# problems — one means reload, the other means retype.
+#
+# None of them is a tool-approval code, and there is no tool-approval code in
+# this module at all. A tool approval is not refused through this API; it has no
+# route to be refused *by*.
+
+CODE_CLARIFICATION_UNKNOWN = "task_clarification_unknown"
+CODE_CLARIFICATION_CLOSED = "task_clarification_closed"
+CODE_CLARIFICATION_INVALID = "task_clarification_invalid"
+CODE_CLARIFICATION_UNSUPPORTED = "task_clarification_unsupported"
+CODE_CLARIFICATION_NOT_DELIVERED = "task_clarification_not_delivered"
+
 
 class TaskError(Exception):
     """A refusal a person should see, with a stable code to branch on.
@@ -227,6 +244,82 @@ class AdapterFailed(TaskError):
         )
 
 
+class ClarificationUnknown(TaskError):
+    """No such question on that task.
+
+    Deliberately the same answer for "that id does not exist" and "that id
+    belongs to a different task", because they are the same fact from the
+    client's side and distinguishing them would let somebody learn which
+    question ids exist elsewhere by watching which refusal came back.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            CODE_CLARIFICATION_UNKNOWN,
+            "no such question on this task",
+            "it may already have been cleared, or it belongs to another task",
+        )
+
+
+class ClarificationClosed(TaskError):
+    """That question is no longer waiting for an answer."""
+
+    def __init__(self, status: str) -> None:
+        super().__init__(
+            CODE_CLARIFICATION_CLOSED,
+            "that question is already " + status,
+            "a question is answered once; open the task to see what happened next",
+        )
+        self.status = status
+
+
+class ClarificationAnswerInvalid(TaskError):
+    """The answer was not the shape the question asked for.
+
+    Its detail is the only place a clarification refusal explains itself in more
+    than a sentence, and it never repeats the submitted answer back — an error
+    response that echoed rejected input would be a way to get arbitrary text into
+    whatever renders it.
+    """
+
+    def __init__(self, detail: Optional[str] = None) -> None:
+        super().__init__(
+            CODE_CLARIFICATION_INVALID, "that answer cannot be accepted", detail
+        )
+
+
+class ClarificationUnsupported(TaskError):
+    """This task's adapter does not ask questions, so it cannot be answered."""
+
+    def __init__(self, adapter_id: str) -> None:
+        super().__init__(
+            CODE_CLARIFICATION_UNSUPPORTED,
+            "that adapter does not ask questions",
+            "the " + adapter_id + " adapter declares no clarification capability",
+        )
+
+
+class ClarificationNotDelivered(TaskError):
+    """The answer was valid and the provider did not take it.
+
+    A refusal rather than a silent success, and the task is left where it is.
+    Recording a question as answered when the session never received the answer
+    would be the false success this design exists to refuse — the person would
+    see their answer accepted and the agent would sit there waiting for it.
+    """
+
+    def __init__(self) -> None:
+        # No product named, and that is a rule rather than a style choice: this
+        # module is provider-neutral and a guard asserts it. Which agent was
+        # asked is the adapter's business, and a sentence naming one would have
+        # to be rewritten for every transport that ever reaches this code.
+        super().__init__(
+            CODE_CLARIFICATION_NOT_DELIVERED,
+            "the agent did not take that answer",
+            "the session may have moved on or stopped; open the task to see",
+        )
+
+
 class StoreUnavailable(TaskError):
     def __init__(self, detail: Optional[str] = None) -> None:
         super().__init__(
@@ -242,6 +335,11 @@ __all__ = [
     "CODE_ADAPTER_NOT_PERMITTED",
     "CODE_ADAPTER_UNKNOWN",
     "CODE_CANCEL_UNSUPPORTED",
+    "CODE_CLARIFICATION_CLOSED",
+    "CODE_CLARIFICATION_INVALID",
+    "CODE_CLARIFICATION_NOT_DELIVERED",
+    "CODE_CLARIFICATION_UNKNOWN",
+    "CODE_CLARIFICATION_UNSUPPORTED",
     "CODE_FOLLOWUP_INVALID",
     "CODE_FOLLOWUP_NOT_WAITING",
     "CODE_FOLLOWUP_UNSUPPORTED",
@@ -259,6 +357,11 @@ __all__ = [
     "AdapterNotPermitted",
     "AdapterUnknown",
     "CancelUnsupported",
+    "ClarificationAnswerInvalid",
+    "ClarificationClosed",
+    "ClarificationNotDelivered",
+    "ClarificationUnknown",
+    "ClarificationUnsupported",
     "FollowupInvalid",
     "FollowupNotWaiting",
     "FollowupUnsupported",
