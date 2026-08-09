@@ -316,6 +316,13 @@ class ClaudeAgentSdkAdapter(TaskAdapter):
                     waiting_reason=WAITING_CLARIFICATION,
                     clarification=asked.clarification,
                     clarification_token=asked.provider_event_id,
+                    # Taken from the event rather than from the session object,
+                    # so the id stored against the question is the one that was
+                    # true when the question was asked.
+                    clarification_session_id=(
+                        asked.provider_session_id or session.provider_session_id
+                    ),
+                    clarification_sequence=asked.provider_sequence,
                 )
             if session.finished:
                 # The session ended without ever producing a result. Exit is not

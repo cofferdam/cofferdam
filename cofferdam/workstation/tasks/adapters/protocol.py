@@ -194,6 +194,20 @@ class AdapterOutcome:
     #: identifier serving both namespaces would let a value a client has seen be
     #: used to address a provider session.
     clarification_token: Optional[str] = None
+    #: The provider session the question was asked in, for the durable record.
+    #:
+    #: Reported rather than inferred, and stored rather than looked up, because
+    #: it is the evidence that an answer resumed *the same* conversation. A
+    #: question whose session id is missing is a question whose continuation
+    #: nobody can check afterwards — which the M2I PR2 live spike found the hard
+    #: way, by producing exactly that.
+    #:
+    #: It is never published to a client: a handle to a live agent conversation
+    #: has no business in a response a bridge might one day relay.
+    clarification_session_id: Optional[str] = None
+    #: The provider's own ordering for that question, kept so a reader can tell
+    #: whether two questions arrived in the order they happened.
+    clarification_sequence: int = 0
 
     @property
     def actor(self) -> str:

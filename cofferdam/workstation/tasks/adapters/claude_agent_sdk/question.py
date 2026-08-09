@@ -66,15 +66,65 @@ QUESTION_TOOL_NAMES: Tuple[str, ...] = ("AskUserQuestion",)
 #: Whether the input schema behind :data:`QUESTION_TOOL_NAMES` has been observed
 #: against a real provider session.
 #:
-#: ``False`` in this build, and it is load-bearing rather than decorative: the
-#: adapter reports it in its capability description, the documentation quotes it,
-#: and a clarification produced while it is ``False`` is marked as coming from an
-#: unverified schema. A live spike flips it, and flipping it without one would be
-#: the single most dishonest edit somebody could make to this package.
-SCHEMA_VERIFIED = False
+#: ``True`` as of the M2I PR2 supervised live spike, recorded in pull request #29.
+#: It is load-bearing rather than decorative: the adapter reports it in its
+#: capability description, and every stored clarification carries the value that
+#: was true when it was stored. Setting it without a spike would be the single
+#: most dishonest edit somebody could make to this package.
+#:
+#: **What the spike established.** Two runs in the disposable ``claude-sandbox``
+#: project, against a non-production daemon, with ``tools=["AskUserQuestion"]``
+#: and no filesystem tool in the session at all. The tool arrived under exactly
+#: that name, its input matched :data:`OBSERVED_SCHEMA` in both runs, the reader
+#: below read it without modification, and the answer resumed the same provider
+#: session through to a terminal result.
+#:
+#: **The reader was not broadened.** The observed schema matched what this file
+#: already read — ``questions`` → ``question`` / ``options`` / ``multiSelect``,
+#: options carrying ``label`` and ``description``. Nothing here was widened to
+#: fit, which is the only honest thing a spike can produce when its finding is
+#: "you were right".
+SCHEMA_VERIFIED = True
 
-#: What a live spike must establish before :data:`SCHEMA_VERIFIED` may change.
-#: Written as data so the spike has a checklist and the pull request has a table.
+#: The sanitized shape observed during that spike: key names and **type names**,
+#: never a value. This is the fixture, and it is the whole of what was retained
+#: from a real provider payload.
+#:
+#: ``options`` is recorded as ``list`` because the shape walker's depth bound
+#: stops there; the entries' own field names — ``label`` and ``description`` —
+#: are known from the normalized clarification the same run produced, and both
+#: are named in :data:`OBSERVED_OPTION_FIELDS`.
+OBSERVED_SCHEMA: Dict[str, Any] = {
+    "questions": [
+        {
+            "header": "str",
+            "multiSelect": "bool",
+            "options": "list",
+            "question": "str",
+        }
+    ]
+}
+
+#: The option fields the same runs produced. No ``value`` key was present, which
+#: is why :func:`read_question` falls back to the label — a fallback that was a
+#: guess before the spike and is an observation after it.
+OBSERVED_OPTION_FIELDS: Tuple[str, ...] = ("label", "description")
+
+#: What the spike did **not** establish, kept so the claim above stays bounded.
+#:
+#: Each of these is a variant the runs did not exercise, not a gap in the shape.
+#: The reader already handles them conservatively; what is missing is evidence
+#: that the provider produces them, and a later spike that sees one should move
+#: it out of this tuple rather than widen any parsing.
+SCHEMA_EVIDENCE_OUTSTANDING: Tuple[str, ...] = (
+    "more than one question in a single tool input",
+    "multiSelect true — a genuinely multiple-choice question",
+    "a question offering no options, answered as free text",
+)
+
+#: What a live spike must establish. Retained as the checklist the spike ran
+#: against; the three entries still open are named in
+#: :data:`SCHEMA_EVIDENCE_OUTSTANDING`.
 SCHEMA_EVIDENCE_REQUIRED: Tuple[str, ...] = (
     "the exact tool name",
     "the exact bounded top-level input shape",
@@ -197,8 +247,61 @@ class ToolInputObservation:
         )
 
 
+#: How deep :func:`describe_shape` will walk. Three is enough for the shapes
+#: this build can read — an input, a question, an option — and a bound rather
+#: than a recursion guard, because a provider sending a deeply nested structure
+#: is a provider whose input is not being read anyway.
+MAX_SHAPE_DEPTH = 3
+
+#: How many keys and how many list entries are described at each level.
+MAX_SHAPE_KEYS = 16
+MAX_SHAPE_ENTRIES = 3
+
+
 def is_question_tool(tool_name: Any) -> bool:
     return isinstance(tool_name, str) and tool_name in QUESTION_TOOL_NAMES
+
+
+def describe_shape(payload: Any, *, depth: int = 0) -> Any:
+    """A recursive description of a payload's **shape**, with no value in it.
+
+    Where :func:`observe` answers "what arrived, roughly", this answers "what is
+    the schema" — and it is the function a supervised live spike uses to settle
+    :data:`SCHEMA_VERIFIED` without a single character of provider or user
+    content being written down.
+
+    Every leaf is a **type name**. A string becomes ``"str"``, never the string;
+    a number becomes ``"int"``, never the number. A dictionary becomes a
+    dictionary of the same keys mapped to their children's shapes, so key names
+    survive — a key name is schema, and it is the part somebody needs in order to
+    write a reader. A list becomes a one-element list holding the shape of its
+    first few entries, merged, because the interesting fact about a list of
+    options is what an option looks like rather than how the third one differs
+    from the second.
+
+    Bounded in depth, in key count and in entry count, so a hostile or merely
+    enormous input describes to something small.
+    """
+    if depth >= MAX_SHAPE_DEPTH:
+        return type(payload).__name__
+    if isinstance(payload, dict):
+        described = {}
+        for key in sorted(payload)[:MAX_SHAPE_KEYS]:
+            if not isinstance(key, str):
+                continue
+            cleaned = safe_line(key, 60)
+            if cleaned is None:
+                continue
+            described[cleaned] = describe_shape(payload[key], depth=depth + 1)
+        return described
+    if isinstance(payload, (list, tuple)):
+        if not payload:
+            return []
+        return [
+            describe_shape(entry, depth=depth + 1)
+            for entry in list(payload)[:MAX_SHAPE_ENTRIES]
+        ]
+    return type(payload).__name__
 
 
 def observe(tool_name: Any, payload: Any) -> ToolInputObservation:
@@ -383,6 +486,13 @@ def _answer_mode(entry: Dict[str, Any], options: Sequence[ObservedOption]) -> st
 
 __all__ = [
     "MAX_OBSERVED_KEYS",
+    "MAX_SHAPE_DEPTH",
+    "MAX_SHAPE_ENTRIES",
+    "MAX_SHAPE_KEYS",
+    "OBSERVED_OPTION_FIELDS",
+    "OBSERVED_SCHEMA",
+    "SCHEMA_EVIDENCE_OUTSTANDING",
+    "describe_shape",
     "MAX_OPTION_DESCRIPTION_CHARS",
     "MAX_QUESTIONS",
     "OPTION_ID_PREFIX",

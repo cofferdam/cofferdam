@@ -125,6 +125,28 @@ FREE_TEXT = {"questions": [{"question": "What should the flag be called?"}]}
 
 TURKISH_QUESTION = {"questions": [{"question": "Hangi dosyayı düzenlemeli?"}]}
 
+#: The shape a real `AskUserQuestion` arrived in, twice, during the M2I PR2
+#: supervised live spike — reconstructed here from the **sanitized** capture
+#: (key names and type names only) with content invented for this file.
+#:
+#: This is the fixture the spike earned. Every field name is evidence; every
+#: value is made up. `header` is a real field this build deliberately ignores,
+#: and it is present here so a future change that starts reading it has to
+#: change a test that says so.
+OBSERVED_LIVE_SHAPE = {
+    "questions": [
+        {
+            "header": "Choice",
+            "multiSelect": False,
+            "question": "Which one do you choose?",
+            "options": [
+                {"label": "Atlas", "description": "Select Atlas"},
+                {"label": "Beacon", "description": "Select Beacon"},
+            ],
+        }
+    ]
+}
+
 
 def clarification_request(payload: Dict[str, Any]) -> ClarificationRequest:
     from cofferdam.workstation.tasks.adapters.claude_agent_sdk import normalize
@@ -427,17 +449,104 @@ class QuestionSchemaTests(unittest.TestCase):
         self.assertNotIn("0;title", parsed.question)
         self.assertNotIn("‮", parsed.question)
 
-    def test_a_read_question_records_that_the_schema_is_unverified(self) -> None:
+    def test_a_read_question_records_the_schema_verification_state(self) -> None:
         """The honesty flag travels with the record, not with the build."""
-        self.assertFalse(question.SCHEMA_VERIFIED)
-        self.assertFalse(question.read_question(FREE_TEXT).schema_verified)
-        self.assertFalse(clarification_request(FREE_TEXT).schema_verified)
+        self.assertTrue(question.SCHEMA_VERIFIED)
+        self.assertTrue(question.read_question(FREE_TEXT).schema_verified)
+        self.assertTrue(clarification_request(FREE_TEXT).schema_verified)
 
     def test_the_evidence_a_live_spike_must_produce_is_written_down(self) -> None:
         self.assertGreaterEqual(len(question.SCHEMA_EVIDENCE_REQUIRED), 6)
         joined = " ".join(question.SCHEMA_EVIDENCE_REQUIRED).lower()
         for expected in ("tool name", "free-text", "session identifier"):
             self.assertIn(expected, joined)
+
+    def test_what_the_spike_did_not_establish_is_still_written_down(self) -> None:
+        """A verified schema is not a verified variant, and the difference is kept."""
+        outstanding = " ".join(question.SCHEMA_EVIDENCE_OUTSTANDING).lower()
+        for expected in ("more than one question", "multiselect", "free text"):
+            self.assertIn(expected, outstanding)
+
+
+class ObservedLiveSchemaTests(unittest.TestCase):
+    """The shipped reader against the shape a real session actually sent.
+
+    Two runs of the M2I PR2 spike produced the same input shape, captured
+    sanitized — key names and type names, no values. These assert that the
+    reader handles it, and that the constants recording it did not drift from
+    what the reader expects.
+    """
+
+    def test_the_recorded_shape_is_what_the_shape_walker_produces(self) -> None:
+        """The fixture and the constant describe the same thing."""
+        self.assertEqual(
+            question.describe_shape(OBSERVED_LIVE_SHAPE), question.OBSERVED_SCHEMA
+        )
+
+    def test_the_observed_shape_reads_without_any_broadening(self) -> None:
+        parsed = question.read_question(OBSERVED_LIVE_SHAPE)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.question, "Which one do you choose?")
+        self.assertEqual(parsed.answer_mode, ANSWER_MODE_SINGLE_CHOICE)
+        self.assertEqual([o.label for o in parsed.options], ["Atlas", "Beacon"])
+        self.assertEqual([o.option_id for o in parsed.options], ["opt1", "opt2"])
+        self.assertEqual(
+            [o.description for o in parsed.options], ["Select Atlas", "Select Beacon"]
+        )
+
+    def test_the_header_field_is_seen_and_deliberately_not_stored(self) -> None:
+        """A real field this build ignores. Ignoring it is a decision, so it is tested."""
+        self.assertIn("header", question.OBSERVED_SCHEMA["questions"][0])
+        parsed = question.read_question(OBSERVED_LIVE_SHAPE)
+        self.assertNotIn("Choice", repr(parsed))
+
+    def test_the_option_fields_the_spike_saw_are_the_ones_read(self) -> None:
+        self.assertEqual(question.OBSERVED_OPTION_FIELDS, ("label", "description"))
+        # No `value` key was observed, which is why the reader falls back to the
+        # label — a guess before the spike, an observation after it.
+        self.assertNotIn("value", question.OBSERVED_OPTION_FIELDS)
+        request = clarification_request(OBSERVED_LIVE_SHAPE)
+        self.assertEqual([o.value for o in request.options], ["Atlas", "Beacon"])
+
+    def test_the_observed_shape_becomes_a_bounded_observation_with_no_values(self) -> None:
+        observed = question.observe("AskUserQuestion", OBSERVED_LIVE_SHAPE)
+        self.assertEqual(observed.key_names, ("questions",))
+        self.assertEqual(observed.value_types, ("list",))
+        self.assertEqual(observed.question_count, 1)
+        self.assertEqual(observed.option_count, 2)
+        self.assertTrue(observed.readable)
+        blob = json.dumps(observed.to_dict())
+        for content in ("Atlas", "Beacon", "Which one", "Choice", "Select Atlas"):
+            self.assertNotIn(content, blob)
+
+    def test_the_shape_walker_keeps_names_and_types_and_no_values(self) -> None:
+        described = json.dumps(question.describe_shape(OBSERVED_LIVE_SHAPE))
+        # "Select" alone would match "multiSelect", which is a field *name*
+        # and belongs here — the check is for values, so it uses the values.
+        for content in ("Atlas", "Beacon", "Which one", "Choice", "Select Atlas"):
+            self.assertNotIn(content, described)
+        for name in ("questions", "question", "options", "multiSelect", "header"):
+            self.assertIn(name, described)
+
+    def test_the_shape_walker_is_bounded_in_depth_keys_and_entries(self) -> None:
+        deep: Any = {"leaf": 1}
+        for _ in range(12):
+            deep = {"nested": deep}
+        described = question.describe_shape(deep)
+        self.assertLessEqual(len(json.dumps(described)), 200)
+
+        wide = {"k" + str(index): index for index in range(200)}
+        self.assertLessEqual(
+            len(question.describe_shape(wide)), question.MAX_SHAPE_KEYS
+        )
+        self.assertLessEqual(
+            len(question.describe_shape([{"a": 1}] * 50)), question.MAX_SHAPE_ENTRIES
+        )
+
+    def test_the_shape_walker_never_raises(self) -> None:
+        for payload in (None, 5, "text", [], {}, {1: 2}, {"a": object()}, b"bytes"):
+            with self.subTest(payload=payload):
+                json.dumps(question.describe_shape(payload))
 
 
 class ObservationTests(unittest.TestCase):
@@ -727,6 +836,8 @@ class ClarifyingAdapter(TaskAdapter):
             waiting_reason=WAITING_CLARIFICATION,
             clarification=clarification_request(self._payload),
             clarification_token=self._token,
+            clarification_session_id=self._session_id,
+            clarification_sequence=3,
         )
 
     def deliver_clarification_answer(
@@ -1173,9 +1284,24 @@ class ProvenanceTests(TaskTestCase):
         self.assertIsNone(provenance.rejection_reason)
 
     def test_the_provider_and_session_provenance_survive_on_the_record(self) -> None:
+        """Including the session id, which the live spike found being dropped.
+
+        The question was stored with a null `provider_session_id`, which meant
+        the one piece of evidence that an answer resumed *the same* conversation
+        was not being kept. It is a durable field now, and this is the test that
+        would have caught it.
+        """
         stored = self.answered()
         self.assertEqual(stored.provider, "clarifying")
         self.assertEqual(stored.provider_event_id, "ask_token_1")
+        self.assertEqual(stored.provider_session_id, "sess-1")
+        self.assertEqual(stored.provider_sequence, 3)
+
+    def test_the_session_provenance_is_never_published_to_a_client(self) -> None:
+        """Kept for the record, withheld from the wire."""
+        stored = self.answered()
+        self.assertNotIn("provider_session_id", stored.to_dict())
+        self.assertNotIn("sess-1", json.dumps(stored.to_dict()))
 
     def test_provenance_carries_no_header_token_or_payload(self) -> None:
         blob = json.dumps(self.answered().to_dict(), ensure_ascii=False).lower()
@@ -1644,7 +1770,8 @@ class ClarificationApiTests(TaskTestCase):
         self.assertEqual(item["category"], CATEGORY_CLARIFICATION)
         self.assertEqual(item["answer_mode"], ANSWER_MODE_SINGLE_CHOICE)
         self.assertEqual([o["option_id"] for o in item["options"]], ["opt1", "opt2"])
-        self.assertFalse(item["schema_verified"])
+        # True since the M2I PR2 live spike observed the real input shape.
+        self.assertTrue(item["schema_verified"])
 
     def test_the_list_publishes_no_session_id_tool_or_path(self) -> None:
         task_id, _ = self.waiting()

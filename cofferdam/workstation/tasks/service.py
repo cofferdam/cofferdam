@@ -1020,6 +1020,8 @@ class TaskService:
                 request=request,
                 requested_at=now_iso(),
                 provider_event_id=token,
+                provider_session_id=getattr(outcome, "clarification_session_id", None),
+                provider_sequence=getattr(outcome, "clarification_sequence", 0) or 0,
             )
         except ClarificationInvalid:
             # A question that will not build is dropped, and the task is

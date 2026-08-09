@@ -10,11 +10,14 @@ This document describes what was built in **M2I PR1** (the foundation) and
 **M2I PR2** (the structured clarification round trip), and is deliberately clear
 about what was not.
 
-> **This adapter is off by default, is not deployed, and has not been run
-> against Anthropic from this repository.** Everything below is evidenced by the
-> published SDK distribution and by automated tests that call nothing. Where a
-> claim would need a live session to support it, it is marked **unverified** and
-> is not made.
+> **This adapter is off by default and is not deployed.** Everything below is
+> evidenced by the published SDK distribution and by automated tests that call
+> nothing — except the clarification schema and round trip, which were settled by
+> a **supervised live spike** in a disposable project against a non-production
+> daemon, recorded in
+> [The question schema](#the-question-schema-verified-by-the-m2i-pr2-live-spike).
+> Where a claim would need evidence nobody has gathered, it is marked
+> **outstanding** and is not made.
 
 ## What is *not* here
 
@@ -27,12 +30,13 @@ transport is what it cannot do and what it does not yet replace.
   retirement rule: the CLI adapter goes only after verified parity.
 - **No production change.** No systemd unit, drop-in, installer or registry file
   in this repository enables it, and none was edited by PR1 or PR2.
-- **The `AskUserQuestion` input schema is still unverified.** PR2 builds the
-  whole round trip and reads the tool input *conservatively*; a shape it cannot
-  defend becomes bounded activity rather than a fabricated question.
-  `question.SCHEMA_VERIFIED` is `False`, every stored clarification records that
-  it was, and the adapter publishes the flag in its capability description. See
-  [The question schema, still unverified](#the-question-schema-still-unverified).
+- **No production validation.** The live spike ran against a *non-production*
+  daemon with a temporary `COFFERDAM_HOME` and a temporary registry copy. The
+  live service, its drop-in and the live registry were never touched, and nothing
+  here claims the adapter has been validated in production.
+- **Three schema variants remain unobserved** — multiple questions in one input,
+  a genuinely multiple-choice question, and a free-text question. The reader
+  handles all three conservatively; nobody has seen the provider produce them.
 - **No PWA question UI.** PR2 validates the round trip through the authenticated
   API. Rendering it on a phone is separate work.
 - **No follow-up.** A task runs one turn, asks what it needs to, and reports its
@@ -362,7 +366,7 @@ side through the same constructors that validate an in-process event.
 
 ## The structured clarification round trip (M2I PR2)
 
-### The question schema, still unverified
+### The question schema, verified by the M2I PR2 live spike
 
 `AskUserQuestion` is in the tool profile now — it is the one tool the SDK
 transport has that the CLI transport cannot support, because a CLI stream offers
@@ -371,23 +375,67 @@ writes none, and runs no command, which is why adding it does not weaken the
 "two transports, one policy" rule. A test asserts the gap between the two
 profiles is exactly this one tool.
 
-Its **input schema is not verified**, and the code says so rather than assuming:
+Its input schema **was not in the SDK distribution** — the string does not occur
+anywhere in the published archive — so PR2 shipped a deliberately conservative
+reader and then settled the question with a supervised live spike. Two runs in
+the disposable `claude-sandbox` project, against a non-production daemon, with
+`tools=["AskUserQuestion"]` and no filesystem tool in the session at all.
 
-- `question.SCHEMA_VERIFIED` is `False`;
-- every stored clarification carries `schema_verified: false`, on the record
-  rather than looked up, so a later build cannot retroactively claim yesterday's
-  questions were verified;
-- the adapter publishes `question_schema_verified` in its capability description;
-- `SCHEMA_EVIDENCE_REQUIRED` lists, as data, the eight things a supervised live
-  spike must establish before the flag may change.
+The observed input, captured sanitized — key names and **type names**, never a
+value:
 
-The reader is allowed to fail. A shape it cannot defend produces **no
-clarification at all** — a bounded observation goes into the history instead
-(key names, value type names, counts, never a value) and the agent is told nobody
-was asked. A missed question costs a task that keeps running with an activity
-line; an invented one shows somebody a question the agent never asked and then
-sends their answer to a model as though it had. Those two mistakes are not the
-same size.
+```json
+{"questions": [{"header": "str", "multiSelect": "bool",
+                "options": "list", "question": "str"}]}
+```
+
+Options carried `label` and `description`. **No `value` key was present**, which
+is why `read_question` falls back to the label — a guess before the spike, an
+observation after it.
+
+**The reader was not broadened.** The observed shape matched what this file
+already read, field for field. `header` is a real field the build deliberately
+ignores, and a test now says so, so a future change that starts reading it has to
+change that test.
+
+`question.SCHEMA_VERIFIED` is therefore `True`, `OBSERVED_SCHEMA` records the
+shape, and every stored clarification carries the value that was true when it was
+stored — a later build cannot retroactively claim yesterday's questions were
+verified, and PR2's own first spike run left rows saying `false`.
+
+**What the spike did not establish** is kept in `SCHEMA_EVIDENCE_OUTSTANDING`,
+because a verified schema is not a verified variant:
+
+- more than one question in a single tool input;
+- `multiSelect: true` — a genuinely multiple-choice question;
+- a question offering no options, answered as free text.
+
+The reader already handles all three conservatively. What is missing is evidence
+that the provider produces them, and a later spike that sees one should move it
+out of that tuple rather than widen any parsing.
+
+The reader is still allowed to fail. A shape it cannot defend produces **no
+clarification at all** — a bounded observation goes into the history instead and
+the agent is told nobody was asked. A missed question costs a task that keeps
+running with an activity line; an invented one shows somebody a question the
+agent never asked and then sends their answer to a model as though it had. Those
+two mistakes are not the same size.
+
+### What the spike found wrong
+
+One real defect, which is what a spike is for: the durable clarification row was
+being written with a **null `provider_session_id`**. The adapter had the id and
+never passed it, so the one piece of evidence that an answer resumed *the same*
+conversation was not being kept. `AdapterOutcome` now carries
+`clarification_session_id` and `clarification_sequence`, the core stores both,
+and a test asserts them.
+
+One cosmetic artifact, recorded rather than hidden: because Cofferdam answers by
+**declining** the question tool, the turn's tool result comes back as an error and
+the history shows a bounded `A tool reported an error.` line immediately after
+`An answer was delivered to Claude.` That is truthful — the tool genuinely did
+not run — and suppressing it would mean tracking `tool_use_id` through the
+normalizer to know which result belonged to the question.
 
 ### Where a clarification comes from
 
@@ -637,16 +685,17 @@ No test calls Anthropic, consumes model usage, requires a login, touches the
 network, starts a subprocess, reads a transcript, modifies the live registry or
 restarts anything.
 
-What the tests do **not** prove, said plainly:
+The live spike settled three things the tests could not: that `can_use_tool`
+fires for `AskUserQuestion`, that the input arrives in the shape this build
+reads, and that the real helper drives a real SDK through a complete round trip.
+`OBSERVED_LIVE_SHAPE` in the test file reconstructs the observed structure with
+invented content, so the reader is now tested against the real field names.
 
-- that a real Claude session emits `AskUserQuestion` in the shape this build
-  reads. Every fixture here was invented for the test file;
-- that `can_use_tool` fires for that tool at all. If it does not, the
-  conservative outcome applies: bounded activity, no fabricated clarification,
-  and the round trip stays unverified;
-- that the real helper drives a real SDK correctly. That is evidenced by the
-  published source and would be evidenced further by a supervised live spike
-  recorded in a pull request.
+What the tests still do **not** prove, said plainly:
+
+- the three unobserved variants in `SCHEMA_EVIDENCE_OUTSTANDING`;
+- anything about production. The spike ran on a non-production daemon, and no
+  claim is made about the live service.
 
 ## Rollback
 
