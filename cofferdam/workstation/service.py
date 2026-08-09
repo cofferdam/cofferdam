@@ -473,6 +473,44 @@ MAX_TASK_BODY_BYTES = 32 * 1024
 #: and there is nothing private in them to keep out of a cache.
 TASK_CONTENT_HEADERS = {"Cache-Control": "no-store"}
 
+#: What every static asset says about its own freshness.
+#:
+#: ``no-cache`` does **not** mean "do not store" — that is ``no-store``, which is
+#: for the task-content routes above. It means "store it, but ask before you use
+#: it". Paired with the ``ETag`` and ``Last-Modified`` Starlette already sends,
+#: an unchanged asset costs one conditional request and a 304 with no body, and a
+#: changed one is picked up on the next load. Always.
+#:
+#: **This exists because a phone served a stale UI.** M2I PR4's follow-up draft
+#: fix was verified in a real browser and then failed on a real phone, because
+#: the asset carried no ``Cache-Control`` at all and iOS Safari is free to apply
+#: heuristic freshness to a response that does not say otherwise. The fix was in
+#: the file; the file was not on the phone. A UI change that cannot be trusted to
+#: reach a device is a UI change that cannot be validated, and "tell the user to
+#: clear their cache" is not a deployment mechanism.
+#:
+#: Chosen over versioned asset URLs deliberately. Versioning nine ``<script>``
+#: and ``<link>`` references means a build step or template rewriting, and it
+#: fails silently the first time somebody adds an asset and forgets to version
+#: it. Revalidation is one header, applies to every file in the directory
+#: including ones added later, and cannot drift.
+STATIC_ASSET_HEADERS = {"Cache-Control": "no-cache"}
+
+
+class RevalidatedStaticFiles(StaticFiles):
+    """``StaticFiles`` that requires a revalidation before a cached copy is used.
+
+    The header is applied to the 304 as well as the 200: a ``Not Modified``
+    response refreshes the stored freshness metadata, and one that omitted the
+    directive would hand the browser back a copy it may then use blind.
+    """
+
+    def file_response(self, *args: Any, **kwargs: Any) -> Response:
+        response = super().file_response(*args, **kwargs)
+        for name, value in STATIC_ASSET_HEADERS.items():
+            response.headers[name] = value
+        return response
+
 # Refusal code -> HTTP status for Task Core.
 #
 # The split that matters here is 404/409/422. 404 is "there is no such thing".
@@ -2424,6 +2462,6 @@ def create_app(
     # -- the PWA -------------------------------------------------------------
 
     if WEB_ROOT.is_dir():
-        app.mount("/", StaticFiles(directory=str(WEB_ROOT), html=True), name="web")
+        app.mount("/", RevalidatedStaticFiles(directory=str(WEB_ROOT), html=True), name="web")
 
     return app

@@ -887,6 +887,35 @@ looks complete because two of them are empty is the kind that reads as correct i
 review. The regression tests assert the consequence — a second tap produces no
 second turn — and not only the symptom.
 
+### The second defect: the fix could not reach the phone
+
+The narrow recheck of that fix **failed on the phone, and the fix was not the
+reason.** It produced three turns again, from a daemon that was serving the
+corrected file.
+
+The cause was found without a provider call: the real `tasks.js` was loaded into
+a real browser against a stubbed API, once at the pre-fix commit and once at the
+fixed one, on a fresh origin. Pre-fix, the box kept its text and a second tap
+posted twice under two keys. Fixed, the box emptied and a second tap posted
+nothing. The DOM fix was sound; the phone had been running the old file.
+
+Assets were served by Starlette's `StaticFiles` with `ETag` and `Last-Modified`
+but **no `Cache-Control` at all**, and a response that says nothing about its own
+freshness may be given a heuristic lifetime by the browser. iOS Safari does
+exactly that, and both temporary daemons had used the same origin.
+
+So every static asset now carries `Cache-Control: no-cache`. That is *not*
+`no-store`: the copy may be kept, it just may not be used without asking, and
+with the existing `ETag` the ordinary case is a 304 with no body. Chosen over
+versioned asset URLs because versioning nine `<script>` and `<link>` references
+needs a build step and fails silently the first time somebody adds a tenth.
+
+**This is a deployment property, not a UI detail.** A frontend change that cannot
+be trusted to reach a device cannot be validated on one, and "clear your browser
+cache" is not a release mechanism. The tests assert the header on every shell
+asset, on the directory index, on a 304, and end to end: an asset is edited on
+disk and the next conditional request must answer 200 with the new bytes.
+
 ### Idempotency, and the retry that was not one
 
 One module-level slot held the request key for every write, and it was cleared on

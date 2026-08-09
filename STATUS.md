@@ -714,8 +714,24 @@ alongside, the next tap resent the same words under a new key — one intended m
 **three provider turns**. Fixed with a single helper that clears the node before the store; the
 regression tests reproduce the three-turn outcome exactly and assert one.
 
-**A narrow real-phone recheck of the follow-up clear is still outstanding**, and **M2I cannot close
-truthfully until it passes**.
+**The narrow recheck then failed too — and found a second, larger defect.** The daemon was serving
+the corrected file and the phone produced three turns again. The cause was isolated with **no
+provider call**: the real `tasks.js` was run in a real browser against a stubbed API, once at the
+pre-fix commit and once at the fixed one. Pre-fix the box kept its text and a second tap posted twice
+under two keys; fixed, it emptied and a second tap posted nothing. The DOM fix was sound — **the
+phone had been running the old file.**
+
+Assets were served with `ETag` and `Last-Modified` but **no `Cache-Control` at all**, and a response
+that says nothing about its freshness may be given a heuristic lifetime; iOS Safari does exactly
+that, and both temporary daemons shared one origin. Every static asset now carries
+`Cache-Control: no-cache` — store it, but ask before using it — which with the existing validator
+costs a 304. A frontend change that cannot be trusted to reach a device cannot be validated on one,
+and "clear your cache" is not a release mechanism.
+
+**A narrow real-phone recheck is still outstanding**, and **M2I cannot close truthfully until it
+passes.** The validation adapter cannot substitute for it: it can never request `ready_for_followup`
+and its `send_followup` completes the task, so the box unmounts and the condition under test does not
+occur.
 
 **No production change.** No unit, drop-in, installer or registry file was edited; the SDK is not
 installed in the production slot and the adapter is not enabled there. The **Claude Code adapter
