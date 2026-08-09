@@ -1,12 +1,19 @@
 # Status
 
-Accurate as of **2026-08-09** (**M2H is complete and merged**, closing the M1 post-reboot gate;
+Accurate as of **2026-08-09**. **M2H is complete and merged**, closing the M1 post-reboot gate;
 M2F Agent Task Core and M2G the Claude Code adapter merged; the isolated Custom GPT Actions mobile
 probe passed; client architecture and the active roadmap recorded as
-[`DECISIONS.md`](DECISIONS.md) D-2026-08-08-1 … -6). **M2I PR1–PR3 are merged; M2I PR4 — the
-phone surface, helper cleanup, startup reconciliation and asset revalidation — is on a branch and
-real-phone validated, which completes M2I's own goal.** Update this file when a category changes,
-not on every commit.
+[`DECISIONS.md`](DECISIONS.md) D-2026-08-08-1 … -6.
+
+**M2I is complete and merged** (PRs #28–#31, the last squash-merged as `1a7d66b`). **M2I.5 PR1 —
+the private Custom GPT Actions bridge foundation — is on a branch.** It is **local only**: bound to
+loopback, not publicly exposed, no tunnel and no DNS record, and **not connected to a real Custom
+GPT**. It claims **no production Agent SDK deployment** — production still runs the Claude Code
+adapter from the documented slot, unchanged. The next two decisions are separate approval gates:
+Gate A (external HTTPS exposure and a real Custom GPT preview) and Gate B (production Agent SDK
+enablement). Neither has been started.
+
+Update this file when a category changes, not on every commit.
 
 ## Merged (on `main`)
 
@@ -86,9 +93,8 @@ says "on branch, not merged" it is describing the moment it was written, correct
 each milestone *did not* do, and which validations are still outstanding, is still current and is
 why these records are kept rather than collapsed into one line.
 
-**M2I PR4 is on a branch, awaiting review** — see the entry under *In progress* below. It is the
-last planned PR of M2I and its real-phone validation has passed, so M2I closes on merge. The queued
-work after that is M2I.5 → M2J; see [`ROADMAP.md`](ROADMAP.md).
+**M2I is closed.** PR4 merged as `1a7d66b` with its real-phone validation passed. The queued work
+is M2I.5 → M2J; see [`ROADMAP.md`](ROADMAP.md). M2I.5 PR1 is on a branch — see *In progress* below.
 
 - **M2G — Claude Code adapter.** Merged as PR #21. The first
   adapter that runs a real program, built on the merged M2F foundation. A phone picks an approved
@@ -631,10 +637,78 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2I.5 PR1 — the private Custom GPT Actions bridge foundation
+
+On `feat/m2i5-actions-bridge`, from `1a7d66b`. **Local only. Nothing is exposed, nothing is
+deployed, no Custom GPT is configured, and no production file changed.**
+
+A separate narrow process — `python -m cofferdam.actions_bridge` — that publishes eight bounded
+Actions under `/v1` and reaches Cofferdam through ten fixed, allowlisted internal calls. It is not
+the PWA, not the main API, not a proxy and not a mirror of the task routes: there is no route in it
+that forwards a caller's path, method, header or query string, and the only way out of the process
+is ten named methods with no URL parameter between them.
+
+**Three credentials, three jobs.** The device token keeps the whole private API. A new
+**bridge-internal token** — 0600, generated only under `--enable-actions-bridge-caller`, off by
+default — is recognised by the daemon on **ten task routes and nothing else**. A separate
+**external key** is what the Custom GPT holds and is the only credential a remote caller ever
+presents. The daemon's other routes still use `require_token`, which has never heard of the bridge
+credential, so a bridge request to `/api/remote-control/...` is a 401 rather than a check somebody
+could later relax.
+
+**The scoped credential exists for provenance as much as for access.** M2I PR2 reserved the words
+`chatgpt_app` and `future_gpt_bridge` and deliberately left them out of the accepted sets, writing
+that "a reserved word is not an enabled surface". A surface now exists, so they are in — and a
+bridge-created task is recorded under the bridge's own name rather than as though somebody had used
+their phone. Two tests that asserted the reservation were replaced by tests that assert the
+labelling, which is the property that was always the point.
+
+**The prompt is withheld at the daemon, not filtered at the bridge.** `GET /api/tasks/{id}` returns
+no `prompt` key at all to the bridge caller: the bridge composed that text from somebody's ChatGPT
+conversation, and handing it back would let a model provider re-read it on a schedule.
+
+**One question shape, and no fabrication.** `submitChoiceAnswer` takes exactly one `option_id` and
+**has no text field at all** — not optional, not validated-and-refused. Free text, multiple choice,
+an unknown mode or options that lost their ids all come back as `clarification_supported: false`
+with the real question text intact and nothing invented in its place. "Other plus custom text" is
+reported as unsupported rather than approximated.
+
+**Tool approvals are excluded by there being nothing to expose.** The private API has no approval
+route, so the bridge has none either. A waiting approval is reported as
+`local_action_required` and pointed at the workstation.
+
+**Artifacts are unavailable, and the reason is recorded rather than worked around.** Cofferdam has
+no task-owned artifact model — `EvidenceReference` is an unverified adapter claim with a free-form
+identifier, explicitly documented as never dereferenced. `artifacts_supported` is `false` with a
+reason word, and [`docs/ACTIONS_BRIDGE.md`](docs/ACTIONS_BRIDGE.md) states the exact five-step Task
+Core PR that would have to come first. No path parameter was added.
+
+**Idempotency without a second task database.** Every mutation needs a `client_request_id`. A small
+bridge-owned SQLite table maps `(operation, scope, request_id) → (digest, task_id)` and stores **no
+request body**; on replay the bridge re-reads the current state from Task Core rather than
+returning a stored response. `createTask` and `sendFollowup` pass the same key upstream, where Task
+Core has its own idempotency — two independent guards on one retry.
+
+**232 bridge tests plus a local end-to-end suite** that runs a real bridge against a real daemon
+over real loopback HTTP with the validation adapter and a sanitized clarification fixture: no
+model call, no network, no production contact. That suite found a real bug — the idempotency
+store's replay path returned without ending its transaction, which only fails on the *second*
+replayed request.
+
+**What this does not claim.** Nothing about the real Custom GPT. Local HTTP over loopback says
+nothing about ChatGPT's request shaping, its confirmation prompts, its retries or its 45-second
+budget. `servers[0].url` in the schema is a placeholder pointing at `.example.invalid`. Production
+is untouched: same slot, same drop-in, same registry, same Claude Code adapter, no restart.
+
+**The next two decisions are separate.** Gate A is external HTTPS exposure and a real Custom GPT
+preview. Gate B is production Agent SDK enablement. Either can be approved without the other.
+
 ### M2I PR4 — the phone surface, helper cleanup and startup reconciliation
 
-On `feat/m2i-production-readiness`. **Not deployed, off by default, and no live SDK call was made
-from this repository.** PR1 merged as #28, PR2 as #29, PR3 as #30.
+**Merged as `1a7d66b` (#31), closing M2I.** The record below was written while it was on
+`feat/m2i-production-readiness` and is kept as that PR's record. PR1 merged as #28, PR2 as #29,
+PR3 as #30. **Still not deployed and still off by default:** production runs the Claude Code
+adapter, and enabling the Agent SDK there is Gate B of M2I.5.
 
 **The headline feature of M2I could not be used from a phone, and that was the finding.** PR2
 shipped the clarification routes and nothing called them: the PWA rendered a generic "Your answer"
@@ -921,15 +995,11 @@ and a Remote Control host must still be started deliberately after every reboot.
 
 Queued, in order:
 
-- **M2I — Claude Agent SDK adapter** (Lane B): structured `AskUserQuestion`, clarification
-  questions kept apart from tool approvals, question and answer provenance, cancellation and
-  restart parity, durable results and the `get_result` foundation. The merged CLI adapter is
-  retired only after verified parity. **PR1 — the SDK dependency boundary, the adapter foundation,
-  the normalized event vocabulary and the clarification/approval separation — is on a branch;** the
-  question round trip is PR2.
-- **M2I.5 — private Custom GPT Actions bridge:** a dedicated narrow process, scoped per-client
-  credentials, a production transport decision, the ten bounded Actions, and real iPhone
-  validation against Cofferdam. No approval Action; no exposure of the general API or the PWA.
+- **M2I.5 — private Custom GPT Actions bridge.** **PR1 is on a branch** (below). What remains in
+  the milestone is external exposure and real-device validation, both behind approval gates: a
+  dedicated HTTPS origin and tunnel design, the external key entered in the GPT editor, the schema
+  imported, and a first real Action call from an iPhone. No approval Action; no exposure of the
+  general API or the PWA.
 - **M2J — Project Workstation, workspaces and profiles:** workspace creation, project templates,
   a code-owned model allowlist, Auto / Safe / Review profiles, project-context retrieval, and
   handoff and history surfaces.

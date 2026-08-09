@@ -97,20 +97,23 @@ FOLLOWUP_SOURCES: Tuple[str, ...] = (
 )
 
 #: The sources a route in **this** build may attribute a follow-up to. The
-#: bridge is deliberately absent, for the same reason it is absent from
-#: ``clarifications.ACCEPTED_ANSWER_SOURCES``: a reserved word is not an enabled
-#: surface, and a frozenset is what makes that difference enforceable.
-ACCEPTED_FOLLOWUP_SOURCES = frozenset({SOURCE_WORKSTATION_PWA, SOURCE_INTERNAL_TEST})
+#: bridge joined this set in M2I.5 PR1 for the same reason and on the same terms
+#: it joined ``clarifications.ACCEPTED_ANSWER_SOURCES``: a real surface with its
+#: own internal credential now exists, and the value is still derived from which
+#: credential authenticated the request rather than read from a body.
+ACCEPTED_FOLLOWUP_SOURCES = frozenset(
+    {SOURCE_WORKSTATION_PWA, SOURCE_INTERNAL_TEST, SOURCE_FUTURE_GPT_BRIDGE}
+)
 
 #: Which source opened a task's **first** turn — the one the prompt began rather
 #: than a follow-up. Derived from the task's origin, which the server assigned
 #: from the authenticated request context and no client can choose.
 #:
-#: The ``chatgpt_app`` entry is unreachable in this build: no route sets that
-#: origin. It is written down anyway, because the alternative is a ``.get``
-#: default that would one day quietly file a bridge-created task under
-#: ``internal_test`` — a mislabel in exactly the direction provenance exists to
-#: prevent.
+#: The ``chatgpt_app`` entry became reachable in M2I.5 PR1, and it was already
+#: written down — which is the whole value of having written it. Had it been a
+#: ``.get`` default instead, the bridge's first task would have been filed under
+#: ``internal_test``, a mislabel in exactly the direction provenance exists to
+#: prevent, and nothing would have failed to say so.
 SOURCE_FOR_ORIGIN: Dict[str, str] = {
     ORIGIN_PWA: SOURCE_WORKSTATION_PWA,
     ORIGIN_CLI: SOURCE_INTERNAL_TEST,

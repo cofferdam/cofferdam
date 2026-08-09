@@ -1097,19 +1097,56 @@ class ClarificationLifecycleTests(TaskTestCase):
                 source=clar.SOURCE_INTERNAL_TEST,
             )
 
-    def test_the_future_bridge_source_is_reserved_and_not_accepted(self) -> None:
-        """A vocabulary entry is not an enabled surface."""
+    def test_the_bridge_source_is_accepted_and_recorded_as_itself(self) -> None:
+        """M2I.5 turned the reserved word into a surface. It kept its own name.
+
+        This test used to assert the opposite — that the bridge source was in the
+        vocabulary and refused — and the change is the point: PR2 reserved a word
+        for the day a bridge existed, and that day arrived. What must not change
+        is the *labelling*. A bridge answer is recorded under the bridge's word,
+        so a stored history can still tell an answer somebody tapped on their
+        phone from one a model provider relayed.
+        """
         self.assertIn(clar.SOURCE_FUTURE_GPT_BRIDGE, clar.ANSWER_SOURCES)
-        self.assertNotIn(clar.SOURCE_FUTURE_GPT_BRIDGE, clar.ACCEPTED_ANSWER_SOURCES)
+        self.assertIn(clar.SOURCE_FUTURE_GPT_BRIDGE, clar.ACCEPTED_ANSWER_SOURCES)
         row = self.ask()
         pending = self.pending(row.task_id)
-        with self.assertRaises(task_errors.ClarificationAnswerInvalid):
-            self.service.answer_clarification(
-                row.task_id,
-                pending.question_id,
-                {"option_ids": ["opt1"]},
-                source=clar.SOURCE_FUTURE_GPT_BRIDGE,
-            )
+        self.service.answer_clarification(
+            row.task_id,
+            pending.question_id,
+            {"option_ids": ["opt1"]},
+            source=clar.SOURCE_FUTURE_GPT_BRIDGE,
+        )
+        stored = self.store.find_clarification(row.task_id, pending.question_id)
+        self.assertEqual(stored.status, clar.STATUS_ANSWERED)
+        self.assertEqual(
+            stored.answer.provenance.source, clar.SOURCE_FUTURE_GPT_BRIDGE
+        )
+        self.assertNotEqual(
+            stored.answer.provenance.source, clar.SOURCE_WORKSTATION_PWA
+        )
+
+    def test_a_source_outside_the_vocabulary_is_still_refused(self) -> None:
+        """The frozenset is a gate, not a formality — widened by one, not opened.
+
+        Three shapes: a word nobody has reserved, the empty string, and a value
+        that is not a string at all. Each is refused before an adapter is asked
+        to deliver anything.
+        """
+        row = self.ask()
+        pending = self.pending(row.task_id)
+        for hostile in ("some_other_client", "", None, 7):
+            with self.assertRaises(task_errors.ClarificationAnswerInvalid):
+                self.service.answer_clarification(
+                    row.task_id,
+                    pending.question_id,
+                    {"option_ids": ["opt1"]},
+                    source=hostile,
+                )
+            # Refused before anything was written: the question is still open,
+            # which is what makes the next iteration a real attempt rather than
+            # a second refusal for a different reason.
+            self.assertTrue(self.pending(row.task_id).pending)
 
     # -- duplicates ----------------------------------------------------------
 

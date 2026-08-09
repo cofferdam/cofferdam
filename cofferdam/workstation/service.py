@@ -245,7 +245,12 @@ from .mediasearch.errors import (
 from .mediasearch.results import MAX_RESULTS, MEDIA_RESULT_MODEL_VERSION
 from .mediasearch.service import MediaSearchService
 from .mediasearch.sessions import SEARCH_SESSION_TTL_SECONDS
-from .config import Config, load_config, load_or_create_token
+from .config import (
+    Config,
+    load_config,
+    load_or_create_actions_bridge_token,
+    load_or_create_token,
+)
 from .errors import (
     CODE_ADAPTER_FAILED,
     CODE_CONFIGURATION_INVALID,
@@ -278,6 +283,7 @@ from .runtime.overlay_writes import (
 from .store import ActionStore, screenshot_path
 from .tasks import TaskService, TaskStore, build_registry as build_task_adapters
 from .tasks.clarifications import (
+    SOURCE_FUTURE_GPT_BRIDGE as ANSWER_SOURCE_ACTIONS_BRIDGE,
     SOURCE_WORKSTATION_PWA as ANSWER_SOURCE_WORKSTATION_PWA,
 )
 from .tasks.errors import (
@@ -311,13 +317,17 @@ from .tasks.errors import (
     TaskError,
 )
 from .tasks.lifecycle import IllegalTransition
-from .tasks.turns import SOURCE_WORKSTATION_PWA as FOLLOWUP_SOURCE_WORKSTATION_PWA
+from .tasks.turns import (
+    SOURCE_FUTURE_GPT_BRIDGE as FOLLOWUP_SOURCE_ACTIONS_BRIDGE,
+    SOURCE_WORKSTATION_PWA as FOLLOWUP_SOURCE_WORKSTATION_PWA,
+)
 from .tasks.models import (
     BUCKETS,
     DEFAULT_EVENT_PAGE,
     DEFAULT_TASK_PAGE,
     MAX_EVENT_PAGE,
     MAX_TASK_PAGE,
+    ORIGIN_CHATGPT_APP,
     ORIGIN_PWA,
     TASK_API_VERSION,
 )
@@ -473,6 +483,46 @@ MAX_TASK_BODY_BYTES = 32 * 1024
 #: and there is nothing private in them to keep out of a cache.
 TASK_CONTENT_HEADERS = {"Cache-Control": "no-store"}
 
+# -- internal callers ---------------------------------------------------------
+#
+# Which credential authenticated a task request. Two values, both code-owned,
+# neither readable from a request: there is no header, query parameter or body
+# field anywhere in this API that names a caller, and adding one would undo the
+# only reason these exist.
+#
+# They are *not* a permission system. A caller does not carry scopes and cannot
+# be widened by configuration; the surface each one can reach is decided by
+# which FastAPI dependency a route was declared with, in this file, at import
+# time. What a caller decides is a single thing: how the work it asks for is
+# attributed in Cofferdam's durable provenance.
+
+#: The private PWA and every other holder of the device token — the CLI, a test,
+#: `curl` on the tailnet. One credential, one word, unchanged since M1.
+CALLER_PWA = "pwa"
+#: The M2I.5 Custom GPT Actions bridge, holding its own 0600 credential.
+CALLER_ACTIONS_BRIDGE = "actions_bridge"
+
+#: Caller to the ``origin`` recorded on a task it creates. Both entries are
+#: members of :data:`~.tasks.models.ORIGINS`, and the mapping is total: a caller
+#: with no entry here would fall through to a ``.get`` default, which is how a
+#: bridge-created task ends up labelled as somebody's phone.
+ORIGIN_FOR_CALLER: Dict[str, str] = {
+    CALLER_PWA: ORIGIN_PWA,
+    CALLER_ACTIONS_BRIDGE: ORIGIN_CHATGPT_APP,
+}
+
+#: Caller to the ``source`` recorded on a clarification answer it submits.
+ANSWER_SOURCE_FOR_CALLER: Dict[str, str] = {
+    CALLER_PWA: ANSWER_SOURCE_WORKSTATION_PWA,
+    CALLER_ACTIONS_BRIDGE: ANSWER_SOURCE_ACTIONS_BRIDGE,
+}
+
+#: Caller to the ``source`` recorded on a follow-up it sends.
+FOLLOWUP_SOURCE_FOR_CALLER: Dict[str, str] = {
+    CALLER_PWA: FOLLOWUP_SOURCE_WORKSTATION_PWA,
+    CALLER_ACTIONS_BRIDGE: FOLLOWUP_SOURCE_ACTIONS_BRIDGE,
+}
+
 #: What every static asset says about its own freshness.
 #:
 #: ``no-cache`` does **not** mean "do not store" — that is ``no-store``, which is
@@ -604,6 +654,10 @@ def create_app(
     config = config or load_config()
     config.ensure_dirs()
     token = token or load_or_create_token(config)
+    # ``None`` unless the host enabled the caller. Held in a closure beside the
+    # device token rather than on ``app.state``: nothing should be able to read
+    # a credential off the application object from inside a request handler.
+    bridge_token = load_or_create_actions_bridge_token(config)
     adapter = adapter or select_adapter(config.adapter_name, config)
 
     store = ActionStore(config)
@@ -743,15 +797,72 @@ def create_app(
     def _token_matches(candidate: Optional[str]) -> bool:
         return bool(candidate) and _secrets.compare_digest(candidate, token)
 
-    async def require_token(request: Request) -> None:
+    def _bridge_token_matches(candidate: Optional[str]) -> bool:
+        # `bridge_token` is None on every deployment that has not enabled the
+        # caller, and this returns False without comparing anything — so a
+        # request cannot become the bridge by presenting an empty string.
+        return (
+            bool(candidate)
+            and bridge_token is not None
+            and _secrets.compare_digest(candidate, bridge_token)
+        )
+
+    def _presented(request: Request) -> Optional[str]:
         header = request.headers.get("authorization", "")
-        candidate = header[7:].strip() if header.lower().startswith("bearer ") else None
-        if not _token_matches(candidate):
+        return header[7:].strip() if header.lower().startswith("bearer ") else None
+
+    async def require_token(request: Request) -> None:
+        """The device token, and only the device token.
+
+        Left exactly as it was, and that is the security property: this
+        dependency guards every route in the file except the ten the Actions
+        bridge is allowed to reach. The bridge's credential is refused here
+        because nothing in this function has ever heard of it — not because a
+        check rejects it, which is a promise a later refactor could lose.
+        """
+        if not _token_matches(_presented(request)):
             raise ApiError(
                 code=CODE_UNAUTHORIZED,
                 message="a valid device token is required",
                 status_code=401,
             )
+
+    async def require_task_caller(request: Request) -> None:
+        """Either internal credential, on the bounded task surface only.
+
+        This is the *whole* difference the M2I.5 bridge makes to the daemon: ten
+        task routes accept a second 0600 credential, and record which one
+        arrived. Nothing else changes — no new route, no widened body, no
+        listener, and no way to reach `/api/actions`, `/api/remote-control`,
+        `/api/registries` or the PWA with the bridge's key.
+
+        The principal is stashed on the request rather than returned, because
+        the routes that need it read it from one helper and the ones that do not
+        never see it. It is derived here from the credential and is not
+        touchable from a header, a query string or a body — there is no field
+        anywhere in this API for a caller to name itself.
+        """
+        candidate = _presented(request)
+        if _token_matches(candidate):
+            request.state.caller = CALLER_PWA
+            return
+        if _bridge_token_matches(candidate):
+            request.state.caller = CALLER_ACTIONS_BRIDGE
+            return
+        raise ApiError(
+            code=CODE_UNAUTHORIZED,
+            message="a valid device token is required",
+            status_code=401,
+        )
+
+    def _caller(request: Request) -> str:
+        """Which credential authenticated this request. Defaults to the PWA.
+
+        The default is reached only by a route that used ``require_token`` and
+        then asked anyway, which means the device token authenticated it — so
+        the safe answer and the true answer are the same one.
+        """
+        return getattr(request.state, "caller", CALLER_PWA)
 
     @app.exception_handler(ApiError)
     async def _api_error_handler(_: Request, exc: ApiError) -> JSONResponse:
@@ -1983,7 +2094,7 @@ def create_app(
                 detail=rejection.reason,
             )
 
-    @app.get("/api/tasks", dependencies=[Depends(require_token)])
+    @app.get("/api/tasks", dependencies=[Depends(require_task_caller)])
     async def list_tasks(
         bucket: Optional[str] = None, limit: int = DEFAULT_TASK_PAGE
     ) -> Dict[str, Any]:
@@ -2014,13 +2125,15 @@ def create_app(
             "counts": counts,
         }
 
-    @app.post("/api/tasks", dependencies=[Depends(require_token)])
+    @app.post("/api/tasks", dependencies=[Depends(require_task_caller)])
     async def create_task(request: Request) -> JSONResponse:
         """Start one task. The whole client vocabulary is five bounded fields.
 
         ``origin`` is **not** among them: it is assigned here from the
         authenticated request context, because a client choosing how its own
         request is later attributed is the opposite of what that field is for.
+        Since M2I.5 that context has two possible answers rather than one, and
+        the lookup is total — see :data:`ORIGIN_FOR_CALLER`.
         """
         payload = await _task_body(
             request,
@@ -2033,7 +2146,7 @@ def create_app(
             prompt=payload.get("prompt"),
             client_request_id=payload.get("client_request_id"),
             title=payload.get("title"),
-            origin=ORIGIN_PWA,
+            origin=ORIGIN_FOR_CALLER[_caller(request)],
         )
         return JSONResponse(
             # 200 rather than 201 when an idempotency key matched: nothing was
@@ -2042,17 +2155,25 @@ def create_app(
             content={"task": tasks.snapshot(row).to_dict(), "created": created},
         )
 
-    @app.get("/api/tasks/{task_id}", dependencies=[Depends(require_token)])
-    async def get_task(task_id: str) -> JSONResponse:
+    @app.get("/api/tasks/{task_id}", dependencies=[Depends(require_task_caller)])
+    async def get_task(task_id: str, request: Request) -> JSONResponse:
         # `refresh_task`, not `get_task`. An adapter whose work happens inside a
         # process has to be *asked* what it saw, and opening the detail view is
         # when Cofferdam asks. For a synchronous adapter it is a no-op returning
         # the same row.
         row = await _run_task(tasks.refresh_task, task_id)
         payload = tasks.snapshot(row).to_dict()
-        # The detail view is the one place the prompt is published, and only to
-        # the authenticated client that already sent it.
-        payload["prompt"] = row.prompt
+        if _caller(request) == CALLER_PWA:
+            # The detail view is the one place the prompt is published, and only
+            # to the authenticated client that already sent it.
+            #
+            # The Actions bridge is not that client. It composed the prompt from
+            # somebody's ChatGPT conversation and then sent it here; handing it
+            # back would let a model provider read the task text out of
+            # Cofferdam again, on a schedule, long after the turn that wrote it.
+            # Withheld rather than redacted: the key is absent from the payload,
+            # so there is nothing for a bridge to forward by accident.
+            payload["prompt"] = row.prompt
         return JSONResponse(content={"task": payload}, headers=TASK_CONTENT_HEADERS)
 
     @app.get("/api/tasks/{task_id}/events", dependencies=[Depends(require_token)])
@@ -2083,7 +2204,7 @@ def create_app(
             headers=TASK_CONTENT_HEADERS,
         )
 
-    @app.post("/api/tasks/{task_id}/followups", dependencies=[Depends(require_token)])
+    @app.post("/api/tasks/{task_id}/followups", dependencies=[Depends(require_task_caller)])
     async def send_task_followup(task_id: str, request: Request) -> Dict[str, Any]:
         """Send one more message to the session this task already owns.
 
@@ -2106,11 +2227,11 @@ def create_app(
             task_id,
             payload.get("followup"),
             client_request_id=payload.get("client_request_id"),
-            source=FOLLOWUP_SOURCE_WORKSTATION_PWA,
+            source=FOLLOWUP_SOURCE_FOR_CALLER[_caller(request)],
         )
         return {"task": tasks.snapshot(row).to_dict()}
 
-    @app.get("/api/tasks/{task_id}/result", dependencies=[Depends(require_token)])
+    @app.get("/api/tasks/{task_id}/result", dependencies=[Depends(require_task_caller)])
     async def get_task_result(task_id: str) -> JSONResponse:
         """What this task produced, in the provider-neutral result shape.
 
@@ -2125,9 +2246,14 @@ def create_app(
         adapter by doing so.
 
         `no-store`, because the body carries the answer to somebody's private
-        prompt and a task's result changes as turns complete. This is a
-        private-client operation; the M2I.5 bridge is a separate process that
-        does not proxy this route, and nothing here is reachable from it today.
+        prompt and a task's result changes as turns complete.
+
+        Since M2I.5 the Actions bridge reads this route with its own internal
+        credential — and it is still not a proxy for it. The bridge publishes
+        `sync_task`, which folds this result into one bounded snapshot, truncates
+        the text to its own smaller limit and drops `provider_session_id`
+        entirely. What travels to a model provider is a subset chosen in
+        `cofferdam/actions_bridge/normalize.py`, not this payload.
         """
         result = await _run_task(tasks.get_result, task_id)
         return JSONResponse(
@@ -2135,7 +2261,7 @@ def create_app(
             headers=TASK_CONTENT_HEADERS,
         )
 
-    @app.post("/api/tasks/{task_id}/finish", dependencies=[Depends(require_token)])
+    @app.post("/api/tasks/{task_id}/finish", dependencies=[Depends(require_task_caller)])
     async def finish_task(task_id: str, request: Request) -> Dict[str, Any]:
         """Close a retained session on purpose, and complete the task.
 
@@ -2147,7 +2273,7 @@ def create_app(
         row = await _run_task(tasks.finish_task, task_id)
         return {"task": tasks.snapshot(row).to_dict()}
 
-    @app.post("/api/tasks/{task_id}/cancel", dependencies=[Depends(require_token)])
+    @app.post("/api/tasks/{task_id}/cancel", dependencies=[Depends(require_task_caller)])
     async def cancel_task(task_id: str, request: Request) -> Dict[str, Any]:
         """Ask this task's own adapter to stop it.
 
@@ -2173,13 +2299,17 @@ def create_app(
     # distinction inside a single `if` — and that `if` is exactly the thing this
     # milestone exists to make structural.
     #
-    # These are private-client operations. The future Custom GPT Actions bridge
-    # (M2I.5) will expose `get_pending_questions` and `submit_clarification_answer`
-    # as bounded Actions of its own; it does not proxy these, and nothing here is
-    # reachable from it today.
+    # Since M2I.5 the Actions bridge reads and writes these two with its own
+    # internal credential, and the absence above is what makes that safe rather
+    # than alarming: there is no approval route for a bridge to reach, so the
+    # question of whether a model provider may grant a permission never arrives
+    # at a check that could be got wrong. The bridge publishes these as
+    # `sync_task` and `submit_choice_answer`, narrower again — one option id, no
+    # free text, and no `answer` field at all on the wire it exposes.
 
     @app.get(
-        "/api/tasks/{task_id}/clarifications", dependencies=[Depends(require_token)]
+        "/api/tasks/{task_id}/clarifications",
+        dependencies=[Depends(require_task_caller)],
     )
     async def list_task_clarifications(task_id: str) -> JSONResponse:
         """The questions this task is waiting on. Bounded, normalized, no payload.
@@ -2212,7 +2342,7 @@ def create_app(
 
     @app.post(
         "/api/tasks/{task_id}/clarifications/{question_id}/answer",
-        dependencies=[Depends(require_token)],
+        dependencies=[Depends(require_task_caller)],
     )
     async def answer_task_clarification(
         task_id: str, question_id: str, request: Request
@@ -2241,7 +2371,7 @@ def create_app(
             task_id,
             question_id,
             payload,
-            source=ANSWER_SOURCE_WORKSTATION_PWA,
+            source=ANSWER_SOURCE_FOR_CALLER[_caller(request)],
         )
         return {"task": tasks.snapshot(row).to_dict()}
 
@@ -2255,7 +2385,7 @@ def create_app(
         """
         return {"adapters": tasks.adapters.describe()}
 
-    @app.get("/api/task-projects", dependencies=[Depends(require_token)])
+    @app.get("/api/task-projects", dependencies=[Depends(require_task_caller)])
     async def list_task_projects() -> Dict[str, Any]:
         """Where tasks may run, by name. **No filesystem path is published.**"""
         return tasks.projects.to_dict()
@@ -2269,10 +2399,12 @@ def create_app(
     # thing that names a directory, and the argv is a constant in
     # sessions/claude.py.
     #
-    # These are private-client operations. The future Custom GPT Actions bridge
-    # (M2I.5) exposes a bounded, separately-chosen set of Actions and must never
-    # include these: handing a session URL to an external model provider would
-    # give it a live interactive agent on this workstation.
+    # These are private-client operations and they stay on `require_token`. The
+    # M2I.5 Actions bridge holds a credential these four have never heard of, so
+    # its requests arrive here as 401 — not as a refusal some later change could
+    # relax. Handing a Remote Control session URL to an external model provider
+    # would give it a live interactive agent on this workstation, and the way
+    # that is prevented is that the bridge cannot authenticate to ask.
 
     async def _run_remote_control(operation, *args, **kwargs) -> Any:
         try:

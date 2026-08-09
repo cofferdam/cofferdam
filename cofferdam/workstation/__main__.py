@@ -156,6 +156,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "'agent-sdk' extra installed. Off unless this flag is given."
         ),
     )
+    parser.add_argument(
+        "--enable-actions-bridge-caller",
+        action="store_true",
+        help=(
+            "recognise the M2I.5 Custom GPT Actions bridge as a second internal "
+            "caller, on a bounded set of task routes only. Generates a separate "
+            "0600 credential under secrets/ and registers no adapter, no route "
+            "and no listener of its own. Off unless this flag is given."
+        ),
+    )
     args = parser.parse_args(argv)
 
     config = load_config()
@@ -184,6 +194,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # decision in the host's registry, not a side effect of a flag.
         config = type(config)(
             **{**config.__dict__, "enable_claude_agent_sdk_adapter": True}
+        )
+    if args.enable_actions_bridge_caller:
+        # Same one-directional rule. This one enables no adapter: it decides
+        # only whether a second internal credential exists.
+        config = type(config)(
+            **{**config.__dict__, "enable_actions_bridge_caller": True}
         )
     config.ensure_dirs()
 
@@ -229,6 +245,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "Claude through the official Agent SDK in projects listed in "
             "task-projects.json, with no shell. The Claude Code adapter is "
             "unaffected by this flag.",
+            file=sys.stderr,
+        )
+
+    if config.enable_actions_bridge_caller:
+        # Announced on every start, like the three above, and it says what the
+        # credential does *not* buy: the bridge is a separate process that is
+        # not started here, and enabling the caller exposes nothing publicly.
+        print(
+            "[cofferdam] the Actions bridge internal caller is enabled. A second "
+            "credential exists under secrets/ and is accepted on task routes "
+            "only. Nothing is exposed publicly and no bridge process is started "
+            "by this service.",
             file=sys.stderr,
         )
 

@@ -118,10 +118,18 @@ SOURCE_WORKSTATION_PWA = "workstation_pwa"
 #: have to claim to be the PWA, which would make the field useless for telling
 #: real answers from synthetic ones in a stored history.
 SOURCE_INTERNAL_TEST = "internal_test"
-#: Reserved for M2I.5's Custom GPT Actions bridge. **Nothing produces it in this
-#: build and no route accepts it.** The word is reserved now so that the day the
-#: bridge exists there is already a truthful value for it, and so nobody is
-#: tempted to record a bridge answer as though it came from the PWA.
+#: M2I.5's Custom GPT Actions bridge. Reserved in M2I PR2 and **produced for
+#: real since M2I.5 PR1**, when the bridge and its own internal credential
+#: arrived — the day that was written down as "the day the bridge exists".
+#:
+#: The stored value keeps the word ``future`` on purpose. It is in durable
+#: answer provenance on disk, and renaming it would either rewrite history or
+#: split one source across two spellings; a constant whose name has aged is a
+#: much smaller problem than a provenance vocabulary that has two words for the
+#: same surface.
+#:
+#: A route may attribute an answer to this source only when the request carried
+#: the bridge's *own* internal credential. It is still never read from a body.
 SOURCE_FUTURE_GPT_BRIDGE = "future_gpt_bridge"
 
 ANSWER_SOURCES: Tuple[str, ...] = (
@@ -130,10 +138,18 @@ ANSWER_SOURCES: Tuple[str, ...] = (
     SOURCE_FUTURE_GPT_BRIDGE,
 )
 
-#: The sources a route in **this** build may attribute an answer to. The bridge
-#: is deliberately absent: a vocabulary entry is not an enabled surface, and this
-#: frozenset is what makes that difference enforceable rather than documented.
-ACCEPTED_ANSWER_SOURCES = frozenset({SOURCE_WORKSTATION_PWA, SOURCE_INTERNAL_TEST})
+#: The sources a route in **this** build may attribute an answer to.
+#:
+#: The bridge joined this set in M2I.5 PR1, and what changed is not the rule but
+#: the facts: the rule was always "a vocabulary entry is not an enabled surface",
+#: and there is now a surface — a separate 0600 internal credential, off by
+#: default, recognised on a bounded set of task routes. What still is not here is
+#: any way for a *client* to select a source: this frozenset gates a value the
+#: route derived from which credential authenticated the request, and
+#: ``_task_body`` has no ``source`` field to send in the first place.
+ACCEPTED_ANSWER_SOURCES = frozenset(
+    {SOURCE_WORKSTATION_PWA, SOURCE_INTERNAL_TEST, SOURCE_FUTURE_GPT_BRIDGE}
+)
 
 OUTCOME_ACCEPTED = "accepted"
 OUTCOME_REJECTED = "rejected"

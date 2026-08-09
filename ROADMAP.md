@@ -118,10 +118,33 @@ below are fixed by [`DECISIONS.md`](DECISIONS.md) D-2026-08-08-1 … -6.
 - **Objective:** the bounded Actions surface from D-2026-08-08-1, as a **dedicated narrow bridge
   process** in front of the task API — not a new route on the workstation daemon.
 - **In scope:** scoped per-client credentials; the production transport decision (the probe's
-  temporary tunnel is not one); `list_projects`, `get_project_context`, `create_task`, `get_task`,
-  `get_updates`, `get_pending_questions`, `submit_clarification_answer`, `send_followup`,
-  `cancel_task`, `get_result`; real iPhone end-to-end validation against Cofferdam rather than
-  against an echo service.
+  temporary tunnel is not one); the bounded Action set; real iPhone end-to-end validation against
+  Cofferdam rather than against an echo service.
+- **PR1 — shipped (local only).** A dedicated `cofferdam.actions_bridge` process, a scoped
+  internal credential, a separate external Bearer key, eight Actions, the OpenAPI schema and the
+  Custom GPT operator instructions. Loopback only; no tunnel, no DNS, no configured GPT.
+- **The Action set as built, and why it differs from D-2026-08-08-1.** That decision recorded ten
+  names so the first implementation could not quietly widen the surface. PR1 ships **eight**, and
+  the difference is narrowing in one place and two small additions elsewhere.
+
+  Four of the recorded reads — `get_task`, `get_updates`, `get_pending_questions` and `get_result`
+  — are one Action, `sync_task`, returning one bounded snapshot. Four Actions where a model must
+  make four calls to answer "what happened" is four chances to make three of them and guess the
+  fourth; the consolidation removes the guess and publishes strictly less than the four separately
+  would.
+
+  `get_project_context` is **not** in PR1. It is M2J's — the roadmap already places project-context
+  retrieval there — and it cannot be built honestly before the workspace model it reads from.
+
+  Two Actions are new: `list_recent_tasks`, so a conversation that has lost its task reference
+  recovers it rather than a model guessing an id; and `finish_task`, which is an existing Task Core
+  lifecycle operation and the honest alternative to recording finished work as cancelled.
+
+  Net: the surface is smaller than recorded, and every addition is a bounded read or an existing
+  lifecycle verb. Recorded as D-2026-08-09-1.
+- **Remaining, behind two separate approval gates.** Gate A: a dedicated HTTPS origin, the tunnel
+  design, the external key in the GPT editor, the schema import, and a first real Action call from
+  an iPhone. Gate B: production Agent SDK enablement. Either may be approved without the other.
 - **Out of scope:** any approval endpoint, and any exposure of the general Cofferdam API or the
   PWA through the bridge's transport (D-2026-08-08-2).
 - **Prior art:** the 2026-08-08 capability probe, recorded in [`STATUS.md`](STATUS.md). It proves

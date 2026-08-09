@@ -49,6 +49,7 @@ ENV_TOKEN = "COFFERDAM_TOKEN"
 ENV_VALIDATION_TASK_ADAPTER = "COFFERDAM_ENABLE_VALIDATION_TASK_ADAPTER"
 ENV_CLAUDE_CODE_ADAPTER = "COFFERDAM_ENABLE_CLAUDE_CODE_ADAPTER"
 ENV_CLAUDE_AGENT_SDK_ADAPTER = "COFFERDAM_ENABLE_CLAUDE_AGENT_SDK_ADAPTER"
+ENV_ACTIONS_BRIDGE_CALLER = "COFFERDAM_ENABLE_ACTIONS_BRIDGE_CALLER"
 
 #: Off, and it stays off unless somebody with access to this machine turns it
 #: on. The validation task adapter is a lifecycle exerciser for a validation
@@ -71,6 +72,17 @@ DEFAULT_ENABLE_CLAUDE_CODE_ADAPTER = False
 #: ``docs/CLAUDE_AGENT_SDK_ADAPTER.md``.
 DEFAULT_ENABLE_CLAUDE_AGENT_SDK_ADAPTER = False
 
+#: Off, and it is a **caller** switch rather than an adapter one — the only one
+#: in this file. It does not register anything, run anything or open a port. All
+#: it does is decide whether a *second* internal credential exists at all, and
+#: therefore whether the M2I.5 Actions bridge has anything to authenticate with.
+#:
+#: Off means the file is never generated, `load_actions_bridge_token` returns
+#: ``None``, and the daemon knows exactly one credential — which is the state
+#: every existing deployment is in and stays in until somebody changes it here.
+#: See ``docs/ACTIONS_BRIDGE.md``.
+DEFAULT_ENABLE_ACTIONS_BRIDGE_CALLER = False
+
 
 @dataclass(frozen=True)
 class Config:
@@ -90,6 +102,10 @@ class Config:
     #: Server-side only. Independent of the field above: neither implies the
     #: other, and neither turns the other off.
     enable_claude_agent_sdk_adapter: bool = DEFAULT_ENABLE_CLAUDE_AGENT_SDK_ADAPTER
+    #: Server-side only, and the narrowest of the four. It grants no adapter and
+    #: no route: it decides whether a second internal credential exists, which a
+    #: bounded set of task routes may then recognise as the Actions bridge.
+    enable_actions_bridge_caller: bool = DEFAULT_ENABLE_ACTIONS_BRIDGE_CALLER
 
     @property
     def secrets_dir(self) -> Path:
@@ -128,6 +144,21 @@ class Config:
     @property
     def token_path(self) -> Path:
         return self.secrets_dir / "token"
+
+    @property
+    def actions_bridge_token_path(self) -> Path:
+        """The **second** internal credential, for the M2I.5 Actions bridge.
+
+        A separate file rather than a scope claim inside the first one, because
+        the property that matters is revocability: deleting this file removes
+        the bridge's access to the daemon and leaves the phone's device token
+        working. One file holding both would make that a parsing question.
+
+        This is *not* the key the Custom GPT holds. That one lives beside the
+        bridge process and never appears here — see
+        ``cofferdam/actions_bridge/config.py``.
+        """
+        return self.secrets_dir / "actions-bridge-internal-token"
 
     @property
     def actions_path(self) -> Path:
@@ -250,6 +281,15 @@ def load_config(home: Optional[Path] = None) -> Config:
             ),
             DEFAULT_ENABLE_CLAUDE_AGENT_SDK_ADAPTER,
         ),
+        enable_actions_bridge_caller=_as_bool(
+            _pick(
+                ENV_ACTIONS_BRIDGE_CALLER,
+                overrides,
+                "enable_actions_bridge_caller",
+                DEFAULT_ENABLE_ACTIONS_BRIDGE_CALLER,
+            ),
+            DEFAULT_ENABLE_ACTIONS_BRIDGE_CALLER,
+        ),
     )
 
 
@@ -276,4 +316,40 @@ def load_or_create_token(config: Config) -> str:
     token = secrets.token_urlsafe(TOKEN_BYTES)
     config.token_path.write_text(token + "\n", encoding="utf-8")
     _restrict(config.token_path)
+    return token
+
+
+def load_or_create_actions_bridge_token(config: Config) -> Optional[str]:
+    """The Actions bridge's internal credential, or ``None`` when it is off.
+
+    Three differences from :func:`load_or_create_token`, each deliberate.
+
+    **There is no environment override.** The device token has one because a
+    systemd ``EnvironmentFile=`` is a documented way to supply it. This
+    credential is read by two processes on the same machine from the same 0600
+    file, and an env var would put a second copy of it in a place that is
+    visible in ``/proc`` and easy to inherit into a child.
+
+    **It is generated only when the caller is enabled**, so a deployment that
+    has not turned this on has no such file — which is a stronger statement than
+    a file nobody uses.
+
+    **It is never announced**, not even on stderr. Nobody has to copy this one
+    anywhere by hand: the bridge reads the same path.
+    """
+    if not config.enable_actions_bridge_caller:
+        return None
+
+    config.ensure_dirs()
+    path = config.actions_bridge_token_path
+    try:
+        existing = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        existing = ""
+    if existing:
+        return existing
+
+    token = secrets.token_urlsafe(TOKEN_BYTES)
+    path.write_text(token + "\n", encoding="utf-8")
+    _restrict(path)
     return token

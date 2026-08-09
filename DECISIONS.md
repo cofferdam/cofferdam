@@ -1036,6 +1036,88 @@ not memory. Any full-text index or embedding built later is a **derived index**:
 discardable, and never the canonical copy of anything. If the index and the Markdown disagree, the
 Markdown is right.
 
+## D-2026-08-09-1 — The bridge's Action set: eight, not the recorded ten (EFE DECISION, ACTIVE)
+
+**Decision.** M2I.5 PR1 ships eight Actions — `list_projects`, `create_task`, `list_recent_tasks`,
+`sync_task`, `submit_choice_answer`, `send_followup`, `cancel_task`, `finish_task` — rather than
+the ten names recorded in D-2026-08-08-1. That decision exists so the first implementation could
+not quietly *widen* the surface, and this one records what happened instead: it narrowed, in one
+place, with two small additions elsewhere.
+
+**Four reads became one.** `get_task`, `get_updates`, `get_pending_questions` and `get_result` are
+`sync_task`, returning a single bounded snapshot. A model that has to make four calls to answer
+"what happened" will make three and guess the fourth, and the guess will be the result. One
+snapshot also publishes strictly less than four separate responses would: the clarification read
+happens only when the task says it is waiting on one, and the result read only when there could be
+a result.
+
+**`get_project_context` is not here.** The roadmap already places project-context retrieval in M2J,
+and it cannot be built honestly before the workspace model it would read from exists. Omitted, not
+dropped.
+
+**Two additions, both bounded.** `list_recent_tasks` returns a strictly bounded, deterministically
+ordered list with no task content, and exists so a conversation that has lost its task reference
+recovers a real id instead of a model reconstructing one — the failure it prevents is an answer or
+a cancellation aimed at the wrong task. `finish_task` is an existing Task Core lifecycle operation
+and the honest alternative to `cancel_task`; without it, the only way to leave a task whose work
+succeeded is to record it as stopped.
+
+**What did not change.** No approval Action, no path, no provider settings, no Remote Control, no
+transcript, no artifact browsing. The exclusions in D-2026-08-08-1 and D-2026-08-08-2 stand
+unaltered.
+
+## D-2026-08-09-2 — The bridge gets its own internal credential (EFE DECISION, ACTIVE)
+
+**Decision.** The Actions bridge authenticates to the Cofferdam daemon with a **second 0600
+credential**, separate from the device token, recognised on **ten task routes and nothing else**,
+and generated only when the host explicitly enables it.
+
+**The reason is provenance before access.** The daemon's task routes assign `origin` and `source`
+from the authenticated caller. Had the bridge reused the device token, every bridge-created task
+would have been recorded as though somebody had used their phone — which is precisely the mislabel
+`tasks/clarifications.py` was written to prevent, and it would have been undetectable afterwards.
+
+**The access property is structural, not a check.** The daemon's other routes keep the unchanged
+`require_token`, which has never heard of the second credential. A bridge request to
+`/api/remote-control/...` is therefore a 401 because nothing there can recognise it — a stronger
+guarantee than a refusal a later refactor could relax, and the same reasoning D-2026-08-08-2 uses
+for the absent approval endpoint.
+
+**Consequence for the reserved provenance words.** `chatgpt_app` and `future_gpt_bridge` were
+reserved in M2I PR2 and deliberately excluded from the accepted sets, on the rule that "a reserved
+word is not an enabled surface". A surface now exists, so they are accepted — and the stored value
+keeps the word `future` on purpose: it is in durable answer provenance on disk, and renaming it
+would either rewrite history or split one source across two spellings.
+
+**It is off by default and revocable by deletion.** No existing deployment gains a second
+credential, and removing the file ends the bridge's access to the daemon while the phone keeps
+working.
+
+## D-2026-08-09-3 — Artifacts stay unavailable until Task Core owns them (EFE DECISION, ACTIVE)
+
+**Decision.** The Actions bridge reports `artifacts_supported: false` with a reason, and exposes no
+file listing, no preview and **no path parameter of any kind**.
+
+**Cofferdam has no task-owned artifact model, and the thing that looks like one is not.**
+`EvidenceReference` with `evidence_type: "artifact"` is an *adapter claim* carrying a free-form
+identifier, documented in its own class as "never dereferenced by Task Core and never trusted as
+fact". There is no manifest, no changed-file set, no digest, no project-root-relative path claim
+and no ownership proof.
+
+Building artifact Actions on that would mean inventing the ownership proof at the bridge — a remote
+caller naming something and the bridge deciding whether the task owns it. That is the "add a path
+parameter" mistake in a different coat.
+
+**Absent rather than empty.** "No artifacts for this task" would be a claim the host cannot make;
+"the capability does not exist" is the true one, and the payload says which.
+
+**What has to come first**, as a Task Core PR, before any bridge artifact Action: structured
+project-root-relative change claims from an adapter, bounded in count and length; storage against
+the task with digest and size, marked `adapter_reported`; containment verified at record time under
+the rule `projects.verify_root` already applies; a code-owned secret-path deny list applied at
+record time rather than on read; and a bounded preview addressed by a server-minted `artifact_id`
+with a size cap and a type allowlist. Detail in `docs/ACTIONS_BRIDGE.md`.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when
