@@ -388,14 +388,19 @@ class ClaudeAgentSdkAdapter(TaskAdapter):
         except Exception:
             raise AdapterRefusal("the follow-up could not be delivered to Claude")
 
+        # No event of its own, and the M2I PR3 live spike is why.
+        #
+        # It used to emit "your follow-up was delivered", which produced two
+        # near-identical lines in the history — this one and the session's own,
+        # emitted when the turn actually started — and this one carried a turn
+        # number that was already stale, because the parent's mirror of it does
+        # not advance until the helper reports the turn ending.
+        #
+        # The other two are enough and are each true of a different moment:
+        # Task Core writes `followup_received` when the message is accepted, and
+        # the session emits its own activity when the provider takes it. A third
+        # line between them said nothing new and said one thing wrong.
         return AdapterOutcome(
-            events=(
-                AdapterEvent(
-                    event_type=EVENT_PROGRESS,
-                    text="Your follow-up was delivered to the same Claude session.",
-                    detail="turn " + str(getattr(session, "turn_number", 0) or 0),
-                ),
-            ),
             provider_session_id=session.provider_session_id,
             session_retained=True,
         )

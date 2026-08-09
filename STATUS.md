@@ -681,8 +681,23 @@ scripted async client, so the multi-turn code under test is the code that ships.
 in three configurations: stdlib-only, workstation extras without the SDK, and extras with
 `claude-agent-sdk 0.2.134` installed.
 
+**One supervised live spike, and it found something.** One disposable task on `claude-sandbox`
+against a non-production loopback daemon, with the session tightened below the shipped profile for
+the run (`tools: []`, USD 0.50 budget, `PROFILE_MAX_TURNS` unchanged, reverted afterwards). Turn 1
+answered `Blue.`; the follow-up was accepted from `ready_for_followup`; **both turns reported the
+same `provider_session_id`** and were served by one helper process and one SDK client; turn 2
+answered *"I named the colour blue."*, which it could only do from turn 1's context. Turn 1
+remained retrievable, an idempotent retry created no second turn, no tool, approval or
+clarification event occurred, the sandbox was byte-for-byte unchanged, and the database contained
+no raw payload, reasoning, transcript, environment value or credential.
+
+The defect it found: the adapter emitted its own "your follow-up was delivered" event *and* the
+session emitted one when the turn actually began — two near-identical history lines, the first
+carrying an already-stale turn number. The adapter's was removed.
+
 **No production change.** No unit, drop-in, installer or registry file was edited; the SDK is not
-installed in the production slot and the adapter is not enabled there.
+installed in the production slot and the adapter is not enabled there. Production's PID, start
+time, drop-in hash and registry hash were recorded before the spike and verified unchanged after.
 
 **Next:** the remaining M2I parity gap before the CLI adapter can be retired — see
 [`ROADMAP.md`](ROADMAP.md).

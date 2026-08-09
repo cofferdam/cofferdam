@@ -1287,6 +1287,22 @@ class SameSessionFollowupTests(AdapterBehaviourTests):
         self.assertEqual(len(self.sessions), 1)
         self.assertEqual(session.clients_created, 1)
 
+    def test_delivering_a_follow_up_emits_no_event_of_its_own(self) -> None:
+        """Found by the M2I PR3 live spike, which produced two of them.
+
+        The history had "your follow-up was delivered" twice — once from here
+        and once from the session when the turn actually began — and the copy
+        from here carried a stale turn number, because the parent's mirror does
+        not advance until the helper reports the turn ending. Task Core's
+        ``followup_received`` and the session's own activity are each true of a
+        different moment; a third line between them was neither.
+        """
+        adapter, _ = self.retained()
+        outcome = adapter.send_followup(context(self.root), "and also this")
+        self.assertEqual(outcome.events, ())
+        self.assertTrue(outcome.session_retained)
+        self.assertEqual(outcome.provider_session_id, "session-abc")
+
     def test_the_provider_session_id_does_not_change_across_turns(self) -> None:
         adapter, first = self.retained()
         before = first.provider_session_id

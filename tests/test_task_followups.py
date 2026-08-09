@@ -937,6 +937,51 @@ class SeparationTests(FollowupTestCase):
         )
         self.assertNotIn("permissionresultallow", source)
 
+    def test_a_clarification_wait_admits_only_the_answer_route(self) -> None:
+        """The separation stated as the single rule it has to satisfy.
+
+        A task whose ``waiting_reason`` is ``clarification`` has exactly one
+        remote continuation operation: the clarification-answer route. The
+        follow-up route is refused — **not** softened to preserve the older,
+        looser `waiting_for_user` follow-up behaviour, which is what a legacy
+        adapter's expectations would otherwise pull it towards.
+
+        Written against the state rather than against an adapter's capability
+        flags, because the guarantee is about the lifecycle: any adapter that
+        can both ask questions and take follow-ups must land here.
+        """
+        row = self.create(adapter_id="conversational")
+        self.agent.pending_question = row.task_id
+        row = self.service.refresh_task(row.task_id)
+
+        self.assertEqual(row.state, STATE_WAITING_FOR_USER)
+        self.assertEqual(row.waiting_reason, WAITING_CLARIFICATION)
+        # The adapter claims both capabilities, so nothing here is refused for
+        # want of one — the refusal is about the state.
+        capabilities = self.agent.capabilities()
+        self.assertTrue(capabilities.followup)
+        self.assertTrue(capabilities.clarifications)
+
+        with self.assertRaises(task_errors.ClarificationPending):
+            self.service.send_followup(row.task_id, "a new instruction")
+
+        # Nothing moved and nothing was delivered.
+        after = self.store.get(row.task_id)
+        self.assertEqual(after.state, STATE_WAITING_FOR_USER)
+        self.assertEqual(after.waiting_reason, WAITING_CLARIFICATION)
+        self.assertEqual(after.lifecycle_revision, row.lifecycle_revision)
+        self.assertEqual(self.agent.delivered, [])
+        self.assertEqual(len(self.service.pending_clarifications(row.task_id)), 1)
+
+        # And the one operation that may continue it, does.
+        question_id = self.service.pending_clarifications(row.task_id)[0].question_id
+        resumed = self.service.answer_clarification(
+            row.task_id, question_id, {"option_ids": ["opt1"]}
+        )
+        self.assertEqual(resumed.state, STATE_RUNNING)
+        self.assertEqual(len(self.agent.answers), 1)
+        self.assertEqual(self.agent.delivered, [])
+
     def test_the_three_operations_have_three_distinct_errors(self) -> None:
         codes = {
             task_errors.CODE_CLARIFICATION_PENDING,

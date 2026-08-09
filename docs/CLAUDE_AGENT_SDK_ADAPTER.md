@@ -1,4 +1,4 @@
-# The Claude Agent SDK adapter — M2I PR1 foundation and PR2 clarifications
+# The Claude Agent SDK adapter — M2I PR1–PR3
 
 A second Lane B transport to the same agent, on the same provider-neutral
 [Agent Task Core](AGENT_TASK_CORE.md). Where the
@@ -6,16 +6,18 @@ A second Lane B transport to the same agent, on the same provider-neutral
 stdout, this one drives the official **Claude Agent SDK** and receives typed
 messages — which is what makes a structured question channel possible at all.
 
-This document describes what was built in **M2I PR1** (the foundation) and
-**M2I PR2** (the structured clarification round trip), and is deliberately clear
-about what was not.
+This document describes what was built in **M2I PR1** (the foundation), **M2I
+PR2** (the structured clarification round trip) and **M2I PR3** (same-session
+follow-up and the `get_result` boundary), and is deliberately clear about what
+was not.
 
 > **This adapter is off by default and is not deployed.** Everything below is
 > evidenced by the published SDK distribution and by automated tests that call
 > nothing — except the clarification schema and round trip, which were settled by
-> a **supervised live spike** in a disposable project against a non-production
-> daemon, recorded in
-> [The question schema](#the-question-schema-verified-by-the-m2i-pr2-live-spike).
+> two **supervised live spikes** in a disposable project against a
+> non-production daemon, recorded in
+> [The question schema](#the-question-schema-verified-by-the-m2i-pr2-live-spike)
+> and [What the M2I PR3 live spike found](#what-the-m2i-pr3-live-spike-found).
 > Where a claim would need evidence nobody has gathered, it is marked
 > **outstanding** and is not made.
 
@@ -29,7 +31,7 @@ transport is what it cannot do and what it does not yet replace.
   validated live from a phone against this host. `ROADMAP.md` holds the
   retirement rule: the CLI adapter goes only after verified parity.
 - **No production change.** No systemd unit, drop-in, installer or registry file
-  in this repository enables it, and none was edited by PR1 or PR2.
+  in this repository enables it, and none was edited by PR1, PR2 or PR3.
 - **No production validation.** The live spike ran against a *non-production*
   daemon with a temporary `COFFERDAM_HOME` and a temporary registry copy. The
   live service, its drop-in and the live registry were never touched, and nothing
@@ -730,6 +732,36 @@ of provider work would put a second `started_at` on something that never stopped
 The adapter is asked *before* anything is written. A follow-up recorded as
 delivered that never reached the session would show somebody their message
 accepted while the agent sat idle.
+
+### What the M2I PR3 live spike found
+
+One disposable task on `claude-sandbox`, against a non-production daemon bound to
+`127.0.0.1` with a temporary `COFFERDAM_HOME` and a registry containing only that
+project. The session was tightened below the shipped profile for the run —
+`tools: []` and a USD 0.50 budget — so a tool request or a clarification was
+structurally impossible rather than merely unexpected. `PROFILE_MAX_TURNS` was
+unchanged and the tightening was reverted afterwards.
+
+| Claim | Observed |
+|---|---|
+| A turn-ending result leaves the session usable | turn 1 reached `ready_for_followup`, result `Blue.` |
+| A follow-up continues the same provider session | one id, byte-identical on **both** turns (not reproduced here: this document does not publish session identifiers, and the rule does not bend for a dead one) |
+| One helper, one client | helper PID `163871`, parent = daemon, started before turn 1 and still the only one after turn 2 |
+| The second turn has the first turn's context | *"In one sentence, what colour did you just name?"* → *"I named the colour blue."* |
+| Turn 1 survives turn 2 | both rows present; turn 1 still `Blue.` |
+| `get_result` means what it says | turn 2 while live (`task_terminal: false`, `follow_up_available: true`), the same result after `finish` (`task_terminal: true`, `follow_up_available: false`) |
+| Retries do not duplicate a turn | same `client_request_id` → 200 and still two turns; different content → `409 task_idempotency_conflict` |
+| No tool, approval or clarification | none in the event stream |
+| Nothing leaked | no raw payload, reasoning, transcript, environment value, credential or provider debug field anywhere in the database |
+| Nothing changed on disk | the sandbox was byte-for-byte identical and its git tree clean |
+
+**It also found a defect, which is the point of running one.** The adapter emitted
+its own "your follow-up was delivered" event *and* the session emitted one when
+the turn actually began — two near-identical history lines, the first carrying a
+turn number that was already stale because the parent's mirror does not advance
+until the helper reports the turn ending. The adapter's event was removed:
+`followup_received` and the session's own activity are each true of a different
+moment, and a third line between them was neither.
 
 ### Restart, and what is not claimed
 
