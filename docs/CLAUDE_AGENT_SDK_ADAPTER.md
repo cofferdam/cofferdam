@@ -1,4 +1,4 @@
-# The Claude Agent SDK adapter — M2I PR1–PR3
+# The Claude Agent SDK adapter — M2I PR1–PR4
 
 A second Lane B transport to the same agent, on the same provider-neutral
 [Agent Task Core](AGENT_TASK_CORE.md). Where the
@@ -7,8 +7,9 @@ stdout, this one drives the official **Claude Agent SDK** and receives typed
 messages — which is what makes a structured question channel possible at all.
 
 This document describes what was built in **M2I PR1** (the foundation), **M2I
-PR2** (the structured clarification round trip) and **M2I PR3** (same-session
-follow-up and the `get_result` boundary), and is deliberately clear about what
+PR2** (the structured clarification round trip), **M2I PR3** (same-session
+follow-up and the `get_result` boundary) and **M2I PR4** (the phone surface,
+helper cleanup and startup reconciliation), and is deliberately clear about what
 was not.
 
 > **This adapter is off by default and is not deployed.** Everything below is
@@ -791,6 +792,210 @@ record. As of PR3 the durable record is the `task_turns` row, written inside the
 transaction that moves the task, and `GET /api/tasks/{id}/result` serves a
 normalized view of it.
 
+## The phone, and what PR4 found (M2I PR4)
+
+PR2 shipped the clarification routes and PR3 shipped follow-up and `get_result`.
+PR4's audit asked the question those three had not: **can somebody actually do
+any of this from a phone?** The answer was no, and the reason was entirely on the
+client — which is why this section exists as its own thing rather than as a note
+on the ones above.
+
+### The gap
+
+The PWA rendered a generic "Your answer" box for any `waiting_for_user` and
+posted it to `/followups` — a route the server refuses outright for as long as a
+question is open. The two routes had been apart on the wire since PR2 and
+together on the screen ever since. From a phone, the headline feature of M2I
+could not be used at all.
+
+`web/tasks.js` now reads `GET /api/tasks/{id}/clarifications`, renders the
+normalized question with its options, and submits through
+`POST /api/tasks/{id}/clarifications/{qid}/answer` with a body of exactly
+`answer` and `option_ids`. While a question is open there is no follow-up box,
+because a field whose contents the server would refuse is not a field.
+
+**There is still no approval control, and there is no route for one.** The panel
+says so where somebody is about to type: answering is *information, not
+permission*, and it cannot approve a tool. A test scans `tasks.js` for
+`approve`, `approval`, `deny` and `permission_mode` as request keys, control ids
+and route segments — matched as those shapes rather than as substrings, so the
+panel's own honest copy survives the scan and a control would not.
+
+### Polling, and the phone-shaped hole in it
+
+The panel polls. On a phone the interesting moment is not while it is polling —
+it is the ten seconds after somebody unlocks the screen, when the page has been
+frozen and the answer on it is stale. `visibilitychange` now triggers **one
+read**, not a new timer: `reschedule` remains the only thing that creates an
+interval, and a test asserts the foreground refresh costs at most two requests.
+Polling stays stopped while hidden.
+
+### Drafts, and why the previous rule was wrong
+
+The panel used to store nothing, and that was right while it had nothing worth
+keeping. It stopped being right when the thing not being kept was somebody's
+half-written instruction to an agent: iOS discards a backgrounded tab whenever it
+likes, and a rule guaranteeing the draft was lost was protecting nothing.
+
+So the blanket ban became a specific one. `localStorage` is used;
+`sessionStorage`, cookies and IndexedDB are not — one storage mechanism is
+enough and three are three things to audit. Every key is
+`cofferdam.taskdraft.<operation>.<task_id>`, so a follow-up draft and a
+clarification draft never share a slot and one task's words can never appear in
+another's box. Every access goes through the guarded pattern `app.js` learned
+from a real device, where the `localStorage` property access *itself* raises
+under Private Browsing; a refusal costs the durability and leaves the panel
+working.
+
+Drafts are dropped when a task reaches a terminal state, and **every draft is
+removed on sign-out** — the most personal content in the product does not
+survive it. A restored draft is text, never a message: nothing is submitted
+because the app came back to the foreground.
+
+No token, no provider session id and no provider payload is stored. That is
+structural rather than reviewed: there is exactly one storage writer, it takes a
+task, an operation and a string, and there is no second `setItem` call site
+through which anything else could arrive.
+
+### Idempotency, and the retry that was not one
+
+One module-level slot held the request key for every write, and it was cleared on
+*any* response — including a refusal. A refusal is exactly the moment somebody
+presses the button again, so the retry carried a fresh key and arrived at the
+server as a second, unrelated message.
+
+Keys are now scoped by operation and task, retained across a refusal, and
+regenerated only when the words change — which is the rule the server's own
+payload-hash binding needs. Retrying a refused follow-up is recognisable as a
+retry; editing it and sending is recognisably a different message.
+
+### Caching
+
+Every route whose body carries task content — the detail view, the event stream,
+the question list and the result — is served `Cache-Control: no-store`. Not
+`no-cache`, which still permits writing the body to disk: for this content that
+means somebody's private instruction to an agent sitting in a browser cache
+directory after the sign-out that was supposed to remove it. Routes carrying no
+task content, such as the adapter list, are deliberately unmarked, and a test
+asserts that too — `no-store` everywhere would say nothing about anything.
+
+## Helper ownership and cleanup (M2I PR4)
+
+Three defects, all of the same kind: something Cofferdam owned could outlive the
+thing that owned it.
+
+**The adapter's `shutdown` had no caller.** It was implemented in PR1 and never
+invoked, so a daemon stopped with a live task left its helper to work out on its
+own that its parent was gone. The helper *does* work that out — its loop ends
+when stdin closes — but "the child notices" is a weaker guarantee than "the
+parent closed it", and only one of the two is bounded. `AdapterRegistry.shutdown`
+now asks every adapter in turn from the daemon's lifespan, and one adapter's
+failure does not stop the next, because the cost of that coupling is somebody
+else's process surviving the shutdown.
+
+**Termination reached the wrong process.** `Popen.terminate` signals the helper
+alone, and the helper is not the only process: the SDK starts a Claude CLI inside
+the helper's process group. A terminated helper could leave that CLI orphaned
+with a live subscription session — the exact leak this milestone names.
+
+So the stop now signals the **group**, under the ownership rule the Claude Code
+adapter has enforced since M2G: pid, `/proc` start time and group id recorded at
+launch, and **all three** re-verified immediately before every signal. The start
+time is the clause that does the work — a pid is a small integer the kernel
+reuses, and between recording one and signalling it the helper can exit and
+somebody's editor can be given the same number. On a personal workstation that
+editor is the thing this codebase exists not to disturb.
+
+Nothing enumerates processes, reads a process name or names a group Cofferdam did
+not create. Escalation is graceful-first and bounded at every step — an agent
+killed mid-write is one that did not finish writing the file it was editing — and
+every branch ends in a `wait`, so no child is left as a zombie.
+
+**The structural guard changed, and the change is worth stating.** `hostclient.py`
+used to be held to "call `terminate` and `kill` as methods on the object `Popen`
+returned, and never name a pid or a group". That sounds stricter and was, about
+the wrong thing: refusing to name a group did not prevent an orphan, it prevented
+cleaning one up. What stays forbidden is everything that makes a stop *broad* — a
+bare `os.kill` on a pid, `psutil`, `pkill`, `killall`, `pidof`, and any match on
+a process name — and a test asserts the identity check appears *before* the
+signal in the file.
+
+**A lost helper now says so.** `HostSession.note_lost` also had no call site, so a
+helper whose process died produced "ended without producing a result" — which is
+equally true of a helper that simply had nothing to say. Those are different facts
+and the difference is what an operator reads a task history for. It is not called
+for a cancelled session: a task somebody stopped must never be reported as a
+transport failure.
+
+## Startup reconciliation (M2I PR4)
+
+`recover_after_restart` was substantively correct and under-covered. The two
+states M2I *added* are the two where getting it wrong is least visible, because
+both look like "the task is waiting for you" and after a restart there is nothing
+on the other end of either.
+
+- **`ready_for_followup` with no live helper becomes `interrupted`.** That state
+  renders a box somebody types into; the process that would receive it died with
+  the daemon, and there is no reattach.
+- **A pending question becomes `interrupted`, and the question is closed as
+  superseded** in the same write. Leaving it pending would put a task in the
+  "needs you" bucket with an answer box whose only possible outcome is a refusal.
+- **Earlier completed turns are untouched.** A restart ended the conversation,
+  not the answer: `get_result` still returns the last completed turn's result and
+  reports that no follow-up is available.
+- **Terminal tasks are never read into the path at all** — same state, same
+  result, same timestamp, same number of history rows.
+- **It is idempotent.** A crash loop that runs it four times settles one task
+  once and writes nothing on the other three passes.
+
+None of this is a limitation being worked around. The adapter does not claim
+`recover_after_restart`, and that is what routes every state above to
+`interrupted` rather than to `recovery_required` — a state that would promise
+somebody a way back.
+
+## The shipped profile, by name (M2I PR4)
+
+There is exactly one profile, it is called **`cofferdam-project-edit-v1`**, and
+it is now published as data by `options.describe_profile()` and carried in the
+adapter's capability description. A named profile is not a profile *system*:
+naming it makes the single shipped set quotable and assertable, and the moment
+somebody adds a second name they have to add a selector too — which is the
+visible change the constant exists to force.
+
+The values are in [The tool profile](#the-tool-profile) and are unchanged by PR4.
+What PR4 added is that they can be read off a running build rather than out of a
+document that may describe a different version, and that each is asserted against
+a written-out literal rather than against itself.
+
+**On the filesystem boundary, the honest version.** `cwd` plus an empty
+`add_dirs` is what the CLI is *told*. That is a configuration boundary enforced by
+the agent's own tool implementations, not a kernel one. Cofferdam has **not**
+verified that a sufficiently determined `Read` of an absolute path outside the
+project root is refused, and this build does not claim it is. What it does claim
+is narrower and true: there is no shell in the session, so there is no general
+execution primitive to escape *with*, and every path Cofferdam itself resolves
+comes from the project registry. A test asserts the published limitations say
+"not a kernel sandbox" and "does not claim", and fails if the word "sandboxed"
+appears.
+
+The child environment allowlist is unchanged and re-asserted: a complete
+code-owned environment built in `hostenv`, replacing rather than merging with the
+daemon's own, with no Cofferdam credential and no other provider's in it.
+
+## Unsupported clarification variants (M2I PR4)
+
+Three shapes remain unobserved, listed in `SCHEMA_EVIDENCE_OUTSTANDING`:
+
+- more than one question in a single tool input;
+- `multiSelect: true` — a genuinely multiple-choice question;
+- a question offering no options, answered as free text.
+
+The reader already handles them conservatively, and the phone now **says so on
+the screen**: a question whose shape this build has not verified is labelled as
+such rather than presented as verified. What is missing is evidence that the
+provider produces them; a later spike that sees one moves it out of that tuple
+rather than widening any parsing.
+
 ## Tests
 
 `tests/test_delegated_events.py`, `tests/test_agent_sdk_adapter.py` and
@@ -826,17 +1031,65 @@ reads, and that the real helper drives a real SDK through a complete round trip.
 `OBSERVED_LIVE_SHAPE` in the test file reconstructs the observed structure with
 invented content, so the reader is now tested against the real field names.
 
+PR4 adds focused tests in four places. In the SDK suite: the process identity
+rule against **real short-lived processes** — the one property a double cannot
+prove — every way a helper can end, restart reconciliation across all five
+non-terminal states, and the named profile. In `tests/test_tasks_pwa.py` and
+`tests/tasks_harness.js`: the clarification workflow, draft survival across a
+genuine reload, request-id retention, the foreground refresh, and result
+retrieval. In `tests/test_task_clarifications.py`: the `no-store` header on every
+task-content route, and its deliberate absence on a route that carries none.
+
+The harness's `localStorage` double lives **outside** the sandbox that runs
+`tasks.js`, so a "reload" builds entirely fresh module state and only what was
+genuinely written down crosses over. A per-sandbox store could not tell "the
+draft was saved" from "the draft was still in a variable".
+
 What the tests still do **not** prove, said plainly:
 
 - the three unobserved variants in `SCHEMA_EVIDENCE_OUTSTANDING`;
+- that any of the PR4 phone work has been exercised on a **real phone**. Every
+  scenario above runs against a DOM double. Real-device validation is a separate,
+  separately approved step and had not been performed when this was written;
 - anything about production. The spike ran on a non-production daemon, and no
   claim is made about the live service.
+
+## Can M2I close?
+
+Not on the strength of this PR alone, and the distinction is worth being precise
+about.
+
+**What is finished.** The transport, the structured question channel, same-session
+follow-up, the result boundary, the phone surface for all three, helper ownership
+and cleanup, and startup reconciliation — each with automated coverage that calls
+nothing.
+
+**What is outstanding.** One real-phone validation run against a temporary
+non-production daemon: open a task, receive a structured question on the phone,
+answer it, receive the result, send a follow-up, and confirm a draft survives the
+screen locking. That run is what would let M2I close truthfully, and it needs its
+own approval because it involves a live provider call and exposing a daemon over
+Tailscale.
+
+**What closing M2I would not mean.** It would not deploy this adapter. The Agent
+SDK adapter stays **off by default and undeployed**: it is a separate host flag,
+no shipped unit or drop-in enables it, the installer does not require the extra,
+and the production venv has never had `claude_agent_sdk` in it. The **Claude Code
+adapter remains the production transport and the fallback**, unchanged by this
+PR, and the roadmap's retirement rule — it goes only after verified parity —
+still stands.
 
 ## Rollback
 
 Revert the PR. The adapter is off by default, the Claude Code adapter is
 unchanged and remains available, and no production unit, registry entry or
 drop-in was touched.
+
+PR4 adds two things a revert touches outside this package, and both are safe to
+take back: the `no-store` headers on the task-content routes, and the draft keys
+the PWA writes under `cofferdam.taskdraft.`. Reverting leaves those keys behind
+in a browser that had used the build; they are removed on the next sign-out,
+which is the same guarantee they had while the feature was present.
 
 The one thing a revert does not undo is the **schema version**, which PR2 moved
 from 1 to 2 by adding `task_clarifications`. That is survivable in the direction

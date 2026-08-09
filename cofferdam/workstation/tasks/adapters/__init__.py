@@ -113,6 +113,27 @@ class AdapterRegistry:
     def describe(self) -> List[dict]:
         return [self._adapters[key].describe() for key in sorted(self._adapters)]
 
+    def shutdown(self) -> None:
+        """Ask every registered adapter to release what it owns. Never raises.
+
+        Called once from the daemon's lifespan as the service stops. Before this
+        existed, ``ClaudeAgentSdkAdapter.shutdown`` was implemented and had no
+        caller: a daemon stopped with a live task left its helper process to
+        notice on its own. It does notice — the helper's loop ends when its stdin
+        closes — but "the child works out that its parent is gone" is a weaker
+        guarantee than "the parent closed it", and only one of the two is
+        bounded.
+
+        Each adapter is asked separately and a failure in one does not stop the
+        next, because the cost of that coupling is somebody else's process
+        surviving the shutdown.
+        """
+        for adapter_id in sorted(self._adapters):
+            try:
+                self._adapters[adapter_id].shutdown()
+            except Exception:  # pragma: no cover - tidying must never raise
+                continue
+
 
 def build_registry(
     *,

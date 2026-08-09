@@ -126,6 +126,66 @@ FORBIDDEN_PERMISSION_MODES: Tuple[str, ...] = (
 PROFILE_MAX_TURNS = 24
 PROFILE_MAX_BUDGET_USD = 2.00
 
+#: The profile's name, so that "which profile does Cofferdam ship" has a one-word
+#: answer that can be asserted, published in a capability description, and
+#: quoted in a pull request.
+#:
+#: There is exactly one, there is no second, and there is no parameter anywhere
+#: that selects between them. A named profile is not a profile *system*: naming
+#: it makes the single shipped set quotable, and the moment somebody adds a
+#: second name they have to add the selector too, which is the visible change
+#: this constant exists to force.
+PROFILE_NAME = "cofferdam-project-edit-v1"
+
+#: What the profile is for, in a sentence. Published, so a person deciding
+#: whether to enable the adapter reads the intent rather than inferring it from a
+#: tool list.
+PROFILE_INTENDED_USE = (
+    "Reading, searching and editing files inside one project directory the "
+    "workstation's own registry named, driven from a phone."
+)
+
+#: What this profile is **not**, stated as facts a reader can check against the
+#: values above rather than as reassurance.
+#:
+#: The last entry is the one that matters most and is the one a sandbox claim
+#: would paper over. ``cwd`` plus an empty ``add_dirs`` is what the CLI is *told*;
+#: it is a configuration boundary enforced by the agent's own tool
+#: implementations, not a kernel one. Cofferdam has not verified that a
+#: sufficiently determined ``Read`` of an absolute path outside the project root
+#: is refused, and this build does not claim it is. What it does claim is
+#: narrower and true: there is no shell in the session, so there is no general
+#: execution primitive to escape *with*, and every path Cofferdam itself resolves
+#: comes from the project registry.
+PROFILE_LIMITATIONS: Tuple[str, ...] = (
+    "No shell. Bash, BashOutput and KillShell are absent from the session and "
+    "named again on the deny list.",
+    "No network tool. WebFetch and WebSearch are absent.",
+    "No MCP server, plugin, hook, subagent or skill is loaded, and no settings "
+    "file is read.",
+    "No caller may choose a tool, a permission mode, a model, an effort level, "
+    "a budget or a directory. Every one of them is fixed in source.",
+    "bypassPermissions is forbidden by name and refused at build time.",
+    "The project root is a configuration boundary the CLI is asked to respect, "
+    "not a kernel sandbox. Cofferdam has not verified that filesystem access "
+    "outside the registered root is impossible, and does not claim it is.",
+)
+
+#: The filesystem boundary, named as the mechanism rather than as an outcome.
+PROFILE_FILESYSTEM_BOUNDARY = (
+    "One directory: the root the server resolved from its own project registry "
+    "and re-verified on disk immediately before the launch. It is passed as the "
+    "helper process's working directory and as the SDK's cwd, with add_dirs "
+    "empty. No request field anywhere above this layer carries a path."
+)
+
+#: The environment policy, in one line, pointing at the module that holds it.
+PROFILE_ENVIRONMENT_POLICY = (
+    "A complete child environment built by allowlist in hostenv, passed to "
+    "Popen, replacing rather than merging with the daemon's own. No credential "
+    "of Cofferdam's or of any other provider is copied into it."
+)
+
 #: Option names a caller must never be able to influence, asserted by test.
 #: Every one of them is either an execution channel (``cli_path``, ``cwd``,
 #: ``extra_args``, ``settings``, ``add_dirs``, ``mcp_servers``, ``hooks``,
@@ -380,6 +440,39 @@ def verify_option_values(values: Dict[str, Any]) -> None:
             raise OptionPolicyError("unexpected environment override: " + name)
 
 
+def describe_profile() -> Dict[str, Any]:
+    """The shipped profile as plain data, for a capability report and for tests.
+
+    Everything here is read from the constants above rather than restated, so a
+    profile that drifted from its own description is not a shape this function
+    can produce. It is deliberately buildable on a machine with no SDK installed
+    — the stdlib-only CI job is where a profile assertion is worth the most, and
+    one that silently skipped there would be worth nothing.
+
+    It carries no path, no environment value and no session identifier. What it
+    describes is the policy, which is the same on every host; what varies per
+    launch is a project root the server resolved, and that belongs to a task
+    rather than to a profile.
+    """
+    return {
+        "profile": PROFILE_NAME,
+        "intended_use": PROFILE_INTENDED_USE,
+        "tools": list(PROFILE_TOOLS),
+        "action_tools": list(PROFILE_ACTION_TOOLS),
+        "question_tools": list(PROFILE_QUESTION_TOOLS),
+        "disallowed_tools": list(PROFILE_DISALLOWED_TOOLS),
+        "permission_mode": PROFILE_PERMISSION_MODE,
+        "forbidden_permission_modes": list(FORBIDDEN_PERMISSION_MODES),
+        "auto_approved_tools": [],
+        "max_turns": PROFILE_MAX_TURNS,
+        "max_budget_usd": PROFILE_MAX_BUDGET_USD,
+        "environment_policy": PROFILE_ENVIRONMENT_POLICY,
+        "filesystem_boundary": PROFILE_FILESYSTEM_BOUNDARY,
+        "caller_settable_options": [],
+        "limitations": list(PROFILE_LIMITATIONS),
+    }
+
+
 def build_options(sdk: Any, values: Dict[str, Any], *, can_use_tool: Any = None) -> Any:
     """Turn verified values into the SDK's own options object.
 
@@ -404,8 +497,13 @@ __all__ = [
     "FORBIDDEN_PERMISSION_MODES",
     "PROFILE_ACTION_TOOLS",
     "PROFILE_DISALLOWED_TOOLS",
+    "PROFILE_ENVIRONMENT_POLICY",
+    "PROFILE_FILESYSTEM_BOUNDARY",
+    "PROFILE_INTENDED_USE",
+    "PROFILE_LIMITATIONS",
     "PROFILE_MAX_BUDGET_USD",
     "PROFILE_MAX_TURNS",
+    "PROFILE_NAME",
     "PROFILE_PERMISSION_MODE",
     "PROFILE_QUESTION_TOOLS",
     "PROFILE_TOOLS",
@@ -413,6 +511,7 @@ __all__ = [
     "build_environment",
     "build_option_values",
     "build_options",
+    "describe_profile",
     "new_session_id",
     "verify_option_values",
 ]

@@ -505,13 +505,24 @@ class CancellationGuard(TaskTestCase):
                 self.assertNotIn(forbidden, source, str(path) + " uses " + forbidden)
 
     def test_the_agent_sdk_launcher_signals_only_its_own_child(self):
-        """The excepted file stops a process it holds, never one it looked up.
+        """The excepted file stops a group it created, never one it looked up.
 
-        ``terminate`` and ``kill`` are called as **methods on the object that
-        ``Popen`` returned**, so the thing being stopped is by construction the
-        thing this object started. There is no ``os.kill``, no ``killpg``, no pid
-        arithmetic and no name matching — so "cancel cannot reach another task"
-        stays structural in the new file too.
+        **This rule changed in M2I PR4, and the reason is worth stating.** The
+        file used to be held to "call ``terminate`` and ``kill`` as methods on
+        the object ``Popen`` returned, and never name a pid or a group". That
+        sounds stricter and was, about the wrong thing: ``Popen.terminate``
+        signals the helper alone, and the helper is not the only process in the
+        picture. The SDK starts a Claude CLI of its own, inside the helper's
+        process group, so a terminated helper could leave that CLI running with a
+        live subscription session. Refusing to name a group did not prevent an
+        orphan; it prevented cleaning one up.
+
+        So the file now signals a group, under the ownership rule the Claude Code
+        adapter has enforced since M2G: pid, ``/proc`` start time and group id
+        recorded at launch, **all three** re-verified immediately before every
+        signal. What stays forbidden is everything that makes a stop broad — a
+        bare ``os.kill`` on a pid, process enumeration, and any match on a
+        process *name*.
         """
         launcher = (
             REPO_ROOT
@@ -523,8 +534,24 @@ class CancellationGuard(TaskTestCase):
             / "hostclient.py"
         )
         source = python_code_only(launcher.read_text("utf-8"))
-        for forbidden in ("os.kill", "killpg", "getpgid", "psutil", "/proc"):
-            self.assertNotIn(forbidden, source, "hostclient.py uses " + forbidden)
+        tokens = source.split("\n")
+        # Broad stops, still absent. `pidof` and the name matchers are what turn
+        # "stop my child" into "stop anything that looks like Claude".
+        for forbidden in ("psutil", "pkill", "killall", "pidof"):
+            self.assertNotIn(forbidden, tokens, "hostclient.py uses " + forbidden)
+        # A bare `os.kill(pid, …)` bypasses the group check entirely.
+        self.assertNotIn("os\n.\nkill\n(", source.replace("\n\n", "\n"))
+        # And the identity rule is present rather than assumed: a `killpg` that
+        # were not gated behind `still_ours` would be exactly the mistake the
+        # previous version of this test was trying to prevent.
+        self.assertIn("killpg", tokens)
+        self.assertIn("still_ours", tokens)
+        signal_site = source.index("killpg")
+        self.assertLess(
+            source.index("still_ours"),
+            signal_site,
+            "hostclient.py signals a group before it verifies it owns one",
+        )
 
 
 # -- 8. prompt content entering audit or log output --------------------------

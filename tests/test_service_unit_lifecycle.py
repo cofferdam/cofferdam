@@ -451,11 +451,33 @@ class ProcessTerminationTests(unittest.TestCase):
         elsewhere and never a name match. The exception is paid for in
         ``tests/test_remote_control_live.py``, which starts a real ``/bin/sh``
         child, terminates it, and asserts the whole group is gone.
+
+        ``claude_agent_sdk/hostclient.py`` (M2I PR4) joins them, on the same
+        terms and no wider ones — **one file**, not the package, because it is
+        the only module in it that may spawn anything at all, and that is
+        separately asserted.
+
+        It used to pass this scan by accident rather than by being safe: it
+        called ``terminate`` and ``kill`` through ``getattr``, so no banned
+        literal appeared, and what it signalled was the helper alone. The SDK
+        starts a Claude CLI *inside* the helper's process group, so a terminated
+        helper could leave that CLI orphaned holding a live subscription
+        session. Passing this test was not the same as cleaning up, and the file
+        now signals the group it created.
+
+        The exception is paid for in ``tests/test_agent_sdk_adapter.py``, whose
+        ``OwnedChildTests`` start **real** short-lived processes and assert what
+        this scan cannot see: that the pid, the ``/proc`` start time and the
+        group id are all re-verified immediately before every signal, that the
+        only group signalled is the one this code created, that a bystander in
+        its own group is untouched, and that nothing is left unreaped.
         """
         for path in _python_sources():
             if "claude_code" in path.parts:
                 continue
             if path.name == "wrapper.py" and path.parent.name == "sessions":
+                continue
+            if path.name == "hostclient.py" and path.parent.name == "claude_agent_sdk":
                 continue
             text = path.read_text(encoding="utf-8")
             with self.subTest(path=path.name):

@@ -321,10 +321,137 @@ class Privacy(unittest.TestCase):
         """A task's prompt and result are somebody's private thinking."""
         self.assertNotIn("console.", tasks_code())
 
-    def test_the_panel_stores_nothing(self):
+    def test_the_panel_stores_only_namespaced_drafts(self):
+        """M2I PR4 replaced "stores nothing" with "stores exactly one thing".
+
+        The old rule was a blanket ban on browser storage, and it was the right
+        rule while the panel had nothing worth keeping. It stopped being right
+        when the thing not being kept was somebody's half-written instruction to
+        an agent: iOS discards a backgrounded tab whenever it likes, and a rule
+        that guaranteed the draft was lost was protecting nothing.
+
+        So the ban became specific. `localStorage` is allowed; `sessionStorage`,
+        cookies and IndexedDB are not, because one storage mechanism is enough
+        and three are three things to audit. Every key is namespaced, every
+        access goes through the four draft helpers, and what may be under a key
+        is asserted separately below.
+        """
         source = tasks_code()
-        for forbidden in ("localStorage", "sessionStorage", "document.cookie", "indexedDB"):
+        for forbidden in ("sessionStorage", "document.cookie", "indexedDB"):
             self.assertNotIn(forbidden, source, forbidden + " is used")
+        self.assertIn("cofferdam.taskdraft.", source, "drafts are not namespaced")
+
+    def test_every_storage_access_is_guarded(self):
+        """A bare `localStorage` access throws on iOS Safari and kills the module.
+
+        app.js learned this from a real device: under Private Browsing and some
+        MDM configurations the *property access itself* raises SecurityError, and
+        an unguarded one at boot took the whole page down. This panel inherits
+        the rule rather than the bug.
+        """
+        for line in tasks_code().splitlines():
+            stripped = line.strip()
+            if "localStorage" in stripped:
+                self.assertIn(
+                    "global.localStorage",
+                    stripped,
+                    "bare localStorage access can throw on iOS Safari: " + stripped,
+                )
+
+    def test_only_the_draft_writer_touches_storage(self):
+        """One writer, and it takes a task, an operation and a string.
+
+        This is what makes "no token, no session id, no provider payload in
+        browser storage" structural rather than reviewed: there is no second
+        `setItem` call site through which anything else could be added.
+        """
+        source = tasks_code()
+        self.assertEqual(
+            source.count("global.localStorage.setItem"),
+            2,
+            "storage is written from somewhere other than writeDraft and its probe",
+        )
+
+    def test_no_provider_or_credential_word_reaches_storage(self):
+        """The keys are drafts. Nothing here names anything else.
+
+        Scanned as *identifiers* the panel could store, not as prose: the file's
+        own comments say the words "token" and "session" while explaining why
+        neither is stored, and a guard that failed on the explanation would be
+        repaired by deleting the explanation.
+        """
+        source = tasks_code()
+        block = source[source.index("function writeDraft") :]
+        block = block[: block.index("function clearAllDrafts")]
+        for forbidden in (
+            "token",
+            "provider_session_id",
+            "session_id",
+            "approve",
+            "approval",
+            "tool_input",
+        ):
+            self.assertNotIn(forbidden, block, "writeDraft can store " + forbidden)
+
+    def test_the_panel_never_reads_or_writes_the_device_token_key(self):
+        """The token lives in storage; it is not this panel's to touch.
+
+        ``app.js`` keeps the device token under ``cofferdam.token`` — validated
+        against the API before it is written, and that is deliberate on a phone.
+        What matters here is that the tasks panel has no business with it: it
+        holds the token nowhere, reads it from no key, and its own namespace
+        cannot collide with it.
+
+        The two prefixes are checked for disjointness rather than merely being
+        different strings, because ``clearAllDrafts`` iterates the whole store
+        and removes by prefix. A namespace that were a prefix of the token key
+        would sign somebody out every time a draft was dropped.
+        """
+        source = tasks_code()
+        self.assertNotIn("cofferdam.token", source)
+        self.assertNotIn("Authorization", source, "the panel builds its own auth header")
+        self.assertNotIn("Bearer", source)
+
+        draft_prefix = "cofferdam.taskdraft."
+        token_key = "cofferdam.token"
+        self.assertFalse(token_key.startswith(draft_prefix))
+        self.assertFalse(draft_prefix.startswith(token_key))
+
+    def test_no_raw_provider_payload_can_be_stored_or_rendered(self):
+        """Section 5, at the client: what the server never sends, the panel
+        never names.
+
+        Hidden reasoning, tool input and the raw SDK message are absent from
+        every API response by construction. This asserts the other half — that
+        the panel has no field, no key and no branch that would read one if a
+        future response carried it, so adding the field server-side could not
+        silently surface it on a phone.
+        """
+        source = tasks_code()
+        for forbidden in (
+            "provider_session_id",
+            "raw_payload",
+            "raw_message",
+            "thinking",
+            "reasoning",
+            "tool_input",
+            "tool_use",
+            "permission_mode",
+            "acceptEdits",
+        ):
+            self.assertNotIn(forbidden, source, forbidden + " is named by tasks.js")
+
+    def test_the_service_worker_caches_no_task_route(self):
+        """A cached task response would outlive both `no-store` and a sign-out."""
+        worker = (WEB_DIR / "sw.js").read_text(encoding="utf-8")
+        for forbidden in (
+            "/api/tasks",
+            "clarification",
+            "followup",
+            "taskdraft",
+            "/result",
+        ):
+            self.assertNotIn(forbidden, worker.lower(), forbidden + " is in the worker")
 
     def test_task_content_never_reaches_a_url(self):
         """Content travels in a body, never in a path or a query string."""
@@ -611,26 +738,311 @@ class FollowUpDraftSurvives(unittest.TestCase):
         )
 
     def test_no_draft_reaches_the_console_or_a_cache(self):
-        """14."""
+        """14.
+
+        `localStorage` is no longer in this list — see
+        ``Privacy.test_the_panel_stores_only_namespaced_drafts`` for what
+        replaced the blanket ban and why. The service worker is still forbidden
+        from knowing anything about a follow-up: a cached response carrying one
+        would outlive the sign-out that is supposed to remove it.
+        """
         for name in ("draft-survives-polling", "failed-submit-preserves-the-draft"):
             self.assertEqual(panel(name)["consoleOutput"], [], name)
         source = (WEB_DIR / "tasks.js").read_text(encoding="utf-8")
         self.assertNotIn("console.", source)
         self.assertNotIn("caches.", source)
-        self.assertNotIn("localStorage", source)
         worker = (WEB_DIR / "sw.js").read_text(encoding="utf-8")
         self.assertNotIn("followup", worker.lower())
+        self.assertNotIn("taskdraft", worker.lower())
 
     def test_drafts_are_keyed_by_task_rather_than_held_in_one_slot(self):
         """A single field would carry one task's words into another's box."""
         source = (WEB_DIR / "tasks.js").read_text(encoding="utf-8")
-        self.assertIn("followupDrafts[", source)
+        self.assertIn("draftKey(", source)
         self.assertIn("draftFor(", source)
 
     def test_the_draft_is_not_written_to_the_server_while_typing(self):
         """A draft is not a follow-up, and a half-typed sentence is not history."""
         result = panel("draft-survives-polling")
         self.assertNotIn("followups", json.dumps(result.get("html", "")))
+
+
+class StructuredQuestions(unittest.TestCase):
+    """M2I PR4: the phone can answer a structured question.
+
+    The gap this closes was the largest in the milestone and was entirely on the
+    client. The backend had shipped `/clarifications` and
+    `/clarifications/{id}/answer` in M2I PR2 and **nothing called them**: the
+    panel rendered a generic "Your answer" box for any `waiting_for_user` and
+    posted it to `/followups`, a route the server refuses outright for as long as
+    a question is open. From a phone, the headline feature of M2I could not be
+    used at all.
+    """
+
+    def test_the_question_is_rendered_with_its_options(self):
+        result = panel("sdk-question-is-rendered-with-its-options")
+        self.assertTrue(result["hasQuestion"])
+        self.assertTrue(result["hasSendButton"])
+        html = result["html"]
+        self.assertIn("Hangi dosyayı düzenleyeyim?", html)
+        self.assertIn("README.md", html)
+        self.assertIn("STATUS.md", html)
+
+    def test_a_fixed_choice_question_gets_no_free_text_box(self):
+        """A field whose contents the server would refuse is not a field."""
+        self.assertFalse(panel("sdk-question-is-rendered-with-its-options")["hasAnswerBox"])
+
+    def test_free_text_is_offered_when_the_question_allows_it(self):
+        self.assertTrue(
+            panel("sdk-question-free-text-is-offered-only-when-allowed")["hasAnswerBox"]
+        )
+
+    def test_no_followup_box_is_offered_while_a_question_is_open(self):
+        """The two routes stay apart on the screen as well as on the wire."""
+        self.assertFalse(panel("sdk-question-is-rendered-with-its-options")["hasFollowupBox"])
+
+    def test_the_answer_goes_to_the_answer_route(self):
+        writes = panel("sdk-answer-goes-to-the-answer-route")["writes"]
+        self.assertEqual(len(writes), 1, writes)
+        self.assertIn("/clarifications/", writes[0]["path"])
+        self.assertTrue(writes[0]["path"].endswith("/answer"))
+        self.assertNotIn("followups", writes[0]["path"])
+
+    def test_the_answer_body_is_the_closed_set(self):
+        """Two fields, and no third one an approval could travel in."""
+        writes = panel("sdk-answer-goes-to-the-answer-route")["writes"]
+        self.assertTrue(set(writes[0]["body"]) <= {"answer", "option_ids"}, writes[0])
+        self.assertEqual(writes[0]["body"]["option_ids"], ["opt2"])
+
+    def test_a_followup_while_a_question_is_open_sends_nothing(self):
+        result = panel("sdk-followup-is-refused-while-a-question-is-open")
+        self.assertEqual(result["writes"], [])
+        self.assertIn("waiting for an answer to a question", result["html"])
+
+    def test_answering_is_labelled_as_information_not_permission(self):
+        """Said on the screen where somebody is about to type it."""
+        html = panel("sdk-question-is-rendered-with-its-options")["html"]
+        self.assertIn("information, not permission", html)
+        self.assertIn("cannot approve a tool", html)
+
+    def test_an_unverified_question_shape_says_so(self):
+        """Section 9: unverified variants are marked, never presented as verified."""
+        html = panel("sdk-unverified-question-shape-is-labelled")["html"]
+        self.assertIn("has not verified this question's shape", html)
+
+    def test_the_question_form_carries_no_provider_field(self):
+        """No session id, no tool input, no raw payload — rendered or stored."""
+        result = panel("sdk-question-renders-no-provider-field")
+        html = result["html"]
+        for forbidden in (
+            "provider_session_id",
+            "tool_input",
+            "permission_mode",
+            "acceptEdits",
+            "claude-agent-sdk",
+        ):
+            self.assertNotIn(forbidden, html, forbidden + " is rendered")
+        self.assertEqual(result["storage"], {}, "a question was written to storage")
+
+    def test_the_panel_has_no_approval_control_at_all(self):
+        """Not a disabled one, not a hidden one — none.
+
+        The API has no approval route, and this is the client half of the same
+        property: there is no path from a tap to a permission decision because
+        there is no control that would produce one.
+
+        Matched as a *route, request field or control*, not as a substring — the
+        same rule ``ClientVocabulary`` follows and for the same reason. Two
+        legitimate uses of the word survive it deliberately: the panel's own copy
+        says "It cannot approve a tool", which is the sentence this guard exists
+        to protect, and ``waitingLabel`` renders `approval` as words because a
+        waiting reason Cofferdam can report is a waiting reason a person should
+        be able to read. Neither is a control, and a scan that failed on either
+        would be repaired by deleting the honesty.
+        """
+        source = tasks_code()
+        for forbidden in ("approve", "approval", "deny", "allow_tool", "permission_mode"):
+            for shape in (
+                r"\b" + forbidden + r"\s*:",       # a request-body key
+                r"id=\\?\"[^\"]*" + forbidden,     # a control's id
+                r"/" + forbidden,                  # a route segment
+            ):
+                self.assertIsNone(
+                    re.search(shape, source, re.IGNORECASE),
+                    forbidden + " appears as a field, control or route in tasks.js",
+                )
+        # Every write path this panel knows, listed: none of them approves.
+        for match in re.findall(r'"/api/tasks[^"]*"', source):
+            for forbidden in ("approve", "approval", "deny", "permission"):
+                self.assertNotIn(forbidden, match, match)
+
+    def test_an_approval_wait_is_still_described_in_words(self):
+        """The control for the guard above.
+
+        "No approval control" must not be satisfied by pretending the waiting
+        reason does not exist. If an adapter ever reported one, the panel says so
+        and offers nothing — which is the truthful pair.
+        """
+        self.assertIn('case "approval"', tasks_code())
+
+
+class DraftsSurviveAReload(unittest.TestCase):
+    """M2I PR4: a draft outlives the page, not just the poll.
+
+    The previous milestone made a draft survive a re-render, which is what a
+    polling tick does to it. It could not survive the page being discarded — and
+    on a phone that is the common case, not the rare one: iOS reclaims a
+    backgrounded tab and the person comes back to an empty box with no
+    indication anything was ever there.
+
+    The harness models this honestly. Its `localStorage` double lives outside the
+    sandbox that runs `tasks.js`, so a "reload" builds entirely fresh module
+    state and only what was genuinely written down crosses over.
+    """
+
+    def test_a_followup_draft_survives_a_reload(self):
+        result = panel("followup-draft-survives-a-reload")
+        self.assertEqual(result["draftAfterReload"], "yarım kalmış bir cümle")
+        self.assertEqual(result["storedBefore"], 1)
+
+    def test_a_clarification_draft_survives_a_reload(self):
+        result = panel("clarification-draft-survives-a-reload")
+        self.assertEqual(result["draftAfterReload"], "üçüncü seçenek olsun")
+
+    def test_the_two_kinds_of_draft_do_not_share_a_key(self):
+        """An answer to a question must not reappear as a follow-up.
+
+        They are separate acts with separate routes, and a shared key would put
+        the words somebody wrote for a question into the box that sends a new
+        instruction — after the question is closed and nobody is checking.
+        """
+        result = panel("drafts-are-separate-by-operation")
+        self.assertEqual(result["followupBox"], "")
+        self.assertEqual(result["keys"], ["cofferdam.taskdraft.clarification.task_sdk"])
+
+    def test_one_task_draft_never_appears_on_another(self):
+        result = panel("drafts-do-not-cross-tasks-in-storage")
+        self.assertEqual(result["draftInB"], "")
+        self.assertEqual(result["keys"], ["cofferdam.taskdraft.followup.task_a"])
+
+    def test_a_cancelled_task_drops_its_draft(self):
+        """Leaving it would show text on a screen with nowhere to send it."""
+        result = panel("a-terminal-task-drops-its-draft")
+        self.assertEqual(result["keysWhileOpen"], 1)
+        self.assertEqual(result["keysAfterCancel"], 0)
+
+    def test_signing_out_removes_every_stored_draft(self):
+        """The most personal content in the product does not survive a sign-out."""
+        result = panel("signing-out-removes-stored-drafts")
+        self.assertEqual(result["before"], 1)
+        self.assertEqual(result["after"], 0)
+
+    def test_storage_that_throws_leaves_the_panel_working(self):
+        """iOS Private Browsing raises on the property access itself."""
+        result = panel("a-storage-refusal-does-not-break-the-panel")
+        self.assertEqual(result["draft"], "hafızada kalsın")
+        self.assertIn("task-detail", result["html"])
+
+    def test_a_restored_draft_is_never_submitted_by_itself(self):
+        """Coming back to the app sends nothing. It is text, not a message."""
+        result = panel("no-draft-is-submitted-on-its-own")
+        self.assertEqual(result["draft"], "kendiliğinden gitmesin")
+        self.assertEqual(
+            [path for path in result["writes"] if "followups" in path], []
+        )
+
+    def test_the_draft_bound_is_stated_in_source(self):
+        """A `maxlength` is a hint a paste can exceed, so the writer bounds it."""
+        source = tasks_code()
+        self.assertIn("MAX_DRAFT_CHARS", source)
+        self.assertIn("slice(0, MAX_DRAFT_CHARS)", source)
+
+
+class RequestIdentity(unittest.TestCase):
+    """M2I PR4: a retry is recognisable as one.
+
+    The defect was small and its consequence was not. One module-level slot held
+    the key for every write, and it was cleared on *any* response — including a
+    refusal. A refusal is exactly the moment somebody presses the button again,
+    so the retry carried a fresh key and arrived at the server as a second,
+    unrelated message.
+    """
+
+    def test_a_refused_followup_is_retried_under_the_same_key(self):
+        result = panel("a-refused-followup-keeps-its-request-id")
+        self.assertEqual(result["posts"], 2)
+        self.assertEqual(
+            len(set(result["requestIds"])),
+            1,
+            "the retry carried a new key, so the server could not recognise it",
+        )
+
+    def test_a_refused_followup_keeps_the_text(self):
+        self.assertEqual(
+            panel("a-refused-followup-keeps-its-request-id")["draft"], "aynı mesaj"
+        )
+
+    def test_edited_words_get_a_new_key(self):
+        """The server binds a key to a payload hash; different words must differ."""
+        ids = panel("an-edited-followup-gets-a-new-request-id")["requestIds"]
+        self.assertEqual(len(ids), 2)
+        self.assertNotEqual(ids[0], ids[1])
+
+    def test_keys_are_scoped_by_operation_and_task(self):
+        source = tasks_code()
+        self.assertIn("requestScope(", source)
+        self.assertIn("requestIdFor(", source)
+        self.assertIn("releaseRequestId(", source)
+
+
+class ForegroundRefresh(unittest.TestCase):
+    """M2I PR4: unlocking the phone shows the truth, not a ten-second-old copy."""
+
+    def test_returning_to_the_app_refreshes_at_once(self):
+        result = panel("foregrounding-refreshes-without-waiting")
+        self.assertEqual(
+            result["whileHidden"], result["afterMount"], "the panel polled while hidden"
+        )
+        self.assertGreater(
+            result["afterForeground"],
+            result["whileHidden"],
+            "foregrounding did not refresh",
+        )
+
+    def test_the_refresh_is_one_read_and_not_a_new_timer(self):
+        """`reschedule` stays the only thing that creates an interval."""
+        result = panel("foregrounding-refreshes-without-waiting")
+        self.assertLessEqual(result["afterForeground"] - result["whileHidden"], 2)
+
+
+class ResultRetrieval(unittest.TestCase):
+    """M2I PR4: the phone can ask what the latest completed turn produced."""
+
+    def test_the_result_route_is_rendered_with_its_turn_facts(self):
+        html = panel("the-result-route-reports-the-latest-turn")["html"]
+        self.assertIn("Latest result", html)
+        self.assertIn("İkinci turun sonucu.", html)
+        self.assertIn("2 turns", html)
+        self.assertIn("turn 2", html)
+
+    def test_the_result_meaning_comes_from_the_server(self):
+        """A second implementation of the distinction would be one too many."""
+        html = panel("the-result-route-reports-the-latest-turn")["html"]
+        self.assertIn("The latest completed turn's result.", html)
+        self.assertIn("task still open", html)
+
+    def test_the_provider_session_id_is_dropped_rather_than_hidden(self):
+        """The route carries one; the panel must not hold it.
+
+        Dropped at adoption rather than merely left unrendered — a field that
+        never enters this panel's state is one no future render can put on a
+        screen.
+        """
+        result = panel("the-result-route-reports-the-latest-turn")
+        self.assertNotIn("3f5a6b7c", result["html"])
+        self.assertEqual(result["storage"], {})
+        source = tasks_code()
+        self.assertNotIn("provider_session_id", source)
 
 
 class PanelSeparation(unittest.TestCase):

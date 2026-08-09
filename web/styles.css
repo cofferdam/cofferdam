@@ -672,6 +672,34 @@ button.danger { color: var(--err); }
 .task-actions button { flex: 1 1 10em; min-width: 0; min-height: 44px; }
 .task-followup { flex: 1 1 100%; display: grid; gap: 8px; min-width: 0; }
 
+/* A structured question (M2I). Its own block rather than a variant of
+   .task-followup, because it is a different act: this one is answered through
+   the clarification route and cannot be sent as a follow-up. Making them look
+   the same would invite exactly the confusion the two routes exist to prevent. */
+.task-question {
+  flex: 1 1 100%; display: grid; gap: 8px; min-width: 0;
+  padding: 10px; border-radius: 10px;
+  border: 1px solid var(--warn, #d0a53c); background: #0a1119;
+}
+.task-question-text {
+  margin: 0; font-weight: 600; overflow-wrap: anywhere; min-width: 0;
+  white-space: pre-wrap;
+}
+.task-question-missing { overflow-wrap: anywhere; min-width: 0; }
+.task-question textarea {
+  width: 100%; box-sizing: border-box; resize: vertical; min-width: 0;
+}
+.task-options { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; min-width: 0; }
+/* The whole row is the target, not just the control: a radio button is a
+   4mm circle and a thumb is not. */
+.task-option label {
+  display: flex; gap: 8px; align-items: flex-start; min-width: 0;
+  min-height: 44px; padding: 8px; border-radius: 8px;
+  border: 1px solid var(--line); cursor: pointer;
+}
+.task-option-label { overflow-wrap: anywhere; min-width: 0; font-weight: 600; }
+.task-result-detail { min-width: 0; }
+
 .task-advanced { min-width: 0; }
 .task-advanced summary { cursor: pointer; font-size: 13px; color: var(--muted); min-height: 40px; }
 .task-events {
@@ -708,6 +736,9 @@ button.danger { color: var(--err); }
   .task-facts { grid-template-columns: 1fr; }
   .task-facts dt { margin-top: 4px; }
   .task-actions button { flex: 1 1 100%; }
+  /* An option's description wraps under its label rather than competing with it
+     for a phone's width. */
+  .task-option label { flex-wrap: wrap; }
 }
 
 /* Remote Control (M2H Lane A) -------------------------------------------- */

@@ -374,6 +374,21 @@ class TaskAdapter:
         """
         raise AdapterRefusal("this adapter cannot recover a task after a restart")
 
+    def shutdown(self) -> None:
+        """Release everything this adapter owns, because the daemon is stopping.
+
+        Declared on the base class rather than only on the adapters that have
+        something to release, so the registry can call it on every adapter
+        without asking what kind each one is — and so an adapter that acquires a
+        process later inherits the call site rather than having to be wired into
+        one.
+
+        Does nothing by default, which is the correct behaviour for an adapter
+        that holds no process. It must never raise: a shutdown path that can fail
+        is a shutdown path that leaves the *next* adapter's children running.
+        """
+        return None
+
     def describe(self) -> Dict[str, Any]:
         """The client-facing description of this adapter."""
         return {
