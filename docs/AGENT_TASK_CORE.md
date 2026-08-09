@@ -235,14 +235,28 @@ reasons are specific:
 Adding it costs no dependency, so the stdlib-only CI path is unchanged.
 
 **Schema version 2** (M2I PR2) adds one table, `task_clarifications`, holding the
-questions a delegated session asked and the answers given. The change is
-**additive only** — no existing column moved, changed type or gained a constraint
-— so the upgrade is the schema script's own `CREATE TABLE IF NOT EXISTS` plus a
-version row. A question and the state change it causes are written in **one
-transaction**, through the same `transition()` that already refused to write a
-state without its event: a task saying `waiting_for_user` with no question, or a
-pending question on a cancelled task, is a disagreement between two rows that
-somebody would have to resolve by guessing.
+questions a delegated session asked and the answers given. **Schema version 3**
+(M2I PR3) adds one more, `task_turns`, holding each provider turn and the result
+it produced. Both changes are **additive only** — no existing column moved,
+changed type or gained a constraint — so each upgrade is the schema script's own
+`CREATE TABLE IF NOT EXISTS` plus a version row, and upgrading from 2 to 3 writes
+no rows at all. A task that predates `task_turns` simply has none, and every
+reader treats that as the ordinary answer rather than a missing record.
+
+A question and the state change it causes are written in **one transaction**,
+through the same `transition()` that already refused to write a state without its
+event; a turn's outcome rides in the same write for the same reason. A task
+saying `waiting_for_user` with no question, a pending question on a cancelled
+task, or a task reported `ready_for_followup` with nothing recorded as having
+produced the result somebody is about to read, are all disagreements between two
+rows that nobody could resolve afterwards.
+
+**A completed turn is never written again.** The update is guarded on
+`completed_at IS NULL`, which is what stops a second turn, a duplicate provider
+event or a late result after a cancellation from rewriting an outcome somebody
+has already been shown. `tasks.final_result` does still move on — it is written
+with `COALESCE` and always has been — and that is exactly why the turn table
+exists.
 
 | Property | Choice |
 | --- | --- |
@@ -465,19 +479,78 @@ in flight returns the current state unchanged.
 
 ## Follow-up
 
-A follow-up is accepted only when the adapter declares `followup`, the task is
-`waiting_for_user`, the payload is bounded and valid, and the idempotency check
-passes.
+A follow-up is accepted only when the adapter declares `followup`, the task is in
+a state that can take another message, no question is open, the adapter still has
+a session, no turn is already in flight, the payload is bounded and valid, and the
+idempotency check passes.
 
 It generates its own `followup_received` event and returns the task to
 `running`. **A follow-up alone never completes a task** — the graph has no
 `waiting_for_user → completed` edge.
 
 The follow-up's text is stored on the task and shown in the detail view. It is
-**not** copied into the event stream, not written to any log, and not put in an
-audit record; the event says one arrived and how long it was.
+**not** copied into the event stream, not written to any log, not put in an audit
+record and not copied into the turn row; the event says one arrived and how long
+it was.
+
+### Two states, two meanings (M2I PR3)
+
+| From | What the message is | What it does to turns |
+| --- | --- | --- |
+| `waiting_for_user` | an answer to something the task is blocked on | **resumes** the open turn |
+| `ready_for_followup` | a new instruction to a finished turn | **opens** turn N+1 |
+
+The distinction is not a technicality. A turn that is blocked is still running,
+and recording two turns for one unit of provider work would put a second
+`started_at` on something that never stopped.
+
+A task with a **pending clarification** refuses a follow-up outright
+(`task_clarification_pending`) rather than superseding the question. A person who
+types a new instruction while the agent is waiting to be told something specific
+has not answered it, and delivering it as though they had would put words in
+their mouth. The clarification answer route is the way forward.
+
+### Whether a session is still there
+
+`ready_for_followup` is Cofferdam's memory of an observation, not the observation
+— so the adapter is asked, fresh, on every follow-up. `session_available` is the
+half of the contract only the thing holding the process can answer, and it is an
+*early* refusal rather than the guarantee: `send_followup` is where a message is
+actually handed over and is the only place that can be authoritative.
+
+After a restart the answer is `False` for every task, because the adapter's
+dictionary of live sessions did not survive the process. The refusal is a
+consequence of the world rather than a flag somebody set.
 
 Cross-task branching and automatic sub-tasks are not implemented.
+
+---
+
+## Turns and results (M2I PR3)
+
+One task, one provider session, several ordered turns. A turn is Cofferdam's unit
+of evidence — one user message in, one terminal outcome out — and it is not a
+transcript: there is no field here for a message list, a tool call or a provider
+payload.
+
+`turn_number` is Cofferdam's own, allocated `MAX+1` inside the transaction that
+inserts the row, with the primary key as the backstop; the provider's own
+ordering is kept beside it as `provider_turn_sequence` rather than instead of it.
+
+`GET /api/tasks/{task_id}/result` returns **the latest completed turn's result**.
+For a terminal task that is also the final task result, and `task_terminal`
+distinguishes the two — both are fields, and the payload states `result_meaning`
+in words as well. "Completed" means the turn *succeeded*, so a task whose first
+turn answered and was then cancelled returns that answer with `outcome:
+cancelled`: the answer is real, the cancellation is real, and the response says
+both.
+
+A terminal task with no successful turn returns its outcome and timestamp and no
+invented text. A live task with nothing yet returns `task_result_not_ready` — 409
+rather than 404, because the task exists.
+
+The route is a read and only a read: no refresh, no adapter call, no state
+change. Something polling it must not be able to drive an adapter by doing so.
 
 ---
 
@@ -513,7 +586,9 @@ GET  /api/tasks                        list, bounded, no task content
 POST /api/tasks                        create one task
 GET  /api/tasks/{task_id}              one task, with its prompt
 GET  /api/tasks/{task_id}/events       append-only history, paged
-POST /api/tasks/{task_id}/followups    answer a waiting task
+POST /api/tasks/{task_id}/followups    one more message to the same session
+GET  /api/tasks/{task_id}/result       the latest completed turn's result
+POST /api/tasks/{task_id}/finish       close a retained session on purpose
 POST /api/tasks/{task_id}/cancel       ask that task's adapter to stop
 GET  /api/task-adapters                registered adapters and capabilities
 GET  /api/task-projects                configured projects, names only
@@ -574,6 +649,11 @@ parsing (413), and malformed JSON is refused (400).
 | `task_illegal_transition` | 409 | the graph does not contain that move |
 | `task_already_finished` | 409 | terminal |
 | `task_not_waiting_for_input` | 409 | a follow-up to something that is not waiting |
+| `task_result_not_ready` | 409 | the task exists and has produced nothing yet |
+| `task_clarification_pending` | 409 | a question is open; answer it instead |
+| `task_session_unavailable` | 409 | the provider session is gone — any result it produced is still readable |
+| `task_followup_in_flight` | 409 | one message is already being delivered |
+| `task_turn_limit_reached` | 409 | this conversation has gone on as long as one task may |
 | `task_adapter_not_permitted_for_project` | 422 | the project does not list it |
 | `task_prompt_invalid` / `task_followup_invalid` | 422 | empty, oversized, or control characters |
 | `task_request_id_invalid` | 422 | malformed retry key |
@@ -592,6 +672,8 @@ Prompts, follow-ups and results are **user content and may be sensitive**.
 | Authenticated access only | every task route requires the device token |
 | No prompts, follow-ups or results in daemon logs | Task Core contains no `logging`, `logger`, `print`, `stdout` or `stderr` call at all — asserted over every file |
 | No task content in the browser console | `web/tasks.js` contains no `console` call |
+| No task content in turn records | a turn keeps what the *provider* produced; what a person typed lives on the task, once |
+| `no-store` on the result response | it carries the answer to somebody's private prompt |
 | No task content in URLs or query strings | content travels in bodies; paths carry ids |
 | No task content in process argv | Task Core starts no process |
 | No task content in systemd unit names | Task Core creates no unit |

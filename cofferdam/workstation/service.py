@@ -43,7 +43,11 @@ route                                        auth  purpose
 ``POST /api/tasks``                          yes   create one task
 ``GET  /api/tasks/{task_id}``                yes   one task, with its prompt
 ``GET  /api/tasks/{task_id}/events``         yes   append-only history, paged
-``POST /api/tasks/{task_id}/followups``      yes   answer a waiting task
+``POST /api/tasks/{task_id}/followups``      yes   one more message to the same
+                                                   session — never an answer to a
+                                                   question, which has its own route
+``GET  /api/tasks/{task_id}/result``         yes   the latest completed turn's
+                                                   result, provider-neutral
 ``POST /api/tasks/{task_id}/cancel``         yes   ask that task's adapter to stop
 ``GET  /api/tasks/{id}/clarifications``      yes   questions the agent is waiting on
 ``POST /api/tasks/{id}/clarifications/{qid}/answer``
@@ -284,11 +288,16 @@ from .tasks.errors import (
     CODE_CLARIFICATION_CLOSED,
     CODE_CLARIFICATION_INVALID,
     CODE_CLARIFICATION_NOT_DELIVERED,
+    CODE_CLARIFICATION_PENDING,
     CODE_CLARIFICATION_UNKNOWN,
     CODE_CLARIFICATION_UNSUPPORTED,
+    CODE_FOLLOWUP_IN_FLIGHT,
     CODE_FOLLOWUP_INVALID,
     CODE_FOLLOWUP_NOT_WAITING,
     CODE_FOLLOWUP_UNSUPPORTED,
+    CODE_RESULT_NOT_READY,
+    CODE_SESSION_UNAVAILABLE,
+    CODE_TURN_LIMIT_REACHED,
     CODE_IDEMPOTENCY_CONFLICT,
     CODE_ILLEGAL_TRANSITION as CODE_TASK_ILLEGAL_TRANSITION,
     CODE_PROJECT_DISABLED,
@@ -302,6 +311,7 @@ from .tasks.errors import (
     TaskError,
 )
 from .tasks.lifecycle import IllegalTransition
+from .tasks.turns import SOURCE_WORKSTATION_PWA as FOLLOWUP_SOURCE_WORKSTATION_PWA
 from .tasks.models import (
     BUCKETS,
     DEFAULT_EVENT_PAGE,
@@ -502,6 +512,19 @@ _TASK_STATUS = {
     # 502: Cofferdam accepted the answer and the provider did not take it. The
     # failure is downstream, and the client's answer was never the problem.
     CODE_CLARIFICATION_NOT_DELIVERED: 502,
+    # 409 for all four M2I PR3 refusals, and the status is the same because the
+    # sentence a client should act on is the same: the request was well formed
+    # and the *world* is not in a state where it can happen. What differs is
+    # what to do next, which is what the code carries.
+    #
+    # `task_result_not_ready` is emphatically not a 404. The task exists, and
+    # answering "no such task" for one that is simply still working would send
+    # somebody looking for a task they already have.
+    CODE_RESULT_NOT_READY: 409,
+    CODE_CLARIFICATION_PENDING: 409,
+    CODE_SESSION_UNAVAILABLE: 409,
+    CODE_FOLLOWUP_IN_FLIGHT: 409,
+    CODE_TURN_LIMIT_REACHED: 409,
     CODE_TASK_ADAPTER_FAILED: 502,
     CODE_STORE_UNAVAILABLE: 503,
 }
@@ -1995,14 +2018,55 @@ def create_app(
 
     @app.post("/api/tasks/{task_id}/followups", dependencies=[Depends(require_token)])
     async def send_task_followup(task_id: str, request: Request) -> Dict[str, Any]:
+        """Send one more message to the session this task already owns.
+
+        Two fields, and what is **absent** is the surface. There is no field
+        here for a provider session id, a model, a tool, an approval decision,
+        an executable, a working directory, a flag, an environment or a
+        permission mode — they are not validated and rejected, they are not
+        there, and `_task_body` refuses an unexpected key rather than ignoring
+        it. The session this reaches is found from the task's own id, server
+        side, in the adapter that owns it.
+
+        `source` is not a field either, for the same reason it is not one on the
+        clarification answer route: a client choosing how its own message is
+        later attributed is the opposite of what provenance is for. It is
+        assigned here from the authenticated request context.
+        """
         payload = await _task_body(request, allowed={"followup", "client_request_id"})
         row = await _run_task(
             tasks.send_followup,
             task_id,
             payload.get("followup"),
             client_request_id=payload.get("client_request_id"),
+            source=FOLLOWUP_SOURCE_WORKSTATION_PWA,
         )
         return {"task": tasks.snapshot(row).to_dict()}
+
+    @app.get("/api/tasks/{task_id}/result", dependencies=[Depends(require_token)])
+    async def get_task_result(task_id: str) -> JSONResponse:
+        """What this task produced, in the provider-neutral result shape.
+
+        **The latest completed turn's result.** For a terminal task that is also
+        the final result, and `task_terminal` in the body says which a caller is
+        holding — both are fields rather than a rule somebody has to infer, and
+        the payload carries `result_meaning` in words as well.
+
+        A read and nothing else: no `refresh_task`, no adapter call, no state
+        change. Asking what a task produced must not be able to change what it
+        produced, and something polling this must not be able to drive an
+        adapter by doing so.
+
+        `no-store`, because the body carries the answer to somebody's private
+        prompt and a task's result changes as turns complete. This is a
+        private-client operation; the M2I.5 bridge is a separate process that
+        does not proxy this route, and nothing here is reachable from it today.
+        """
+        result = await _run_task(tasks.get_result, task_id)
+        return JSONResponse(
+            content={"result": result.to_dict()},
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.post("/api/tasks/{task_id}/finish", dependencies=[Depends(require_token)])
     async def finish_task(task_id: str, request: Request) -> Dict[str, Any]:

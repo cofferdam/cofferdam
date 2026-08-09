@@ -628,9 +628,83 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2I PR3 — same-session follow-up and the `get_result` boundary
+
+On `feat/m2i-followup-results`. **Not deployed, off by default, and no live SDK call was made
+from this repository.** M2I PR1 merged as #28 and PR2 as #29; the record for PR1 below describes
+the foundation both of them built on.
+
+**A task can now be several turns.** A turn-ending result no longer ends the session: the helper
+keeps the same `ClaudeSDKClient`, and another `query()` on it continues the same provider
+conversation. Three facts read from the published 0.2.134 source make that sound rather than
+hopeful — a result frame ends one turn and not the run, `receive_messages()` keeps yielding past
+it, and `connect()` with no prompt never closes stdin, because the SDK only spawns the
+stdin-closing input stream for an `AsyncIterable` prompt. Cofferdam already called `connect()`
+that way for the permission-callback reason.
+
+**Turns are durable, and one never overwrites another.** Schema version 3 adds `task_turns`,
+additive and backward-compatible from version 2, writing no rows on upgrade. `turn_number` is
+allocated `MAX+1` inside the transaction that moves the task, with the primary key as the
+backstop, and a completed turn is never written again — the update is guarded on `completed_at IS
+NULL`. That guard is what stops a second turn, a duplicate provider event or a late result after
+a cancellation from rewriting an answer somebody has already read. `tasks.final_result` still
+moves on, because it is written with `COALESCE`, which is precisely why the table exists.
+
+**`get_result` has one stated meaning.** `GET /api/tasks/{id}/result` returns the latest
+*completed* turn's result; `task_terminal` distinguishes a task that may still produce more from
+one that is finished, and the payload carries `result_meaning` in words. A task whose first turn
+answered and was then cancelled returns that answer with `outcome: cancelled` — both facts are
+true and the response says both. A live task with nothing yet is `task_result_not_ready` (409, not
+404: the task exists). It is a read and only a read.
+
+**The follow-up contract is narrow and each refusal is its own sentence.** Allowed from
+`ready_for_followup` with a live session and no question open. A pending clarification refuses a
+follow-up outright rather than superseding the question — a person typing a new instruction while
+the agent waits to be told something specific has not answered it. Whether a session is still
+there is asked of the adapter, fresh, because the state name is Cofferdam's memory of an
+observation rather than the observation.
+
+**Restart stays truthful.** The live client is in memory inside the helper, so after a restart the
+adapter's session dictionary is empty and every task answers "not continuable" as a consequence of
+the world rather than a flag. The task becomes `interrupted`, the turn in flight closes as
+`interrupted`, and **every earlier completed turn is untouched** — an interrupted task still
+returns the result it produced. **Cross-process `resume` is not used and not evidenced.**
+
+**Three concepts, three code paths.** A clarification answer, a follow-up and a local tool
+approval remain impossible to confuse: separate routes, separate helper commands, separate session
+methods, and a body shaped like one refused by the others. There is still no tool-approval route,
+table or field anywhere.
+
+**Tests.** 118 new focused tests, including `SdkSessionTurnTests`, which drives the **real**
+`SdkSession` — thread, loop, receive loop, between-turn park, session-identity check — against a
+scripted async client, so the multi-turn code under test is the code that ships. Full suite green
+in three configurations: stdlib-only, workstation extras without the SDK, and extras with
+`claude-agent-sdk 0.2.134` installed.
+
+**One supervised live spike, and it found something.** One disposable task on `claude-sandbox`
+against a non-production loopback daemon, with the session tightened below the shipped profile for
+the run (`tools: []`, USD 0.50 budget, `PROFILE_MAX_TURNS` unchanged, reverted afterwards). Turn 1
+answered `Blue.`; the follow-up was accepted from `ready_for_followup`; **both turns reported the
+same `provider_session_id`** and were served by one helper process and one SDK client; turn 2
+answered *"I named the colour blue."*, which it could only do from turn 1's context. Turn 1
+remained retrievable, an idempotent retry created no second turn, no tool, approval or
+clarification event occurred, the sandbox was byte-for-byte unchanged, and the database contained
+no raw payload, reasoning, transcript, environment value or credential.
+
+The defect it found: the adapter emitted its own "your follow-up was delivered" event *and* the
+session emitted one when the turn actually began — two near-identical history lines, the first
+carrying an already-stale turn number. The adapter's was removed.
+
+**No production change.** No unit, drop-in, installer or registry file was edited; the SDK is not
+installed in the production slot and the adapter is not enabled there. Production's PID, start
+time, drop-in hash and registry hash were recorded before the spike and verified unchanged after.
+
+**Next:** the remaining M2I parity gap before the CLI adapter can be retired — see
+[`ROADMAP.md`](ROADMAP.md).
+
 ### M2I PR1 — the Claude Agent SDK foundation and structured session events
 
-On `feat/m2i-agent-sdk-foundation`. The first PR of Lane B's M2I: the official
+Merged as #28. The first PR of Lane B's M2I: the official
 **Claude Agent SDK** as a second delegated-task transport, and the provider-neutral event
 vocabulary that makes a structured question channel possible. **Not deployed, off by default, and
 no live SDK call was made from this repository.**
@@ -688,8 +762,8 @@ behaviours PR #21 validated live.
 no subprocess, no transcript, no live registry change, no service restart. Documented in
 [`docs/CLAUDE_AGENT_SDK_ADAPTER.md`](docs/CLAUDE_AGENT_SDK_ADAPTER.md).
 
-**Next:** M2I PR2 — the structured clarification-question round trip, answer provenance, and
-strict separation from local tool approvals.
+**Followed by:** M2I PR2 (#29) — the structured clarification-question round trip, answer
+provenance, and strict separation from local tool approvals — and M2I PR3, above.
 
 ## Recently merged milestone records
 

@@ -115,6 +115,13 @@ CANCEL_TIMEOUT_SECONDS = 15.0
 #: disconnect before this class stops waiting and says so.
 CLOSE_TIMEOUT_SECONDS = 20.0
 
+#: How long a close waits for a session that was **parked between turns** to
+#: unwind by itself before the loop is stopped underneath it. Short, because
+#: that coroutine is waiting on an event this process just set and has only a
+#: disconnect left to do — and because falling through to the loop stop is
+#: correct anyway, just noisier in the history.
+PARKED_CLOSE_TIMEOUT_SECONDS = 5.0
+
 #: How long the permission callback holds a question open waiting for a person.
 #:
 #: Twenty minutes, and the number is a judgement rather than a limit somebody
@@ -204,10 +211,29 @@ class DelegatedSession:
         reach the provider through entirely different channels, and a single
         method would have to decide which — from state, at the worst possible
         moment.
+
+        Raises :class:`SessionRefused` when the session cannot take one: no
+        client, a turn already running, a question open, or a cancel already
+        asked for. It never returns having done nothing.
         """
         raise SessionRefused(
-            "same-session follow-up is not implemented by this adapter yet"
+            "same-session follow-up is not implemented by this adapter"
         )
+
+    @property
+    def turn_complete(self) -> bool:
+        """Whether a turn has ended and the session is holding, able to take more.
+
+        Distinct from :attr:`finished`, which means the session is over. The two
+        were one thing until this milestone, and collapsing them is what made a
+        finished *turn* look like a finished *task*.
+        """
+        return False
+
+    @property
+    def turn_number(self) -> int:
+        """How many turns this session has begun. One after a successful start."""
+        return 0
 
     def request_cancel(self) -> bool:
         """Ask the provider to stop. ``True`` only if the request was delivered."""
@@ -280,6 +306,17 @@ class SdkSession(DelegatedSession):
         self._start_error: Optional[str] = None
         self._pending: Optional[_PendingQuestion] = None
         self._questions_asked = 0
+        #: Set when a turn has ended and the client is still connected. The
+        #: driving coroutine parks on ``_followup_arrived`` while this is true.
+        self._turn_complete = False
+        self._turn_number = 0
+        self._followup_text: Optional[str] = None
+        #: An ``asyncio`` event for the same reason ``_PendingQuestion`` uses
+        #: one: what waits on it runs on the loop that owns the client, and a
+        #: threading primitive awaited there would block the loop that has to
+        #: deliver the interrupt a cancel depends on.
+        self._followup_arrived: Optional["asyncio.Event"] = None
+        self._closing = False
         #: Sequence numbers for events this class mints itself — a cancellation
         #: notice, a transport failure, a clarification. Counted separately from
         #: the normalizer's so a Cofferdam-authored event can never be mistaken
@@ -304,6 +341,16 @@ class SdkSession(DelegatedSession):
     def pending_question_token(self) -> Optional[str]:  # type: ignore[override]
         with self._lock:
             return self._pending.token if self._pending is not None else None
+
+    @property
+    def turn_complete(self) -> bool:  # type: ignore[override]
+        with self._lock:
+            return self._turn_complete and not self._stopped.is_set()
+
+    @property
+    def turn_number(self) -> int:  # type: ignore[override]
+        with self._lock:
+            return self._turn_number
 
     def drain(self) -> List[DelegatedEvent]:
         with self._lock:
@@ -373,6 +420,50 @@ class SdkSession(DelegatedSession):
             return False
         return True
 
+    def send_followup(self, followup: str) -> None:  # type: ignore[override]
+        """Hand one more user turn to the client this session already holds.
+
+        No second client, no reconnect, no ``resume``: the same
+        ``ClaudeSDKClient`` that ran the first turn runs this one, which is what
+        makes "the provider session id is the same" a consequence of the code
+        rather than a thing to hope for. The SDK supports this directly —
+        ``query()`` is a write to a transport whose stdin was never closed,
+        because ``connect()`` was called with no prompt and so the SDK never
+        spawned the input stream that would have ended it.
+
+        Every refusal here is a state this session cannot honestly take a turn
+        in. None of them is silent: the caller gets a sentence, and the task
+        gets a truthful error rather than a message that went nowhere.
+        """
+        if not isinstance(followup, str) or not followup:
+            raise SessionRefused("that follow-up is not usable")
+        loop = self._loop
+        with self._lock:
+            if self._stopped.is_set() or loop is None or self._client is None:
+                raise SessionRefused("this Claude session is no longer running")
+            if self._cancel_requested:
+                raise SessionRefused("this task is being cancelled")
+            if self._pending is not None and not self._pending.cancelled:
+                # A question is open. Task Core refuses this one layer up; the
+                # check is repeated here because the rule belongs to whoever
+                # holds the session, and a future caller that skipped the first
+                # check must not be able to answer a question by accident.
+                raise SessionRefused("this session is waiting for an answer")
+            if not self._turn_complete:
+                raise SessionRefused("Claude is still working on the previous message")
+            event = self._followup_arrived
+            if event is None:  # pragma: no cover - set before the first turn ends
+                raise SessionRefused("this session cannot take a follow-up yet")
+            self._followup_text = followup
+            self._turn_complete = False
+        try:
+            loop.call_soon_threadsafe(event.set)
+        except RuntimeError:  # pragma: no cover - loop already closed
+            with self._lock:
+                self._followup_text = None
+                self._turn_complete = True
+            raise SessionRefused("this Claude session is no longer running")
+
     def request_cancel(self) -> bool:
         """Interrupt this session, and only this one.
 
@@ -390,6 +481,11 @@ class SdkSession(DelegatedSession):
             first = not self._cancel_requested
             self._cancel_requested = True
         self._release_pending_question()
+        # And a session parked between turns, for the same reason a blocked
+        # question is released: a cancel must reach a session that is idle as
+        # surely as one that is working, and a coroutine waiting on an event
+        # nobody will set is a session that would sit there until its ceiling.
+        self._wake_between_turns()
         if first:
             self._emit(
                 KIND_CANCELLATION_REQUESTED,
@@ -422,6 +518,21 @@ class SdkSession(DelegatedSession):
         invisible until a workstation has a dozen of them.
         """
         self._release_pending_question()
+        # Wake a session parked between turns *before* reaching for the loop.
+        # A coroutine waiting on the follow-up event unwinds by itself, runs its
+        # own `finally`, and disconnects cleanly — whereas stopping the loop
+        # underneath it aborts `run_until_complete` and is recorded as a
+        # transport failure, which would put "the session ended unexpectedly"
+        # into the history of a task that was closed on purpose.
+        #
+        # Only worth waiting for when it *was* parked. A session in the middle
+        # of a turn is blocked on the provider, not on an event this process
+        # controls, and waiting the full close timeout for it before stopping
+        # the loop would just add that timeout to every ordinary close.
+        if self._wake_between_turns():
+            thread = self._thread
+            if thread is not None and thread.is_alive():
+                thread.join(PARKED_CLOSE_TIMEOUT_SECONDS)
         loop = self._loop
         if loop is not None and not self._stopped.is_set():
             try:
@@ -434,6 +545,25 @@ class SdkSession(DelegatedSession):
             if thread.is_alive():
                 return False
         return True
+
+    def _wake_between_turns(self) -> bool:
+        """Release a coroutine parked waiting for a follow-up. Idempotent.
+
+        Returns whether one was actually parked, so a caller can decide whether
+        it is worth waiting for the clean unwind.
+        """
+        loop = self._loop
+        with self._lock:
+            self._closing = True
+            event = self._followup_arrived
+            parked = self._turn_complete
+        if loop is None or event is None:
+            return False
+        try:
+            loop.call_soon_threadsafe(event.set)
+        except RuntimeError:  # pragma: no cover - loop already closed
+            return False
+        return parked
 
     def _release_pending_question(self) -> None:
         """Wake a blocked callback without answering it."""
@@ -494,6 +624,10 @@ class SdkSession(DelegatedSession):
             return
 
         self._client = client
+        with self._lock:
+            # Created on this loop, which is the only one allowed to touch it.
+            self._followup_arrived = asyncio.Event()
+            self._turn_number = 1
         try:
             # No prompt argument: the SDK refuses a string here when a permission
             # callback is installed. See :meth:`start`.
@@ -509,16 +643,22 @@ class SdkSession(DelegatedSession):
 
         try:
             async for message in client.receive_messages():
+                if not self._same_session(message):
+                    break
                 terminal = False
                 for event in self._normalizer.normalize(message):
                     self._append(event)
                     if event.terminal:
                         terminal = True
                 if terminal:
-                    # The turn produced its result. Stop reading rather than
-                    # holding a live subprocess for a follow-up this adapter
-                    # does not deliver.
-                    break
+                    # The turn produced its result — **the turn, not the run**.
+                    # The SDK is explicit that a result frame ends one turn and
+                    # that `receive_messages()` keeps yielding past it, so the
+                    # client stays connected and this coroutine parks here
+                    # rather than tearing the session down.
+                    if not await self._hold_for_followup(client):
+                        break
+                    continue
                 if self._cancel_requested and self._stopped.is_set():  # pragma: no cover
                     break
         except asyncio.CancelledError:  # pragma: no cover - loop stopped under us
@@ -530,6 +670,88 @@ class SdkSession(DelegatedSession):
                 self._emit(KIND_CANCELLED, text="This task was stopped.")
             await _disconnect_quietly(client)
             self._client = None
+
+    def _same_session(self, message: Any) -> bool:
+        """Whether this message belongs to the conversation this session started.
+
+        The identity check the normalizer's ``_learn_session`` docstring names
+        and deliberately does not perform: that method's job is not to lose the
+        first answer, and this one's is to notice when a later message disagrees
+        with it. Before follow-up existed the distinction was academic — one
+        turn, one stream. It stops being academic the moment a second turn can
+        be issued, because "the same provider session continued" is the claim
+        this milestone rests on, and a claim nothing checks is a hope.
+
+        A mismatch ends the session as a provider failure rather than being
+        adopted or ignored. Adopting it would mean reporting on somebody else's
+        conversation under this task's id; ignoring it would mean recording a
+        result whose provenance is wrong.
+        """
+        known = self._normalizer.provider_session_id
+        if known is None:
+            return True
+        candidate = getattr(message, "session_id", None)
+        if not isinstance(candidate, str) or not candidate or candidate == known:
+            return True
+        self._emit(
+            KIND_PROVIDER_FAILED,
+            text="Claude replied about a different session than the one Cofferdam started.",
+            # The ids themselves are not put in the text. One of them is a
+            # handle to a live conversation and neither is something to render.
+            detail="session_mismatch",
+            failure_code="session_mismatch",
+        )
+        return False
+
+    async def _hold_for_followup(self, client: Any) -> bool:
+        """Wait between turns. ``True`` when another turn was started.
+
+        ``False`` means this session is over — closed, cancelled, or woken
+        without a message — and the caller should stop reading. That is the only
+        way out of here other than a follow-up, which matters because a
+        coroutine that could park forever would be a live subscription session
+        nobody is watching.
+
+        The bound is the helper's own lifetime ceiling rather than a timeout of
+        this method's invention. A person who has read an answer and is thinking
+        about their next message should not be interrupted by a number chosen
+        here, and the process that holds this session already stops on its own.
+        """
+        event = self._followup_arrived
+        if event is None:  # pragma: no cover - created before the first turn
+            return False
+        with self._lock:
+            if self._cancel_requested or self._closing:
+                return False
+            self._turn_complete = True
+            event.clear()
+
+        await event.wait()
+
+        with self._lock:
+            followup = self._followup_text
+            self._followup_text = None
+            stopping = self._cancel_requested or self._closing
+            if stopping or not followup:
+                self._turn_complete = True
+                return False
+            self._turn_number += 1
+            turn = self._turn_number
+
+        try:
+            # The same client, the same connection, the same conversation. The
+            # session id is not passed and could not be: this object holds one
+            # client and has no way to name another.
+            await client.query(followup)
+        except Exception as exc:
+            self._record_transport_failure(exc)
+            return False
+        self._emit(
+            KIND_ACTIVITY,
+            text="Your follow-up was delivered to the same Claude session.",
+            detail="turn " + str(turn),
+        )
+        return True
 
     # -- the permission channel ----------------------------------------------
 

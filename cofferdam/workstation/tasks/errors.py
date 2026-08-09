@@ -67,6 +67,27 @@ CODE_CLARIFICATION_INVALID = "task_clarification_invalid"
 CODE_CLARIFICATION_UNSUPPORTED = "task_clarification_unsupported"
 CODE_CLARIFICATION_NOT_DELIVERED = "task_clarification_not_delivered"
 
+# -- turns, results and same-session follow-up (M2I PR3) ----------------------
+#
+# Five codes, and the reason there are five rather than one "cannot do that" is
+# the reason this milestone exists. A phone showing "follow-up unavailable" has
+# told somebody nothing. Each of these sends them somewhere different: wait,
+# answer the question that is open, decide something at the workstation, start a
+# new task, or accept that this conversation is over.
+
+#: The task is real and has produced nothing to return yet.
+CODE_RESULT_NOT_READY = "task_result_not_ready"
+#: A question is open. The clarification route is the way forward, not this one.
+CODE_CLARIFICATION_PENDING = "task_clarification_pending"
+#: The provider session this task owns is gone — the helper died, or the daemon
+#: restarted. Distinct from "the task finished": the work may have succeeded and
+#: its result is still retrievable; what is unavailable is *continuing* it.
+CODE_SESSION_UNAVAILABLE = "task_session_unavailable"
+#: A follow-up is already being delivered. At most one turn per task, ever.
+CODE_FOLLOWUP_IN_FLIGHT = "task_followup_in_flight"
+#: This task has had as many turns as one task may have.
+CODE_TURN_LIMIT_REACHED = "task_turn_limit_reached"
+
 
 class TaskError(Exception):
     """A refusal a person should see, with a stable code to branch on.
@@ -320,6 +341,86 @@ class ClarificationNotDelivered(TaskError):
         )
 
 
+class ResultNotReady(TaskError):
+    """The task exists and has produced nothing to return yet.
+
+    Distinct from "no such task" and distinct from a failure. A client that gets
+    this should come back, and the state name in the detail tells it whether
+    coming back is likely to help.
+    """
+
+    def __init__(self, state: str) -> None:
+        super().__init__(
+            CODE_RESULT_NOT_READY,
+            "this task has no result yet",
+            "it is " + state,
+        )
+
+
+class ClarificationPending(TaskError):
+    """A question is open, so a follow-up is refused rather than queued.
+
+    The two are different acts and this is the boundary between them. Somebody
+    who sends a new instruction while the agent is blocked on a question has not
+    answered the question, and delivering it as though they had would put words
+    in their mouth at the one moment the agent is waiting to be told something
+    specific. Answer it, or cancel the task.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            CODE_CLARIFICATION_PENDING,
+            "this task is waiting for an answer to a question",
+            "answer the open question instead of sending a new message",
+        )
+
+
+class SessionUnavailable(TaskError):
+    """The provider session this task owned is gone.
+
+    Truthful about what is lost and what is not. The task's result, if it
+    produced one, is still there and still retrievable — what cannot happen is
+    another turn, because the conversation it would continue no longer exists.
+    There is no recovery by session id in this build, and inventing one would
+    mean claiming a context nobody has verified survives.
+    """
+
+    def __init__(self, detail: Optional[str] = None) -> None:
+        super().__init__(
+            CODE_SESSION_UNAVAILABLE,
+            "this task's session is no longer available",
+            detail or "start a new task; any result it produced is still readable",
+        )
+
+
+class FollowupInFlight(TaskError):
+    """One follow-up is already being delivered.
+
+    A second concurrent message would become a second provider turn on one
+    conversation, interleaved at a point nobody chose. Refused rather than
+    queued: a queue here would mean accepting something now and delivering it
+    into a context that has since changed.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            CODE_FOLLOWUP_IN_FLIGHT,
+            "a follow-up is already being delivered to this task",
+            "wait for it to finish before sending another",
+        )
+
+
+class TurnLimitReached(TaskError):
+    """This task has had as many turns as one task may have."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            CODE_TURN_LIMIT_REACHED,
+            "this conversation has gone on as long as one task may",
+            "start a new task to carry on",
+        )
+
+
 class StoreUnavailable(TaskError):
     def __init__(self, detail: Optional[str] = None) -> None:
         super().__init__(
@@ -338,9 +439,11 @@ __all__ = [
     "CODE_CLARIFICATION_CLOSED",
     "CODE_CLARIFICATION_INVALID",
     "CODE_CLARIFICATION_NOT_DELIVERED",
+    "CODE_CLARIFICATION_PENDING",
     "CODE_CLARIFICATION_UNKNOWN",
     "CODE_CLARIFICATION_UNSUPPORTED",
     "CODE_FOLLOWUP_INVALID",
+    "CODE_FOLLOWUP_IN_FLIGHT",
     "CODE_FOLLOWUP_NOT_WAITING",
     "CODE_FOLLOWUP_UNSUPPORTED",
     "CODE_IDEMPOTENCY_CONFLICT",
@@ -350,9 +453,12 @@ __all__ = [
     "CODE_PROJECT_UNKNOWN",
     "CODE_PROMPT_INVALID",
     "CODE_REQUEST_ID_INVALID",
+    "CODE_RESULT_NOT_READY",
+    "CODE_SESSION_UNAVAILABLE",
     "CODE_STORE_UNAVAILABLE",
     "CODE_TASK_TERMINAL",
     "CODE_TASK_UNKNOWN",
+    "CODE_TURN_LIMIT_REACHED",
     "AdapterFailed",
     "AdapterNotPermitted",
     "AdapterUnknown",
@@ -360,8 +466,10 @@ __all__ = [
     "ClarificationAnswerInvalid",
     "ClarificationClosed",
     "ClarificationNotDelivered",
+    "ClarificationPending",
     "ClarificationUnknown",
     "ClarificationUnsupported",
+    "FollowupInFlight",
     "FollowupInvalid",
     "FollowupNotWaiting",
     "FollowupUnsupported",
@@ -372,8 +480,11 @@ __all__ = [
     "ProjectUnknown",
     "PromptInvalid",
     "RequestIdInvalid",
+    "ResultNotReady",
+    "SessionUnavailable",
     "StoreUnavailable",
     "TaskAlreadyFinished",
     "TaskError",
     "TaskUnknown",
+    "TurnLimitReached",
 ]

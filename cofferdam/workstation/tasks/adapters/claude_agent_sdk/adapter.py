@@ -80,6 +80,7 @@ from ...models import (
     STATE_CANCELLED,
     STATE_COMPLETED,
     STATE_FAILED,
+    STATE_READY_FOR_FOLLOWUP,
     STATE_WAITING_FOR_USER,
     WAITING_CLARIFICATION,
 )
@@ -123,8 +124,10 @@ LIMITATIONS = (
     "question grants nothing — it is information, not permission.",
     "A task is not resumed if Cofferdam restarts — it is reported as "
     "interrupted, and any question it was waiting on is closed with it.",
-    "This adapter does not take follow-up messages yet; a task runs one turn, "
-    "asks what it needs to, and reports its result.",
+    "You can keep talking to a finished turn: a follow-up goes to the same "
+    "Claude session, and the earlier answer stays readable.",
+    "A follow-up needs the session to still be running here. If Cofferdam "
+    "restarted, the conversation is over — start a new task.",
     "Never type a password, one-time code or token into a prompt or an answer.",
 )
 
@@ -167,6 +170,10 @@ class ClaudeAgentSdkAdapter(TaskAdapter):
         self._sessions: Dict[str, DelegatedSession] = {}
         self._logs: Dict[str, DelegatedEventLog] = {}
         self._results: Dict[str, DelegatedResult] = {}
+        #: The provider sequence at which each task's current turn began. An
+        #: event at or below it belongs to a turn that is already settled and is
+        #: dropped rather than recorded — see :meth:`_begin_next_turn`.
+        self._turn_floor: Dict[str, int] = {}
         self._lock = threading.RLock()
 
     # -- what this adapter is ------------------------------------------------
@@ -177,11 +184,16 @@ class ClaudeAgentSdkAdapter(TaskAdapter):
             cancel=True,
             structured_progress=True,
             final_result=True,
-            # False, and honestly so. The session ends at its first terminal
-            # event in this foundation, so there is nothing alive for a
-            # follow-up to reach. Declaring the capability would make Task Core
-            # offer a button whose only outcome is a refusal.
-            followup=False,
+            # True as of M2I PR3. A turn-ending result no longer ends the
+            # session: the helper keeps the same `ClaudeSDKClient`, and another
+            # `query()` on it continues the same provider conversation. The
+            # capability is what makes Task Core offer a follow-up box, so it
+            # was false until the box would actually lead somewhere.
+            #
+            # The capability is a statement about the transport, not a promise
+            # about any particular task. Whether *this* task can take a message
+            # right now is `session_available`, asked fresh.
+            followup=True,
             # True: the session can ask a structured question and take an answer
             # back into the same conversation. This is what M2I PR2 added and it
             # is the one capability the CLI transport cannot have.
@@ -257,6 +269,7 @@ class ClaudeAgentSdkAdapter(TaskAdapter):
             )
             self._sessions[context.task_id] = session
             self._logs[context.task_id] = DelegatedEventLog()
+            self._turn_floor[context.task_id] = 0
 
         try:
             session.start(context.prompt)
@@ -338,6 +351,90 @@ class ClaudeAgentSdkAdapter(TaskAdapter):
             return AdapterOutcome(events=tuple(events))
 
         return self._settle(context.task_id, terminal, events)
+
+    def send_followup(self, context: TaskContext, followup: str) -> AdapterOutcome:
+        """Deliver one more user turn to this task's own session.
+
+        The session is found by **this task's id**, in this adapter's own
+        dictionary. There is no argument here that could name another task's
+        session, no registry to look one up in, and nothing on the wire below
+        that carries a session identifier — which is what makes "a follow-up
+        cannot reach another conversation" structural rather than checked.
+
+        Every refusal is an :class:`AdapterRefusal` with a sentence, and Task
+        Core turns it into ``task_session_unavailable`` rather than moving the
+        task. Nothing here reports a message as delivered that was not.
+        """
+        with self._lock:
+            session = self._sessions.get(context.task_id)
+        if session is None:
+            raise AdapterRefusal("there is no running Claude session for this task")
+        if session.finished:
+            raise AdapterRefusal("this Claude session has already ended")
+        if session.pending_question_token is not None:
+            # Belt and braces with Task Core's own check. This one exists
+            # because the rule belongs to whoever holds the session: a
+            # follow-up delivered while a question is open would be answered
+            # into a blocked callback, which is not what the person typing it
+            # meant.
+            raise AdapterRefusal("this task is waiting for an answer to a question")
+        if not getattr(session, "turn_complete", False):
+            raise AdapterRefusal("Claude is still working on the previous message")
+
+        try:
+            session.send_followup(followup)
+        except SessionRefused as refusal:
+            raise AdapterRefusal(str(refusal))
+        except Exception:
+            raise AdapterRefusal("the follow-up could not be delivered to Claude")
+
+        # No event of its own, and the M2I PR3 live spike is why.
+        #
+        # It used to emit "your follow-up was delivered", which produced two
+        # near-identical lines in the history — this one and the session's own,
+        # emitted when the turn actually started — and this one carried a turn
+        # number that was already stale, because the parent's mirror of it does
+        # not advance until the helper reports the turn ending.
+        #
+        # The other two are enough and are each true of a different moment:
+        # Task Core writes `followup_received` when the message is accepted, and
+        # the session emits its own activity when the provider takes it. A third
+        # line between them said nothing new and said one thing wrong.
+        return AdapterOutcome(
+            provider_session_id=session.provider_session_id,
+            session_retained=True,
+        )
+
+    def session_available(self, task_id: str) -> bool:
+        """Whether a live session for this task is here, now, and continuable.
+
+        Four conditions, and every one of them has been the cause of a false
+        "you can keep talking to this" in some system: the session must exist in
+        *this* process, must not have finished, must have a provider session id
+        to continue, and must have completed its previous turn.
+
+        The first condition is what makes restart truthful without any special
+        case. After a restart this dictionary is empty — the helper processes
+        died with the daemon — so every task's answer here is ``False``, and the
+        follow-up refusal is a consequence of the world rather than a flag
+        somebody remembered to set.
+        """
+        with self._lock:
+            session = self._sessions.get(task_id)
+        if session is None or session.finished:
+            return False
+        if not session.provider_session_id:
+            return False
+        return bool(getattr(session, "turn_complete", False))
+
+    def release_session(self, task_id: str) -> None:
+        """Close a retained session because a person said they are finished.
+
+        Called by ``TaskService.finish_task``, which is the honest way out of a
+        turn that succeeded — cancelling one would record work that was done as
+        work that was stopped.
+        """
+        self._retire(task_id)
 
     def cancel(self, context: TaskContext) -> AdapterOutcome:
         """Stop this task's session, and nothing else.
@@ -429,11 +526,18 @@ class ClaudeAgentSdkAdapter(TaskAdapter):
         """
         with self._lock:
             log = self._logs.get(task_id)
+            floor = self._turn_floor.get(task_id, 0)
         if log is None:
             return [], None
         projected: List[AdapterEvent] = []
         asked: Optional[DelegatedEvent] = None
         for event in session.drain():
+            if event.provider_sequence <= floor:
+                # An event from a turn that has already been settled, drained
+                # late. Dropped rather than recorded: at best it is a duplicate
+                # of history, and at worst — a re-sent result — it would end the
+                # current turn with the previous turn's answer.
+                continue
             accepted = log.record(event)
             if accepted is None:
                 continue
@@ -477,17 +581,56 @@ class ClaudeAgentSdkAdapter(TaskAdapter):
     def _settle(
         self, task_id: str, terminal: DelegatedEvent, events: List[AdapterEvent]
     ) -> AdapterOutcome:
-        """Turn a terminal delegated event into a requested Task Core state."""
+        """Turn a terminal delegated event into a requested Task Core state.
+
+        **A terminal event ends a turn. Whether it ends the task is a separate
+        question**, and getting those two confused is what this method used to
+        do. A successful turn on a session that is still alive asks for
+        ``ready_for_followup``; the same event on a session that has gone asks
+        for ``completed``. The difference is not inferred from the event — the
+        event looks identical in both cases — it is asked of the session.
+
+        A failure, a cancellation or an interruption ends the task whatever the
+        session is doing. There is no "failed but you may continue": a turn that
+        broke leaves a conversation whose state nobody can describe, and
+        offering to add to it would be offering something untested.
+        """
         state = TERMINAL_STATE_FOR_KIND.get(terminal.kind, STATE_FAILED)
+        session = self._sessions.get(task_id)
+        retained = bool(
+            terminal.kind == KIND_SUCCEEDED
+            and session is not None
+            and not session.finished
+            and getattr(session, "turn_complete", False)
+        )
         self._remember_result(task_id, terminal)
-        self._retire(task_id)
 
         if terminal.kind == KIND_SUCCEEDED:
+            if retained:
+                # The turn is over and the session is not. The log is replaced
+                # so the next turn starts with a clean one — the old log has
+                # accepted a terminal event and would refuse everything after
+                # it, which is exactly right for a turn and exactly wrong for
+                # the conversation the turn belongs to.
+                self._begin_next_turn(task_id, floor=terminal.provider_sequence)
+                return AdapterOutcome(
+                    events=tuple(events),
+                    requested_state=STATE_READY_FOR_FOLLOWUP,
+                    final_result=(terminal.result or "")[:MAX_RESULT_CHARS] or None,
+                    provider_session_id=self._session_id_for(task_id, terminal),
+                    provider_turn_sequence=terminal.provider_sequence,
+                    session_retained=True,
+                )
+            self._retire(task_id)
             return AdapterOutcome(
                 events=tuple(events),
                 requested_state=STATE_COMPLETED,
                 final_result=(terminal.result or "")[:MAX_RESULT_CHARS] or None,
+                provider_session_id=self._session_id_for(task_id, terminal),
+                provider_turn_sequence=terminal.provider_sequence,
             )
+
+        self._retire(task_id)
         if terminal.kind == KIND_PROVIDER_FAILED:
             return AdapterOutcome(
                 events=tuple(events),
@@ -495,17 +638,72 @@ class ClaudeAgentSdkAdapter(TaskAdapter):
                 failure_code=terminal.failure_code or "provider_error",
                 failure_message=terminal.text
                 or "Claude reported an error without explaining it.",
+                provider_session_id=self._session_id_for(task_id, terminal),
+                provider_turn_sequence=terminal.provider_sequence,
             )
         if terminal.kind == KIND_CANCELLED:
-            return AdapterOutcome(events=tuple(events), requested_state=STATE_CANCELLED)
-        return AdapterOutcome(events=tuple(events), requested_state=state)
+            return AdapterOutcome(
+                events=tuple(events),
+                requested_state=STATE_CANCELLED,
+                provider_session_id=self._session_id_for(task_id, terminal),
+                provider_turn_sequence=terminal.provider_sequence,
+            )
+        return AdapterOutcome(
+            events=tuple(events),
+            requested_state=state,
+            provider_session_id=self._session_id_for(task_id, terminal),
+            provider_turn_sequence=terminal.provider_sequence,
+        )
+
+    def _session_id_for(self, task_id: str, event: DelegatedEvent) -> Optional[str]:
+        """The provider session that produced this event.
+
+        From the event first, because that is what was true when it happened,
+        and from the session only as a fallback for an event that carried none.
+        """
+        if event.provider_session_id:
+            return event.provider_session_id
+        session = self._sessions.get(task_id)
+        return session.provider_session_id if session is not None else None
+
+    def _begin_next_turn(self, task_id: str, *, floor: int) -> None:
+        """Give a retained session a fresh event log for its next turn.
+
+        The old log has done its job: it ordered one turn's events, suppressed
+        its duplicates, and accepted exactly one terminal event. Keeping it
+        would mean the second turn's result was refused as "after terminal" —
+        the finality rule doing precisely what it should, to the wrong scope.
+
+        A fresh log alone is not enough, though, and the gap it leaves is the
+        one worth naming: a *duplicate of the previous turn's result*, drained
+        late, would arrive at a log that has never seen it and no terminal event
+        — and would end the new turn with the old turn's answer. So the turn
+        boundary is recorded as a floor on the provider's own sequence, and
+        :meth:`_collect` drops anything at or below it. The normalizer counts
+        monotonically for the life of the session, which is what makes the
+        comparison meaningful across turns.
+        """
+        with self._lock:
+            if task_id in self._sessions:
+                self._logs[task_id] = DelegatedEventLog()
+                self._turn_floor[task_id] = max(
+                    self._turn_floor.get(task_id, 0), int(floor)
+                )
 
     def _remember_result(self, task_id: str, terminal: DelegatedEvent) -> None:
+        """Keep the latest turn's result in memory, for this process's lifetime.
+
+        Overwritten by a later *turn*, and unreachable by a later *event* in the
+        same turn — the log refuses a second terminal event, and ``_collect``
+        drops anything from a turn already settled, so the only way to get here
+        twice is a genuinely new turn producing a genuinely new answer.
+
+        This is no longer where a result durably lives. The durable record is
+        ``task_turns``, written inside the transaction that moves the task; this
+        dictionary is a convenience for the same process and is lost on restart,
+        exactly as its own docstring said in PR1.
+        """
         with self._lock:
-            if task_id in self._results:
-                # First terminal event wins, exactly as the log decided. A second
-                # one cannot rewrite the result of a task that already has one.
-                return
             self._results[task_id] = result_from_event(
                 task_id=task_id, event=terminal, completed_at=now_iso()
             )
@@ -524,6 +722,7 @@ class ClaudeAgentSdkAdapter(TaskAdapter):
         with self._lock:
             session = self._sessions.pop(task_id, None)
             self._logs.pop(task_id, None)
+            self._turn_floor.pop(task_id, None)
         if session is None:
             return
         try:
@@ -538,6 +737,7 @@ class ClaudeAgentSdkAdapter(TaskAdapter):
         ]:
             self._sessions.pop(task_id, None)
             self._logs.pop(task_id, None)
+            self._turn_floor.pop(task_id, None)
 
     def active_task_ids(self):
         with self._lock:
@@ -553,6 +753,7 @@ class ClaudeAgentSdkAdapter(TaskAdapter):
             sessions = list(self._sessions.values())
             self._sessions.clear()
             self._logs.clear()
+            self._turn_floor.clear()
         for session in sessions:
             try:
                 session.close()

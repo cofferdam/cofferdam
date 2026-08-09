@@ -594,7 +594,7 @@ class TransactionalStorage(TaskTestCase):
         self.assertEqual(int(row[0]), store_module.SCHEMA_VERSION)
         # Pinned as a literal too, so a bump is a deliberate edit here rather
         # than a test that follows whatever the code says.
-        self.assertEqual(store_module.SCHEMA_VERSION, 2)
+        self.assertEqual(store_module.SCHEMA_VERSION, 3)
 
     def test_an_older_database_gains_the_new_tables_and_records_the_version(self):
         """M2I PR2's upgrade, which is additive and therefore a create-if-absent.

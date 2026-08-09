@@ -1504,12 +1504,52 @@ class ProtocolTests(unittest.TestCase):
     def test_the_command_vocabulary_carries_nothing_executable(self) -> None:
         """No command names a path, an executable, an environment or a tool."""
         self.assertEqual(
-            set(hostproto.COMMANDS), {"start", "answer", "cancel", "close"}
+            set(hostproto.COMMANDS),
+            {"start", "answer", "followup", "cancel", "close"},
         )
         built = hostproto.command(
             hostproto.COMMAND_ANSWER, token="ask_1", answer="yes"
         )
         self.assertEqual(set(built), {"v", "command", "token", "answer"})
+
+    def test_a_followup_command_carries_text_and_no_session_identifier(self) -> None:
+        """The follow-up command is text, and structurally cannot be more.
+
+        No session id on it, because the helper holds one client and has no way
+        to reach another — so there is nothing for an identifier to select.
+        """
+        built = hostproto.command(hostproto.COMMAND_FOLLOWUP, followup="and also this")
+        self.assertEqual(set(built), {"v", "command", "followup"})
+        for forbidden in (
+            "session_id",
+            "provider_session_id",
+            "cwd",
+            "path",
+            "env",
+            "tools",
+            "model",
+            "permission_mode",
+            "resume",
+        ):
+            self.assertNotIn(forbidden, built)
+
+    def test_a_followup_is_its_own_command_and_not_a_second_kind_of_answer(
+        self,
+    ) -> None:
+        """The two never collapse into one word on the wire.
+
+        If they ever did, the helper would have to decide from state which one
+        had arrived — at the moment when getting it wrong means answering a
+        blocked question with an unrelated instruction.
+        """
+        self.assertNotEqual(hostproto.COMMAND_FOLLOWUP, hostproto.COMMAND_ANSWER)
+        answer = hostproto.command(
+            hostproto.COMMAND_ANSWER, token="ask_1", answer="yes"
+        )
+        followup = hostproto.command(hostproto.COMMAND_FOLLOWUP, followup="yes")
+        self.assertNotIn("followup", answer)
+        self.assertNotIn("token", followup)
+        self.assertNotIn("answer", followup)
 
     def test_an_unknown_command_or_message_name_is_refused(self) -> None:
         with self.assertRaises(hostproto.ProtocolError):
@@ -1618,6 +1658,134 @@ class SameSessionTests(unittest.TestCase):
         session.submit_answer("ask_alpha", "Selected: alpha")
         self.assertEqual(session.provider_session_id, before)
         self.assertEqual(session.provider_session_id, "sess-1")
+
+    # -- M2I PR3: the same helper takes another turn --------------------------
+
+    def test_a_follow_up_reaches_the_helper_that_owns_the_session(self) -> None:
+        session, helper = self.started()
+        helper.complete_turn()
+        self._await(lambda: session.turn_complete)
+        session.send_followup("and also this")
+        self.assertEqual(helper.followups, ["and also this"])
+        # One command channel, one helper, and the start is still the only
+        # thing that ever carried a prompt.
+        commands = [hostproto.decode_line(line) for line in helper.received]
+        self.assertEqual([c["command"] for c in commands], ["start", "followup"])
+        self.assertNotIn("prompt", commands[1])
+
+    def test_a_follow_up_does_not_change_the_provider_session_id(self) -> None:
+        session, helper = self.started()
+        helper.complete_turn()
+        self._await(lambda: session.turn_complete)
+        before = session.provider_session_id
+        session.send_followup("again")
+        self.assertEqual(session.provider_session_id, before)
+        self.assertEqual(session.provider_session_id, "sess-1")
+
+    def test_an_unrelated_session_is_untouched_by_a_follow_up(self) -> None:
+        first, first_helper = self.started(session_id="sess-1")
+        second, second_helper = self.started(session_id="sess-2")
+        for helper, session in ((first_helper, first), (second_helper, second)):
+            helper.complete_turn()
+            self._await(lambda s=session: s.turn_complete)
+
+        first.send_followup("only for the first")
+        self.assertEqual(first_helper.followups, ["only for the first"])
+        self.assertEqual(second_helper.followups, [])
+        self.assertEqual(second.provider_session_id, "sess-2")
+        self.assertTrue(second.turn_complete)
+
+    def test_a_follow_up_before_the_turn_ended_is_refused(self) -> None:
+        from cofferdam.workstation.tasks.adapters.claude_agent_sdk.session import (
+            SessionRefused,
+        )
+
+        session, helper = self.started()
+        with self.assertRaises(SessionRefused) as caught:
+            session.send_followup("hurry up")
+        self.assertIn("still working", str(caught.exception))
+        self.assertEqual(helper.followups, [])
+
+    def test_a_follow_up_while_a_question_is_open_is_refused(self) -> None:
+        from cofferdam.workstation.tasks.adapters.claude_agent_sdk.session import (
+            SessionRefused,
+        )
+
+        session, helper = self.started(question_token="ask_alpha")
+        session.drain()
+        helper.complete_turn()
+        self._await(lambda: session.turn_complete)
+        with self.assertRaises(SessionRefused) as caught:
+            session.send_followup("never mind the question")
+        self.assertIn("waiting for an answer", str(caught.exception))
+        self.assertEqual(helper.followups, [])
+
+    def test_a_helper_that_refuses_a_follow_up_says_so(self) -> None:
+        """The refusal reaches the caller rather than latching as a start error.
+
+        A message that went nowhere has to be reported as one — and the session
+        must still be usable afterwards, because the helper is fine.
+        """
+        from cofferdam.workstation.tasks.adapters.claude_agent_sdk.session import (
+            SessionRefused,
+        )
+
+        session, helper = self.started()
+        helper.complete_turn()
+        self._await(lambda: session.turn_complete)
+        helper.followup_error = "this session is waiting for an answer"
+        with self.assertRaises(SessionRefused) as caught:
+            session.send_followup("hello")
+        self.assertIn("waiting for an answer", str(caught.exception))
+
+        helper.followup_error = None
+        session.send_followup("hello again")
+        self.assertEqual(helper.followups, ["hello", "hello again"])
+
+    def test_a_follow_up_after_the_helper_died_is_refused(self) -> None:
+        from cofferdam.workstation.tasks.adapters.claude_agent_sdk.session import (
+            SessionRefused,
+        )
+
+        session, helper = self.started()
+        helper.complete_turn()
+        self._await(lambda: session.turn_complete)
+        helper.exit(0)
+        self._await(lambda: session.finished)
+        with self.assertRaises(SessionRefused):
+            session.send_followup("still there?")
+
+    def test_a_cancel_still_reaches_a_session_between_turns(self) -> None:
+        session, helper = self.started()
+        helper.complete_turn()
+        self._await(lambda: session.turn_complete)
+        self.assertTrue(session.request_cancel())
+        self.assertEqual(helper.cancelled, 1)
+        # And a follow-up after the cancel is refused rather than delivered.
+        from cofferdam.workstation.tasks.adapters.claude_agent_sdk.session import (
+            SessionRefused,
+        )
+
+        with self.assertRaises(SessionRefused):
+            session.send_followup("one more thing")
+        self.assertEqual(helper.followups, [])
+
+    def _await(self, predicate, timeout: float = 5.0) -> None:
+        """Wait for the reader thread to have absorbed what the helper said.
+
+        The helper double speaks on a queue that a real thread drains, so a test
+        that asserted immediately would be racing it. Polling rather than
+        sleeping a fixed amount keeps the suite fast and keeps the failure mode
+        a timeout rather than a flake.
+        """
+        import time
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.005)
+        self.fail("the session never reached the expected state")
 
     def test_the_session_id_comes_from_the_provider_not_the_caller(self) -> None:
         """There is no parameter anywhere in this object that could supply one."""

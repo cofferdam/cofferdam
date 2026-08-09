@@ -208,6 +208,29 @@ class AdapterOutcome:
     #: The provider's own ordering for that question, kept so a reader can tell
     #: whether two questions arrived in the order they happened.
     clarification_sequence: int = 0
+    #: Which provider session produced this report, and where in it.
+    #:
+    #: Reported on every outcome that ends a turn, and the reason it is reported
+    #: rather than looked up is the same reason ``clarification_session_id`` is:
+    #: it is the evidence that a second turn happened in the *same* conversation
+    #: as the first. A turn whose session id is missing is a turn whose
+    #: continuity nobody can check afterwards.
+    #:
+    #: Never published to a client. A handle to a live agent conversation has no
+    #: business in a response, and the result boundary publishes the id of a
+    #: *finished* turn — a name for something that happened, not a way to reach
+    #: something that is still running.
+    provider_session_id: Optional[str] = None
+    #: The provider's own sequence for the event that ended the turn.
+    provider_turn_sequence: int = 0
+    #: Whether the adapter still holds a usable session for this task **now**.
+    #:
+    #: The adapter is the only layer that can answer this, and it answers it
+    #: fresh rather than from a flag set earlier: a helper can die between one
+    #: read and the next. The core turns ``True`` into ``ready_for_followup``
+    #: and ``False`` into a completed task, which is the difference between
+    #: offering somebody a follow-up box that works and one that cannot.
+    session_retained: bool = False
 
     @property
     def actor(self) -> str:
@@ -272,7 +295,44 @@ class TaskAdapter:
         raise AdapterRefusal("this adapter cannot start tasks")
 
     def send_followup(self, context: TaskContext, followup: str) -> AdapterOutcome:
+        """Deliver one more user turn to the session **this task already owns**.
+
+        The session is never named, supplied or looked up by identifier: an
+        adapter finds it by the task's own id, in its own table of live
+        sessions. There is no parameter here — and no field on any request
+        above — that could point this at another task's conversation.
+
+        ``followup`` is validated user text. It is delivered as its own provider
+        turn, not concatenated onto a prompt and not encoded as an answer: a
+        follow-up and a clarification answer reach the provider through
+        different code paths on purpose, because a single path would have to
+        decide which at the worst possible moment.
+
+        Refused by default, so an adapter that declared ``followup`` without
+        implementing it fails loudly rather than silently swallowing somebody's
+        message.
+        """
         raise AdapterRefusal("this adapter does not accept follow-up messages")
+
+    def session_available(self, task_id: str) -> bool:
+        """Whether this adapter can still see a session it could continue.
+
+        The half of the follow-up contract only an adapter can answer. Task Core
+        knows the state says ``ready_for_followup``; only the thing holding the
+        process knows whether the process is still there. Asked fresh on every
+        follow-up, because a helper can die between one read and the next.
+
+        **This is an early refusal, not the guarantee.** The guarantee is
+        :meth:`send_followup`, which refuses when the session is gone and is the
+        only place a message is actually handed over. That is why the default is
+        ``True`` rather than fail-closed: the Claude Code adapter has enforced
+        liveness inside its own ``send_followup`` since M2G, and defaulting to
+        ``False`` here would have broken a shipped adapter to satisfy a check it
+        already performs one layer down. What this method buys is a truthful
+        refusal *before* the task moves, so a dead session produces
+        ``task_session_unavailable`` rather than a task briefly reported running.
+        """
+        return True
 
     def cancel(self, context: TaskContext) -> AdapterOutcome:
         raise AdapterRefusal("this adapter cannot cancel a running task")
