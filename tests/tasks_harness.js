@@ -1761,14 +1761,20 @@ function run() {
       fire("click", button("taskFollowupSend"));
       return drain();
     }).then(function () {
+      /* After the refusal: the words and the key both have to still be here,
+         because this is the moment somebody presses the button again. */
+      const draftAfterRefusal = valueOf("taskFollowupText");
       field("taskFollowupText", "aynı mesaj");
       fire("click", button("taskFollowupSend"));
       return drain().then(function () {
+        /* And the retry is accepted, so now — and only now — it goes. */
         const posts = writes().filter((w) => w.path.indexOf("/followups") !== -1);
         return {
           posts: posts.length,
           requestIds: posts.map((w) => w.body.client_request_id),
-          draft: valueOf("taskFollowupText")
+          draftAfterRefusal: draftAfterRefusal,
+          draftAfterAccept: valueOf("taskFollowupText"),
+          keysAfterAccept: Object.keys(storage.data)
         };
       });
     });
@@ -1911,6 +1917,240 @@ function run() {
       fire("click", button("taskShowResult"));
       return drain().then(function () {
         return { html: html(), storage: storage.data };
+      });
+    });
+  }
+
+  /* -- M2I PR4 fix: an accepted follow-up leaves nothing behind ------------- */
+
+  if (scenario === "an-accepted-followup-clears-everything") {
+    /* The defect the phone found, in one scenario.
+
+       Clearing the store was not enough: the draft is not part of the markup,
+       so the textarea still held the accepted sentence, and the next render's
+       `captureDraft` read that node and wrote it back. On the phone the text
+       reappeared, and because the request id had been released with it, the
+       next tap sent the same words under a new key — a second provider turn. */
+    const ready = readyTask("task_acc");
+    return mount({
+      realAdapter: true,
+      initial: listPayload([ready]),
+      detail: ready,
+      result: () => ({ payload: { task: ready } })
+    }).then(function () {
+      fire("click", openButton("task_acc"));
+      return drain();
+    }).then(function () {
+      field("taskFollowupText", "hangi etiketi seçtim?");
+      advance(4000);                       /* a poll files the draft */
+      return drain();
+    }).then(function () {
+      const storedBefore = Object.keys(storage.data).length;
+      fire("click", button("taskFollowupSend"));
+      return drain().then(function () {
+        /* And a further render, which is where the draft used to come back. */
+        advance(4000);
+        return drain().then(function () {
+          return {
+            storedBefore: storedBefore,
+            box: valueOf("taskFollowupText"),
+            keys: Object.keys(storage.data),
+            posts: writes().filter((w) => w.path.indexOf("/followups") !== -1).length
+          };
+        });
+      });
+    });
+  }
+
+  if (scenario === "an-accepted-followup-does-not-return-after-a-reload") {
+    const ready = readyTask("task_acc");
+    const behaviour = {
+      realAdapter: true,
+      initial: listPayload([ready]),
+      detail: ready,
+      result: () => ({ payload: { task: ready } })
+    };
+    return mount(behaviour).then(function () {
+      fire("click", openButton("task_acc"));
+      return drain();
+    }).then(function () {
+      field("taskFollowupText", "gönderildi ve bitti");
+      advance(4000);
+      return drain();
+    }).then(function () {
+      fire("click", button("taskFollowupSend"));
+      return drain();
+    }).then(function () {
+      return reload(behaviour).then(function () {
+        fire("click", openButton("task_acc"));
+        return drain().then(function () {
+          return { box: valueOf("taskFollowupText"), keys: Object.keys(storage.data) };
+        });
+      });
+    });
+  }
+
+  if (scenario === "a-second-tap-after-acceptance-sends-nothing") {
+    /* The consequence, asserted directly: with the box empty there is nothing
+       to resend, so a second tap produces no second turn. */
+    const ready = readyTask("task_acc");
+    return mount({
+      realAdapter: true,
+      initial: listPayload([ready]),
+      detail: ready,
+      result: () => ({ payload: { task: ready } })
+    }).then(function () {
+      fire("click", openButton("task_acc"));
+      return drain();
+    }).then(function () {
+      field("taskFollowupText", "tek sefer");
+      fire("click", button("taskFollowupSend"));
+      return drain();
+    }).then(function () {
+      fire("click", button("taskFollowupSend"));
+      return drain();
+    }).then(function () {
+      fire("click", button("taskFollowupSend"));
+      return drain().then(function () {
+        const posts = writes().filter((w) => w.path.indexOf("/followups") !== -1);
+        return {
+          posts: posts.length,
+          requestIds: posts.map((w) => w.body.client_request_id),
+          box: valueOf("taskFollowupText"),
+          html: html()
+        };
+      });
+    });
+  }
+
+  if (scenario === "text-typed-while-in-flight-survives-acceptance") {
+    /* The property the clear must not break: what somebody typed *after*
+       pressing Send is their next message, not a leftover of the accepted one. */
+    const ready = readyTask("task_acc");
+    let release = null;
+    return mount({
+      realAdapter: true,
+      initial: listPayload([ready]),
+      detail: ready,
+      onWrite(pathname) {
+        if (pathname.indexOf("/followups") === -1) { return null; }
+        return new Promise(function (resolve) {
+          release = () => resolve({ ok: true, status: 200, payload: { task: ready } });
+        });
+      },
+      result: () => ({ payload: { task: ready } })
+    }).then(function () {
+      fire("click", openButton("task_acc"));
+      return drain();
+    }).then(function () {
+      field("taskFollowupText", "ilk mesaj");
+      fire("click", button("taskFollowupSend"));
+      return drain();
+    }).then(function () {
+      /* Typed while the request is still open. */
+      field("taskFollowupText", "sonraki mesaj");
+      release();
+      return drain().then(function () {
+        return { box: valueOf("taskFollowupText"), keys: Object.keys(storage.data) };
+      });
+    });
+  }
+
+  if (scenario === "a-refused-followup-still-keeps-the-box") {
+    const ready = readyTask("task_acc");
+    return mount({
+      realAdapter: true,
+      initial: listPayload([ready]),
+      detail: ready,
+      onWrite(pathname) {
+        if (pathname.indexOf("/followups") === -1) { return null; }
+        return Promise.resolve({
+          ok: false,
+          status: 409,
+          payload: { error: { code: "task_idempotency_conflict", message: "No." } }
+        });
+      },
+      result: () => ({ payload: { task: ready } })
+    }).then(function () {
+      fire("click", openButton("task_acc"));
+      return drain();
+    }).then(function () {
+      field("taskFollowupText", "reddedildi ama duruyor");
+      fire("click", button("taskFollowupSend"));
+      return drain().then(function () {
+        advance(4000);
+        return drain().then(function () {
+          const posts = writes().filter((w) => w.path.indexOf("/followups") !== -1);
+          return {
+            box: valueOf("taskFollowupText"),
+            keys: Object.keys(storage.data),
+            requestIds: posts.map((w) => w.body.client_request_id)
+          };
+        });
+      });
+    });
+  }
+
+  if (scenario === "accepting-one-task-leaves-another-tasks-draft") {
+    const a = readyTask("task_a");
+    const b = readyTask("task_b");
+    let current = a;
+    const behaviour = {
+      realAdapter: true,
+      initial: listPayload([a, b]),
+      detail: () => current,
+      result: () => ({ payload: { task: current } })
+    };
+    return mount(behaviour).then(function () {
+      fire("click", openButton("task_b"));
+      return drain();
+    }).then(function () {
+      current = b;
+      field("taskFollowupText", "b için taslak");
+      advance(4000);
+      return drain();
+    }).then(function () {
+      fire("click", button("taskBack"));
+      return drain();
+    }).then(function () {
+      current = a;
+      fire("click", openButton("task_a"));
+      return drain();
+    }).then(function () {
+      field("taskFollowupText", "a gönderiliyor");
+      fire("click", button("taskFollowupSend"));
+      return drain().then(function () {
+        return {
+          keys: Object.keys(storage.data).sort(),
+          boxAfterAcceptOnA: valueOf("taskFollowupText")
+        };
+      });
+    });
+  }
+
+  if (scenario === "an-accepted-answer-leaves-the-followup-draft-alone") {
+    /* The two operations stay separate through an acceptance as well. */
+    const waiting = sdkWaiting();
+    return mount({
+      realAdapter: true,
+      initial: listPayload([waiting]),
+      detail: waiting,
+      clarifications: [clarificationPayload({ allows_free_text: true })],
+      result: () => ({ payload: { task: waiting } })
+    }).then(function () {
+      fire("click", openButton("task_sdk"));
+      return drain();
+    }).then(function () {
+      field("taskAnswerText", "cevap metni");
+      advance(12000);
+      return drain();
+    }).then(function () {
+      /* A follow-up draft filed under the same task, by hand, so the
+         acceptance below has something of the other kind to leave alone. */
+      storage.setItem("cofferdam.taskdraft.followup.task_sdk", "sonraki mesaj");
+      fire("click", button("taskAnswerSend"));
+      return drain().then(function () {
+        return { keys: Object.keys(storage.data).sort() };
       });
     });
   }

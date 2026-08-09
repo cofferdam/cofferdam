@@ -698,8 +698,24 @@ is the one property a double cannot prove; everything else runs against doubles.
 Anthropic, uses the network, consumes model usage, inspects a transcript, modifies the live
 registry, starts Remote Control or touches production.
 
-**Not validated on a real phone.** Every scenario runs against a DOM double. Real-device validation
-is a separate, separately approved step and **M2I cannot close truthfully until it has happened**.
+**One supervised real-phone run, and it found a defect.** A temporary non-production daemon on a
+tailnet-only bind, its own `COFFERDAM_HOME`, its own one-project registry and its own token, with the
+session narrowed below the shipped profile for the run (`tools: ["AskUserQuestion"]`,
+`permission_mode: "default"`, 4 turns, USD 0.50) in a **disposable worktree** so the PR branch stayed
+byte-clean. Sixteen of the seventeen checks passed: the structured question rendered and was answered
+through the clarification route, both drafts survived locking and reload, neither auto-submitted,
+foregrounding refreshed immediately, both turns ran in one provider session, and no provider session
+id, raw payload, tool input or debug data reached the phone.
+
+The defect: **an accepted follow-up did not clear its draft**, and that was worse than it looked. The
+draft is deliberately not in the markup, so clearing the store left the live textarea holding the
+accepted text, and the next render's `captureDraft` wrote it back. With the request id released
+alongside, the next tap resent the same words under a new key — one intended message produced
+**three provider turns**. Fixed with a single helper that clears the node before the store; the
+regression tests reproduce the three-turn outcome exactly and assert one.
+
+**A narrow real-phone recheck of the follow-up clear is still outstanding**, and **M2I cannot close
+truthfully until it passes**.
 
 **No production change.** No unit, drop-in, installer or registry file was edited; the SDK is not
 installed in the production slot and the adapter is not enabled there. The **Claude Code adapter

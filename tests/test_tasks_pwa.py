@@ -958,6 +958,103 @@ class DraftsSurviveAReload(unittest.TestCase):
         self.assertIn("slice(0, MAX_DRAFT_CHARS)", source)
 
 
+class AcceptedDraftIsCleared(unittest.TestCase):
+    """Found on a real phone during M2I PR4 validation, and worse than it looked.
+
+    **What was reported:** after an accepted follow-up produced its result, the
+    sent text was still sitting in the follow-up box.
+
+    **What it actually was:** the draft is deliberately not part of the markup —
+    keeping it out is what stops the form being rebuilt under somebody on every
+    poll. So ``clearDraft`` emptied memory and ``localStorage`` while the live
+    textarea kept holding the accepted words, and the next ``render`` called
+    ``captureDraft``, which read that node and wrote them straight back.
+
+    The draft came back, the request id had been released with it, and the next
+    tap on Send therefore submitted the same sentence under a **new** key. The
+    server did exactly the right thing with a new key and different-looking
+    message: it opened another turn. The validation run produced **three**
+    follow-up turns from one intended message, with three distinct request ids,
+    consuming real model usage — and nothing on the screen said so.
+
+    So this is not a cosmetic class. It is the duplicate-turn class, and the
+    scenarios below assert the consequence as well as the symptom.
+    """
+
+    def test_the_box_is_empty_after_an_accepted_followup(self):
+        self.assertEqual(panel("an-accepted-followup-clears-everything")["box"], "")
+
+    def test_the_stored_draft_is_gone_after_an_accepted_followup(self):
+        result = panel("an-accepted-followup-clears-everything")
+        self.assertEqual(result["storedBefore"], 1, "nothing was stored to begin with")
+        self.assertEqual(result["keys"], [])
+
+    def test_a_reload_does_not_bring_the_accepted_text_back(self):
+        """The store is what survives a reload, so this is the durable half."""
+        result = panel("an-accepted-followup-does-not-return-after-a-reload")
+        self.assertEqual(result["box"], "")
+        self.assertEqual(result["keys"], [])
+
+    def test_tapping_send_again_creates_no_second_turn(self):
+        """The defect's actual cost, asserted directly.
+
+        Three taps, one message. Before the fix this produced three posts under
+        three different keys, which is what the phone run recorded in
+        ``task_turns``.
+        """
+        result = panel("a-second-tap-after-acceptance-sends-nothing")
+        self.assertEqual(result["posts"], 1, result["requestIds"])
+        self.assertEqual(len(set(result["requestIds"])), 1)
+        self.assertEqual(result["box"], "")
+
+    def test_text_typed_while_the_request_was_open_is_kept(self):
+        """The clear must not eat somebody's next message.
+
+        What is in the box after the server answers is not necessarily what the
+        server accepted. Anything newer is a different message and survives.
+        """
+        result = panel("text-typed-while-in-flight-survives-acceptance")
+        self.assertEqual(result["box"], "sonraki mesaj")
+        self.assertEqual(result["keys"], ["cofferdam.taskdraft.followup.task_acc"])
+
+    def test_a_refused_followup_keeps_its_box_and_its_key(self):
+        """Cleared on acceptance, never on merely having received a response.
+
+        A 409 is the case most likely to be retried, and both the words and the
+        key the server would recognise the retry by have to survive it.
+        """
+        result = panel("a-refused-followup-still-keeps-the-box")
+        self.assertEqual(result["box"], "reddedildi ama duruyor")
+        self.assertEqual(result["keys"], ["cofferdam.taskdraft.followup.task_acc"])
+        self.assertEqual(len(result["requestIds"]), 1)
+
+    def test_accepting_on_one_task_leaves_another_tasks_draft(self):
+        result = panel("accepting-one-task-leaves-another-tasks-draft")
+        self.assertEqual(result["keys"], ["cofferdam.taskdraft.followup.task_b"])
+        self.assertIn(result["boxAfterAcceptOnA"], ("", None))
+
+    def test_an_accepted_answer_leaves_the_followup_draft_alone(self):
+        """The two operations stay separate through an acceptance too."""
+        result = panel("an-accepted-answer-leaves-the-followup-draft-alone")
+        self.assertEqual(result["keys"], ["cofferdam.taskdraft.followup.task_sdk"])
+
+    def test_the_clear_goes_through_one_helper_that_touches_the_node(self):
+        """Structural, because the store-only clear looked correct for a week.
+
+        A future clear that empties the store and forgets the node reproduces
+        the defect exactly, and reads as fine in review. So the helper exists,
+        both accepted paths go through it, and it is the thing that writes the
+        node.
+        """
+        source = tasks_code()
+        self.assertIn("function clearAcceptedDraft", source)
+        self.assertEqual(source.count("clearAcceptedDraft("), 3, "one helper, two callers")
+        block = source[source.index("function clearAcceptedDraft") :]
+        block = block[: block.index("function applyDraft")]
+        self.assertIn('box.value = ""', block, "the helper does not clear the node")
+        self.assertIn("clearDraft(", block, "the helper does not clear the store")
+
+
 class RequestIdentity(unittest.TestCase):
     """M2I PR4: a retry is recognisable as one.
 
@@ -977,10 +1074,19 @@ class RequestIdentity(unittest.TestCase):
             "the retry carried a new key, so the server could not recognise it",
         )
 
-    def test_a_refused_followup_keeps_the_text(self):
-        self.assertEqual(
-            panel("a-refused-followup-keeps-its-request-id")["draft"], "aynı mesaj"
-        )
+    def test_a_refused_followup_keeps_the_text_then_gives_it_up_once_accepted(self):
+        """Two moments, and this test used to check only the wrong one.
+
+        It asserted the draft was still there at the *end* of the scenario — by
+        which point the retry had been **accepted**. So it passed while the panel
+        held on to text the server had taken, which is the M2I PR4 phone defect,
+        and would have kept passing after it. The refusal is what the draft must
+        survive; the acceptance is what it must not.
+        """
+        result = panel("a-refused-followup-keeps-its-request-id")
+        self.assertEqual(result["draftAfterRefusal"], "aynı mesaj")
+        self.assertEqual(result["draftAfterAccept"], "")
+        self.assertEqual(result["keysAfterAccept"], [])
 
     def test_edited_words_get_a_new_key(self):
         """The server binds a key to a payload hash; different words must differ."""

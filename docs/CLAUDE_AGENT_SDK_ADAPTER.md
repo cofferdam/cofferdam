@@ -857,6 +857,36 @@ structural rather than reviewed: there is exactly one storage writer, it takes a
 task, an operation and a string, and there is no second `setItem` call site
 through which anything else could arrive.
 
+### What the phone found, and why it was not cosmetic
+
+The first real-device run reported a small thing: after an accepted follow-up
+produced its result, the sent text was still sitting in the box.
+
+It was not small. The draft is deliberately **not** part of the markup — keeping
+it out is what stops the form being rebuilt under somebody on every poll — so
+clearing the store emptied memory and `localStorage` while the live textarea kept
+holding the accepted words. The next render called `captureDraft`, which reads
+that node and wrote them straight back.
+
+The draft came back, the request id had been released with it, and the next tap
+on Send therefore submitted the same sentence under a **new** key. The server did
+the right thing with a new key and an unrecognised message: it opened another
+turn. One intended follow-up produced **three provider turns** with three
+distinct request ids, consuming real model usage, with nothing on screen to say
+so.
+
+The fix is one helper, `clearAcceptedDraft`, which clears the node before the
+store and is the only path either accepted submission takes. Text typed while a
+request was in flight is newer than the answer and is left alone; a refusal, a
+conflict, a timeout or an unreachable workstation still preserve both the words
+and the key.
+
+The lesson worth keeping is about the shape of the bug rather than the bug: a
+draft that lives in three places is cleared in three places, and a clear that
+looks complete because two of them are empty is the kind that reads as correct in
+review. The regression tests assert the consequence — a second tap produces no
+second turn — and not only the symptom.
+
 ### Idempotency, and the retry that was not one
 
 One module-level slot held the request key for every write, and it was cleared on

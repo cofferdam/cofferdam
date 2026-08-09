@@ -994,6 +994,37 @@
     delete chosenOptions[task.task_id];
   }
 
+  /* Drop a draft the server has **accepted**, at every layer it lives in.
+
+     This exists because clearing the store is not enough, and the phone found
+     out the hard way. The draft text is deliberately not part of the markup —
+     see `render` — so `clearDraft` empties memory and storage while the live
+     textarea keeps holding the accepted words. The next `render` then calls
+     `captureDraft`, which reads that node and writes them straight back. The
+     draft came back, and because the request id had been released with it, the
+     next tap on Send submitted the same sentence under a new key: a second
+     provider turn, real model usage, and nothing on screen to suggest it had
+     happened.
+
+     So the node is cleared first, and only then the store.
+
+     `accepted` is the text the server took. Anything else in the box now is
+     newer than the answer — somebody's next message typed while the request was
+     in flight — and is left alone. Returns whether it cleared, so a caller can
+     be tested on the distinction rather than assuming it. */
+  function clearAcceptedDraft(taskId, operation, accepted) {
+    /* Only ever the box belonging to the task that was accepted. A different
+       task open on screen has its own draft and its own box. */
+    var box = openTaskId === taskId ? draftBox(operation) : null;
+    var current = box && typeof box.value === "string"
+      ? box.value
+      : draftFor(taskId, operation);
+    if (current !== accepted) { return false; }
+    if (box) { box.value = ""; }
+    clearDraft(taskId, operation);
+    return true;
+  }
+
   /* Copy the stored draft into the freshly built textarea. */
   function applyDraft() {
     if (!openTaskId) { return; }
@@ -1404,13 +1435,10 @@
         return loadDetail(taskId);
       }
       releaseRequestId(OP_FOLLOWUP, taskId);
-      /* Accepted. Cleared once, and only if the stored draft still holds the
-         text that was accepted — anything typed while the request was in flight
-         is newer than the answer and is somebody's next message, not a
-         leftover. */
-      if (draftFor(taskId, OP_FOLLOWUP) === sent) {
-        clearDraft(taskId, OP_FOLLOWUP);
-      }
+      /* Accepted. Cleared at the node as well as the store — see
+         `clearAcceptedDraft` — and only if what is there is still the text the
+         server took. */
+      clearAcceptedDraft(taskId, OP_FOLLOWUP, sent);
       actionNote = "Sent.";
       detail = response.payload.task;
       settleTerminalDrafts(detail);
@@ -1489,9 +1517,12 @@
         render();
         return loadDetail(taskId);
       }
-      if (draftFor(taskId, OP_CLARIFICATION) === sent) {
-        clearDraft(taskId, OP_CLARIFICATION);
-      }
+      /* The same clear, through the same helper. The question form usually
+         disappears on the next render, which hid this instance of the defect on
+         the phone — the node was gone before `captureDraft` could read it. That
+         is luck, not a difference in the code, and the two paths should not
+         differ on it. */
+      clearAcceptedDraft(taskId, OP_CLARIFICATION, sent);
       delete chosenOptions[questionId];
       actionNote = "Answer sent.";
       detail = response.payload.task;
