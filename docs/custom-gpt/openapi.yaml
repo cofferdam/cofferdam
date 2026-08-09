@@ -1,0 +1,947 @@
+# Cofferdam Actions bridge — GPT Actions schema
+#
+# Paste this into the Custom GPT editor's Actions panel. It describes the whole
+# external surface of `python -m cofferdam.actions_bridge` and nothing else.
+#
+# Verified against OpenAI's current GPT Actions contract on 2026-08-09:
+#   * OpenAPI 3.1.0                       (Getting started with GPT Actions)
+#   * one `operationId` per operation     (Getting started with GPT Actions)
+#   * a `servers` base URL                (Getting started with GPT Actions)
+#   * API key auth, sent as Bearer        (GPT Actions authentication)
+#   * 45 s round trip, 100,000-char cap   (Production notes on GPT Actions)
+#   * operation descriptions <= 300 chars (Production notes on GPT Actions)
+#   * parameter descriptions <= 700 chars (Production notes on GPT Actions)
+#   * custom headers unsupported          (Production notes on GPT Actions)
+#   * x-openai-isConsequential: true forces confirmation and hides
+#     "always allow"; absent defaults GET false and everything else true
+#
+# `servers[0].url` is a PLACEHOLDER. PR1 ships no public origin: no tunnel, no
+# DNS record and no certificate exist. Replacing it is part of Gate A.
+#
+# Nothing in this file contains a real hostname, token, task id, question id,
+# project id or filesystem path. Every example value is invented.
+
+openapi: 3.1.0
+
+info:
+  title: Cofferdam Actions bridge
+  description: >-
+    Delegate coding tasks to Cofferdam, a private personal workstation, and read
+    back their state, questions and results. Cofferdam owns the task lifecycle,
+    the projects and the agent; this API is a bounded control surface over it.
+  version: "1"
+
+servers:
+  - url: https://REPLACE-ME.example.invalid
+    description: >-
+      PLACEHOLDER. No public origin exists yet. Replace with the dedicated
+      Cofferdam bridge hostname once external exposure is approved.
+
+security:
+  - bridgeKey: []
+
+paths:
+  /v1/health:
+    get:
+      operationId: bridgeHealth
+      summary: Check that the Cofferdam bridge is reachable.
+      description: >-
+        Liveness only. Returns four constant fields and says nothing about the
+        workstation, the tasks on it or whether Cofferdam itself is running. Use
+        it to confirm connectivity, not task state.
+      x-openai-isConsequential: false
+      security: []
+      responses:
+        "200":
+          description: The bridge is listening.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+
+  /v1/projects:
+    get:
+      operationId: listProjects
+      summary: List the projects that can accept a delegated task.
+      description: >-
+        Returns only projects the workstation has registered and enabled for
+        delegated work. No filesystem path is ever returned. Call this before
+        createTask when the user has not named a project unambiguously.
+      x-openai-isConsequential: false
+      responses:
+        "200":
+          description: The eligible projects.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/tasks:
+    get:
+      operationId: listRecentTasks
+      summary: List recent tasks so a lost task reference can be recovered.
+      description: >-
+        Bounded, newest first, with no task text, prompt or result. Use it when
+        the conversation has lost which task it was discussing. Never guess a
+        task_id; read a current one from here.
+      x-openai-isConsequential: false
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: >-
+            How many recent tasks to return. Defaults to 10 and is capped at 20
+            by the server; asking for more returns the cap rather than an error.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 20
+      responses:
+        "200":
+          description: The recent tasks.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecentTaskList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+    post:
+      operationId: createTask
+      summary: Start a new Cofferdam task in a registered project.
+      description: >-
+        Sends one self-contained instruction to an agent on the user's
+        workstation. Only create a task when the user has clearly asked to
+        delegate or run work. Summarise the objective; never paste the
+        conversation. Ask which project if it is ambiguous.
+      x-openai-isConsequential: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTaskRequest"
+      responses:
+        "201":
+          description: The task was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatedTask"
+        "200":
+          description: >-
+            This client_request_id had already created a task. Nothing new was
+            started and the existing task is returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatedTask"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/UpstreamUnavailable"
+        "504":
+          $ref: "#/components/responses/UpstreamTimeout"
+
+  /v1/tasks/{task_id}:
+    get:
+      operationId: syncTask
+      summary: Get one task's current state, open question and latest result.
+      description: >-
+        The primary read. Returns state, a bounded activity line, any pending
+        single-choice question, and the latest completed turn's result. Cofferdam
+        cannot push into this chat, so call this when the user asks what
+        happened.
+      x-openai-isConsequential: false
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+      responses:
+        "200":
+          description: The task snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskSnapshot"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/UpstreamUnavailable"
+        "504":
+          $ref: "#/components/responses/UpstreamTimeout"
+
+  /v1/tasks/{task_id}/answer:
+    post:
+      operationId: submitChoiceAnswer
+      summary: Answer a pending single-choice question with one option_id.
+      description: >-
+        Submits exactly one option_id that syncTask returned for this question.
+        Custom text cannot be carried. Never send a display number, never send
+        two options, and never use this to grant a tool permission.
+      x-openai-isConsequential: true
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnswerRequest"
+      responses:
+        "200":
+          description: The answer was accepted, or a retry was recognised.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MutationResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/UpstreamUnavailable"
+        "504":
+          $ref: "#/components/responses/UpstreamTimeout"
+
+  /v1/tasks/{task_id}/followup:
+    post:
+      operationId: sendFollowup
+      summary: Send one more instruction into the same live task.
+      description: >-
+        Continues an existing task rather than creating a new one. Only legal
+        when syncTask reports follow_up_available. Ask the user before sending a
+        substantive continuation. Send a bounded instruction, not chat history.
+      x-openai-isConsequential: true
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FollowupRequest"
+      responses:
+        "200":
+          description: The follow-up was delivered, or a retry was recognised.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MutationResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/UpstreamUnavailable"
+        "504":
+          $ref: "#/components/responses/UpstreamTimeout"
+
+  /v1/tasks/{task_id}/cancel:
+    post:
+      operationId: cancelTask
+      summary: Ask Cofferdam to stop a running task.
+      description: >-
+        Stops the task through Cofferdam's own lifecycle. Work already done is
+        not undone and the history is kept. Confirm with the user first unless
+        they have just asked for it in this turn.
+      x-openai-isConsequential: true
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CancelRequest"
+      responses:
+        "200":
+          description: Cancellation was requested, or a retry was recognised.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MutationResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/UpstreamUnavailable"
+        "504":
+          $ref: "#/components/responses/UpstreamTimeout"
+
+  /v1/tasks/{task_id}/finish:
+    post:
+      operationId: finishTask
+      summary: Close a finished task and release its agent session.
+      description: >-
+        Use when the work is done and no follow-up is coming. Completes the task
+        and frees the session. Results and history are kept. Not the same as
+        cancelling, which records the task as stopped.
+      x-openai-isConsequential: true
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FinishRequest"
+      responses:
+        "200":
+          description: The task was finished, or a retry was recognised.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MutationResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/UpstreamUnavailable"
+        "504":
+          $ref: "#/components/responses/UpstreamTimeout"
+
+components:
+  securitySchemes:
+    bridgeKey:
+      type: http
+      scheme: bearer
+      description: >-
+        The Cofferdam Actions bridge key. Separate from every other Cofferdam
+        credential. Enter it in the GPT editor as API Key with Auth Type
+        Bearer.
+
+  parameters:
+    TaskId:
+      name: task_id
+      in: path
+      required: true
+      description: >-
+        The canonical Cofferdam task id, exactly as returned by createTask or
+        listRecentTasks. It starts with "task_". Do not send the short display
+        reference (CF-XXXXXX) here and do not construct or guess an id; if the
+        conversation has lost it, call listRecentTasks and read a current one.
+      schema:
+        type: string
+        pattern: "^task_[0-9a-hjkmnp-tv-z]{26}$"
+
+  schemas:
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status, service, version, authenticated_operations]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        service:
+          type: string
+        version:
+          type: integer
+        authenticated_operations:
+          type: integer
+
+    Project:
+      type: object
+      additionalProperties: false
+      required: [project_id, display_name, enabled, task_adapters, accepts_tasks]
+      properties:
+        project_id:
+          type: string
+          description: Pass this exact value as project_id to createTask.
+        display_name:
+          type: string
+        enabled:
+          type: boolean
+        task_adapters:
+          type: array
+          description: >-
+            Which delegated task adapters this project permits, as short
+            code-owned labels. Informational only; you cannot choose one.
+          items:
+            type: string
+        accepts_tasks:
+          type: boolean
+
+    ProjectList:
+      type: object
+      additionalProperties: false
+      required: [version, projects]
+      properties:
+        version:
+          type: integer
+        projects:
+          type: array
+          items:
+            $ref: "#/components/schemas/Project"
+
+    CreateTaskRequest:
+      type: object
+      additionalProperties: false
+      required: [project_id, task_text, client_request_id]
+      properties:
+        project_id:
+          type: string
+          maxLength: 64
+          description: A project_id from listProjects. Never a path or a folder name.
+        task_text:
+          type: string
+          minLength: 1
+          maxLength: 6000
+          description: >-
+            The instruction for the agent. Self-contained: objective,
+            constraints and anything it must not do. Summarise the relevant part
+            of the conversation rather than pasting it, and leave out unrelated
+            personal content. There is no field here for a file path, a command,
+            a model, a tool, a permission mode or a budget, and none can be
+            expressed in this text either - Cofferdam decides all of that.
+          examples:
+            - "Add a regression test for the empty-input case in the parser and run the suite."
+        expected_output:
+          type: string
+          maxLength: 1000
+          description: >-
+            Optional. What a good result looks like, appended to the instruction
+            under a fixed heading. Counts against the 6000-character total.
+          examples:
+            - "A passing test plus a one-line summary of what it covers."
+        title:
+          type: string
+          maxLength: 120
+          description: Optional short display title shown on the workstation.
+          examples:
+            - "Parser regression test"
+        client_request_id:
+          $ref: "#/components/schemas/ClientRequestId"
+
+    CreatedTask:
+      type: object
+      additionalProperties: false
+      required:
+        - version
+        - task_id
+        - display_ref
+        - project
+        - state
+        - created
+        - replayed
+        - next_recommended_operation
+      properties:
+        version:
+          type: integer
+        task_id:
+          type: string
+          description: >-
+            The canonical id. Keep it for later Actions in this conversation.
+            Show the user display_ref instead.
+        display_ref:
+          type: string
+          description: Short human-facing reference, e.g. CF-A12F09. Display only.
+        project:
+          type: string
+        state:
+          $ref: "#/components/schemas/TaskState"
+        title:
+          type: [string, "null"]
+        created_at:
+          type: [string, "null"]
+        created:
+          type: boolean
+          description: False when this client_request_id had already created the task.
+        replayed:
+          type: boolean
+        next_recommended_operation:
+          $ref: "#/components/schemas/NextOperation"
+
+    RecentTask:
+      type: object
+      additionalProperties: false
+      required:
+        - task_id
+        - display_ref
+        - project
+        - state
+        - terminal
+        - updated_at
+        - has_pending_question
+        - local_action_required
+        - result_available
+        - follow_up_available
+      properties:
+        task_id:
+          type: string
+        display_ref:
+          type: string
+        project:
+          type: [string, "null"]
+        state:
+          $ref: "#/components/schemas/TaskState"
+        terminal:
+          type: boolean
+        title:
+          type: [string, "null"]
+        updated_at:
+          type: [string, "null"]
+        has_pending_question:
+          type: boolean
+        local_action_required:
+          type: boolean
+          description: >-
+            The task needs a person at the workstation - a tool approval or a
+            sign-in. No Action here can satisfy it.
+        result_available:
+          type: boolean
+        follow_up_available:
+          type: boolean
+
+    RecentTaskList:
+      type: object
+      additionalProperties: false
+      required: [version, tasks, count, limit]
+      properties:
+        version:
+          type: integer
+        tasks:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecentTask"
+        count:
+          type: integer
+        limit:
+          type: integer
+
+    Option:
+      type: object
+      additionalProperties: false
+      required: [option_id, label]
+      properties:
+        option_id:
+          type: string
+          description: >-
+            Submit this exact value to submitChoiceAnswer. It is Cofferdam's own
+            identifier, not a number and not the label.
+        label:
+          type: string
+        description:
+          type: [string, "null"]
+
+    PendingQuestion:
+      type: object
+      additionalProperties: false
+      required: [clarification_supported, local_action_required]
+      properties:
+        question_id:
+          type: [string, "null"]
+          description: Pass this to submitChoiceAnswer together with one option_id.
+        question:
+          type: [string, "null"]
+        answer_mode:
+          type: [string, "null"]
+          enum: [single_choice, multiple_choice, free_text, unknown, null]
+        clarification_supported:
+          type: boolean
+          description: >-
+            True only for a single-choice question with submittable options.
+            When false, this question cannot be answered through this API: tell
+            the user to open the local Cofferdam surface, and do not invent
+            options or reshape the question.
+        reason:
+          type: [string, "null"]
+          enum: [unsupported_question_shape, options_not_submittable, null]
+        local_action_required:
+          type: boolean
+        schema_verified:
+          type: boolean
+        requested_at:
+          type: [string, "null"]
+        options:
+          type: array
+          items:
+            $ref: "#/components/schemas/Option"
+        answer_rules:
+          type: string
+
+    TaskResult:
+      type: object
+      additionalProperties: false
+      required: [available]
+      properties:
+        available:
+          type: boolean
+        text:
+          type: [string, "null"]
+        truncated:
+          type: boolean
+          description: True when the result was longer than this API will carry.
+        outcome:
+          type: [string, "null"]
+        succeeded:
+          type: boolean
+        is_final:
+          type: boolean
+          description: >-
+            True when the task is finished and this is its final result. False
+            means the latest completed turn's result and more may follow.
+        completed_at:
+          type: [string, "null"]
+        turn_number:
+          type: [integer, "null"]
+        turn_count:
+          type: [integer, "null"]
+        failure_code:
+          type: [string, "null"]
+        failure_summary:
+          type: [string, "null"]
+        meaning:
+          type: string
+
+    TaskSnapshot:
+      type: object
+      additionalProperties: false
+      required:
+        - version
+        - task_id
+        - display_ref
+        - state
+        - terminal
+        - follow_up_available
+        - can_cancel
+        - can_finish
+        - local_action_required
+        - artifacts_supported
+        - next_recommended_operation
+      properties:
+        version:
+          type: integer
+        task_id:
+          type: string
+        display_ref:
+          type: string
+        project:
+          type: [string, "null"]
+        state:
+          $ref: "#/components/schemas/TaskState"
+        terminal:
+          type: boolean
+        title:
+          type: [string, "null"]
+        created_at:
+          type: [string, "null"]
+        updated_at:
+          type: [string, "null"]
+        latest_activity:
+          type: [string, "null"]
+          description: A short safe summary of what happened. Never the full output.
+        local_action_required:
+          type: boolean
+        local_action_reason:
+          type: [string, "null"]
+          enum: [approval, authentication, privileged_action, adapter_input, unknown, null]
+        can_cancel:
+          type: boolean
+        can_finish:
+          type: boolean
+        follow_up_available:
+          type: boolean
+        failure_code:
+          type: [string, "null"]
+        failure_summary:
+          type: [string, "null"]
+        artifacts_supported:
+          type: boolean
+          description: >-
+            Always false in this version. Cofferdam has no task-owned artifact
+            model yet, so no file listing or preview exists to expose.
+        artifacts_unavailable_reason:
+          type: [string, "null"]
+        pending_question:
+          oneOf:
+            - $ref: "#/components/schemas/PendingQuestion"
+            - type: "null"
+        result:
+          $ref: "#/components/schemas/TaskResult"
+        next_recommended_operation:
+          $ref: "#/components/schemas/NextOperation"
+
+    AnswerRequest:
+      type: object
+      additionalProperties: false
+      required: [question_id, option_id, client_request_id]
+      properties:
+        question_id:
+          type: string
+          maxLength: 64
+          description: The question_id from syncTask's pending_question.
+        option_id:
+          type: string
+          maxLength: 64
+          description: >-
+            Exactly one option_id from that question's options list. Not a
+            display number, not the label text, and not a value you composed. If
+            the user said "answer 2", map 2 to the second option you showed them
+            and send that option's option_id. There is deliberately no field
+            here for custom text: if the user wants to say something the options
+            do not cover, tell them so rather than approximating.
+        client_request_id:
+          $ref: "#/components/schemas/ClientRequestId"
+
+    FollowupRequest:
+      type: object
+      additionalProperties: false
+      required: [followup_text, client_request_id]
+      properties:
+        followup_text:
+          type: string
+          minLength: 1
+          maxLength: 3000
+          description: >-
+            One bounded instruction continuing this task: the decision made, the
+            exact change requested, constraints, and how it should be verified.
+            Not the chat history.
+          examples:
+            - "Go with the first option. Add the test, keep the public signature unchanged, and run the suite."
+        client_request_id:
+          $ref: "#/components/schemas/ClientRequestId"
+
+    CancelRequest:
+      type: object
+      additionalProperties: false
+      required: [client_request_id]
+      properties:
+        reason:
+          type: string
+          enum:
+            - user_changed_mind
+            - wrong_project
+            - wrong_instruction
+            - taking_too_long
+            - no_longer_needed
+          description: Optional category. Free text is not accepted here.
+        client_request_id:
+          $ref: "#/components/schemas/ClientRequestId"
+
+    FinishRequest:
+      type: object
+      additionalProperties: false
+      required: [client_request_id]
+      properties:
+        client_request_id:
+          $ref: "#/components/schemas/ClientRequestId"
+
+    MutationResult:
+      type: object
+      additionalProperties: false
+      required:
+        - version
+        - task_id
+        - display_ref
+        - state
+        - accepted
+        - replayed
+        - next_recommended_operation
+      properties:
+        version:
+          type: integer
+        task_id:
+          type: string
+        display_ref:
+          type: string
+        state:
+          $ref: "#/components/schemas/TaskState"
+        terminal:
+          type: boolean
+        accepted:
+          type: boolean
+        replayed:
+          type: boolean
+          description: >-
+            True when this client_request_id had already been processed. The
+            work happened once; this is the current state of it.
+        has_pending_question:
+          type: boolean
+        local_action_required:
+          type: boolean
+        follow_up_available:
+          type: boolean
+        updated_at:
+          type: [string, "null"]
+        next_recommended_operation:
+          $ref: "#/components/schemas/NextOperation"
+
+    ClientRequestId:
+      type: string
+      minLength: 8
+      maxLength: 64
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{6,63}$"
+      description: >-
+        An id you choose for this request, so a retry cannot do the work twice.
+        Reuse the same value when retrying the identical request. Choose a new
+        value for a genuinely new request: reusing one with different content is
+        refused as a conflict.
+      examples:
+        - "gpt-2026-08-09-create-01"
+
+    TaskState:
+      type: string
+      enum:
+        - created
+        - queued
+        - starting
+        - running
+        - waiting_for_user
+        - ready_for_followup
+        - cancelling
+        - completed
+        - failed
+        - cancelled
+        - interrupted
+        - recovery_required
+
+    NextOperation:
+      type: string
+      description: What to do next. Follow it rather than inferring from state.
+      enum:
+        - sync_task
+        - submit_choice_answer
+        - send_followup_or_finish_task
+        - open_the_local_cofferdam_surface
+        - nothing
+
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - unauthorized
+                - invalid_request
+                - not_found
+                - project_not_eligible
+                - not_allowed_now
+                - unsupported_question_shape
+                - idempotency_conflict
+                - request_in_flight
+                - rate_limited
+                - too_large
+                - upstream_timeout
+                - upstream_unavailable
+                - not_implemented
+                - internal_error
+            message:
+              type: string
+            detail:
+              type: [string, "null"]
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid bridge key.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: No such task, question or project.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: >-
+        Not possible right now - the task's state does not allow it, a question
+        is open, the question shape is unsupported, or the client_request_id was
+        reused with different content.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InvalidRequest:
+      description: A field is missing, malformed or over its limit.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    TooLarge:
+      description: The request body is too large.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RateLimited:
+      description: Too many requests. Wait, then sync rather than resending.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    UpstreamUnavailable:
+      description: Cofferdam is not reachable from the bridge right now.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    UpstreamTimeout:
+      description: >-
+        Cofferdam did not answer in time. The work may still be running - sync
+        the task rather than sending it again.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"

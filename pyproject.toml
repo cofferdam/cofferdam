@@ -51,13 +51,25 @@ agent-sdk = [
     "claude-agent-sdk>=0.2.134,<0.3; python_version >= '3.10'",
 ]
 # Test-only extras (the Trust Core suite itself needs nothing beyond stdlib).
+#
+# `pyyaml` and `openapi-spec-validator` arrived with M2I.5: the Custom GPT
+# schema in `docs/custom-gpt/openapi.yaml` is a file that gets pasted into
+# somebody else's product, so "it validates" has to be a test rather than a
+# claim. Both are test-only — nothing under `cofferdam/` imports either — and
+# the tests that need them skip cleanly when they are absent.
 dev = [
     "httpx>=0.27",
+    "pyyaml>=6.0",
+    "openapi-spec-validator>=0.7",
 ]
 
 [project.scripts]
 cofferdam = "cofferdam.cli:main"
 cofferdam-workstation = "cofferdam.workstation.__main__:main"
+# The M2I.5 Actions bridge. A separate process from the workstation daemon on
+# purpose — see docs/ACTIONS_BRIDGE.md — so it gets its own entry point rather
+# than a flag on the one above.
+cofferdam-actions-bridge = "cofferdam.actions_bridge.__main__:main"
 
 [tool.setuptools]
 # Listed explicitly rather than auto-discovered. `find:` would also sweep up
@@ -77,6 +89,7 @@ cofferdam-workstation = "cofferdam.workstation.__main__:main"
 # of shipping.
 packages = [
     "cofferdam",
+    "cofferdam.actions_bridge",
     "cofferdam.workstation",
     "cofferdam.workstation.adapters",
     "cofferdam.workstation.audio",

@@ -527,16 +527,31 @@ class FollowupContractTests(FollowupTestCase):
             self.service.get_result(first.task_id).result, "first task answer"
         )
 
-    def test_the_bridge_source_is_reserved_and_refused(self) -> None:
+    def test_the_bridge_source_is_accepted_and_recorded_as_itself(self) -> None:
+        """The reserved word became a surface in M2I.5, and kept its own name.
+
+        The inverse of this test shipped in PR3, and replacing it is the honest
+        thing to do rather than a weakening: the frozenset said "no bridge
+        exists", one now does, and the property worth holding is that its turns
+        are *labelled* as the bridge's rather than as the phone's.
+        """
         row = self.answered_turn()
-        with self.assertRaises(task_errors.FollowupInvalid):
-            self.service.send_followup(
-                row.task_id, "hello", source=SOURCE_FUTURE_GPT_BRIDGE
-            )
         self.assertIn(SOURCE_FUTURE_GPT_BRIDGE, turns_module.FOLLOWUP_SOURCES)
-        self.assertNotIn(
-            SOURCE_FUTURE_GPT_BRIDGE, turns_module.ACCEPTED_FOLLOWUP_SOURCES
+        self.assertIn(SOURCE_FUTURE_GPT_BRIDGE, turns_module.ACCEPTED_FOLLOWUP_SOURCES)
+        self.service.send_followup(
+            row.task_id, "hello", source=SOURCE_FUTURE_GPT_BRIDGE
         )
+        self.assertEqual(self.agent.delivered, [(row.task_id, "hello")])
+        turn = self.store.turns(row.task_id)[-1]
+        self.assertEqual(turn.source, SOURCE_FUTURE_GPT_BRIDGE)
+        self.assertNotEqual(turn.source, turns_module.SOURCE_WORKSTATION_PWA)
+
+    def test_a_source_outside_the_vocabulary_is_still_refused(self) -> None:
+        """Widened by exactly one word. Everything else still fails closed."""
+        row = self.answered_turn()
+        for hostile in ("some_other_client", "", None, 7):
+            with self.assertRaises(task_errors.FollowupInvalid):
+                self.service.send_followup(row.task_id, "hello", source=hostile)
         self.assertEqual(self.agent.delivered, [])
 
     def test_an_oversized_or_empty_follow_up_is_refused(self) -> None:
