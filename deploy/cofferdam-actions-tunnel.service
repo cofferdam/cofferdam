@@ -1,0 +1,83 @@
+[Unit]
+# The dedicated Cloudflare Tunnel for the Actions bridge — systemd **user** unit.
+#
+# One tunnel, one hostname, one loopback service. It is not a general ingress
+# for this machine and must never become one: the ingress file it runs has
+# exactly one hostname rule and a 404 catch-all, and
+# tests/test_actions_exposure_deploy.py asserts that shape.
+#
+# Why a user unit rather than `cloudflared service install`
+# --------------------------------------------------------
+# That command installs a *system* service, which needs root and would run the
+# connector as a different user than the one owning the bridge, the credentials
+# and the tunnel certificate. Everything in this deployment is user-owned and
+# survives reboot through lingering, which is the model the workstation daemon
+# already proved on this host. Adding a root-owned component to reach a loopback
+# port would widen the blast radius for no gain.
+Description=Cofferdam Actions tunnel (cloudflared, dedicated Actions hostname)
+Documentation=file:%h/cofferdam/slots/a/docs/ACTIONS_EXPOSURE.md
+
+# Ordering only, again without Requires=. cloudflared retries its origin
+# indefinitely and reports 502 upstream while the bridge is down, which is the
+# honest answer; binding the tunnel's existence to the bridge's would turn a
+# five-second bridge restart into a tunnel reconnect storm.
+After=cofferdam-actions-bridge.service
+Wants=cofferdam-actions-bridge.service
+
+# No graphical-session.target in any dependency direction. Same rule, same
+# reason as every other Cofferdam user unit.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=notify
+
+# cloudflared reads its tunnel credentials from the JSON named by
+# `credentials-file:` inside the config, and its account certificate from
+# --origincert. Neither is an environment variable and neither belongs in this
+# unit. NO TOKEN, NO TUNNEL SECRET AND NO ACCOUNT IDENTIFIER MAY APPEAR HERE.
+Environment=TUNNEL_ORIGIN_CERT=%h/.cloudflared/cert.pem
+
+# --no-autoupdate: an unattended binary swap under a live tunnel is a change
+#   nobody approved, on a path that carries the only external surface Cofferdam
+#   has. Updates are an operator action.
+# --config: the single-hostname ingress. Its path is fixed here so that a stray
+#   config in one of cloudflared's default search directories cannot be picked
+#   up instead.
+# --metrics 127.0.0.1: loopback only. The metrics endpoint exposes connector
+#   internals and must never be reachable through the tunnel or the tailnet.
+#   cloudflared's own default is localhost:0, but "the default is safe today" is
+#   not the same statement as "this is bound to loopback".
+ExecStart=%h/.local/bin/cloudflared --no-autoupdate \
+    --config %h/cofferdam/config/actions-tunnel.yml \
+    --metrics 127.0.0.1:20241 \
+    tunnel run
+
+Restart=on-failure
+RestartSec=10
+# A tunnel is a long-lived outbound connection; a connector that drops is
+# expected to take a few seconds to re-establish. Give it room before systemd
+# calls the start a failure.
+TimeoutStartSec=90
+
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+# Read-only home: cloudflared reads its certificate, its config and its
+# credentials, and writes none of them.
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=default.target
