@@ -218,6 +218,65 @@ filesystem path anywhere in it.
 
 ---
 
+## Two Cloudflare credentials, and only one of them stays
+
+`cloudflared tunnel login` writes `~/.cloudflared/cert.pem`. It is an
+**account-wide management credential**: it authorizes creating, deleting and
+re-routing every tunnel in the account. `cloudflared tunnel create` writes a
+**per-tunnel credentials JSON**, which authorizes exactly one thing — running
+that one tunnel.
+
+They are not interchangeable, and only the smaller one is needed to serve
+traffic. That was measured rather than assumed: the connector was started with
+`TUNNEL_ORIGIN_CERT` pointed at a nonexistent path, registered its edge
+connections normally, and survived a full service restart with the file absent
+from disk. The only mention of the variable anywhere in the log was cloudflared
+echoing back the value it had been given.
+
+So after provisioning, `cert.pem` is **removed from the workstation**:
+
+- it is never copied into a unit, an environment file, a Cofferdam directory,
+  the repository or any runtime config — the tunnel unit names it only in a
+  comment explaining its absence;
+- the per-tunnel JSON lives at `secrets/cloudflared/<uuid>.json`, mode `0600`,
+  in a `0700` directory;
+- what breaks without it is exactly the management surface: `tunnel list`,
+  `tunnel info`, `tunnel route dns` and `tunnel delete` all fail with
+  *"Error locating origin cert"*. Serving traffic does not.
+
+**Re-authenticating when management access is needed again** — for example to
+run the rollback below:
+
+```bash
+cloudflared tunnel login
+```
+
+That opens a browser, authorizes a zone, and writes a fresh `~/.cloudflared/cert.pem`.
+Remove it again afterwards.
+
+One honest limitation: deleting the local file removes local management access.
+It does **not** revoke the underlying credential at Cloudflare. Treat a
+`cert.pem` that may have been exposed as still-valid and rotate it from the
+Cloudflare dashboard rather than assuming the `rm` was enough.
+
+## The Gate A candidate runtime
+
+During Gate A the bridge runs from `~/cofferdam/bridge-runtime/<short-sha>/`
+rather than from a slot, while the daemon stays on its slot. That is not a new
+deployment model — it is a consequence of the bridge and the daemon being two
+processes, where Gate A needed one of them ahead of the other:
+
+merged main logs the canonical task id through httpx and creates its
+idempotency table at the process umask, and neither is acceptable behind a
+public origin. The candidate fixes both and changes nothing the daemon runs
+(`git diff <merged> <candidate> -- cofferdam/workstation/` is empty), so no
+daemon rebuild was required.
+
+**It is temporary.** When this PR merges, the bridge moves back onto a normal
+slot beside the daemon, the slot drop-in returns to
+`deploy/dropins/10-actions-bridge-slot.conf.example`, and
+`~/cofferdam/bridge-runtime/` is deleted.
+
 ## Cloudflare Access is deliberately off
 
 Cloudflare Access puts a browser-based identity challenge in front of a
