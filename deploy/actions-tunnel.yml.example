@@ -1,0 +1,69 @@
+# Example cloudflared configuration for the Cofferdam Actions tunnel.
+#
+#   cp deploy/actions-tunnel.yml.example ~/cofferdam/config/actions-tunnel.yml
+#   chmod 600 ~/cofferdam/config/actions-tunnel.yml
+#   # then replace every CHANGE_ME below
+#
+# One tunnel. One hostname. One loopback service. A 404 for everything else.
+#
+# The ingress list below is the entire external routing surface of this machine,
+# and it is the reason the PWA and the main Cofferdam API stay private: they are
+# not in it. Cloudflare cannot reach a service this file does not name, so the
+# boundary is the absence of a rule rather than a rule that denies.
+#
+# NEVER add:
+#   * the workstation daemon's private API port, or its tailnet address. That
+#     port number does not appear anywhere in this file, deliberately, and a
+#     test asserts it does not — a commented-out rule is one keystroke from a
+#     live one.
+#   * a PWA route, a /api route, or the production root path
+#   * ssh://, a second hostname, a wildcard hostname, or a path-only rule
+#   * `service: http://localhost` without a port, which resolves surprisingly
+# tests/test_actions_exposure_deploy.py asserts each of these.
+
+# The tunnel's UUID or its name. A name is used here on purpose: the UUID is a
+# per-account identifier and this file is committed as an example.
+tunnel: CHANGE_ME-tunnel-name
+
+# The per-tunnel credentials JSON written by `cloudflared tunnel create`. It is
+# a token that authenticates this connector, so it lives beside Cofferdam's
+# other secrets at mode 0600 in a 0700 directory — not in the repository, not in
+# the unit, and not in this file.
+credentials-file: /home/CHANGE_ME/cofferdam/secrets/cloudflared/CHANGE_ME.json
+
+# Loopback only. The metrics endpoint reports connector internals; it is not
+# authenticated and must never be routed.
+metrics: 127.0.0.1:20241
+
+# Outbound transport. Leave these commented unless the network requires them.
+# On a network that filters outbound TCP 7844 to part of Cloudflare's edge, the
+# connector can only reach some regions; QUIC and HTTP/2 both need 7844 and
+# neither falls back to 443. Pinning the transport is better than letting the
+# connector discover the blocked half by timing out against it. Fewer than four
+# connections means reduced HA, not a broken tunnel — say so rather than hiding
+# it.
+#
+# `edge-ip-version` must be QUOTED. cloudflared parses it as a string and an
+# unquoted 4 fails every command that reads the file — including `tunnel ingress
+# validate` — with "expected string found int for edge-ip-version".
+# protocol: http2
+# edge-ip-version: "4"
+
+ingress:
+  # The one and only public route into this machine.
+  - hostname: CHANGE_ME.example.com
+    service: http://127.0.0.1:7210
+    originRequest:
+      # The bridge's own upstream budget is 20s and OpenAI's round trip is 45s.
+      # A connector timeout between the two means a slow daemon surfaces as the
+      # bridge's own bounded error rather than as a truncated tunnel response.
+      connectTimeout: 10s
+      # No TLS to the origin: the hop is loopback on the same host, where a
+      # certificate would authenticate nothing that the kernel does not already.
+      noTLSVerify: false
+      httpHostHeader: CHANGE_ME.example.com
+
+  # Required, and required to be last. cloudflared refuses a config whose
+  # ingress does not end in a catch-all. 404 rather than a service: anything
+  # that is not the Actions hostname must reach nothing at all.
+  - service: http_status:404

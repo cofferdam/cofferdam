@@ -1,0 +1,22 @@
+# Point the Actions bridge at the active runtime slot.
+#
+# Install as:
+#   ~/.config/systemd/user/cofferdam-actions-bridge.service.d/10-actions-bridge-slot.conf
+#
+# deploy/cofferdam-actions-bridge.service names slot A, matching
+# deploy/cofferdam-workstation.service. A host whose active slot is B needs this
+# override, and needs it to move at the same time as the daemon's own slot
+# override — a bridge running last release's code against this release's daemon
+# is a version skew nobody would think to look for.
+#
+# Both lines are required. A bare `ExecStart=` first is how systemd is told to
+# replace the inherited value rather than append a second one; without it the
+# unit has two ExecStart entries and refuses to start.
+#
+# The path must name ~/cofferdam/slots/<a|b>. If it ever names clones/ or
+# worktrees/, production is pinned to a development checkout whose deletion
+# leaves the bridge failing at every boot — see docs/DEPLOYMENT_PREFLIGHT.md.
+[Service]
+WorkingDirectory=%h/cofferdam/slots/b
+ExecStart=
+ExecStart=%h/cofferdam/slots/b/.venv/bin/python -m cofferdam.actions_bridge

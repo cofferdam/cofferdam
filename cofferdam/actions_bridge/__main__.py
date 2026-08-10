@@ -29,6 +29,29 @@ from .config import (
 from .observe import LOGGER_NAME
 
 
+#: Every third-party module the bridge imports at run time, as import names.
+#: `httpx` is the one that matters: it is the client `internal.py` uses to reach
+#: the daemon, so a bridge without it can start, authenticate, and then fail on
+#: the first real request.
+RUNTIME_DEPENDENCIES = ("fastapi", "starlette", "uvicorn", "httpx")
+
+
+def _missing_runtime_dependencies() -> list:
+    """Which of :data:`RUNTIME_DEPENDENCIES` cannot be imported here.
+
+    Uses ``find_spec`` rather than importing: this runs on the startup path, and
+    importing uvicorn to discover that uvicorn exists costs a measurable amount
+    of time to learn something a spec lookup already knows.
+    """
+    import importlib.util
+
+    return [
+        name
+        for name in RUNTIME_DEPENDENCIES
+        if importlib.util.find_spec(name) is None
+    ]
+
+
 def _is_loopback(host: str) -> bool:
     return host in ("127.0.0.1", "::1", "localhost")
 
@@ -128,6 +151,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         file=sys.stderr,
     )
 
+    # Checked here, before `--check` can return success, because `--check` is
+    # what an operator runs to find out whether starting the bridge will work.
+    # A check that passes on a host where the process cannot import its own
+    # dependencies answers a question nobody asked.
+    missing = _missing_runtime_dependencies()
+    if missing:
+        print(
+            "[cofferdam-bridge] missing runtime dependencies: "
+            + ", ".join(missing)
+            + ". Install the extra: pip install -e '.[actions-bridge]'",
+            file=sys.stderr,
+        )
+        return 2
+
     if args.check:
         print("[cofferdam-bridge] configuration and credentials are usable.")
         return 0
@@ -157,6 +194,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
     logging.getLogger(LOGGER_NAME).setLevel(logging.INFO)
+
+    # httpx logs one INFO line per request containing the full upstream URL —
+    # which for `syncTask` is `.../api/tasks/task_<26 chars>`, the canonical task
+    # id that `observe.py` goes out of its way to keep out of this journal. The
+    # bridge's own line carries the display reference instead, precisely so that
+    # a log describing traffic from a model provider cannot be joined to specific
+    # tasks; an httpx line two rows above it makes that join for free, and also
+    # publishes the daemon's private address.
+    #
+    # Silenced for the same reason uvicorn's access log is, and at the same
+    # point. WARNING rather than CRITICAL: a genuine client-level failure should
+    # still be visible, and httpx does not put a URL in those.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
     app = create_bridge_app(config)
     uvicorn.run(

@@ -50,6 +50,27 @@ workstation = [
 agent-sdk = [
     "claude-agent-sdk>=0.2.134,<0.3; python_version >= '3.10'",
 ]
+# The M2I.5 Actions bridge (Gate A). Its own extra for the same reason the
+# adapter above has one: the bridge is a separate optional process, and a host
+# that only runs the workstation daemon should not acquire an HTTP client it
+# never imports.
+#
+# This extra exists because PR1 shipped without it. `cofferdam/actions_bridge/
+# internal.py` imports httpx at module scope — it is the client that talks to the
+# daemon, so it is not optional — but httpx was declared only under `dev`. A
+# clean `pip install -e ".[workstation]"` therefore produced a bridge that
+# passed `--check` and then died with an ImportError the moment it was asked to
+# serve, which is the worst place for a missing dependency to surface. Nothing
+# caught it because every environment that had ever run the bridge also had the
+# test extras installed.
+#
+# `tests/test_packaging.py` now compares the bridge package's imports against
+# this list, so the next omission fails a test instead of a deployment.
+actions-bridge = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "httpx>=0.27",
+]
 # Test-only extras (the Trust Core suite itself needs nothing beyond stdlib).
 #
 # `pyyaml` and `openapi-spec-validator` arrived with M2I.5: the Custom GPT

@@ -1,0 +1,136 @@
+[Unit]
+# Cofferdam Actions bridge — systemd **user** unit (M2I.5 Gate A).
+#
+# A second, narrow process beside the workstation daemon. It publishes eight
+# bounded Actions on loopback for a private Custom GPT to reach through a
+# dedicated Cloudflare Tunnel. It is NOT the PWA, NOT the main API, and NOT a
+# proxy — see docs/ACTIONS_BRIDGE.md for the shape and docs/ACTIONS_EXPOSURE.md
+# for the deployment.
+#
+# Why a separate unit rather than a flag on cofferdam-workstation.service
+# ----------------------------------------------------------------------
+# Because the whole point is that these are two processes with two credentials
+# and two blast radii. A flag would put the externally-reachable listener inside
+# the process that holds the device token, and "the bridge crashed" would then
+# mean "the phone lost Cofferdam". Stopping this unit removes the external
+# surface and leaves the PWA untouched; that property is worth a second file.
+#
+# Boot safety, inherited from the workstation unit's hard-won rules
+# ----------------------------------------------------------------
+# No relationship of any kind to graphical-session.target — not in Wants=,
+# Requires=, BindsTo=, PartOf=, Upholds=, Requisite= or WantedBy=. Naming that
+# target from a unit which may start before login is the M1.1 login-loop
+# regression; see docs/SERVICE_LIFECYCLE.md.
+Description=Cofferdam Actions bridge (private Custom GPT surface)
+Documentation=file:%h/cofferdam/slots/a/docs/ACTIONS_BRIDGE.md
+
+# Ordering only, deliberately not a requirement. `After=` without `Requires=`
+# means: if the daemon is starting too, start after it — but a bridge whose
+# daemon is down should still come up and answer 502 on its authenticated
+# operations rather than refusing to exist. An operator debugging a tunnel needs
+# /v1/health to answer; a unit that would not start because its upstream was
+# briefly unavailable makes "is the tunnel working?" unanswerable.
+After=cofferdam-workstation.service
+
+# Same bounded restart policy as the workstation unit, and for the same reason:
+# StartLimitIntervalSec=0 disables the limiter entirely, so a permanent failure
+# (a missing credential file, an occupied port) would respawn forever. These two
+# keys belong in [Unit]; systemd ignores them under [Service] and says so only
+# as a warning, which is how a rate limit can look configured while doing
+# nothing.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+
+# Non-secret configuration only. Both credentials are read from 0600 files by
+# the process itself:
+#   %h/cofferdam/secrets/actions-bridge-key             the EXTERNAL Actions key
+#   %h/cofferdam/secrets/actions-bridge-internal-token  the INTERNAL daemon token
+# NO SECRET MAY EVER BE WRITTEN INTO THIS UNIT, INTO A DROP-IN, OR INTO THE
+# ENVIRONMENT FILE. The bridge has no environment variable that accepts either
+# credential, on purpose: an env var is visible in /proc and inherited by every
+# child.
+Environment=COFFERDAM_HOME=%h/cofferdam
+EnvironmentFile=-%h/cofferdam/actions-bridge.env
+
+# This template names slot A, matching deploy/cofferdam-workstation.service. On
+# a host whose active slot is B, install the one-line ExecStart override in
+# deploy/dropins/10-actions-bridge-slot.conf.example — do NOT point ExecStart at
+# a clone/ or worktrees/ checkout, which is the drift docs/DEPLOYMENT_PREFLIGHT.md
+# exists to catch.
+WorkingDirectory=%h/cofferdam/slots/a
+ExecStart=%h/cofferdam/slots/a/.venv/bin/python -m cofferdam.actions_bridge
+
+Restart=on-failure
+RestartSec=5
+
+# The bridge writes one bounded line per request — a request id, the
+# operationId, the display reference, the status, the duration. It has no
+# parameter that could hold a credential, a body or a header, and uvicorn's
+# access log is disabled in-process because its line carries a task id.
+StandardOutput=journal
+StandardError=journal
+
+# There is deliberately NO LogFilterPatterns= here, and the absence is a result
+# rather than an oversight.
+#
+# The problem it was reached for is real: httpx logs one INFO line per request
+# carrying the full upstream URL, which for syncTask contains the canonical task
+# id — the identifier observe.py exists to keep out of this journal, because
+# this log describes traffic from a model provider and correlating it to
+# specific tasks is the join a leaked journal would otherwise make possible.
+#
+# `LogFilterPatterns=~HTTP Request:` looked like the fix and was measured
+# instead of assumed. On systemd 259 it dropped nothing: not the stdout/stderr
+# the service writes, and not even messages sent through the native journal
+# protocol by systemd-cat. A directive that is accepted, shown by `systemctl
+# show`, and filters nothing is worse than no directive at all — it is a control
+# somebody would later trust.
+#
+# So the filtering is done where it works: `__main__.py` sets the httpx and
+# httpcore loggers to WARNING at startup, beside the line that disables
+# uvicorn's access log for the identical reason.
+
+# Hardening. This process controls no host application, starts no browser and
+# needs no session, so it can be locked down considerably harder than the
+# workstation daemon — which deliberately is not sandboxed away from the user
+# manager it has to talk to.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# The two writable paths: the idempotency table, and nothing else. The secrets
+# directory stays read-only — the bridge reads both credentials and writes
+# neither. `--generate-key` is an operator command run outside this unit.
+ReadWritePaths=%h/cofferdam/state/actions-bridge
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+#
+# ProtectKernelTunables, ProtectKernelModules and ProtectControlGroups are
+# deliberately ABSENT, and their absence is the tested state. Each one makes
+# systemd narrow the capability bounding set, which a **user** manager may not
+# do — the service dies before exec with:
+#
+#   Failed to drop capabilities: Operation not permitted
+#   Failed at step CAPABILITIES spawning .../python: Operation not permitted
+#   Main process exited, code=exited, status=218/CAPABILITIES
+#
+# and then restarts into the same wall every five seconds. They are also not
+# load-bearing here: those three protect a process that could otherwise write
+# kernel state, and this one runs unprivileged under a user manager that already
+# cannot. Adding them back would buy a crash loop and no security.
+# Loopback plus the tailnet hop to the daemon. No other address family is
+# needed: the bridge makes no outbound internet call of any kind.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+# Headless, and it must be reachable before login for the same reason the
+# workstation daemon must: the tunnel reconnects at boot whether or not anybody
+# has signed in. default.target only — nothing here pulls a graphical session.
+WantedBy=default.target

@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import threading
@@ -139,7 +140,35 @@ class IdempotencyStore:
     """The bridge's own small table. One file, one connection, one lock."""
 
     def __init__(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        # Owner-only, matching how the daemon treats `state/tasks`.
+        #
+        # This table stores no request body, but it does store
+        # `(operation, scope, request_id) -> task_id`, which is enough for
+        # anybody who can read it to enumerate which tasks arrived through the
+        # Custom GPT and when. That is the same provider-traffic-to-task
+        # correlation `observe.py` keeps out of the log, so leaving the file at
+        # the process umask — 0755 on the directory, 0644 on the database —
+        # would have published through the filesystem what the logging is
+        # careful not to publish through the journal.
+        #
+        # The directory is created restricted rather than created and then
+        # tightened: between those two calls it exists at the umask's mode, and
+        # a WAL sibling written in that window keeps it.
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            path.parent.chmod(0o700)
+        except OSError:  # pragma: no cover - platform dependent
+            pass
+        # sqlite3.connect creates the file at the umask, so the descriptor is
+        # opened here instead and immediately closed; connect then reuses the
+        # existing 0600 file rather than making a new one.
+        if not path.exists():
+            os.close(os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+        else:
+            try:
+                path.chmod(0o600)
+            except OSError:  # pragma: no cover - platform dependent
+                pass
         self._lock = threading.Lock()
         self._db = sqlite3.connect(
             str(path), check_same_thread=False, isolation_level=None

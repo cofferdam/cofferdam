@@ -1,9 +1,50 @@
 # Cofferdam Custom GPT — operator instructions
 
-Copy everything between the two rules into the **Instructions** box of a private
-Custom GPT, alongside the Actions schema in [`openapi.yaml`](openapi.yaml).
+> **Paste [`gpt-instructions.md`](gpt-instructions.md), not this file.**
+>
+> The Instructions box in the GPT builder holds **8,000 characters** and simply
+> refuses to save anything longer. The block between the two rules below is
+> ~11,200 — it was written before anything had been pasted into a real editor,
+> and it cannot be. `gpt-instructions.md` is the bounded version that fits, and
+> `tests/test_actions_exposure_deploy.py` asserts both that it stays under the
+> limit and that it still carries every safety-bearing sentence this file does:
+> the approval/clarification separation, the task-id rules, the high-impact stop
+> list, the "Other" refusal, the no-background-push promise, and the rule
+> against ever asking for a credential.
+>
+> This file remains the **operator's** document: the same guidance with its
+> reasoning intact, plus the fifteen worked examples, which are reference
+> material rather than something the model needs verbatim.
 
-Two notes before you do.
+## Installing it in the GPT editor
+
+The GPT editor is web-only, and a GPT uses **apps or actions, not both** — do not
+enable Apps on this one. Set its visibility to **Only me**.
+
+1. **Instructions** — paste [`gpt-instructions.md`](gpt-instructions.md) whole.
+2. **Actions → Schema** — paste the *rendered production* document, not
+   [`openapi.yaml`](openapi.yaml). That file keeps a placeholder server URL on
+   purpose; render the real one on the host that owns the origin:
+
+   ```bash
+   python3 deploy/render-actions-openapi.py --hostname <your-actions-host>
+   ```
+
+3. **Authentication** — API Key, Auth Type **Bearer**. Read the value from
+   `secrets/actions-bridge-key` in your own terminal and paste it into that field
+   only. Never into a chat window.
+
+After importing, **count the operations**. The editor must list nine. If it lists
+fewer and shows a note like *"parameter … is missing or has a non-string name;
+operation skipped"*, the schema is declaring a parameter with `$ref`: the editor
+does not resolve it, reads the parameter as nameless and drops the whole
+operation. That happened here and cost five of the nine Actions while the import
+reported success. Parameters are inlined for that reason;
+`tests/test_actions_exposure_deploy.py` fails if a parameter-level `$ref`
+returns. Schema and response `$ref`s import fine and stay shared.
+
+Read the rest of this file to understand *why* the instructions say what they
+say. Two notes before you paste.
 
 **These are conventions, not syntax.** `@cf sync` is not a parser command and
 nothing in Cofferdam matches on it. It is a phrase the instructions teach the

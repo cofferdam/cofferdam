@@ -142,9 +142,21 @@ below are fixed by [`DECISIONS.md`](DECISIONS.md) D-2026-08-08-1 … -6.
 
   Net: the surface is smaller than recorded, and every addition is a bounded read or an existing
   lifecycle verb. Recorded as D-2026-08-09-1.
-- **Remaining, behind two separate approval gates.** Gate A: a dedicated HTTPS origin, the tunnel
-  design, the external key in the GPT editor, the schema import, and a first real Action call from
-  an iPhone. Gate B: production Agent SDK enablement. Either may be approved without the other.
+- **PR2 — Gate A, shipped and validated.** A dedicated HTTPS origin on its own hostname, one
+  Cloudflare Tunnel whose ingress names that hostname and a loopback port and answers 404 to
+  everything else, the external key entered in the GPT editor, the schema imported, and a real
+  private Custom GPT driving the bridge. The no-provider Preview passed; one approved Claude Code
+  task then ran end to end in the disposable sandbox — one provider turn, an idempotent replay, a
+  conflicting reuse refused, and a truthful finish.
+
+  Validated on the **web GPT editor's Preview** and then, for the two read Actions, in the **native
+  iPhone ChatGPT app** — which the original plan asked for. Mobile executed `listProjects` and
+  `listRecentTasks` against the real origin and rendered the results. No write Action was called
+  from the phone, so the consequential-confirmation prompt is still unverified there; that is the
+  part most likely to differ between clients, and it is not claimed.
+- **Remaining: Gate B only.** Production Agent SDK enablement, and with it the structured
+  `AskUserQuestion` round trip that the Claude Code adapter cannot demonstrate. Independent of
+  Gate A, which is now closed.
 - **Out of scope:** any approval endpoint, and any exposure of the general Cofferdam API or the
   PWA through the bridge's transport (D-2026-08-08-2).
 - **Prior art:** the 2026-08-08 capability probe, recorded in [`STATUS.md`](STATUS.md). It proves

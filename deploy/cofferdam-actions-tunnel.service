@@ -1,0 +1,98 @@
+[Unit]
+# The dedicated Cloudflare Tunnel for the Actions bridge — systemd **user** unit.
+#
+# One tunnel, one hostname, one loopback service. It is not a general ingress
+# for this machine and must never become one: the ingress file it runs has
+# exactly one hostname rule and a 404 catch-all, and
+# tests/test_actions_exposure_deploy.py asserts that shape.
+#
+# Why a user unit rather than `cloudflared service install`
+# --------------------------------------------------------
+# That command installs a *system* service, which needs root and would run the
+# connector as a different user than the one owning the bridge, the credentials
+# and the tunnel certificate. Everything in this deployment is user-owned and
+# survives reboot through lingering, which is the model the workstation daemon
+# already proved on this host. Adding a root-owned component to reach a loopback
+# port would widen the blast radius for no gain.
+Description=Cofferdam Actions tunnel (cloudflared, dedicated Actions hostname)
+Documentation=file:%h/cofferdam/slots/a/docs/ACTIONS_EXPOSURE.md
+
+# Ordering only, again without Requires=. cloudflared retries its origin
+# indefinitely and reports 502 upstream while the bridge is down, which is the
+# honest answer; binding the tunnel's existence to the bridge's would turn a
+# five-second bridge restart into a tunnel reconnect storm.
+After=cofferdam-actions-bridge.service
+Wants=cofferdam-actions-bridge.service
+
+# No graphical-session.target in any dependency direction. Same rule, same
+# reason as every other Cofferdam user unit.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+
+# There is deliberately NO reference to ~/.cloudflared/cert.pem here.
+#
+# cert.pem is an ACCOUNT-WIDE MANAGEMENT CREDENTIAL: it authorizes creating,
+# deleting and re-routing every tunnel in the Cloudflare account. The per-tunnel
+# credentials JSON named by `credentials-file:` in the config authorizes exactly
+# one thing — running this one tunnel. They are not interchangeable, and a
+# runtime service should hold the smaller of the two.
+#
+# That running does not need cert.pem was measured, not assumed: the connector
+# was started with TUNNEL_ORIGIN_CERT pointed at a nonexistent path and
+# registered its edge connections normally. The only mention of the variable in
+# the log was cloudflared echoing back the value it had been given.
+#
+# NO TOKEN, NO TUNNEL SECRET, NO ACCOUNT IDENTIFIER AND NO TUNNEL UUID MAY
+# APPEAR IN THIS FILE. The tunnel is named, not addressed by id.
+
+# --no-autoupdate: an unattended binary swap under a live tunnel is a change
+#   nobody approved, on a path that carries the only external surface Cofferdam
+#   has. Updates are an operator action.
+# --config: the single-hostname ingress. Its path is fixed here so that a stray
+#   config in one of cloudflared's default search directories cannot be picked
+#   up instead.
+# --metrics 127.0.0.1: loopback only. The metrics endpoint exposes connector
+#   internals and must never be reachable through the tunnel or the tailnet.
+#   cloudflared's own default is localhost:0, but "the default is safe today" is
+#   not the same statement as "this is bound to loopback".
+ExecStart=%h/.local/bin/cloudflared --no-autoupdate \
+    --config %h/cofferdam/config/actions-tunnel.yml \
+    --metrics 127.0.0.1:20241 \
+    tunnel run
+
+Restart=on-failure
+RestartSec=10
+# A tunnel is a long-lived outbound connection; a connector that drops is
+# expected to take a few seconds to re-establish. Give it room before systemd
+# calls the start a failure.
+TimeoutStartSec=90
+
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+# Read-only home: cloudflared reads its certificate, its config and its
+# credentials, and writes none of them.
+ProtectHome=read-only
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+#
+# ProtectKernelTunables, ProtectKernelModules and ProtectControlGroups are
+# absent for the same measured reason as in cofferdam-actions-bridge.service:
+# each makes systemd narrow the capability bounding set, which a **user**
+# manager may not do. The connector died before exec with
+# `status=218/CAPABILITIES` and restarted into the same wall. They protect
+# against writing kernel state, which an unprivileged user service cannot do
+# anyway, so adding them back buys a crash loop and no security.
+
+[Install]
+WantedBy=default.target

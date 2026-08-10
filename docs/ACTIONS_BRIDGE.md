@@ -4,10 +4,13 @@ A separate, narrow process that lets a **private Custom GPT** delegate work to
 Cofferdam and read back what happened. It publishes eight bounded Actions and
 reaches Cofferdam through ten fixed internal calls.
 
-**Status as of M2I.5 PR1: local only.** The bridge binds to loopback, no tunnel
-exists, no DNS record exists, no certificate exists, and no Custom GPT has been
-configured against it. Exposing it is [Gate A](#gate-a--external-exposure), a
-separate decision with its own approval.
+**Status as of M2I.5 PR2: exposed and connected.** The bridge still binds to
+loopback — that has not changed and must not. What changed is that a Cloudflare
+Tunnel now reaches that loopback port from one dedicated hostname, and a real
+private Custom GPT is configured against it.
+[Gate A](#gate-a--external-exposure) is closed; see
+[`ACTIONS_EXPOSURE.md`](ACTIONS_EXPOSURE.md) for what was deployed and how to
+roll it back.
 
 ---
 
@@ -422,7 +425,16 @@ No systemd unit and no drop-in ship in this PR.
 
 [`docs/custom-gpt/openapi.yaml`](custom-gpt/openapi.yaml) is copy-paste ready
 except for one line: `servers[0].url` is `https://REPLACE-ME.example.invalid`.
-It cannot be filled in until an origin exists, which is Gate A.
+It stays a placeholder: the production document is *rendered* on the host that
+owns the origin by `deploy/render-actions-openapi.py`, which substitutes the
+server URL and verifies the result. A committed real origin would publish the
+one fact an attacker cannot derive from the code, in the file whose whole
+purpose is being copied into somebody else's product.
+
+One thing that file cannot express, learned from the real editor rather than
+from a validator: **a parameter declared with `$ref` is skipped**, and the
+operation with it. Parameters are inlined for that reason; schema and response
+`$ref`s import fine and stay shared.
 
 [`docs/custom-gpt/INSTRUCTIONS.md`](custom-gpt/INSTRUCTIONS.md) holds the
 operator instructions and fifteen worked examples.
@@ -482,12 +494,16 @@ real GPT builder.
 
 ## Gate A — external exposure
 
-**Not started, and not to be started without approval.** Covers: a dedicated
-HTTPS origin, a Cloudflare Tunnel, DNS, entering the external key into the GPT
-editor, importing the schema, and a first real Action call from ChatGPT.
+**Done.** A dedicated HTTPS origin, one Cloudflare Tunnel, one DNS record, the
+external key entered in the GPT editor, the schema imported, and a real private
+Custom GPT driving the bridge — including one approved Claude Code task end to
+end. [`ACTIONS_EXPOSURE.md`](ACTIONS_EXPOSURE.md) holds the deployment, the
+limitations and the rollback.
 
-The main Cofferdam API and the PWA stay private. Only the bridge's `/v1` paths
-are ever reachable.
+The main Cofferdam API and the PWA stayed private, and the mechanism is worth
+restating because it is the whole argument: they are **not in the tunnel's
+ingress**. Cloudflare cannot reach a service the ingress does not name, so this
+is an absence rather than a rule that could be relaxed.
 
 ## Gate B — production Agent SDK
 
@@ -500,10 +516,15 @@ adapter disabled, or the reverse.
 
 ## Rollback
 
-Revert the PR. There is no production unit, slot, registry entry, token or
-tunnel to restore: PR1 installs nothing, exposes nothing and restarts nothing.
-The existing PWA, the Claude Code adapter and every deployment file are
-unchanged.
+**That was PR1's rollback and it no longer applies.** PR2 installs units, moves
+the runtime slot, creates credentials and opens a public origin. Reverting the
+commit undoes none of that. The real sequence — GPT editor first, then tunnel,
+DNS, bridge, keys, drop-in, and the slot only if the deployment itself is at
+fault — is in
+[`ACTIONS_EXPOSURE.md`](ACTIONS_EXPOSURE.md#rollback).
+
+For a machine that only ever ran the bridge locally, the original advice still
+holds:
 
 If the bridge has been run locally, delete `secrets/actions-bridge-key`,
 `secrets/actions-bridge-internal-token` and `state/actions-bridge/`.
