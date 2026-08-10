@@ -334,9 +334,16 @@ These are properties of the products involved, not defects to work around.
   to 443. On a network where only part of the edge is reachable the connector
   establishes fewer than four connections. That is degraded redundancy, not a
   broken tunnel, and it is reported rather than hidden.
-- **Mobile clients are unverified for this deployment.** Gate A validates the
-  web GPT editor's Preview. There are current third-party reports of Actions not
-  being invoked on some mobile ChatGPT builds; nothing here claims otherwise.
+- **Mobile: reads verified, writes not.** The same private GPT was opened in the
+  native iPhone ChatGPT app and executed `listProjects` and `listRecentTasks`
+  against this origin successfully. That is worth recording, because there are
+  current third-party reports of Actions not being invoked on some mobile
+  builds, and this deployment is evidence against that being universal.
+
+  No write Action was called from the phone, so the consequential-confirmation
+  prompt — the part of the flow most likely to differ between clients — remains
+  unverified on mobile. Creating a task from the phone needs its own
+  provider-usage approval.
 - **A build from before this PR logs canonical task ids.** `internal.py` uses
   httpx, and httpx logs one INFO line per request carrying the full upstream
   URL — which for `syncTask` ends in `/api/tasks/task_<26 chars>`. That is
@@ -355,6 +362,9 @@ These are properties of the products involved, not defects to work around.
 ## What Gate A actually validated
 
 Recorded here because "it works" is not a claim anybody can check later.
+
+Validated on the **web GPT editor's Preview** and, for the two read operations,
+on the **native iPhone app**.
 
 **No-provider Preview, through the real private GPT.** `listProjects` returned
 the one eligible project with safe capability labels and no root, path or

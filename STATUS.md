@@ -13,7 +13,9 @@ loopback-only Actions bridge through a Cloudflare Tunnel whose ingress names one
 service and answers 404 to everything else. A real private Custom GPT completed the no-provider
 Preview and then, under separate explicit approval, exactly one Claude Code task end to end:
 createTask, syncTask, an idempotent replay, a conflicting reuse refused with 409, and finishTask —
-one provider turn, 37 s, the disposable sandbox byte-identical afterwards.
+one provider turn, 37 s, the disposable sandbox byte-identical afterwards. The same GPT then
+executed both read Actions from the **native iPhone app**; no write Action was called there, so
+mobile confirmation behaviour for mutations is not claimed.
 
 **The main API and the PWA remain private**, reachable only on the existing Tailscale bind. They are
 not in the tunnel's ingress, so Cloudflare cannot reach them — an absence, not a rule that denies.

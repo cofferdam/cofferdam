@@ -149,9 +149,11 @@ below are fixed by [`DECISIONS.md`](DECISIONS.md) D-2026-08-08-1 … -6.
   task then ran end to end in the disposable sandbox — one provider turn, an idempotent replay, a
   conflicting reuse refused, and a truthful finish.
 
-  Validated on the **web GPT editor's Preview**, not on an iPhone. The original plan said iPhone;
-  there are current third-party reports of Actions not being invoked on some mobile ChatGPT builds,
-  so mobile is **unverified for this deployment** and is not claimed.
+  Validated on the **web GPT editor's Preview** and then, for the two read Actions, in the **native
+  iPhone ChatGPT app** — which the original plan asked for. Mobile executed `listProjects` and
+  `listRecentTasks` against the real origin and rendered the results. No write Action was called
+  from the phone, so the consequential-confirmation prompt is still unverified there; that is the
+  part most likely to differ between clients, and it is not claimed.
 - **Remaining: Gate B only.** Production Agent SDK enablement, and with it the structured
   `AskUserQuestion` round trip that the Claude Code adapter cannot demonstrate. Independent of
   Gate A, which is now closed.
