@@ -37,11 +37,17 @@ metrics: 127.0.0.1:20241
 
 # Outbound transport. Leave these commented unless the network requires them.
 # On a network that filters outbound TCP 7844 to part of Cloudflare's edge, the
-# connector may only be able to reach some regions; `--edge-ip-version 4` and
-# `protocol: http2` were needed on one such network. Fewer than four connections
-# means reduced HA, not a broken tunnel — say so rather than hiding it.
+# connector can only reach some regions; QUIC and HTTP/2 both need 7844 and
+# neither falls back to 443. Pinning the transport is better than letting the
+# connector discover the blocked half by timing out against it. Fewer than four
+# connections means reduced HA, not a broken tunnel — say so rather than hiding
+# it.
+#
+# `edge-ip-version` must be QUOTED. cloudflared parses it as a string and an
+# unquoted 4 fails every command that reads the file — including `tunnel ingress
+# validate` — with "expected string found int for edge-ip-version".
 # protocol: http2
-# edge-ip-version: 4
+# edge-ip-version: "4"
 
 ingress:
   # The one and only public route into this machine.

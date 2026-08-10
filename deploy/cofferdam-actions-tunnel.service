@@ -30,13 +30,23 @@ StartLimitIntervalSec=300
 StartLimitBurst=10
 
 [Service]
-Type=notify
+Type=simple
 
-# cloudflared reads its tunnel credentials from the JSON named by
-# `credentials-file:` inside the config, and its account certificate from
-# --origincert. Neither is an environment variable and neither belongs in this
-# unit. NO TOKEN, NO TUNNEL SECRET AND NO ACCOUNT IDENTIFIER MAY APPEAR HERE.
-Environment=TUNNEL_ORIGIN_CERT=%h/.cloudflared/cert.pem
+# There is deliberately NO reference to ~/.cloudflared/cert.pem here.
+#
+# cert.pem is an ACCOUNT-WIDE MANAGEMENT CREDENTIAL: it authorizes creating,
+# deleting and re-routing every tunnel in the Cloudflare account. The per-tunnel
+# credentials JSON named by `credentials-file:` in the config authorizes exactly
+# one thing — running this one tunnel. They are not interchangeable, and a
+# runtime service should hold the smaller of the two.
+#
+# That running does not need cert.pem was measured, not assumed: the connector
+# was started with TUNNEL_ORIGIN_CERT pointed at a nonexistent path and
+# registered its edge connections normally. The only mention of the variable in
+# the log was cloudflared echoing back the value it had been given.
+#
+# NO TOKEN, NO TUNNEL SECRET, NO ACCOUNT IDENTIFIER AND NO TUNNEL UUID MAY
+# APPEAR IN THIS FILE. The tunnel is named, not addressed by id.
 
 # --no-autoupdate: an unattended binary swap under a live tunnel is a change
 #   nobody approved, on a path that carries the only external surface Cofferdam
@@ -69,15 +79,20 @@ ProtectSystem=strict
 # Read-only home: cloudflared reads its certificate, its config and its
 # credentials, and writes none of them.
 ProtectHome=read-only
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 RestrictRealtime=yes
 LockPersonality=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
+#
+# ProtectKernelTunables, ProtectKernelModules and ProtectControlGroups are
+# absent for the same measured reason as in cofferdam-actions-bridge.service:
+# each makes systemd narrow the capability bounding set, which a **user**
+# manager may not do. The connector died before exec with
+# `status=218/CAPABILITIES` and restarted into the same wall. They protect
+# against writing kernel state, which an unprivileged user service cannot do
+# anyway, so adding them back buys a crash loop and no security.
 
 [Install]
 WantedBy=default.target

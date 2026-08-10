@@ -732,6 +732,73 @@ class PasteableInstructionsTests(unittest.TestCase):
                 self.assertNotIn(value, self.text)
 
 
+class IdempotencyStorePermissionTests(unittest.TestCase):
+    """The bridge's own table is owner-only, like the daemon's task store.
+
+    It stores no request body, but it does store
+    `(operation, scope, request_id) -> task_id`. Anybody who can read the file
+    can therefore enumerate which tasks arrived through the Custom GPT and when
+    — the same provider-traffic-to-task correlation `observe.py` keeps out of
+    the journal. Created at the process umask it was 0755/0644, which published
+    through the filesystem what the logging is careful not to publish through
+    the log.
+    """
+
+    def test_the_store_creates_owner_only_paths(self) -> None:
+        try:
+            from cofferdam.actions_bridge.idempotency import IdempotencyStore
+        except ImportError:
+            self.skipTest("the actions-bridge extra is not installed")
+
+        import stat as _stat
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state" / "actions-bridge" / "idempotency.db"
+            store = IdempotencyStore(path)
+            try:
+                self.assertEqual(
+                    0o700,
+                    _stat.S_IMODE(path.parent.stat().st_mode),
+                    "the bridge state directory must be owner-only",
+                )
+                self.assertEqual(
+                    0o600,
+                    _stat.S_IMODE(path.stat().st_mode),
+                    "the idempotency database must be owner-only",
+                )
+            finally:
+                store.close()
+
+    def test_an_existing_loose_database_is_tightened(self) -> None:
+        """A host that already ran a build from before this fix gets corrected.
+
+        Tightened rather than refused, unlike a credential file: this table is
+        not a secret whose exposure cannot be undone, it is derived state whose
+        worst case is a task id somebody could also read from the daemon's own
+        database. Refusing to start over it would strand a working deployment.
+        """
+        try:
+            from cofferdam.actions_bridge.idempotency import IdempotencyStore
+        except ImportError:
+            self.skipTest("the actions-bridge extra is not installed")
+
+        import stat as _stat
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "actions-bridge" / "idempotency.db"
+            path.parent.mkdir(parents=True)
+            path.parent.chmod(0o755)
+            path.touch(mode=0o644)
+            store = IdempotencyStore(path)
+            try:
+                self.assertEqual(0o700, _stat.S_IMODE(path.parent.stat().st_mode))
+                self.assertEqual(0o600, _stat.S_IMODE(path.stat().st_mode))
+            finally:
+                store.close()
+
+
 class ExposureDocTests(unittest.TestCase):
     """The document is part of the boundary: it is what a person follows."""
 
