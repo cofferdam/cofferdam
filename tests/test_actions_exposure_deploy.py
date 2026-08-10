@@ -732,6 +732,137 @@ class PasteableInstructionsTests(unittest.TestCase):
                 self.assertNotIn(value, self.text)
 
 
+class GptActionsSchemaCompatibilityTests(unittest.TestCase):
+    """Constraints the real GPT Actions editor imposes beyond valid OpenAPI.
+
+    The schema validated cleanly against an OpenAPI 3.1 validator and was still
+    rejected by the editor, which is the whole reason this class exists: "the
+    spec is valid" and "the product accepts it" are different claims, and only
+    one of them was being tested.
+
+    Observed on 2026-08-10, pasting the production document into the Actions
+    editor of a real private Custom GPT::
+
+        In path /v1/tasks/{task_id}, method get, operationId syncTask,
+        parameter {'$ref': '#/components/parameters/TaskId'} is missing or has
+        a non-string name; operation skipped.
+
+    The editor reads each entry of `parameters` looking for a string `name` and
+    does not resolve `$ref` first, so a referenced parameter looks nameless and
+    the **entire operation is dropped**. Five of the nine Actions disappeared
+    silently — the editor reported it as a note and imported the rest.
+
+    Scope, deliberately narrow: this is a *parameter-level* defect. Schema and
+    response `$ref`s in the same document imported without complaint, so they
+    are left alone. Flattening the whole schema to be safe would throw away the
+    shared `Error`, `TaskState` and `ClientRequestId` definitions that keep nine
+    operations describing the same vocabulary, in exchange for no evidence.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.path = DOCS_ROOT / "custom-gpt" / "openapi.yaml"
+        cls.text = cls.path.read_text(encoding="utf-8")
+
+    def _spec(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML is not installed (dev extra)")
+        return yaml.safe_load(self.text)
+
+    def test_no_parameter_is_declared_by_reference(self) -> None:
+        """The regression, asserted structurally rather than by text search."""
+        spec = self._spec()
+        for path, item in spec["paths"].items():
+            for method, operation in item.items():
+                if not isinstance(operation, dict):
+                    continue
+                for index, parameter in enumerate(operation.get("parameters", [])):
+                    with self.subTest(path=path, method=method, index=index):
+                        self.assertNotIn(
+                            "$ref",
+                            parameter,
+                            f"{operation.get('operationId')} declares parameter "
+                            f"{index} by $ref. The GPT Actions editor does not "
+                            "resolve it, reads the parameter as nameless, and "
+                            "skips the whole operation. Inline it.",
+                        )
+
+    def test_no_path_level_parameter_is_declared_by_reference(self) -> None:
+        """`parameters` may also sit beside the methods, and has the same problem."""
+        spec = self._spec()
+        for path, item in spec["paths"].items():
+            for index, parameter in enumerate(item.get("parameters", []) or []):
+                with self.subTest(path=path, index=index):
+                    self.assertNotIn("$ref", parameter)
+
+    def test_the_shared_parameter_component_is_gone(self) -> None:
+        """Nothing to point at, so nobody can point at it again by habit."""
+        spec = self._spec()
+        self.assertNotIn("parameters", spec.get("components", {}))
+        self.assertNotIn("#/components/parameters/", self.text)
+
+    def test_every_task_scoped_operation_carries_the_inline_parameter(self) -> None:
+        """Inlining must not have lost a constraint on the way."""
+        spec = self._spec()
+        expected = (
+            ("get", "/v1/tasks/{task_id}"),
+            ("post", "/v1/tasks/{task_id}/answer"),
+            ("post", "/v1/tasks/{task_id}/followup"),
+            ("post", "/v1/tasks/{task_id}/cancel"),
+            ("post", "/v1/tasks/{task_id}/finish"),
+        )
+        for method, path in expected:
+            operation = spec["paths"][path][method]
+            with self.subTest(operationId=operation["operationId"]):
+                parameters = operation["parameters"]
+                self.assertEqual(1, len(parameters))
+                parameter = parameters[0]
+                self.assertEqual("task_id", parameter["name"])
+                self.assertEqual("path", parameter["in"])
+                self.assertIs(True, parameter["required"])
+                self.assertEqual("string", parameter["schema"]["type"])
+                self.assertEqual(
+                    "^task_[0-9a-hjkmnp-tv-z]{26}$", parameter["schema"]["pattern"]
+                )
+                # The description is what stops the model sending a display
+                # reference into a slot that only accepts a canonical id.
+                self.assertIn("CF-XXXXXX", parameter["description"])
+                self.assertIn("listRecentTasks", parameter["description"])
+                self.assertLessEqual(len(parameter["description"]), 700)
+
+    def test_the_five_copies_stay_identical(self) -> None:
+        """Duplication is the fix; drift between the copies would be the next bug."""
+        spec = self._spec()
+        seen = []
+        for path, item in spec["paths"].items():
+            for method, operation in item.items():
+                if isinstance(operation, dict):
+                    for parameter in operation.get("parameters", []):
+                        if parameter.get("name") == "task_id":
+                            seen.append(parameter)
+        self.assertEqual(5, len(seen))
+        for parameter in seen[1:]:
+            self.assertEqual(seen[0], parameter)
+
+    def test_every_path_template_variable_has_a_matching_parameter(self) -> None:
+        """A skipped parameter would otherwise leave `{task_id}` unbound."""
+        spec = self._spec()
+        for path, item in spec["paths"].items():
+            variables = set(re.findall(r"\{([^}]+)\}", path))
+            for method, operation in item.items():
+                if not isinstance(operation, dict) or "operationId" not in operation:
+                    continue
+                declared = {
+                    parameter.get("name")
+                    for parameter in operation.get("parameters", [])
+                    if parameter.get("in") == "path"
+                }
+                with self.subTest(operationId=operation["operationId"]):
+                    self.assertEqual(variables, declared)
+
+
 class IdempotencyStorePermissionTests(unittest.TestCase):
     """The bridge's own table is owner-only, like the daemon's task store.
 

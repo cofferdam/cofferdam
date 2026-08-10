@@ -188,6 +188,27 @@ def check(rendered: str, hostname: str, source_text: str) -> None:
     parsed = yaml.safe_load(rendered)
     if not isinstance(parsed, dict):
         raise RenderError("the rendered schema is not a YAML mapping")
+
+    # A parameter given as {"$ref": ...} is valid OpenAPI and unusable in the GPT
+    # Actions editor: it does not resolve the reference, reads the parameter as
+    # nameless, and skips the entire operation with
+    #   "parameter {...} is missing or has a non-string name; operation skipped"
+    # Five of nine Actions vanished that way, reported as a note rather than an
+    # error. Checked here as well as in the tests because this function produces
+    # the document somebody pastes, and it should not be able to produce one that
+    # imports as four operations.
+    for path, item in (parsed.get("paths") or {}).items():
+        entries = list(item.get("parameters") or [])
+        for method, operation in item.items():
+            if isinstance(operation, dict):
+                entries.extend(operation.get("parameters") or [])
+        for parameter in entries:
+            if isinstance(parameter, dict) and "$ref" in parameter:
+                raise RenderError(
+                    f"{path} declares a parameter by $ref. The GPT Actions editor "
+                    "skips any operation whose parameter it cannot read a name "
+                    "from. Inline the parameter into each operation."
+                )
     if parsed.get("openapi") != "3.1.0":
         raise RenderError(f"unexpected OpenAPI version {parsed.get('openapi')!r}")
     servers = parsed.get("servers")

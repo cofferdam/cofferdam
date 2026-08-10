@@ -170,7 +170,26 @@ paths:
         happened.
       x-openai-isConsequential: false
       parameters:
-        - $ref: "#/components/parameters/TaskId"
+        # Inlined rather than $ref-ed into components.parameters. The real GPT
+        # Actions editor parses a parameter given as {"$ref": ...} as a
+        # parameter with no name and SKIPS THE WHOLE OPERATION:
+        #   "parameter {'$ref': ...} is missing or has a non-string name;
+        #    operation skipped"
+        # That silently removed five of the nine Actions. Repeated in full on
+        # each operation because a shared definition is exactly what the editor
+        # cannot follow; tests/test_actions_exposure_deploy.py fails if a
+        # parameter-level $ref comes back.
+        - name: task_id
+          in: path
+          required: true
+          description: >-
+            The canonical Cofferdam task id, exactly as returned by createTask or
+            listRecentTasks. It starts with "task_". Do not send the short display
+            reference (CF-XXXXXX) here and do not construct or guess an id; if the
+            conversation has lost it, call listRecentTasks and read a current one.
+          schema:
+            type: string
+            pattern: "^task_[0-9a-hjkmnp-tv-z]{26}$"
       responses:
         "200":
           description: The task snapshot.
@@ -199,7 +218,26 @@ paths:
         two options, and never use this to grant a tool permission.
       x-openai-isConsequential: true
       parameters:
-        - $ref: "#/components/parameters/TaskId"
+        # Inlined rather than $ref-ed into components.parameters. The real GPT
+        # Actions editor parses a parameter given as {"$ref": ...} as a
+        # parameter with no name and SKIPS THE WHOLE OPERATION:
+        #   "parameter {'$ref': ...} is missing or has a non-string name;
+        #    operation skipped"
+        # That silently removed five of the nine Actions. Repeated in full on
+        # each operation because a shared definition is exactly what the editor
+        # cannot follow; tests/test_actions_exposure_deploy.py fails if a
+        # parameter-level $ref comes back.
+        - name: task_id
+          in: path
+          required: true
+          description: >-
+            The canonical Cofferdam task id, exactly as returned by createTask or
+            listRecentTasks. It starts with "task_". Do not send the short display
+            reference (CF-XXXXXX) here and do not construct or guess an id; if the
+            conversation has lost it, call listRecentTasks and read a current one.
+          schema:
+            type: string
+            pattern: "^task_[0-9a-hjkmnp-tv-z]{26}$"
       requestBody:
         required: true
         content:
@@ -240,7 +278,26 @@ paths:
         substantive continuation. Send a bounded instruction, not chat history.
       x-openai-isConsequential: true
       parameters:
-        - $ref: "#/components/parameters/TaskId"
+        # Inlined rather than $ref-ed into components.parameters. The real GPT
+        # Actions editor parses a parameter given as {"$ref": ...} as a
+        # parameter with no name and SKIPS THE WHOLE OPERATION:
+        #   "parameter {'$ref': ...} is missing or has a non-string name;
+        #    operation skipped"
+        # That silently removed five of the nine Actions. Repeated in full on
+        # each operation because a shared definition is exactly what the editor
+        # cannot follow; tests/test_actions_exposure_deploy.py fails if a
+        # parameter-level $ref comes back.
+        - name: task_id
+          in: path
+          required: true
+          description: >-
+            The canonical Cofferdam task id, exactly as returned by createTask or
+            listRecentTasks. It starts with "task_". Do not send the short display
+            reference (CF-XXXXXX) here and do not construct or guess an id; if the
+            conversation has lost it, call listRecentTasks and read a current one.
+          schema:
+            type: string
+            pattern: "^task_[0-9a-hjkmnp-tv-z]{26}$"
       requestBody:
         required: true
         content:
@@ -281,7 +338,26 @@ paths:
         they have just asked for it in this turn.
       x-openai-isConsequential: true
       parameters:
-        - $ref: "#/components/parameters/TaskId"
+        # Inlined rather than $ref-ed into components.parameters. The real GPT
+        # Actions editor parses a parameter given as {"$ref": ...} as a
+        # parameter with no name and SKIPS THE WHOLE OPERATION:
+        #   "parameter {'$ref': ...} is missing or has a non-string name;
+        #    operation skipped"
+        # That silently removed five of the nine Actions. Repeated in full on
+        # each operation because a shared definition is exactly what the editor
+        # cannot follow; tests/test_actions_exposure_deploy.py fails if a
+        # parameter-level $ref comes back.
+        - name: task_id
+          in: path
+          required: true
+          description: >-
+            The canonical Cofferdam task id, exactly as returned by createTask or
+            listRecentTasks. It starts with "task_". Do not send the short display
+            reference (CF-XXXXXX) here and do not construct or guess an id; if the
+            conversation has lost it, call listRecentTasks and read a current one.
+          schema:
+            type: string
+            pattern: "^task_[0-9a-hjkmnp-tv-z]{26}$"
       requestBody:
         required: true
         content:
@@ -322,7 +398,26 @@ paths:
         cancelling, which records the task as stopped.
       x-openai-isConsequential: true
       parameters:
-        - $ref: "#/components/parameters/TaskId"
+        # Inlined rather than $ref-ed into components.parameters. The real GPT
+        # Actions editor parses a parameter given as {"$ref": ...} as a
+        # parameter with no name and SKIPS THE WHOLE OPERATION:
+        #   "parameter {'$ref': ...} is missing or has a non-string name;
+        #    operation skipped"
+        # That silently removed five of the nine Actions. Repeated in full on
+        # each operation because a shared definition is exactly what the editor
+        # cannot follow; tests/test_actions_exposure_deploy.py fails if a
+        # parameter-level $ref comes back.
+        - name: task_id
+          in: path
+          required: true
+          description: >-
+            The canonical Cofferdam task id, exactly as returned by createTask or
+            listRecentTasks. It starts with "task_". Do not send the short display
+            reference (CF-XXXXXX) here and do not construct or guess an id; if the
+            conversation has lost it, call listRecentTasks and read a current one.
+          schema:
+            type: string
+            pattern: "^task_[0-9a-hjkmnp-tv-z]{26}$"
       requestBody:
         required: true
         content:
@@ -362,20 +457,6 @@ components:
         The Cofferdam Actions bridge key. Separate from every other Cofferdam
         credential. Enter it in the GPT editor as API Key with Auth Type
         Bearer.
-
-  parameters:
-    TaskId:
-      name: task_id
-      in: path
-      required: true
-      description: >-
-        The canonical Cofferdam task id, exactly as returned by createTask or
-        listRecentTasks. It starts with "task_". Do not send the short display
-        reference (CF-XXXXXX) here and do not construct or guess an id; if the
-        conversation has lost it, call listRecentTasks and read a current one.
-      schema:
-        type: string
-        pattern: "^task_[0-9a-hjkmnp-tv-z]{26}$"
 
   schemas:
     Health:
