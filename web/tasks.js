@@ -315,6 +315,41 @@
   function adapterList() { return (adapters && adapters.adapters) || []; }
   function projectList() { return (projects && projects.projects) || []; }
 
+  function projectById(projectId) {
+    var list = projectList();
+    for (var index = 0; index < list.length; index += 1) {
+      if (list[index].project_id === projectId) { return list[index]; }
+    }
+    return null;
+  }
+
+  function defaultAdapterFor(projectId) {
+    /* The adapter this project delegates to, when the host said and this build
+       has it available.
+
+       The PWA is the surface that *may* name an adapter — it shows the choice
+       and the person makes it — so this is a default, not a rule; the dropdown
+       still offers every registered adapter and Task Core still refuses one the
+       project does not permit.
+
+       It exists because M2I.5 Gate B registers a second Claude adapter, and the
+       old default was "the first available one in the list". With two
+       registered that would open the composer on `claude-agent-sdk` for a
+       project that only permits `claude-code`, and the person would learn about
+       it by pressing Play and being refused. Opening on the adapter the project
+       actually delegates to is the same information, one step earlier. */
+    var project = projectById(projectId);
+    var delegated = project && project.delegated_adapter;
+    if (!delegated) { return null; }
+    var list = adapterList();
+    for (var index = 0; index < list.length; index += 1) {
+      if (list[index].adapter_id === delegated && list[index].available) {
+        return delegated;
+      }
+    }
+    return null;
+  }
+
   function isTerminal(state) { return TERMINAL.indexOf(state) !== -1; }
 
   function anyActive() {
@@ -1150,6 +1185,9 @@
         draft.projectId = projectList()[0].project_id;
       }
       if (!draft.adapterId) {
+        draft.adapterId = defaultAdapterFor(draft.projectId);
+      }
+      if (!draft.adapterId) {
         var available = adapterList().filter(function (a) { return a.available; });
         if (available.length) { draft.adapterId = available[0].adapter_id; }
       }
@@ -1775,6 +1813,12 @@
         if (!event.target) { return; }
         if (event.target.id === "taskProject") {
           draft.projectId = String(event.target.value || "");
+          /* Follow the new project's delegation. Only when the host named one
+             and it is available: otherwise whatever the person already chose
+             stays chosen, because silently changing somebody's selection is
+             worse than leaving a default they can see and correct. */
+          var delegated = defaultAdapterFor(draft.projectId);
+          if (delegated) { draft.adapterId = delegated; }
           render();
         } else if (event.target.id === "taskAdapter") {
           draft.adapterId = String(event.target.value || "");

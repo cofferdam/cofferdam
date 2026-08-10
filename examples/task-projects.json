@@ -17,6 +17,14 @@
     "future adapter never silently gains access to an existing project. Names this",
     "build does not know are dropped rather than failing the entry.",
     "",
+    "'delegated_adapter' says WHICH of those actually runs when the caller did not",
+    "name one — which is every task started through the Actions bridge, because",
+    "createTask has no adapter field. Omit it when 'adapters' has exactly one entry:",
+    "there is nothing to choose between and Cofferdam resolves it. Set it as soon as",
+    "there are two, because a project permitting several and delegating to none is",
+    "refused rather than guessed at. It must name an adapter the same entry permits",
+    "and this build registered; anything else also refuses.",
+    "",
     "Nothing is auto-registered. A registry that scanned your home directory and",
     "offered what it found would grant access by accident.",
     "",
@@ -30,6 +38,15 @@
       "adapters": ["validation"],
       "enabled": true,
       "notes": "the main repository"
+    },
+    {
+      "project_id": "both-transports",
+      "display_name": "A project that permits both Claude transports",
+      "root": "/home/CHANGE-ME/some-project",
+      "adapters": ["claude-code", "claude-agent-sdk"],
+      "delegated_adapter": "claude-agent-sdk",
+      "enabled": true,
+      "notes": "delete the delegated_adapter line and no task can start here"
     }
   ]
 }

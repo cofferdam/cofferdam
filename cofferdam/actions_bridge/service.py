@@ -57,6 +57,7 @@ from .errors import (
     CODE_INTERNAL,
     CODE_INVALID_REQUEST,
     CODE_NOT_FOUND,
+    CODE_PROJECT_NOT_ELIGIBLE,
     CODE_RATE_LIMITED,
     CODE_REQUEST_IN_FLIGHT,
     CODE_TOO_LARGE,
@@ -88,9 +89,10 @@ from .limits import (
     MAX_TITLE_CHARS,
 )
 from .normalize import (
-    adapter_for_project,
+    AMBIGUOUS_DELEGATIONS,
     clarification_view,
     created_task_view,
+    delegation_for_project,
     display_ref,
     mutation_view,
     projects_view,
@@ -643,8 +645,17 @@ def create_bridge_app(
         what is present: no path, no working directory, no adapter flag, no
         model, no effort, no tool list, no permission mode, no budget, no
         environment, no executable, no MCP configuration, no hook, no metadata
-        blob. The adapter is chosen by Cofferdam from the project's own registry
-        entry — the bridge does not send ``adapter_id`` at all.
+        blob. The caller does not send ``adapter_id``; the *request schema has no
+        such field*, so an attempt to add one is a 422 from ``_bridge_body``
+        rather than a value that gets ignored somewhere later.
+
+        Which adapter runs is read from the project's own registry entry on the
+        workstation — ``delegated_adapter``, resolved there by
+        ``TaskProject.delegation``. Since M2I.5 PR3 that is an explicit host
+        decision rather than "the first adapter listed", which is what made it
+        safe for two Claude transports to be registered at once. A project that
+        has not said, and permits more than one, is refused here; see
+        :func:`~.normalize.delegation_for_project`.
 
         ``expected_output`` is appended to the instruction under a fixed heading
         this module owns. It is the only text the bridge composes, it counts
@@ -676,8 +687,32 @@ def create_bridge_app(
         # This is both the eligibility check and the adapter decision, and it
         # costs one extra internal read on the one operation that starts work.
         registry = await run_in_threadpool(internal_client.list_projects)
-        adapter_id = adapter_for_project(registry, project_id)
+        adapter_id, delegation = delegation_for_project(registry, project_id)
         if adapter_id is None:
+            # Two refusals, because they are two different situations for the
+            # caller. A project that does not exist, is disabled, or takes no
+            # delegated work at all is `not_found` — retrying will not help and
+            # listProjects is the answer.
+            #
+            # A project that exists, permits several adapters and has not been
+            # told which one runs is `project_not_eligible`: it is a real project
+            # the model may well have been offered before, and the fix is an edit
+            # to a file on the workstation that nothing reachable from here can
+            # make. Saying "no such project" there would send somebody looking
+            # for a typo that is not in their message.
+            #
+            # Both are refusals. Neither falls back to an adapter, and there is
+            # no request field that could supply one.
+            if delegation in AMBIGUOUS_DELEGATIONS:
+                raise BridgeError(
+                    code=CODE_PROJECT_NOT_ELIGIBLE,
+                    message=(
+                        "This project has not been told which agent runs "
+                        "delegated tasks, so Cofferdam will not choose one. Ask "
+                        "the workstation owner to set it, then try again."
+                    ),
+                    status_code=status_for(CODE_PROJECT_NOT_ELIGIBLE),
+                )
             raise BridgeError(
                 code=CODE_NOT_FOUND,
                 message=(
@@ -726,7 +761,7 @@ def create_bridge_app(
                 project_id=project_id,
                 # Read from the project's own registry entry a moment ago, not
                 # from the request. There is no adapter field on this Action —
-                # see `normalize.adapter_for_project` for who decides and why.
+                # see `normalize.delegation_for_project` for who decides and why.
                 adapter_id=adapter_id,
                 prompt=prompt,
                 client_request_id=request_key,

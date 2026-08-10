@@ -14,6 +14,7 @@ that syncing a running task never asks for a result, that create never sends an
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from cofferdam.actions_bridge.errors import (
@@ -21,6 +22,16 @@ from cofferdam.actions_bridge.errors import (
     from_upstream_code,
     status_for,
 )
+# The bridge imports no workstation code, and this double is not the bridge. It
+# borrows the real projection so that "what the daemon publishes" has one
+# definition here too — a hand-written delegation status in a double is a test
+# that would keep passing after the real resolver changed.
+from cofferdam.workstation.tasks.projects import TaskProject
+
+#: Distinguishes "the caller said nothing" from "the caller said ``None``". A
+#: plain ``None`` default cannot: ``delegated_adapter=None`` is exactly how a
+#: test asks for the ambiguous case.
+_UNSET = object()
 
 TASK_ID = "task_01k0000000000000000000000a"
 OTHER_TASK_ID = "task_01k0000000000000000000000b"
@@ -161,14 +172,38 @@ def project(
     project_id: str = PROJECT_ID,
     enabled: bool = True,
     adapters: Optional[List[str]] = None,
+    delegated_adapter: Any = _UNSET,
+    delegation: Any = _UNSET,
 ) -> Dict[str, Any]:
-    """A project shaped like ``TaskProject.to_dict``, notes and all."""
+    """A project shaped like ``TaskProject.to_dict``, notes and all.
+
+    ``delegated_adapter`` and ``delegation`` default to what the real
+    ``TaskProject.delegation`` would answer for the given adapter list, so a
+    double cannot quietly describe a project the workstation could never
+    produce. Pass either explicitly — including ``None`` — to build the
+    ambiguous and unavailable cases a test needs.
+    """
+    names = ["claude-agent-sdk"] if adapters is None else list(adapters)
+    if delegated_adapter is _UNSET or delegation is _UNSET:
+        resolved, status = TaskProject(
+            project_id=project_id,
+            display_name="Demo Project",
+            root=Path("/nonexistent"),
+            adapters=tuple(names),
+            delegated_adapter=None if delegated_adapter is _UNSET else delegated_adapter,
+        ).delegation()
+        if delegated_adapter is _UNSET:
+            delegated_adapter = resolved
+        if delegation is _UNSET:
+            delegation = status
     return {
         "project_id": project_id,
         "display_name": "Demo Project",
         "enabled": enabled,
         "remote_control_enabled": True,
-        "adapters": ["claude-agent-sdk"] if adapters is None else adapters,
+        "adapters": names,
+        "delegated_adapter": delegated_adapter,
+        "delegation": delegation,
         "notes": "internal note: lives under /home/someone/private/demo",
     }
 

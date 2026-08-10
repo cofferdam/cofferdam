@@ -168,6 +168,16 @@ A project still has to list `claude-agent-sdk` in its `adapters` array before a
 task may use it. The daemon announces the adapter on every start, and says
 explicitly that the Claude Code adapter is unaffected.
 
+Two adapters registered at once is the configuration M2I.5 PR3 had to make safe
+before this flag could be turned on in production. A caller that names an
+adapter — the PWA — is unaffected: `adapters` is still the permission list. A
+caller that cannot name one — the Actions bridge, because `createTask` has no
+such field — used to get *the first adapter listed*, which with both transports
+permitted would have resolved alphabetically to this one. It now gets the
+adapter the project explicitly delegated to, and a project that delegated to
+nothing takes no task at all. See
+[`AGENT_TASK_CORE.md`](AGENT_TASK_CORE.md#which-adapter-runs-delegated_adapter).
+
 Two adapters answering to one id is now a start-up failure rather than a silent
 overwrite — `DuplicateAdapterId`, raised when the registry is constructed.
 
