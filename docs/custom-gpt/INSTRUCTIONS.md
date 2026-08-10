@@ -16,6 +16,33 @@
 > reasoning intact, plus the fifteen worked examples, which are reference
 > material rather than something the model needs verbatim.
 
+## Installing it in the GPT editor
+
+The GPT editor is web-only, and a GPT uses **apps or actions, not both** — do not
+enable Apps on this one. Set its visibility to **Only me**.
+
+1. **Instructions** — paste [`gpt-instructions.md`](gpt-instructions.md) whole.
+2. **Actions → Schema** — paste the *rendered production* document, not
+   [`openapi.yaml`](openapi.yaml). That file keeps a placeholder server URL on
+   purpose; render the real one on the host that owns the origin:
+
+   ```bash
+   python3 deploy/render-actions-openapi.py --hostname <your-actions-host>
+   ```
+
+3. **Authentication** — API Key, Auth Type **Bearer**. Read the value from
+   `secrets/actions-bridge-key` in your own terminal and paste it into that field
+   only. Never into a chat window.
+
+After importing, **count the operations**. The editor must list nine. If it lists
+fewer and shows a note like *"parameter … is missing or has a non-string name;
+operation skipped"*, the schema is declaring a parameter with `$ref`: the editor
+does not resolve it, reads the parameter as nameless and drops the whole
+operation. That happened here and cost five of the nine Actions while the import
+reported success. Parameters are inlined for that reason;
+`tests/test_actions_exposure_deploy.py` fails if a parameter-level `$ref`
+returns. Schema and response `$ref`s import fine and stay shared.
+
 Read the rest of this file to understand *why* the instructions say what they
 say. Two notes before you paste.
 

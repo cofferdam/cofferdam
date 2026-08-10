@@ -352,6 +352,53 @@ These are properties of the products involved, not defects to work around.
   into its own local journal until it is rebuilt; nothing about it is externally
   reachable.
 
+## What Gate A actually validated
+
+Recorded here because "it works" is not a claim anybody can check later.
+
+**No-provider Preview, through the real private GPT.** `listProjects` returned
+the one eligible project with safe capability labels and no root, path or
+registry note. `listRecentTasks` returned recent tasks by display reference. An
+invalid display reference produced **no Action call at all** — the GPT declined
+locally rather than inventing a canonical id, which is the stronger of the two
+acceptable outcomes, since `CF-` references are one-way by construction.
+
+**One approved provider task.** `createTask` → 201 → one Claude Code turn of
+37 s → `syncTask` → the exact requested sentence → `finishTask` → `completed`,
+`terminal`, `is_final`. Exactly one task created, exactly one `turn_complete`,
+one adapter subprocess that dropped to zero when the session was released. The
+disposable sandbox was byte-identical afterwards: same HEAD, clean status, zero
+untracked files, all tracked hashes unchanged.
+
+**Idempotency, end to end.** The accepted request body was reconstructed and
+verified offline against the stored digest *before* anything was re-sent —
+otherwise a near-miss body would have produced a 409 and a failed replay would
+have been reported as a passing conflict test. Identical body plus identical
+request id replayed with `replayed: true` and created nothing; the same id with
+one field changed was refused `409 idempotency_conflict` and left the task
+untouched. Finishing an already-terminal task is `409 not_allowed_now`.
+
+**Journals, across the whole window.** Zero canonical task ids, zero httpx
+upstream URLs, zero URLs of any kind, zero request or response bodies, and all
+three credential values absent from both journals.
+
+**One honest asymmetry.** The canonical `task_id` *is* returned to the model —
+it is the only thing `syncTask`, `sendFollowup`, `cancelTask` and `finishTask`
+accept, and display references have no reverse lookup. What is true is narrower
+and is the designed property: it is not rendered into the conversation the user
+reads, and it does not reach the local journal. "No canonical task id reached the
+model" would be false.
+
+**A defect in the observation, not the system.** The first live guard read the
+task count from the bridge's own `/v1/tasks` every five seconds. That wrote a
+`listRecentTasks` line into the journal being used as evidence of what the GPT
+did, and spent a fifth of the bridge's rate budget; two events were misattributed
+to the GPT before it was caught. The guard was rebuilt to poll the daemon
+instead. The contaminated window is left in the record rather than trimmed. The
+same guard counted `ready_for_followup` as "running" and raised a false abort at
+123 s — the turn had finished in 37 s and the task was idle holding a session
+open, which is what `finishTask` releases.
+
 ## The provider-usage gate
 
 Listing projects, listing recent tasks and syncing a task that does not exist

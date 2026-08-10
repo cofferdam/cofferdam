@@ -1,17 +1,28 @@
 # Status
 
-Accurate as of **2026-08-09**. **M2H is complete and merged**, closing the M1 post-reboot gate;
+Accurate as of **2026-08-10**. **M2H is complete and merged**, closing the M1 post-reboot gate;
 M2F Agent Task Core and M2G the Claude Code adapter merged; the isolated Custom GPT Actions mobile
 probe passed; client architecture and the active roadmap recorded as
 [`DECISIONS.md`](DECISIONS.md) D-2026-08-08-1 … -6.
 
-**M2I is complete and merged** (PRs #28–#31, the last squash-merged as `1a7d66b`). **M2I.5 PR1 —
-the private Custom GPT Actions bridge foundation — is on a branch.** It is **local only**: bound to
-loopback, not publicly exposed, no tunnel and no DNS record, and **not connected to a real Custom
-GPT**. It claims **no production Agent SDK deployment** — production still runs the Claude Code
-adapter from the documented slot, unchanged. The next two decisions are separate approval gates:
-Gate A (external HTTPS exposure and a real Custom GPT preview) and Gate B (production Agent SDK
-enablement). Neither has been started.
+**M2I is complete and merged** (PRs #28–#31, the last squash-merged as `1a7d66b`). **M2I.5 PR1 is
+merged** as `e078251`. **M2I.5 PR2 — Gate A — is implemented and validated on a branch.**
+
+Gate A is done and the private Custom GPT is connected. A dedicated HTTPS origin reaches a
+loopback-only Actions bridge through a Cloudflare Tunnel whose ingress names one hostname and one
+service and answers 404 to everything else. A real private Custom GPT completed the no-provider
+Preview and then, under separate explicit approval, exactly one Claude Code task end to end:
+createTask, syncTask, an idempotent replay, a conflicting reuse refused with 409, and finishTask —
+one provider turn, 37 s, the disposable sandbox byte-identical afterwards.
+
+**The main API and the PWA remain private**, reachable only on the existing Tailscale bind. They are
+not in the tunnel's ingress, so Cloudflare cannot reach them — an absence, not a rule that denies.
+
+It still claims **no production Agent SDK deployment**: production runs the Claude Code adapter from
+the documented slot, the SDK is absent from every deployed venv, and no project selects it.
+**Structured `AskUserQuestion` round trips are therefore not demonstrated through the real GPT** and
+nothing here claims they are. That is **Gate B**, the one remaining gate, and it has not been
+started.
 
 Update this file when a category changes, not on every commit.
 
@@ -637,10 +648,33 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2I.5 PR2 — Gate A, the connected private Custom GPT
+
+On `feat/m2i5-actions-exposure`, from the merged `e078251`. **Exposed, deployed, connected and
+validated.** See [`docs/ACTIONS_EXPOSURE.md`](docs/ACTIONS_EXPOSURE.md) for the deployment and its
+rollback, and `validation/` on the host for the sanitized Gate A evidence.
+
+Production moved to the inactive slot at merged main; the previous slot is retained untouched as
+the rollback target. Two new user services run beside the daemon: the Actions bridge on loopback,
+and one cloudflared connector. The project registry is unchanged, the Claude Code adapter is still
+the only enabled provider adapter, and no Remote Control host, Tailscale Serve or Funnel exists.
+
+Three defects in PR1 surfaced only by performing Gate A, and each is fixed here: `httpx` was
+declared as a test-only dependency although the bridge imports it at module scope; httpx's own
+per-request log line carried the canonical task id that `observe.py` exists to keep out of the
+journal; and the operator instruction block was ~11,200 characters against an 8,000-character
+Instructions box, so the file everyone was told to paste could not be pasted. A fourth was found in
+the live deployment: the bridge's idempotency table was created at the process umask while the
+daemon's task store beside it is 0700.
+
+A fifth was found by the real GPT editor rather than by any validator: a parameter declared with
+`$ref` is read as nameless and the **whole operation is skipped**, which silently removed five of
+the nine Actions while the import reported success.
+
 ### M2I.5 PR1 — the private Custom GPT Actions bridge foundation
 
-On `feat/m2i5-actions-bridge`, from `1a7d66b`. **Local only. Nothing is exposed, nothing is
-deployed, no Custom GPT is configured, and no production file changed.**
+Merged as `e078251`. **Local only at the time: nothing exposed, nothing deployed, no Custom GPT
+configured, no production file changed.**
 
 A separate narrow process — `python -m cofferdam.actions_bridge` — that publishes eight bounded
 Actions under `/v1` and reaches Cofferdam through ten fixed, allowlisted internal calls. It is not
