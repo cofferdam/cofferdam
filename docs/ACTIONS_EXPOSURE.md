@@ -418,16 +418,39 @@ approval — which project, which adapter, what prompt, what it may cost.
 
 Gate A is complete without ever creating one.
 
-## Gate B is still separate
+## Gate B — separate, and now granted
 
-Production runs the **Claude Code adapter** and nothing else. The Claude Agent
-SDK adapter is not installed in the production environment, is not enabled, and
-is not selected by any project in the registry.
+Gate A ran with the **Claude Code adapter** and nothing else: the Agent SDK was
+absent from every deployed venv, disabled, and selected by no project. Gate A
+therefore demonstrated no structured clarification, and this document never
+claimed it did.
 
-Structured clarifications (`AskUserQuestion` round trips) need that adapter, so
-Gate A does not demonstrate them and this document does not claim it does.
-Enabling the Agent SDK in production is **Gate B**, a separate approval, and it
-may be granted or refused independently of this one.
+Gate B was approved separately on 2026-08-10 and performed. What changed on the
+host, and only this:
+
+1. The candidate slot's venv gained the repository-declared `agent-sdk` extra —
+   `claude-agent-sdk 0.2.134`, the exact version the adapter records as verified.
+2. One drop-in,
+   `~/.config/systemd/user/cofferdam-workstation.service.d/30-claude-agent-sdk-adapter.conf`,
+   carrying `Environment=COFFERDAM_ENABLE_CLAUDE_AGENT_SDK_ADAPTER=1` and nothing
+   else. It touches no `ExecStart`, so it cannot move production to another slot
+   or another checkout — the drift [`DEPLOYMENT_PREFLIGHT.md`](DEPLOYMENT_PREFLIGHT.md)
+   exists to catch. Deleting it and restarting revokes the Agent SDK **alone**.
+3. One appended project in `task-projects.json`: `agent-sdk-sandbox`, a new
+   disposable git root, delegating explicitly to `claude-agent-sdk`. The
+   `cofferdam` and `claude-sandbox` entries are byte-identical to before.
+
+**The Claude Code adapter stays enabled**, its drop-in's flag untouched, and
+`claude-sandbox` still resolves to it — implicitly, having gained no registry
+field at all, which is what makes the backward-compatibility case a production
+fact rather than a test.
+
+Nothing else moved. No new listener, no ingress change, no credential rotation,
+no cloudflared restart, and no OpenAPI or Custom GPT edit: enabling a second
+adapter required none, because the delegated adapter is resolved on the host and
+published through fields that already existed.
+
+Evidence: [`checklists/m2i5-gate-b-validation.md`](checklists/m2i5-gate-b-validation.md).
 
 ---
 

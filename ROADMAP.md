@@ -154,9 +154,29 @@ below are fixed by [`DECISIONS.md`](DECISIONS.md) D-2026-08-08-1 … -6.
   `listRecentTasks` against the real origin and rendered the results. No write Action was called
   from the phone, so the consequential-confirmation prompt is still unverified there; that is the
   part most likely to differ between clients, and it is not claimed.
-- **Remaining: Gate B only.** Production Agent SDK enablement, and with it the structured
-  `AskUserQuestion` round trip that the Claude Code adapter cannot demonstrate. Independent of
-  Gate A, which is now closed.
+- **PR3 — Gate B, shipped and validated.** Production Agent SDK enablement, and with it the
+  structured `AskUserQuestion` round trip the Claude Code adapter cannot demonstrate. `agent-sdk`
+  installed in the candidate slot, the adapter registered by one removable drop-in, and a new
+  disposable `agent-sdk-sandbox` project delegating to it — with `claude-sandbox` left on Claude
+  Code, unchanged, as the regression baseline.
+
+  **Registry ordering is no longer authority, and this had to land first.** The bridge used to take
+  the first adapter a project listed, which is a real choice the moment two adapters coexist — and
+  the list is sorted at load, so "first" meant *alphabetically first*. `delegated_adapter` makes it
+  an explicit host decision; ambiguity fails closed; a single permitted adapter still resolves
+  implicitly so no existing registry needed rewriting. No OpenAPI change and no Custom GPT edit.
+
+  One live task validated the whole workflow from the **native iPhone app**: a real single-choice
+  clarification, the displayed choice mapped to the Cofferdam-minted `option_id`, provenance
+  `future_gpt_bridge`, the same provider session across the continuation and one follow-up, a
+  truthful finish, and a byte-identical sandbox. All four consequential Actions prompted rather than
+  mutating silently — closing the mobile gap PR2 left open. Evidence in
+  [`docs/checklists/m2i5-gate-b-validation.md`](docs/checklists/m2i5-gate-b-validation.md).
+
+  **Only the single-choice shape is supported.** Free text, multiple choice, several simultaneous
+  questions and "Other + custom text" stay unsupported and return a bounded unsupported result; one
+  live question establishes nothing about them, and nothing was widened to fit. Tool approvals are
+  still never bridged.
 - **Out of scope:** any approval endpoint, and any exposure of the general Cofferdam API or the
   PWA through the bridge's transport (D-2026-08-08-2).
 - **Prior art:** the 2026-08-08 capability probe, recorded in [`STATUS.md`](STATUS.md). It proves

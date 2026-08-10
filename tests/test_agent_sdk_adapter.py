@@ -1719,16 +1719,25 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("--enable-claude-code-adapter", rendered)
         del argparse
 
-    def test_no_deployment_file_enables_the_new_adapter(self) -> None:
-        """This PR changes no unit, drop-in or installer."""
-        for path in sorted((REPO_ROOT / "deploy").rglob("*")):
-            if not path.is_file():
-                continue
+    def test_registration_is_not_something_the_repository_does_for_you(self) -> None:
+        """A checked-out tree enables nothing. Somebody has to install a file.
+
+        This replaces M2I PR1's "no deployment file mentions the flag", which was
+        a true statement about a PR rather than a property of the design — and
+        M2I.5 Gate B is the PR that stops it being true. What survives is the
+        part that was always the point: the adapter is off in the tree, off in
+        every shipped unit, and reachable only through a drop-in an operator
+        chose to install. ``DeploymentReadinessTests`` holds the drop-in's own
+        shape, count and inertness.
+        """
+        from cofferdam.workstation.config import load_config
+
+        self.assertFalse(load_config(REPO_ROOT / "nonexistent-home").enable_claude_agent_sdk_adapter)
+        for path in sorted((REPO_ROOT / "deploy").rglob("*.service")):
             with self.subTest(path=path.name):
-                self.assertNotIn(
-                    "enable-claude-agent-sdk-adapter",
-                    path.read_text(encoding="utf-8", errors="replace"),
-                )
+                text = path.read_text(encoding="utf-8", errors="replace")
+                self.assertNotIn("enable-claude-agent-sdk-adapter", text)
+                self.assertNotIn("COFFERDAM_ENABLE_CLAUDE_AGENT_SDK_ADAPTER", text)
 
 
 class TaskCoreIntegrationTests(TaskTestCase):
@@ -2732,14 +2741,73 @@ class DeploymentReadinessTests(unittest.TestCase):
         self.assertEqual(build_registry().ids(), ())
         self.assertNotIn(ADAPTER_ID, build_registry(enable_claude_code_adapter=True).ids())
 
-    def test_no_shipped_unit_or_drop_in_enables_the_agent_sdk(self) -> None:
-        """The production unit is not modified to add this flag, in this PR or
-        any other, until the adapter has earned it."""
-        for path in sorted(self.deploy.rglob("*")):
-            if not path.is_file():
-                continue
+    #: The one file under ``deploy/`` that is allowed to turn this adapter on.
+    #: M2I.5 Gate B is where "the adapter has earned it" stopped being a future
+    #: tense — and the guard below was rewritten on purpose rather than deleted,
+    #: because the property that mattered was never "nothing enables it". It was
+    #: "enabling it is one deliberate, named, removable act".
+    SDK_DROPIN_NAME = "30-claude-agent-sdk-adapter.conf"
+
+    def test_no_shipped_unit_enables_the_agent_sdk(self) -> None:
+        """A ``.service`` file must never carry it. Only a drop-in may.
+
+        The distinction is the whole deployment model. A unit is what everybody
+        installs; a drop-in is what one operator chose. An adapter that launches
+        a model provider against somebody's files belongs in the second category
+        permanently, so this stays asserted after Gate B rather than being
+        retired with it.
+        """
+        for path in sorted(self.deploy.rglob("*.service")):
             text = path.read_text(encoding="utf-8", errors="replace")
             self.assertNotIn("--enable-claude-agent-sdk-adapter", text, str(path))
+            self.assertNotIn(
+                "COFFERDAM_ENABLE_CLAUDE_AGENT_SDK_ADAPTER", text, str(path)
+            )
+
+    def test_exactly_one_drop_in_enables_the_agent_sdk(self) -> None:
+        """One file, so that removing one file is a complete revocation."""
+        enabling = [
+            path
+            for path in sorted(self.deploy.rglob("*"))
+            if path.is_file()
+            and (
+                "--enable-claude-agent-sdk-adapter"
+                in path.read_text(encoding="utf-8", errors="replace")
+                or "COFFERDAM_ENABLE_CLAUDE_AGENT_SDK_ADAPTER=1"
+                in path.read_text(encoding="utf-8", errors="replace")
+            )
+        ]
+        self.assertEqual([path.name for path in enabling], [self.SDK_DROPIN_NAME])
+
+    def test_the_sdk_drop_in_carries_only_the_switch(self) -> None:
+        """A boolean and nothing else — no flag, no path, no credential."""
+        path = self.deploy / "dropins" / self.SDK_DROPIN_NAME
+        directives = [
+            line.strip()
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        self.assertEqual(
+            directives,
+            ["[Service]", "Environment=COFFERDAM_ENABLE_CLAUDE_AGENT_SDK_ADAPTER=1"],
+        )
+
+    def test_the_sdk_drop_in_does_not_move_production(self) -> None:
+        """The M2H PR4 regression, guarded on the newest drop-in too.
+
+        This is also why the drop-in uses the environment variable rather than
+        ``--enable-claude-agent-sdk-adapter``: the flag would require rewriting
+        ``ExecStart``, which is exactly the line a capability drop-in must not
+        touch — and it would have made this file own the Claude Code flag as
+        well, so removing it would have taken that adapter away too.
+        """
+        path = self.deploy / "dropins" / self.SDK_DROPIN_NAME
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if line.startswith("#"):
+                continue
+            self.assertFalse(line.startswith("ExecStart"))
+            self.assertFalse(line.startswith("WorkingDirectory"))
 
     def test_the_installer_does_not_require_the_sdk_extra(self) -> None:
         """A production venv that has never seen the SDK is a supported venv."""

@@ -6,25 +6,42 @@ probe passed; client architecture and the active roadmap recorded as
 [`DECISIONS.md`](DECISIONS.md) D-2026-08-08-1 … -6.
 
 **M2I is complete and merged** (PRs #28–#31, the last squash-merged as `1a7d66b`). **M2I.5 PR1 is
-merged** as `e078251`. **M2I.5 PR2 — Gate A — is implemented and validated on a branch.**
+merged** as `e078251` and **PR2 — Gate A — as `de15bd73`.** **M2I.5 PR3 — Gate B — is implemented,
+deployed to the candidate slot and validated live on a branch.**
 
 Gate A is done and the private Custom GPT is connected. A dedicated HTTPS origin reaches a
 loopback-only Actions bridge through a Cloudflare Tunnel whose ingress names one hostname and one
-service and answers 404 to everything else. A real private Custom GPT completed the no-provider
-Preview and then, under separate explicit approval, exactly one Claude Code task end to end:
-createTask, syncTask, an idempotent replay, a conflicting reuse refused with 409, and finishTask —
-one provider turn, 37 s, the disposable sandbox byte-identical afterwards. The same GPT then
-executed both read Actions from the **native iPhone app**; no write Action was called there, so
-mobile confirmation behaviour for mutations is not claimed.
+service and answers 404 to everything else.
+
+**Gate B is done: the Agent SDK runs in production and the structured clarification round trip is
+demonstrated through the real private Custom GPT, from the native iPhone app.** One task in a new
+disposable `agent-sdk-sandbox`: the agent asked one real `AskUserQuestion`, the GPT displayed the
+two options, the person answered by position, and the GPT submitted the **Cofferdam-minted
+`option_id`** — not the digit, not the label, with the free-text field `null`. The answer is
+recorded with source `future_gpt_bridge`, the **same provider session** carried the continuation and
+then one normal follow-up, and `finishTask` released the session. Two turns, one clarification, one
+accepted answer, two results, and the disposable sandbox byte-identical afterwards. Sanitized
+evidence: [`docs/checklists/m2i5-gate-b-validation.md`](docs/checklists/m2i5-gate-b-validation.md).
+
+All four consequential Actions — `createTask`, `submitChoiceAnswer`, `sendFollowup`, `finishTask` —
+were driven from the **native iPhone app**, which prompted rather than mutating silently. That
+closes the gap Gate A left, where only the two read Actions had been exercised on mobile.
+
+Both Claude adapters are now registered at once, which is why **the delegated adapter is an explicit
+host decision** rather than the first entry of a list. That list is sorted at load, so "first" had
+quietly meant *alphabetically first*; see the milestone record below.
 
 **The main API and the PWA remain private**, reachable only on the existing Tailscale bind. They are
 not in the tunnel's ingress, so Cloudflare cannot reach them — an absence, not a rule that denies.
+The bridge is still loopback-only, the tunnel still names one hostname, and the external Action
+surface is still the same nine operations against an **unchanged** OpenAPI document — enabling a
+second adapter required no Custom GPT edit.
 
-It still claims **no production Agent SDK deployment**: production runs the Claude Code adapter from
-the documented slot, the SDK is absent from every deployed venv, and no project selects it.
-**Structured `AskUserQuestion` round trips are therefore not demonstrated through the real GPT** and
-nothing here claims they are. That is **Gate B**, the one remaining gate, and it has not been
-started.
+What Gate B does **not** claim: only the **single-choice** question shape is supported. Free text,
+multiple choice, several questions at once and "Other + custom text" remain unsupported and return a
+bounded unsupported result; none was widened to fit, and no live evidence about them was produced.
+The project root also remains a configuration boundary the CLI is asked to respect, **not a kernel
+sandbox**.
 
 Update this file when a category changes, not on every commit.
 
@@ -649,6 +666,58 @@ bind logic. Neither does M2B3A, M2B3A.1, M2C, M2D, M2E, M2F, or M2G. **M2H does*
 the gate closes there.
 
 ## In progress (on a branch, not merged)
+
+### M2I.5 PR3 — Gate B, production Agent SDK delegation
+
+On `feat/m2i5-agent-sdk-gate-b`, from the merged `de15bd73`. **Implemented, deployed to the
+candidate slot and validated live through the real private Custom GPT.** Sanitized evidence:
+[`docs/checklists/m2i5-gate-b-validation.md`](docs/checklists/m2i5-gate-b-validation.md).
+
+**The precondition, and it was worse than it read.** The Actions bridge has no `adapter_id` field —
+a model provider choosing which agent runs on somebody's workstation is the shape M2I.5 exists to
+prevent — so it took *the first adapter the project listed*. That was defensible only while every
+delegated project permitted exactly one adapter, which is precisely the condition Gate B ends. It
+was also not the operator's ordering: `TaskProject` sorts the adapter list at load, so "first" meant
+**alphabetically first**, and `claude-agent-sdk` would have silently beaten `claude-code` because
+`a` sorts before `c`. Nobody would have chosen that rule and nobody would have seen it apply.
+
+A project may now name one adapter in `delegated_adapter`, resolved on the host by
+`TaskProject.delegation` into one of four published words. Ordering is authority nowhere; a project
+permitting one adapter still resolves implicitly, so no existing registry had to be rewritten;
+several permitted with none delegated fails closed; and a delegation is a *selection among things
+already permitted*, never a grant — naming an adapter the project does not permit, or that this
+build never registered, resolves to nothing. There is no fallback anywhere in the path, including
+for a payload with no `delegated_adapter` at all, which is what an older daemon than the bridge
+would send.
+
+**No published contract changed.** `Project` is `additionalProperties: false` in the Custom GPT
+schema and `project_not_eligible` was already in the declared error enum, so the consequence
+surfaces through fields that already exist. The nine operations, the OpenAPI document and the GPT
+instructions are untouched, and the real GPT needed no edit.
+
+**Deployed:** the candidate slot with `workstation`, `actions-bridge` and `agent-sdk` extras;
+`claude-agent-sdk 0.2.134`, the exact version the adapter records as verified. Its wheel bundles its
+own CLI (2.1.226) which Cofferdam does not use — the adapter pins the host's own `claude` (2.1.221),
+the binary whose sign-in the workstation manages. The adapter is enabled by one removable drop-in
+carrying a single environment variable and touching no `ExecStart`, so removing it revokes exactly
+one capability. **The Claude Code adapter stays enabled and `claude-sandbox` still resolves to it**,
+implicitly, having gained no registry field at all.
+
+**Validated live:** one task in a new disposable `agent-sdk-sandbox`, every mutation driven by a
+person through the real private Custom GPT on the native iPhone app. One real `AskUserQuestion`, two
+options, the displayed choice mapped to the **Cofferdam-minted `option_id`** with the free-text
+field `null`, answer source `future_gpt_bridge`, the **same provider session** across the
+continuation and across one normal follow-up, then `finishTask` releasing the session. Two turns,
+one clarification, one accepted answer, results `Selected: Beacon` and `Follow-up received.`, and
+the sandbox byte-identical afterwards — same tree, same three blob hashes, zero untracked files.
+All four consequential Actions prompted on mobile rather than mutating silently.
+
+**Still unsupported, deliberately:** free text, multiple choice, several questions at once, and
+"Other + custom text". The live run exercised one single-choice question and establishes nothing
+about the others; nothing was widened to fit, and `SCHEMA_VERIFIED` was not edited. Tool approvals
+are still never bridged — `can_use_tool` denies, and there is no approval route the bridge can
+authenticate to. The project root is still a configuration boundary the CLI is asked to respect,
+**not a kernel sandbox**.
 
 ### M2I.5 PR2 — Gate A, the connected private Custom GPT
 

@@ -121,6 +121,36 @@ NEXT_OPERATIONS: Tuple[str, ...] = (
     NEXT_NOTHING,
 )
 
+# -- delegation, as Cofferdam reports it --------------------------------------
+#
+# Task Core's own words again, for the same reason as STATES: this process talks
+# to the daemon over HTTP and deliberately imports none of its code, so the
+# vocabulary has to be repeated somewhere, and a test asserts the two tuples are
+# equal. Repeating it is the cost of the process boundary; a translation table
+# would be the cost plus a place to disagree.
+
+DELEGATION_OK = "ok"
+DELEGATION_NO_ADAPTER = "no_adapter"
+DELEGATION_AMBIGUOUS = "ambiguous_adapter"
+DELEGATION_UNAVAILABLE = "delegated_adapter_unavailable"
+
+DELEGATIONS: Tuple[str, ...] = (
+    DELEGATION_OK,
+    DELEGATION_NO_ADAPTER,
+    DELEGATION_AMBIGUOUS,
+    DELEGATION_UNAVAILABLE,
+)
+
+#: The two statuses that mean "somebody has to edit a file on the workstation",
+#: as opposed to "this project was never going to take delegated work". Only
+#: these two produce ``project_not_eligible``; see the create route.
+#:
+#: ``no_adapter`` is deliberately absent. A project that permits no adapter is
+#: not misconfigured — it is what a Remote-Control-only or validation-only
+#: project looks like — and it never appears in ``listProjects`` at all, so a
+#: caller naming one has guessed an id.
+AMBIGUOUS_DELEGATIONS = frozenset({DELEGATION_AMBIGUOUS, DELEGATION_UNAVAILABLE})
+
 
 # -- text ---------------------------------------------------------------------
 
@@ -179,6 +209,13 @@ def project_view(entry: Any) -> Optional[Dict[str, Any]]:
 
     The root path is not dropped here — it was never published. Cofferdam's own
     ``TaskProject.to_dict`` has no field for it.
+
+    ``delegation`` is read and not republished. It is the *reason* a project
+    cannot take work, which is useful to the operator looking at the PWA and is
+    nothing a model provider can act on: the fix is always an edit to a file on
+    the workstation. What the model gets is the consequence, in the field that
+    already exists for it — ``accepts_tasks`` — so a project whose delegation is
+    ambiguous is simply one the GPT is never offered.
     """
     if not isinstance(entry, dict):
         return None
@@ -191,6 +228,7 @@ def project_view(entry: Any) -> Optional[Dict[str, Any]]:
         if isinstance(adapters, list)
         else []
     )
+    delegated = entry.get("delegated_adapter")
     return {
         "project_id": project_id,
         "display_name": _text(entry.get("display_name"), MAX_TITLE_CHARS)
@@ -200,51 +238,80 @@ def project_view(entry: Any) -> Optional[Dict[str, Any]]:
         # tell a model whether a project can take delegated work at all, which
         # it needs in order to avoid proposing a task somewhere that will refuse
         # one. They name no model, no flag and no binary.
+        #
+        # Still the *permitted* list rather than the resolved one, and the field
+        # keeps the meaning its published description gives it. A project that
+        # permits one adapter therefore shows exactly the adapter that will run,
+        # which is what the two Gate B sandboxes look like.
         "task_adapters": labels,
-        "accepts_tasks": bool(entry.get("enabled")) and bool(labels),
+        # Resolvability, not merely eligibility. Before M2I.5 PR3 this asked
+        # "does the project permit any adapter", which was the same question
+        # while every delegated project permitted exactly one. It is not the same
+        # question once two can coexist: a project permitting both Claude
+        # transports and delegating to neither has adapters and cannot take a
+        # task, and telling a model otherwise would send it to a create that
+        # fails for a reason it cannot fix.
+        "accepts_tasks": bool(entry.get("enabled"))
+        and isinstance(delegated, str)
+        and bool(delegated),
     }
 
 
-def adapter_for_project(payload: Any, project_id: str) -> Optional[str]:
-    """Which adapter a task in this project runs under. Decided by the host.
+def delegation_for_project(
+    payload: Any, project_id: str
+) -> Tuple[Optional[str], Optional[str]]:
+    """The host's answer to "which adapter runs here", and its reason.
 
-    Task Core requires an ``adapter_id`` on every create and has no "pick one
-    for me" — correctly, because a default would mean a new adapter silently
-    gaining every project the day it was registered. So somebody has to choose,
-    and the whole question is *who*.
+    Returns ``(adapter_id, delegation_status)``. ``(None, None)`` means the
+    project is not in the payload at all, or is disabled — the caller turns that
+    into "no such project", deliberately the same answer as a project that does
+    not exist, because a caller able to tell those apart can enumerate.
 
-    Not the caller. There is no ``adapter_id`` field on ``createTask``, and a
-    model choosing which agent runs on somebody's workstation is the shape this
-    milestone exists to prevent.
+    **This function reads a decision; it does not make one.** The decision is
+    ``TaskProject.delegation`` on the workstation, published as
+    ``delegated_adapter``. That matters more than it looks: the bridge is the
+    process holding a credential given to a model provider, and the last thing
+    it should own is which agent runs on the machine.
 
-    So: **the first adapter the project itself lists**, in the order written in
-    the host's own ``task-projects.json``. That file is edited in a text editor
-    on the workstation and is never writable through any API, so the choice is
-    the operator's; it is deterministic, so two identical requests cannot land
-    on different agents; and a project that lists none returns ``None``, which
-    the caller sees as an ineligible project rather than a failed create.
+    What is gone from here, and must not come back
+    ----------------------------------------------
 
-    A project listing several adapters gets the first one. That is a real
-    configuration — ``claude-code`` and ``claude-agent-sdk`` may both be
-    permitted — and "the operator writes the preferred one first" is a rule the
-    operator can act on, where "the bridge refuses ambiguous projects" would
-    only be a rule they have to work around.
+    Until M2I.5 PR3 this function took the **first entry of the project's
+    adapter list**. That was defensible only while every delegated project
+    permitted exactly one adapter — and Gate B makes two coexist, which is
+    precisely the condition it was never valid under.
+
+    It was also not the rule its own docstring claimed. Cofferdam sorts that
+    list at load, so "first" meant *alphabetically first*: with both Claude
+    transports permitted, ``claude-agent-sdk`` would have quietly won over
+    ``claude-code`` because of where the letters fall. Nobody would have chosen
+    that, and nobody would have seen it happen.
+
+    So there is no ordering here now, and no fallback of any kind. A payload
+    that does not carry ``delegated_adapter`` — an older daemon than this
+    bridge, say — yields ``None`` and a refused create, which is the safe
+    direction for a version skew to break in.
     """
     entries = payload.get("projects") if isinstance(payload, dict) else None
     if not isinstance(entries, list):
-        return None
+        return None, None
     for entry in entries:
         if not isinstance(entry, dict) or entry.get("project_id") != project_id:
             continue
         if not entry.get("enabled"):
-            return None
-        adapters = entry.get("adapters")
-        if isinstance(adapters, list):
-            for candidate in adapters:
-                if isinstance(candidate, str) and candidate:
-                    return candidate
-        return None
-    return None
+            return None, None
+        status = entry.get("delegation")
+        status = status if isinstance(status, str) and status else None
+        delegated = entry.get("delegated_adapter")
+        if isinstance(delegated, str) and delegated:
+            return delegated, status
+        return None, status
+    return None, None
+
+
+def adapter_for_project(payload: Any, project_id: str) -> Optional[str]:
+    """The delegated adapter id, or ``None``. See :func:`delegation_for_project`."""
+    return delegation_for_project(payload, project_id)[0]
 
 
 def projects_view(payload: Any) -> Dict[str, Any]:
@@ -642,7 +709,13 @@ def mutation_view(
 
 
 __all__ = [
+    "AMBIGUOUS_DELEGATIONS",
     "ANSWER_MODE_SINGLE_CHOICE",
+    "DELEGATIONS",
+    "DELEGATION_AMBIGUOUS",
+    "DELEGATION_NO_ADAPTER",
+    "DELEGATION_OK",
+    "DELEGATION_UNAVAILABLE",
     "adapter_for_project",
     "LOCAL_ONLY_WAITING_REASONS",
     "NEXT_OPERATIONS",
@@ -651,6 +724,7 @@ __all__ = [
     "clarification_view",
     "clipped",
     "created_task_view",
+    "delegation_for_project",
     "display_ref",
     "mutation_view",
     "project_view",

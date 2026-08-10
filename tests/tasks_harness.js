@@ -376,6 +376,35 @@ function listPayload(tasks) {
 function adaptersPayload(options) {
   const settings = options || {};
   if (settings.empty) { return { adapters: [] }; }
+  if (settings.twoAdapters) {
+    /* Both Claude transports registered at once — the M2I.5 Gate B host. The
+       SDK is listed first, which is what `/api/task-adapters` really returns
+       (it sorts by id), so a composer that took `available[0]` would choose it. */
+    return {
+      adapters: [
+        {
+          adapter_id: "claude-agent-sdk",
+          display_name: "Claude Agent SDK",
+          description: "Runs a real program inside one approved project.",
+          available: true,
+          unavailable_reason: null,
+          capabilities: CAPABILITIES,
+          limitations: ["It has no shell."],
+          max_concurrent_tasks: 1
+        },
+        {
+          adapter_id: "claude-code",
+          display_name: "Claude Code",
+          description: "Runs a real program inside one approved project.",
+          available: true,
+          unavailable_reason: null,
+          capabilities: CAPABILITIES,
+          limitations: ["It has no shell."],
+          max_concurrent_tasks: 1
+        }
+      ]
+    };
+  }
   if (settings.realAdapter) {
     /* An adapter that runs an actual program. Shaped exactly like the payload
        `/api/task-adapters` returns for one, and deliberately NOT named after any
@@ -423,10 +452,27 @@ function projectsPayload(options) {
   if (settings.empty) {
     return { projects: [], configured: 0, problems: [], source_present: false };
   }
+  if (settings.twoAdapters) {
+    /* A project permitting both Claude transports and delegating to one of
+       them — the M2I.5 Gate B shape. `claude-agent-sdk` is deliberately the
+       adapter this project does NOT delegate to *and* the one that sorts first,
+       so a composer that fell back to list order would be visible here. */
+    return {
+      projects: [
+        { project_id: "demo", display_name: "Demo project", enabled: true,
+          adapters: ["claude-agent-sdk", "claude-code"],
+          delegated_adapter: "claude-code", delegation: "ok", notes: null }
+      ],
+      configured: 1,
+      problems: [],
+      source_present: true
+    };
+  }
   return {
     projects: [
       { project_id: "demo", display_name: "Demo project", enabled: true,
-        adapters: ["validation"], notes: null }
+        adapters: ["validation"], delegated_adapter: "validation",
+        delegation: "ok", notes: null }
     ],
     configured: 1,
     problems: [],
@@ -721,6 +767,27 @@ function run() {
   }
 
   /* -- one action at a time ------------------------------------------------ */
+
+  if (scenario === "composer-follows-the-projects-delegation") {
+    /* Two adapters registered, one project delegating to the one that does NOT
+       sort first. The composer must open on the delegated adapter and send it.
+       If it ever falls back to list order this sends `claude-agent-sdk`. */
+    return mount({
+      twoAdapters: true,
+      hang: true,
+      result: () => ({ payload: {} })
+    }).then(function () {
+      fire("click", button("taskCompose"));
+      return drain().then(function () {
+        field("taskPrompt", "merhaba");
+        fire("input", field("taskPrompt", "merhaba"));
+        fire("click", button("taskStart"));
+        return drain().then(function () {
+          return { html: html(), writes: writes() };
+        });
+      });
+    });
+  }
 
   if (scenario === "double-tap-creates-one-task") {
     return mount({

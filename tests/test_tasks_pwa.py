@@ -177,6 +177,20 @@ class DuplicateSubmission(unittest.TestCase):
         self.assertIn("did not finish in time", result["after"])
         self.assertIn("cannot say whether it worked", result["after"])
 
+    def test_the_composer_opens_on_the_adapter_the_project_delegates_to(self):
+        """M2I.5 Gate B. Two adapters registered; the project decides which.
+
+        The PWA *may* name an adapter — it shows the dropdown and a person picks
+        — so this is a default rather than a rule. It matters because the old
+        default was "the first available adapter", and with both Claude
+        transports registered that is ``claude-agent-sdk`` (ids sort), which the
+        fixture project does not permit. A person would have learned that by
+        pressing Play and being refused.
+        """
+        result = panel("composer-follows-the-projects-delegation")
+        self.assertEqual(len(result["writes"]), 1)
+        self.assertEqual(result["writes"][0]["body"]["adapter_id"], "claude-code")
+
     def test_a_refused_creation_is_shown_as_the_refusal(self):
         """No optimistic false success."""
         result = panel("refused-create-is-not-success")

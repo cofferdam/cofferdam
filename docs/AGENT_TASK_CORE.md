@@ -132,6 +132,59 @@ somebody wrote each entry down on purpose.
 An empty `adapters` list means **no adapters**, not all of them — so a future
 adapter never silently gains access to an existing project.
 
+### Which adapter runs: `delegated_adapter`
+
+`adapters` says which adapters *may* run here. It does not say which one *does*,
+and that second question has a caller who cannot answer it: `createTask` on the
+Actions bridge has no adapter field, on purpose, because a model provider
+choosing which agent runs on somebody's workstation is the shape M2I.5 exists to
+prevent.
+
+Until M2I.5 PR3 the answer was **the first entry of `adapters`** — fine while
+every delegated project permitted exactly one, and not fine at all once the two
+Claude transports could both be registered. It was also not the rule it looked
+like: `adapters` is sorted at load, so "first" meant *alphabetically first*, and
+`claude-agent-sdk` would have silently beaten `claude-code`.
+
+So a project may now name one:
+
+```json
+{
+  "project_id": "some-project",
+  "display_name": "Some project",
+  "root": "/home/you/some-project",
+  "adapters": ["claude-code", "claude-agent-sdk"],
+  "delegated_adapter": "claude-agent-sdk",
+  "enabled": true
+}
+```
+
+It resolves to one of four words, published on `/api/task-projects` as
+`delegation` alongside the resolved `delegated_adapter`:
+
+| `delegation` | When | A task can start |
+| --- | --- | --- |
+| `ok` | one permitted adapter, or a delegated one that is permitted | yes |
+| `no_adapter` | the project permits none | no |
+| `ambiguous_adapter` | several permitted, none delegated | **no** |
+| `delegated_adapter_unavailable` | the delegated one is not permitted here, or this build never registered it | **no** |
+
+Three properties are worth stating plainly, because each is a thing that could
+have been done the convenient way instead:
+
+* **Ordering is never authority.** Not registry order, not sorted order. Two
+  permitted adapters and no delegation is a refusal, not a coin toss.
+* **One permitted adapter stays implicit.** There is nothing to choose between,
+  so no existing registry has to be rewritten to keep working.
+* **A delegation is a selection, never a grant.** It cannot reach an adapter the
+  project does not permit or the build did not register — those fail closed, in
+  the direction where no task runs.
+
+`delegated_adapter` carries an adapter **id** and nothing else. No flag, path,
+model, effort, tool list, permission mode or budget: those are execution values,
+they live in the adapter's own source, and a configuration file that could carry
+them is what the forbidden-field list refuses.
+
 **The root is never published.** `/api/task-projects` returns names and ids; the
 machine's directory layout stays on the machine.
 

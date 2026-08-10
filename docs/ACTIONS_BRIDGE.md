@@ -255,12 +255,40 @@ Task Core requires an `adapter_id` on every create and has no "pick one for me"
 — correctly, because a default would mean a new adapter silently gaining every
 project the day it was registered.
 
-So the bridge reads the project's own registry entry and takes **the first
-adapter that project lists**, in the order written in the host's
-`task-projects.json`. That file is edited on the workstation and is never
-writable through any API, so the choice is the operator's; it is deterministic,
-so two identical requests cannot land on different agents; and there is no
-`adapter_id` field on `createTask` for a caller to influence it.
+The bridge does not choose it. `createTask` has no `adapter_id` field, and the
+request schema is closed, so a body carrying one is a 422 rather than a value
+that gets ignored somewhere later. What the bridge sends is the adapter the
+**workstation** delegated, read from the project projection as
+`delegated_adapter` and resolved on the host by `TaskProject.delegation` — see
+[`AGENT_TASK_CORE.md`](AGENT_TASK_CORE.md#which-adapter-runs-delegated_adapter).
+
+**This changed in M2I.5 PR3, and the old rule was worse than it read.** The
+bridge used to take *the first adapter the project listed*. That was defensible
+only while every delegated project permitted exactly one adapter — which is
+exactly the condition Gate B ends by registering both Claude transports. It was
+also not the operator's ordering: `adapters` is sorted at load, so "first" meant
+alphabetically first, and `claude-agent-sdk` would have quietly won over
+`claude-code` because of where the letters fall.
+
+There is now no ordering in this path at all, and no fallback:
+
+* a project permitting **one** adapter resolves to it, so nothing that worked
+  before needs rewriting;
+* a project permitting **several** with an explicit `delegated_adapter` resolves
+  to exactly that one, whatever order the file is written in;
+* a project permitting several with **none** delegated, or delegating to an
+  adapter it does not permit or this build never registered, is refused with
+  `project_not_eligible` and never appears in `listProjects` with
+  `accepts_tasks: true`;
+* a project payload with no `delegated_adapter` at all — an older daemon than
+  this bridge — resolves to nothing, which is the safe direction for a version
+  skew to break in.
+
+`listProjects` publishes no new field for this. `task_adapters` keeps its
+meaning — the adapters the project *permits* — and the consequence of an
+unresolvable delegation shows up where a model can act on it, as
+`accepts_tasks: false`. The OpenAPI schema is unchanged, and so is the Custom
+GPT.
 
 ## Artifacts: unavailable, and why
 
@@ -505,14 +533,31 @@ restating because it is the whole argument: they are **not in the tunnel's
 ingress**. Cloudflare cannot reach a service the ingress does not name, so this
 is an absence rather than a rule that could be relaxed.
 
-## Gate B — production Agent SDK
+## Gate B — production Agent SDK, approved and validated
 
-**Separate from Gate A, and independent of it.** Production runs the Claude Code
-adapter, which supports start, follow-up, cancellation and results — enough for
-most of the bridge. Structured clarifications need the Agent SDK adapter.
+**Separate from Gate A, and independent of it.** Production ran only the Claude
+Code adapter, which supports start, follow-up, cancellation and results — enough
+for most of the bridge. Structured clarifications need the Agent SDK adapter,
+because a CLI stream gives no channel an answer could travel back on mid-turn.
 
-It must be possible to approve external exposure while keeping the Agent SDK
-adapter disabled, or the reverse.
+That independence held in both directions and still does: the two adapters have
+separate switches, and removing
+`deploy/dropins/30-claude-agent-sdk-adapter.conf` revokes the Agent SDK alone.
+
+Gate B was approved and performed on 2026-08-10. One task in a disposable
+`agent-sdk-sandbox`, every mutation driven by a person through the real private
+Custom GPT on the native iPhone app: one real `AskUserQuestion`, the displayed
+choice mapped to the **Cofferdam-minted `option_id`**, answer provenance
+`future_gpt_bridge`, the same provider session across the continuation and one
+follow-up, and a truthful finish. Sanitized evidence in
+[`checklists/m2i5-gate-b-validation.md`](checklists/m2i5-gate-b-validation.md).
+
+Two things the bridge does **not** gain from it. Only the **single-choice**
+question shape is carried — every other shape still becomes
+`unsupported_question_shape` and points at the local surface. And a tool
+approval is still never bridged: `can_use_tool` denies, and there is no approval
+route this process can authenticate to, so "may a model provider grant a
+permission" never reaches a check that could be got wrong.
 
 ## Rollback
 

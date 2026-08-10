@@ -167,13 +167,19 @@ class CreateTaskTests(BridgeTestCase):
     def test_the_adapter_comes_from_the_host_registry_not_the_caller(self) -> None:
         """Task Core requires an adapter id; the *host* supplies it.
 
-        The bridge reads the project's own registry entry and takes the first
-        adapter it lists. There is no field on this Action for one, and a body
-        carrying ``adapter_id`` is refused (see the unknown-fields test), so a
-        model cannot choose which agent runs on somebody's workstation.
+        The bridge sends the adapter the workstation delegated, and nothing
+        else. There is no field on this Action for one, and a body carrying
+        ``adapter_id`` is refused (see the unknown-fields test), so a model
+        cannot choose which agent runs on somebody's workstation.
         """
         self.upstream.projects_payload = {
-            "projects": [project(adapters=["claude-code", "claude-agent-sdk"])]
+            "projects": [
+                project(
+                    adapters=["claude-code", "claude-agent-sdk"],
+                    delegated_adapter="claude-code",
+                    delegation="ok",
+                )
+            ]
         }
         self.create()
         _, kwargs = self.upstream.calls[-1]
