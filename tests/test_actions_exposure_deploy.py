@@ -78,6 +78,76 @@ def _sections(path: Path) -> Dict[str, List[str]]:
     return sections
 
 
+#: Messages `systemd-analyze verify` emits that describe the *machine it ran on*
+#: rather than the file it was given. Each is paired with the reason it is not a
+#: defect in a shipped template, because a filter without a stated reason is how
+#: a check quietly stops checking.
+#:
+#: This list is why CI failed and a developer machine did not. The units name
+#: `%h/cofferdam/slots/a/.venv/bin/python` and `%h/.local/bin/cloudflared`;
+#: `verify` resolves `%h` and stats the binary. On a host with Cofferdam
+#: installed those exist, so the check passed locally for weeks. On a clean
+#: runner they do not, and it failed with:
+#:
+#:     Command …/.venv/bin/python is not executable: No such file or directory
+#:
+#: A template that only verifies on a machine where it is already installed is a
+#: template nobody can check before installing it — which is exactly when the
+#: check is worth something.
+_ENVIRONMENT_DEPENDENT = (
+    # The ExecStart binary is absent here. A template names paths that come into
+    # existence at install time; that is what `%h` is for.
+    ("is not executable", "the referenced executable is not installed on this host"),
+    ("No such file or directory", "the referenced path does not exist on this host"),
+    # Units these merely order against need not be installed to check syntax.
+    ("not found", "a unit named in After=/Wants= is not installed here"),
+)
+
+
+def _systemd_analyze_available() -> bool:
+    try:
+        probe = subprocess.run(
+            ["systemd-analyze", "--version"], capture_output=True, timeout=20
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return probe.returncode == 0
+
+
+def _systemd_verify_problems(unit: Path):
+    """Run `systemd-analyze verify` and return (structural problems, raw output).
+
+    Two filters, in this order, and the order matters.
+
+    **Only lines naming this unit count.** `verify` loads the whole user unit
+    tree to resolve dependencies and reports on anything it finds — on one
+    developer machine that meant a warning about `spice-vdagent.service`, which
+    has nothing to do with Cofferdam. The previous version of this helper dropped
+    those by matching the *text* `Unknown key`, which would also have hidden an
+    unknown key in our own file. Matching the filename instead keeps that error
+    visible where it matters.
+
+    **Then drop the environment-dependent classes**, listed and justified in
+    :data:`_ENVIRONMENT_DEPENDENT`.
+    """
+    result = subprocess.run(
+        ["systemd-analyze", "--user", "verify", str(unit)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    combined = result.stdout + result.stderr
+    problems = []
+    for line in combined.splitlines():
+        line = line.strip()
+        if not line or unit.name not in line:
+            continue
+        if any(marker in line for marker, _reason in _ENVIRONMENT_DEPENDENT):
+            continue
+        problems.append(line)
+    return problems, combined
+
+
 def _directive(path: Path, section: str, key: str) -> List[str]:
     return [
         line.split("=", 1)[1].strip()
@@ -131,25 +201,42 @@ class UnitsExistAndParseTests(unittest.TestCase):
             self.skipTest("systemd-analyze is unavailable")
         for unit in (BRIDGE_UNIT, TUNNEL_UNIT):
             with self.subTest(unit=unit.name):
-                result = subprocess.run(
-                    ["systemd-analyze", "--user", "verify", str(unit)],
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                )
-                combined = result.stdout + result.stderr
-                # `verify` reports missing units it merely orders against, which
-                # is expected here: the templates are checked outside an install.
-                real = [
-                    line
-                    for line in combined.splitlines()
-                    if line.strip()
-                    and "not found" not in line
-                    and "Unknown key" not in line
-                ]
+                problems, combined = _systemd_verify_problems(unit)
                 self.assertEqual(
-                    [], real, f"{unit.name} failed verification:\n{combined}"
+                    [], problems, f"{unit.name} failed verification:\n{combined}"
                 )
+
+    def test_the_verifier_still_catches_a_genuinely_broken_unit(self) -> None:
+        """The filter above must not have blinded the check.
+
+        `_systemd_verify_problems` discards two classes of message, and a filter
+        that discards too much turns this whole class into decoration. So a unit
+        with a real structural error is verified here too, and it must be
+        reported — if this test ever passes silently, the one above is worthless.
+        """
+        import tempfile
+
+        if not _systemd_analyze_available():
+            self.skipTest("systemd-analyze is unavailable")
+
+        broken = (
+            "[Unit]\nDescription=deliberately broken\n\n"
+            "[Service]\n"
+            # A relative ExecStart. systemd requires an absolute path and says
+            # so — a structural complaint, not an environment fact.
+            "ExecStart=not/an/absolute/path\n\n"
+            "[Install]\nWantedBy=default.target\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cofferdam-deliberately-broken.service"
+            path.write_text(broken, encoding="utf-8")
+            problems, combined = _systemd_verify_problems(path)
+            self.assertNotEqual(
+                [],
+                problems,
+                "a unit with a relative ExecStart verified clean, so the "
+                f"environment filter is swallowing real errors:\n{combined}",
+            )
 
 
 class BootSafetyTests(unittest.TestCase):
