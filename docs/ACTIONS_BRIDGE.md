@@ -533,14 +533,31 @@ restating because it is the whole argument: they are **not in the tunnel's
 ingress**. Cloudflare cannot reach a service the ingress does not name, so this
 is an absence rather than a rule that could be relaxed.
 
-## Gate B — production Agent SDK
+## Gate B — production Agent SDK, approved and validated
 
-**Separate from Gate A, and independent of it.** Production runs the Claude Code
-adapter, which supports start, follow-up, cancellation and results — enough for
-most of the bridge. Structured clarifications need the Agent SDK adapter.
+**Separate from Gate A, and independent of it.** Production ran only the Claude
+Code adapter, which supports start, follow-up, cancellation and results — enough
+for most of the bridge. Structured clarifications need the Agent SDK adapter,
+because a CLI stream gives no channel an answer could travel back on mid-turn.
 
-It must be possible to approve external exposure while keeping the Agent SDK
-adapter disabled, or the reverse.
+That independence held in both directions and still does: the two adapters have
+separate switches, and removing
+`deploy/dropins/30-claude-agent-sdk-adapter.conf` revokes the Agent SDK alone.
+
+Gate B was approved and performed on 2026-08-10. One task in a disposable
+`agent-sdk-sandbox`, every mutation driven by a person through the real private
+Custom GPT on the native iPhone app: one real `AskUserQuestion`, the displayed
+choice mapped to the **Cofferdam-minted `option_id`**, answer provenance
+`future_gpt_bridge`, the same provider session across the continuation and one
+follow-up, and a truthful finish. Sanitized evidence in
+[`checklists/m2i5-gate-b-validation.md`](checklists/m2i5-gate-b-validation.md).
+
+Two things the bridge does **not** gain from it. Only the **single-choice**
+question shape is carried — every other shape still becomes
+`unsupported_question_shape` and points at the local surface. And a tool
+approval is still never bridged: `can_use_tool` denies, and there is no approval
+route this process can authenticate to, so "may a model provider grant a
+permission" never reaches a check that could be got wrong.
 
 ## Rollback
 

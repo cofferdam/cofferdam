@@ -1065,6 +1065,21 @@ such rather than presented as verified. What is missing is evidence that the
 provider produces them; a later spike that sees one moves it out of that tuple
 rather than widening any parsing.
 
+**M2I.5 Gate B did not change this list**, and the fact is worth stating rather
+than leaving to be inferred from a diff. The live production round trip
+(below) exercised **one single-choice question** through the real Custom GPT. One
+question establishes exactly one shape. Nothing here was widened to fit it,
+`SCHEMA_VERIFIED` and `OBSERVED_SCHEMA` were not edited, and the three variants
+above — plus an "Other" option carrying custom text, which the bridge's own
+answer surface has no field for — still produce a bounded unsupported result
+rather than a fabricated single-choice question.
+
+That asymmetry is deliberate and is the reason this reader is allowed to fail.
+A missed clarification costs a task that keeps running with an activity line in
+its history. An invented one shows somebody a question the agent never asked and
+then sends their answer to a model as though it had. Those are not the same size
+of mistake, and only one of them is recoverable.
+
 ## Tests
 
 `tests/test_delegated_events.py`, `tests/test_agent_sdk_adapter.py` and
@@ -1184,6 +1199,55 @@ and the production venv has never had `claude_agent_sdk` in it. The **Claude Cod
 adapter remains the production transport and the fallback**, unchanged by this
 PR, and the roadmap's retirement rule — it goes only after verified parity —
 still stands.
+
+## Production deployment (M2I.5 Gate B)
+
+M2I.5 PR3 is where the paragraph above stops describing the deployment. The
+adapter is **still off by default in the tree** — that has not changed, and
+`DeploymentReadinessTests` asserts it — but one host now runs it, by one
+deliberate act:
+
+| | |
+| --- | --- |
+| Installed | the repository-declared `agent-sdk` extra, in the candidate slot's venv |
+| Resolved | `claude-agent-sdk 0.2.134`, the version `sdk.py` records as verified |
+| Wheel | `…-py3-none-manylinux_2_17_x86_64.whl`, sha256 `0cba177a…05a420`, MIT |
+| Enabled by | `deploy/dropins/30-claude-agent-sdk-adapter.conf` — one environment variable, no `ExecStart` |
+| Selected by | one project, `agent-sdk-sandbox`, through `delegated_adapter` |
+
+The drop-in uses `COFFERDAM_ENABLE_CLAUDE_AGENT_SDK_ADAPTER=1` rather than
+`--enable-claude-agent-sdk-adapter`, and the reason is structural: the flag would
+require rewriting `ExecStart`, which would make that file own the Claude Code
+flag too — so removing it would take *both* adapters away. As written, removing
+it revokes exactly one capability.
+
+**Which CLI actually ran.** The published wheel bundles its own Claude Code binary
+(2.1.226, ~284 MB of the install). Cofferdam does not use it: `build_registry`
+passes `cli_path` for the host's own `claude`, which on the validated host was
+**2.1.221** — the binary whose sign-in the workstation manages and the one the
+Claude Code adapter already drives. The SDK's version probe only *warns* below
+CLI 2.0.0, so this passes silently rather than by suppression.
+
+**Two adapters, one registry.** Registering both is what forced M2I.5 PR3's other
+half: the Actions bridge used to take the first adapter a project listed, and the
+list is sorted at load, so "first" meant *alphabetically first* — this adapter
+would have quietly won every project that permitted both. See
+[`AGENT_TASK_CORE.md`](AGENT_TASK_CORE.md#which-adapter-runs-delegated_adapter).
+
+**Validated live**, once, through the real private Custom GPT from the native
+iPhone app: one `AskUserQuestion`, the displayed choice mapped to the
+Cofferdam-minted `option_id`, provenance `future_gpt_bridge`, the same provider
+session across the continuation and one same-session follow-up, a truthful
+finish, the helper exited and the sandbox byte-identical. Sanitized evidence in
+[`checklists/m2i5-gate-b-validation.md`](checklists/m2i5-gate-b-validation.md).
+
+**What that run did not establish.** Any other question shape — see *Unsupported
+clarification variants* above. Parity with the Claude Code adapter, which the
+roadmap's retirement rule still governs; nothing here asks for that adapter to be
+retired, and it stays enabled beside this one. And nothing about the filesystem
+boundary: the project root is a configuration boundary the CLI is asked to
+respect, **not a kernel sandbox**, and the sandbox hash check is what makes "it
+touched nothing" a measurement rather than a claim.
 
 ## Rollback
 
