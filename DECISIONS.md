@@ -1118,6 +1118,349 @@ the rule `projects.verify_root` already applies; a code-owned secret-path deny l
 record time rather than on read; and a bounded preview addressed by a server-minted `artifact_id`
 with a size cap and a type allowlist. Detail in `docs/ACTIONS_BRIDGE.md`.
 
+## The 2026-08-11 replan
+
+Twelve entries recorded together on 2026-08-11, after M2I.5 closed, reshaping the work that
+follows it around three things the product does not have: a workspace it can name, evidence it
+can trust, and a local model that plans rather than implements. The planning package that
+produced them is preserved as history in `handoffs/replan-2026-08-11/`; **these entries and
+[`ROADMAP.md`](ROADMAP.md) are the authority**, and where the handoff disagrees with them the
+handoff is a draft that was edited before adoption.
+
+Nothing in this group is implemented. They are recorded before the work rather than after it
+because each one constrains a component that does not exist yet, and the constraint is the part
+worth writing down while it is still free to state.
+
+## D-2026-08-11-1 — The sequence after M2I.5 is M2J → M2K → M2L → M2M (EFE DECISION, ACTIVE)
+
+**Decision.** M2J is **preserved and reshaped**, and three milestones are named after it:
+
+- **M2J — workspace, Working Context, mind foundation, Context Builder.** The recorded M2J scope
+  (workspaces, project templates, a code-owned model allowlist, Auto/Safe/Review profiles,
+  `get_project_context`, handoff and history surfaces) is kept and gains the durable
+  "what are we working on" state the rest of this group reads from.
+- **M2K — evidence and evaluation foundation**, model-free.
+- **M2L — the first Local Planner milestone.**
+- **M2M — remote operations and dashboard completion.**
+
+**M2K comes before the planner, and that is the one ordering worth arguing.** The faster route is
+a planner first — it demos sooner. It would also evaluate worker claims it has no means to check,
+and it would be benchmarked on invented fixtures. The evidence bundle is worth building on its own
+terms: it is deterministic, it needs no model, and the PWA and the Custom GPT can render
+expected-vs-observed the day it exists. A planner arriving in M2L therefore arrives with factual
+reason codes to explain rather than operational causes to invent.
+
+**This is not a new bet; it is the repository's own recorded reasoning.** D-2026-08-09-1 left
+`get_project_context` out of the Actions bridge because it "cannot be built honestly before the
+workspace model it reads from." That sentence applies verbatim to a local planner, which is why
+the foundation milestones come first.
+
+M2J's profile work stays scoped to **evaluation depth and confirmation defaults** and never to
+widening what a task may do — the warning already recorded against that milestone, unchanged.
+
+## D-2026-08-11-2 — The Local Planner is an advisory coordinator, not a coding worker (EFE DECISION, ACTIVE)
+
+**Decision.** The local model is a **planner, prompter, evaluator, coordinator and conversational
+interface**. It understands messy Turkish and English input, holds the planning conversation,
+drafts worker prompts and follow-ups, reads evidence, explains what happened, and recommends a
+next step. **It writes no code, runs nothing, and holds no credentials.**
+
+**Implementation stays delegated to cloud workers through Task Core**, and the worker abstraction
+is the one that already exists: `TaskAdapter` + declared capabilities + `delegated_adapter`
+(D-2026-08-06-2, and PR #34's rule that ordering is never authority). Codex, when it arrives, is a
+third adapter — not a new "Worker" superclass, and not a new layer above the one that works.
+
+**Planner output is advisory and never authority.** Its entire output surface is conversation text
+plus schema-validated **proposals**, and a proposal becomes real only through an existing
+validated path — `POST /api/tasks`, a clarification answer, a typed action — each with the same
+validation and idempotency it has today. The planner never bypasses those paths and never gains a
+shorter one. This is D-2026-08-08-2 restated for a client that happens to run on the same host.
+
+**Placement:** a domain component of the workstation daemon (`cofferdam/workstation/planner/`),
+speaking to a **separate model-runtime process** on loopback through a replaceable provider
+client. It is **not** a `TaskAdapter` — adapters execute delegated work under the task lifecycle,
+and a conversation is not a task — and it does **not** reach Task Core through the Actions bridge;
+it calls the same internal service functions the HTTP routes use. Task Core stays provider-neutral
+and model-free.
+
+**Confirmation is explicit by default in M2L.** Every consequential planner proposal requires the
+user to confirm it. No autonomous planner → worker continuation exists in the first planner
+milestone. A per-workspace relaxation for low-risk sandbox projects is a possible *later* policy
+decision and deliberately not a launch default: deciding now that it is out of M2L is what keeps
+the milestone honest.
+
+## D-2026-08-11-3 — Three minds: global vault, project repository, Working Context (EFE DECISION, ACTIVE)
+
+**Decision.** Extends D-2026-08-08-6, which already binds: Markdown is canonical, derived indexes
+are rebuildable and discardable, and where an index and the Markdown disagree the Markdown is
+right. Three layers, three homes:
+
+- **Global mind — a fresh, dedicated, Cofferdam-specific Obsidian-compatible vault**, user-owned
+  and living outside `$COFFERDAM_HOME`, read under an explicit host-owned grant with the same
+  validation posture as project roots. **The architecture is not bound to an absolute path**: the
+  host chooses where the vault lives, and the grant names it. Likely durable content is user-level
+  and cross-project — `USER.md`, `COMMUNICATION_STYLE.md`, `PREFERENCES.md`, freeform notes.
+- **Project mind — the project's own repository**, canonical for its own memory. For **Cofferdam
+  itself the existing documents are role-mapped** — `STATUS.md`, `ROADMAP.md`, `DECISIONS.md`,
+  `DESIGN.md` — and **no `PLAN.md` is added merely to satisfy a filename convention**. A project
+  with no established vocabulary may use a compact template (`PROJECT.md`, `RESEARCH.md`,
+  `PLAN.md`, `DECISIONS.md`, `STATUS.md`). Workspace config records which file plays which
+  **role**, so the Context Builder reads roles rather than hardcoded filenames.
+- **Working Context — Cofferdam state, not Markdown.** Active workspace, current objective, active
+  task reference, delegated worker, plan checkpoint, pending decisions, latest evidence reference,
+  expected next step. It lives in SQLite under `state/`, the same posture as Task Core's store.
+
+**Project STATUS/ROADMAP/DECISIONS are never duplicated into the global vault**, and no second
+authority is created in either direction: no JSON mirror of Markdown, no Markdown mirror of
+SQLite. A generated read-only `WORKING.md` export may exist for vault users, marked generated and
+never read back as authority.
+
+Obsidian compatibility means plain CommonMark, `[[wikilinks]]` and optional YAML frontmatter, and
+nothing else. Cofferdam never invokes Obsidian, never reads `.obsidian/`, and never writes its
+config; the vault works in a text editor with Cofferdam stopped. Wikilink resolution follows the
+M2A alias rule — case-folded with the Turkish dotted/dotless-İ tailoring, ambiguity reported
+rather than guessed.
+
+## D-2026-08-11-4 — Memory writes are proposal → user accept → hash-bound apply (EFE DECISION, ACTIVE)
+
+**Decision.** No model, local or cloud, ever silently writes durable memory. The planner
+**proposes**, a person **accepts**, and Cofferdam **applies** — the posture Trust Core froze
+(fail-closed, hash-bound, single-use) without importing its machinery yet.
+
+1. A memory edit exists only as a **MemoryProposal**: target file inside the granted vault or
+   project memory, **base content hash**, the change, a one-line why, and provenance.
+2. Proposals are queued and visible; nothing touches disk before acceptance.
+3. **Acceptance is a device-token surface** — the PWA or the workstation. The planner and the
+   Actions bridge have **no acceptance route at all**: absent, not refusing, the same stronger
+   statement D-2026-08-08-2 makes about approvals.
+4. Apply is atomic and **refuses when the base hash no longer matches**. A drifted file means the
+   human re-reads it rather than a stale diff landing on top of an edit they made.
+5. Every applied proposal is recorded, bounded, so "why does my `USER.md` say this" has an answer.
+6. **Deletion of durable memory is never planner-proposable.** Only the user deletes.
+7. Working Context writes are exempt: they are state with dedicated validated routes, not
+   canonical memory.
+
+Indexes and any future vector store stay derived, rebuildable and discardable (D-2026-08-08-6).
+Routing high-impact memory changes through the preserved Trust Core mint is recorded as the
+insertion point and is not built now.
+
+## D-2026-08-11-5 — Local context and external context are two security objects (EFE DECISION, ACTIVE)
+
+**Decision.** A context pack assembled for the **local** planner and a context pack **leaving the
+host** are not the same object and must not share one type. Repository-consistent names:
+**`LocalContextPack`** and **`CloudContextProjection`**.
+
+The Local Planner may receive rich local context — granted global mind, project mind, Working
+Context, task state, evidence, user preferences — because it runs on the authority itself and its
+provider client speaks only to loopback.
+
+**Anything leaving the host passes through an explicit egress projection**, whatever the
+destination: a cloud worker, the private Custom GPT, a ChatGPT browser skill, or any other
+external model. Default posture:
+
+| Included when relevant | Excluded by default |
+|---|---|
+| project plan and context | global personal memory |
+| relevant project decisions | unrelated-project memory |
+| current objective | vault paths and project filesystem roots |
+| acceptance criteria | credentials and secrets (structurally absent) |
+| selected project research | unrelated private notes |
+
+Workspace policy may **later** explicitly allow selected global-mind extracts. It is an opt-in
+naming what may leave, never an inference from a profile.
+
+**The reason this is a decision rather than an implementation detail:** one universal
+`ContextPack` would make every future caller a potential egress path, and the mistake would be
+invisible — a field added for the planner would reach the Custom GPT the same day. Two types make
+the boundary a compile-time question instead of a review question.
+
+## D-2026-08-11-6 — Worker claims are not observations, and a model may not upgrade evidence (EFE DECISION, ACTIVE)
+
+**Decision.** Extends the rule Task Core already enforces for single events — adapter-reported
+evidence is a claim, not an observation — from one event to a whole turn, and adds the consumer
+Task Core deliberately never had.
+
+- **An `EvidenceBundle` carries every field with its source kind**: what the worker *claimed*,
+  what Cofferdam *observed* (its own git observations, its own executed checks), and what nobody
+  observed. Absent observation is **`unknown`, rendered unverified** — never inferred, and never
+  reported as "did not happen". This is the M4 resource-audit honesty rule, unchanged.
+- **Claims that contradict observations are both kept and flagged** (`claim_conflict`) rather than
+  reconciled. The conflict is the evaluator's best input, and discarding either side destroys it.
+- **Deterministic checks run before any model evaluation.**
+- **The model layer may only downgrade, never upgrade.** A criterion the deterministic layer marked
+  `failed` or `unverified` cannot become `verified` by model opinion. This is M6's
+  "an advisory model review can never gate activation", inverted for verdicts.
+- **Worker-reported success does not override missing evidence.** Expected A, B, C against observed
+  A verified, B verified, C unverified is a `PARTIAL`, whatever the worker's final message says.
+- **Risk level is code-owned or policy-derived, never self-selected by a model.** `LOW` is a
+  deterministic pass plus a short sanity check; `MEDIUM` (the default) is the full bundle,
+  expected-vs-observed, missing proof and risks; `HIGH/DEEP` adds prior decisions, sensitive paths,
+  security/deployment/database implications, plan drift, regression and adversarial review. A model
+  judgment may raise attention; it is never the security boundary, and it never grants.
+
+A second, deeper model may later be routed for `HIGH` cases. **No second model is required for
+M2L**, and until one exists a `HIGH` review runs on the same model with a larger budget and a
+stricter prompt rather than blocking the milestone.
+
+## D-2026-08-11-7 — Executable check text never comes from a request (EFE DECISION, ACTIVE)
+
+**Decision.** Evidence checks are useful only if Cofferdam ran them itself, which makes "who
+decides what runs" the whole security question. The answer is exactly two sources, and a request
+is neither:
+
+- **code-owned named checks**, or
+- **host/operator-owned validated check definitions**, referenced by **stable ids**.
+
+**The planner, the worker, a remote caller and a task prompt never provide executable command
+text.** A workspace or task policy may *select* a pre-approved check id; it may not introduce new
+executable text through a request. Execution is literal `argv`, **no shell**, a validated project
+`cwd`, a bounded timeout and bounded output.
+
+**This entry exists because the planning material was ambiguous and the ambiguity was the
+dangerous kind.** It described check commands as "code-owned" while also placing an allowlist in
+workspace configuration — two different authorities under one reassuring word. Configuration
+written by the host operator is a legitimate second source; a command arriving inside a request is
+not; and a document that calls both "code-owned" would eventually be implemented as whichever the
+reader assumed. The registry rule this follows is already established: a registry selects among
+capabilities the code has and can never introduce one (D-2026-08-04-5, D-2026-08-04-6).
+
+## D-2026-08-11-8 — Health truth is evidence-led, and consequential work is never auto-retried (EFE DECISION, ACTIVE)
+
+**Decision.** The machine records evidence first, a deterministic layer diagnoses second, and a
+model phrases third.
+
+A closed, code-extensible vocabulary of machine-observed reason codes — `NETWORK_UNREACHABLE`,
+`DNS_FAILURE`, `PROVIDER_UNREACHABLE`, `PROVIDER_RATE_LIMIT`, `PROVIDER_AUTH`, `PROVIDER_QUOTA`,
+`WORKER_EXITED`, `WORKER_TIMEOUT`, `WORKER_INTERRUPTED`, `HELPER_CRASH`, `LOCAL_SERVICE_RESTART`,
+`HOST_SHUTDOWN`, `BROWSER_BRIDGE_DISCONNECTED`, `MODEL_RUNTIME_UNAVAILABLE`, `APPROVAL_REQUIRED`,
+`USER_CLARIFICATION_REQUIRED`, `TUNNEL_DISCONNECTED`, `UNKNOWN` — **begins in M2K**, attached to
+task failures where the adapter boundary can classify a real error. The consolidated overview and
+dashboard complete in M2M.
+
+**A diagnosis states its confidence: `observed`, `likely`, or `unknown`.** The planner may phrase
+it naturally; it may not invent operational truth. Given a failed connectivity probe, a
+disconnected provider worker and a healthy workstation, *"the worker likely stopped because this
+host lost connectivity"* is allowed and *"your internet went down"* is not, unless that was
+actually observed. When evidence is insufficient the honest sentence is the one rendered:
+Cofferdam could not determine the cause.
+
+**Retry policy.** Automatic retry covers idempotent reads and infrastructure reconnects already
+under supervision. **Consequential operations are never automatically retried** — task creation,
+follow-ups, clarification answers, actuator sends, memory applies. Those are user-triggered and
+carry idempotency keys so that a retry after uncertainty is safe rather than duplicated. Host
+reboot and service restart preserve durable task and history state and mark interrupted work
+truthfully where continuation is unavailable, which is the behaviour restart reconciliation
+already implements.
+
+## D-2026-08-11-9 — Browser automation is a provider-neutral actuator track (EFE DECISION, ACTIVE)
+
+**Decision.** `BrowserActuator` is a Cofferdam-owned interface with narrow semantic verbs; the
+implementation is a configured provider behind it, exactly like Task Core's adapters. **No winner
+is chosen in advance.** The isolated evaluation compares three candidates against one checklist:
+
+1. **Playwright** against a dedicated real Chrome/Chromium profile,
+2. **Kimi WebBridge**, if its Ubuntu local-agent path can be made operational and driven
+   semantically,
+3. **BrowserSkill**, on the same acceptance checklist.
+
+All viable providers run the same narrow spike: a known logged-in ChatGPT conversation → a
+nonce-tagged exact prompt → submit → wait for truthful completion → extract only the final
+assistant response → stop.
+
+**D-2026-08-04-7 is unchanged and decides admissibility.** Semantic automation only — DOM,
+accessibility or extension APIs. **A provider that operates by screenshots and coordinates is out
+regardless of its other merits.**
+
+- **A dedicated automation profile**, not the user's daily browser profile. A logged-in browser is
+  a high-value credential, and the daily profile would make every signed-in site reachable by a
+  buggy or compromised skill. The profile directory is treated as a secret.
+- **Skills, not scripts.** `chatgpt.ask` and its kind are code-owned definitions with site
+  knowledge and completion rules, versioned and reviewed. The planner selects a skill id and
+  bounded arguments; it never emits selectors, JavaScript or steps, and a skill never arrives from
+  a request.
+- **User-triggered and single-shot.** No autonomous ChatGPT ↔ worker loop. Sending content to an
+  external service is confirm-by-default.
+- **Anything read from a page is data with provenance `external_model_output`**, never
+  instructions — never executed, never auto-triggering an action.
+- Remote surfaces see actuator status and bounded results only; **no raw browser-control surface is
+  exposed anywhere**.
+
+Driving a consumer web UI by automation sits in a gray zone of the provider's terms; the design
+keeps volume low and isolates it so that removing it removes one unit and one skill. The Custom GPT
+Actions path remains the sanctioned integration.
+
+## D-2026-08-11-10 — Ollama is the initial runtime; the model is a benchmark result (EFE DECISION, ACTIVE)
+
+**Decision.** **Ollama** is the initial recommended local-model runtime, as its own systemd user
+unit on loopback, **behind a replaceable provider boundary** — one file speaks HTTP to it, and
+planner logic never imports a model SDK. llama.cpp server remains a drop-in alternative behind the
+same client. The Ollama posture already recorded stands: optional, and the daemon runs fine
+without it (`MODEL_RUNTIME_UNAVAILABLE` is a first-class state; planner routes answer
+`planner_unavailable` and nothing else is affected).
+
+**Qwen3.5-9B quantized is the current benchmark candidate, not an architectural dependency**, and
+**no exact model or tag is frozen into durable architecture** until Track D has verified the
+actual host, runtime and model combination. Configuration maps **roles → provider + model** against
+a code-owned model allowlist — a config selects among allowed models and can never introduce one.
+`planner.deep` and `planner.fast` are reserved role words from day one; the MVP ships one role and
+one model.
+
+**The model is chosen by measurement, not intuition.** Track D scores candidates on the work
+Cofferdam actually does: messy Turkish intent, project/context understanding, plan extraction,
+worker-prompt quality, follow-up quality, result explanation, expected-vs-observed evaluation,
+unsupported-claim detection, tool selection, deciding **not** to act, and asking for
+clarification. A failure that a better context pack fixes is a Context Builder bug, not a reason
+to buy a bigger model.
+
+**Real and sanitized private fixtures stay local-only initially.** Real Turkish phrasing and
+private project examples remain off the public repository; committed fixtures are synthetic or
+public-safe. Promoting selected real fixtures is a later, explicit review decision.
+
+## D-2026-08-11-11 — The surfaces do not change (EFE DECISION, ACTIVE)
+
+**Decision.** The workstation is intended to work as a personal private server — the user leaves
+the machine at home and reaches it from a phone, a browser, another computer or a future native
+app. **The host remains the authority and every remote device remains a control surface.**
+Execution, memory, credentials, workers, browser automation and local models stay on the host
+wherever practical.
+
+Nothing in this replan widens exposure. Restated because new components are the usual way a
+boundary erodes:
+
+- **The main API and the PWA stay tailnet-private.** The remote dashboard *is* the PWA, reached
+  over Tailscale. It is not published through the existing tunnel, and no second public origin is
+  added for it. A future dedicated app is a new client of the same tailnet API, gaining nothing the
+  PWA does not have.
+- **The private Custom GPT stays a bounded conversation surface** through the Actions bridge,
+  poll-only (D-2026-08-08-4), and remains the only public surface.
+- **The PWA (device token, tailnet) is the decision surface** — and now more so, since memory
+  acceptance lands on it. That is precisely why memory acceptance is never added to the bridge.
+- **No generic public shell, filesystem API or browser-control surface**, no provider session ids,
+  no raw hidden reasoning, no adapter/model/provider selection by an external caller.
+
+**Normal use should not require internal identifiers.** "Claude ne yaptı?", "Bitti mi?", "İkinci
+seçeneği seç", "İnternet mi gitti, niye durmuş?" are the target interaction; task ids, provider
+session ids and adapter ids stay internal, and commands remain power-user shortcuts rather than
+the price of entry.
+
+**The default loop stays human-directed**: the user discusses, the planner drafts, the user
+confirms, the worker implements, the planner evaluates, the user decides. Autonomous
+planner → worker → planner loops are **not** recorded as the roadmap's direction. They would need
+their own explicit decision.
+
+## D-2026-08-11-12 — One supervised validation-debt pass before M2J PR1 merges (EFE DECISION, ACTIVE)
+
+**Decision.** The inherited unclosed live validations — the M2B logout/login cycle, the M2C write
+path, M2D/M2D.1 and M2E re-validation, and the unconfigured media provider credentials — get **one
+supervised cleanup pass before M2J PR1 is merged**.
+
+It does **not** block starting M2J PR1 development or preparation. It does block the merge: PR1
+must not land while that agreed debt is unresolved without a new explicit decision.
+
+**The reason is habit rather than tidiness.** Every milestone in this replan is validated live on
+the real host by design, and the debt is a record of that habit slipping. Clearing it costs little
+and stops STATUS carrying caveats that readers learn to skip.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

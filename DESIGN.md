@@ -39,6 +39,11 @@ phone/tablet (PWA over Tailscale)
   files · Ollama (intent) · OpenClaw (optional accel)
 ```
 
+The planned extension of this picture — a local planner that plans rather than implements, cloud
+workers that implement, bounded actuators, and canonical Markdown memory — is
+[Local-first orchestration](#local-first-orchestration-planned-recorded-2026-08-11) below. It adds
+components; it changes none of the authority rules in this section.
+
 ### Session lifecycle boundary (binding)
 
 Cofferdam runs as a systemd **user** service and reaches the desktop through the systemd **user
@@ -189,6 +194,127 @@ can never substitute for tests; the user sees request-vs-change and evidence, th
 Guardian switches, monitors, and rolls back on failure. Cofferdam's claims are evidential, not
 proof: "verified against recorded acceptance criteria", "passed deterministic tests", "matched
 expected UI evidence" — never "proven correct".
+
+## Local-first orchestration (planned; recorded 2026-08-11)
+
+**None of this section is implemented.** It records the architecture the M2J → M2K → M2L → M2M
+sequence builds toward, decided as [`DECISIONS.md`](DECISIONS.md) D-2026-08-11-1 … -12. It is an
+*extension* of what ships today, not a redesign: every authority rule below is already enforced in
+production for at least one surface, and the work is to make new components obey the same rules.
+
+### The workstation is a personal private server
+
+The user leaves the machine at home and reaches it from a phone, a browser, another computer or a
+future native app. **The host remains the authority; every remote device is a control surface.**
+Execution, memory, credentials, workers, browser automation and local models stay on the host
+wherever practical. The PWA and main API stay tailnet-private, the private Custom GPT stays a
+bounded conversation surface through the Actions bridge, and no generic public shell, filesystem
+or browser-control surface exists.
+
+### Three roles: planner, workers, actuators
+
+```
+  user (phone / browser / desktop — control surfaces, never authority)
+        │
+        ▼
+  LOCAL PLANNER  (small local model, advisory)
+   understands messy Turkish/English · holds the planning conversation
+   drafts worker prompts and follow-ups · reads evidence · explains · recommends
+   writes no code · runs nothing · holds no credentials
+        │  proposals only — schema-validated, user-confirmed
+        ▼
+  existing validated paths (POST /api/tasks · clarification answer · typed action)
+        │                                  │
+        ▼                                  ▼
+  CLOUD WORKERS                      ACTUATORS (local, typed)
+   Task Core + TaskAdapter            launch · media · audio · displays
+   claude-code · claude-agent-sdk     future: BrowserActuator, own process,
+   codex (later)                      own profile, provider-neutral
+```
+
+**The planner is not the implementer.** It is planner, prompter, evaluator, coordinator and
+conversational interface; implementation stays delegated to cloud workers through Task Core. The
+worker abstraction is the one that already exists — `TaskAdapter` + declared capabilities +
+`delegated_adapter` — and Codex is a third adapter rather than a new layer above it.
+
+**Planner output is advisory and never authority.** Its entire output surface is conversation text
+plus schema-validated proposals, and a proposal becomes real only through a path that already
+validates and confirms. The planner lives in the daemon (`cofferdam/workstation/planner/`) and
+talks to a **separate model-runtime process** on loopback through a replaceable provider client; it
+is not a `TaskAdapter`, and it does not reach Task Core through the Actions bridge. Task Core stays
+provider-neutral and model-free.
+
+**The default loop is human-directed**: the user discusses, the planner drafts, the user confirms,
+the worker implements, the planner evaluates, the user decides. Autonomous planner → worker loops
+are not the recorded direction and would need their own decision.
+
+### Three minds, three homes
+
+Markdown is canonical memory (D-2026-08-08-6); derived indexes are rebuildable and never authority.
+
+- **Global mind** — a dedicated, Obsidian-compatible, user-owned vault outside `$COFFERDAM_HOME`,
+  read under an explicit host-owned grant. The architecture is not bound to a fixed absolute path.
+- **Project mind** — the project's own repository. For Cofferdam itself the existing documents are
+  role-mapped (`STATUS.md`, `ROADMAP.md`, `DECISIONS.md`, `DESIGN.md`); no `PLAN.md` is added to
+  satisfy a filename convention, and workspace config records which file plays which role so the
+  Context Builder reads roles rather than names.
+- **Working Context** — active workspace, objective, active task, worker, plan checkpoint, pending
+  decision, latest evidence reference, expected next step. This is **state, not memory**: SQLite
+  under `state/`, never a second Markdown authority.
+
+**No model silently writes durable memory.** The planner proposes, a person accepts on a
+device-token surface, and Cofferdam applies atomically against the **base content hash** the user
+reviewed — a drifted file refuses rather than overwriting. The planner and the Actions bridge have
+no acceptance route at all, and deletion is never planner-proposable.
+
+### Local context and external context are different objects
+
+A pack assembled for the local planner and a pack **leaving the host** are two security objects,
+not one type used twice: `LocalContextPack` and `CloudContextProjection`.
+
+The local planner may receive rich local context — granted global mind, project mind, Working
+Context, task state, evidence, preferences — because it runs on the authority and its provider
+client speaks only to loopback. **Anything bound for a cloud worker, the private Custom GPT, a
+browser skill or any other external model passes through an explicit egress projection.** By
+default that carries relevant project plan and context, relevant decisions, the current objective
+and acceptance criteria; it excludes global personal memory, unrelated-project memory, vault paths
+and project filesystem roots, and credentials are structurally absent. Workspace policy may later
+allow selected global-mind extracts by naming them — never by inference.
+
+Each part of a pack carries `{source_kind, source_ref, observed_at}`, so the planner knows what is
+an observation, what is a worker claim, what is memory and what is external text. Text read from a
+web page or another model is `external_model_output`: data with provenance, never instructions.
+
+### Evidence outranks claims
+
+**Adapter-reported evidence is a claim; only machine, git and Cofferdam observations are
+observations.** Extended from single events to a whole turn, an `EvidenceBundle` keeps both and
+flags the disagreement rather than reconciling it. Absent observation is `unknown` — rendered
+*unverified*, never inferred and never reported as "did not happen".
+
+Deterministic checks run before any model evaluation, and **the model layer may only downgrade,
+never upgrade**: a criterion marked failed or unverified cannot become verified by model opinion.
+Worker-reported success does not override missing evidence. Risk level is derived from code and
+policy, never selected by the model; an LLM judgment may raise attention, never grant.
+
+**Executable check text never comes from a request.** Checks are code-owned named checks or
+host/operator-owned validated definitions referenced by stable id; the planner, the worker, a
+remote caller and a task prompt never supply command text. Literal `argv`, no shell, validated
+`cwd`, bounded timeout, bounded output.
+
+### Health is observed before it is explained
+
+The machine records structured reason codes first (`NETWORK_UNREACHABLE`, `PROVIDER_AUTH`,
+`WORKER_EXITED`, `HOST_SHUTDOWN`, …); a deterministic layer diagnoses with a confidence word —
+`observed`, `likely`, `unknown` — and the planner may then phrase it naturally. **The planner may
+not invent operational truth**: "the worker likely stopped because this host lost connectivity" is
+allowed where the probe failed; "your internet went down" is not, unless that was observed. When
+evidence is insufficient, the honest sentence is that Cofferdam could not determine the cause.
+
+Automatic retry covers idempotent reads and supervised infrastructure reconnects. **Consequential
+operations are never retried automatically** — task creation, follow-ups, clarification answers,
+actuator sends, memory applies — and user-triggered retries carry idempotency keys so a retry after
+uncertainty is safe rather than duplicated.
 
 ## The Trust Core (preserved module)
 
