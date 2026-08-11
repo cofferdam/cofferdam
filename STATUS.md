@@ -8,9 +8,13 @@ structured single-choice `AskUserQuestion` with Cofferdam-minted option ids, a t
 PWA/API, and only the narrow Actions bridge public.
 
 **The work after it was replanned on 2026-08-11**: M2J is preserved and reshaped, and the queue is
-**M2J → M2K → M2L → M2M** with two isolated parallel tracks. Nothing is implemented yet. See
-[`ROADMAP.md`](ROADMAP.md) and [`DECISIONS.md`](DECISIONS.md) D-2026-08-11-1 … -12 and
-D-2026-08-12-1; the planning package is preserved as history in `handoffs/replan-2026-08-11/`.
+**M2J → M2K → M2L → M2M** with two isolated parallel tracks. See [`ROADMAP.md`](ROADMAP.md) and
+[`DECISIONS.md`](DECISIONS.md) D-2026-08-11-1 … -12 and D-2026-08-12-1; the planning package is
+preserved as history in `handoffs/replan-2026-08-11/`.
+
+**M2J PR1 is implemented on a branch** — workspaces and durable Working Context, so Cofferdam owns
+"what are we working on" without a model inferring it. See *In progress* below. Nothing else in
+M2J is started: no mind, no Context Builder, no planner, no evidence bundles.
 
 **M2H is complete and merged**, closing the M1 post-reboot gate;
 M2F Agent Task Core and M2G the Claude Code adapter merged; the isolated Custom GPT Actions mobile
@@ -716,6 +720,66 @@ real session exactly, with zero mismatches in either direction — see the
 **M2B does not change the M1 reboot gate.** It alters no boot behaviour, no systemd unit, and no
 bind logic. Neither does M2B3A, M2B3A.1, M2C, M2D, M2E, M2F, or M2G. **M2H does**, which is why
 the gate closes there.
+
+## In progress (on a branch, not merged)
+
+### M2J PR1 — workspaces and durable Working Context
+
+On `feat/m2j-workspace-working-context`, from the merged `ebe1a78`. **Implemented and validated
+locally; not deployed and not merged.** Documented in [`docs/WORKSPACES.md`](docs/WORKSPACES.md).
+
+**Cofferdam now owns "what are we working on", and it survives a restart.** A workspace is
+host-owned configuration in `config/workspaces.json` — a stable id, a label, and the id of a
+project that already exists — beside `task-projects.json` and validated the same way. Working
+Context is Cofferdam's own durable state in its own SQLite database under `state/workspace/`:
+the active workspace, each workspace's objective and its history, and four bounded continuity
+references. Six private routes under `/api/workspace*`, all on the device token.
+
+**Context is keyed by workspace rather than stored once**, and that is the design decision worth
+recording. One global objective would mean switching workspace left the previous objective on
+screen describing something nobody is doing, and switching back lost it. Per-workspace rows make
+the switch a pointer move and make cross-workspace confusion structurally impossible instead of a
+rule to remember.
+
+**Nothing derived is persisted.** Task state, bucket and terminality are asked of Task Core on
+every read; the delegated worker is resolved through the workspace's project on every read. A
+stored `task_state` would be correct for seconds and then wrong with nothing announcing it, and a
+stored worker would be a second adapter authority holding a stale copy — strictly worse than the
+ordering bug PR #34 fixed. Both are asserted by changing the underlying fact behind the store and
+re-reading.
+
+**A task reference is a reference.** `live`, `terminal` or `missing`, resolved live. A terminal
+task keeps its reference, because it finished and that is the fact somebody came back to read; a
+task Task Core no longer has is reported `missing` with its id rather than blanked. Pointing at a
+task in another project is refused.
+
+**The workspace cannot become a second authority.** `root`, `path`, `adapters`,
+`delegated_adapter`, `model`, `provider` and the execution words are refused *by name* in the
+config schema, with a message saying where that decision actually lives, and refused again by
+allowlist at every route. There is no create route: workspaces are edited on the host, and nothing
+auto-registers one for an existing project.
+
+**The Actions bridge reaches none of it.** These routes use `require_token`, which has never heard
+of the bridge credential, so a bridge request is a 401 because nothing can recognise it rather than
+because a check refuses it. A test enables the bridge caller, presents the real credential to all
+six routes, and uses a task route as the control. `syncWorkspace` is an M2J PR4 decision and no
+external surface reads the workspace today.
+
+**Backward compatible by absence.** No `workspaces.json` means no workspaces, every existing task,
+Custom GPT and Claude flow is untouched, and **no database is created** — a read never opens one,
+because the PWA polls and an ordinary connect would manufacture a state directory out of somebody
+looking at a screen.
+
+**Two defects were found by writing the tests rather than by reading the code**: a failed
+schema-version check abandoned an open SQLite connection holding a lock on a database the process
+had just decided not to touch, and a plain read created the database on an unconfigured host,
+which contradicted the backward-compatibility claim this PR makes. Both are fixed and both have
+regression tests.
+
+**Not in this PR:** the mind, the vault and memory proposals (PR2); the Context Builder,
+`LocalContextPack` and `CloudContextProjection` (PR3); the PWA workspace panel and `syncWorkspace`
+(PR4); evidence and evaluation (M2K); the planner and any model runtime (M2L); the dashboard
+(M2M). No document-role or profile fields were added, because nothing reads them yet.
 
 ## M2I.5 records (all merged; written while each was on its branch)
 

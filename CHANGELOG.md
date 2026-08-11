@@ -8,6 +8,38 @@ release.
 
 ### Added
 
+- **M2J PR1 — Cofferdam knows what you are working on, and remembers it.** Until now every surface
+  worked that out again per request: the phone knew because you were looking at a task list, the
+  Custom GPT knew because the conversation mentioned a project, and nothing survived a restart.
+  Now there are **workspaces** — a name for a piece of work, bound to a project you already have —
+  and each one keeps its own **objective**, its own expected next step, and a pointer to the task
+  in flight. Configure them in `config/workspaces.json`; setup and the full API are in
+  [`docs/WORKSPACES.md`](docs/WORKSPACES.md).
+
+  **Switching workspaces does not smear one onto the other.** Context is kept per workspace, so
+  moving from one to another and back finds each objective where you left it, rather than showing
+  you yesterday's goal for something you are not doing.
+
+  **Nothing is remembered that could go stale.** A task's state, and which worker runs in a
+  workspace, are looked up fresh every time you read — from Task Core and from the project. A saved
+  copy would be right for a few seconds and then quietly wrong, which is the one thing this kind of
+  "current status" feature is usually bad at.
+
+  **A finished task stays on screen.** When work completes, fails or is cancelled, the reference is
+  kept and labelled rather than cleared: it finished, and that is exactly the moment you come back
+  to look at it. A task that no longer exists says so, with its id, instead of vanishing.
+
+  **A workspace can only name a project.** There is no field for a folder, an agent, a model or a
+  provider — those decisions live where they already lived, and writing one here is refused with a
+  message saying where it belongs. There is no way to create a workspace over the network, and
+  Cofferdam never invents one for a project it finds.
+
+  **Nothing here runs anything.** "Expected next step" is a note to yourself; Cofferdam records it
+  and does not act on it.
+
+  If you configure no workspaces, nothing changes: every existing task, Claude and Custom GPT flow
+  works exactly as before, and no new database is created.
+
 - **M2D — press play on the track you picked, from your phone.** Cofferdam could find the exact
   song and open Spotify; you still had to press play yourself. This adds control of your **own
   Spotify account's player**: what is playing now, pause and resume, previous and next, Spotify's

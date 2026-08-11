@@ -55,6 +55,12 @@ route                                        auth  purpose
                                                    tool approval, which has no route
 ``GET  /api/task-adapters``                  yes   registered adapters + capabilities
 ``GET  /api/task-projects``                  yes   configured projects, names only
+``GET  /api/workspaces``                     yes   configured workspaces, names only
+``GET  /api/workspace/current``              yes   what are we working on right now
+``PUT  /api/workspace/active``               yes   switch or clear the active workspace
+``PUT  /api/workspace/objective``            yes   set or clear the objective
+``PUT  /api/workspace/context``              yes   bounded continuity fields
+``GET  /api/workspace/objective-history``    yes   previous objectives, bounded
 ``WS   /ws``                                 yes   live events
 ``GET  /`` and static assets                 no    the PWA shell itself
 ===========================================  ====  =============================
@@ -331,8 +337,37 @@ from .tasks.models import (
     ORIGIN_PWA,
     TASK_API_VERSION,
 )
+from .workspace import (
+    CODE_ACTIVE_WORKSPACE_UNSET,
+    CODE_CONTEXT_FIELD_INVALID,
+    CODE_TASK_NOT_IN_WORKSPACE,
+    CODE_WORKSPACE_DISABLED,
+    CODE_WORKSPACE_PROJECT_MISSING,
+    CODE_WORKSPACE_UNKNOWN,
+    WorkspaceError,
+    WorkspaceService,
+    WorkspaceStore,
+)
 
 WEB_ROOT = Path(__file__).resolve().parents[2] / "web"
+
+# A workspace request body is an id, a sentence, or a handful of short
+# references. Two kilobytes is already far more than that shape needs, and the
+# body is refused on length before it is parsed — the same posture the audio and
+# overlay bodies use.
+MAX_WORKSPACE_BODY_BYTES = 4 * 1024
+
+# Refusal code -> HTTP status. 404 for a workspace that is not configured, 409
+# for a world that is not in the right state (nothing active, the project gone),
+# 422 for everything the request itself got wrong.
+_WORKSPACE_STATUS = {
+    CODE_WORKSPACE_UNKNOWN: 404,
+    CODE_WORKSPACE_DISABLED: 409,
+    CODE_WORKSPACE_PROJECT_MISSING: 409,
+    CODE_ACTIVE_WORKSPACE_UNSET: 409,
+    CODE_CONTEXT_FIELD_INVALID: 422,
+    CODE_TASK_NOT_IN_WORKSPACE: 422,
+}
 
 # An overlay is a short label and a handful of aliases. Anything larger is
 # not a naming request, so the body is capped well below the registry file
@@ -649,6 +684,7 @@ def create_app(
     spotify=None,
     youtube_player=None,
     tasks=None,
+    workspaces=None,
 ) -> FastAPI:
     """Build the application. Arguments are injectable for tests."""
     config = config or load_config()
@@ -731,6 +767,26 @@ def create_app(
         # would be the first lie the whole milestone exists to prevent.
         tasks.recover_after_restart()
 
+    # Workspaces and Working Context (M2J PR1). Constructed unconditionally and
+    # harmless when unconfigured: a host with no `workspaces.json` has no
+    # workspaces, every route below answers truthfully that none is active, and
+    # nothing else in the service consults it. The database is created lazily on
+    # the first write, so a host that never activates a workspace never gains a
+    # file.
+    #
+    # It reads the project registry through a callable rather than holding one,
+    # so an edit to `task-projects.json` is visible to a workspace read the same
+    # way it is to Task Core. It holds Task Core itself only to *resolve* task
+    # references — see `workspace/service.py` for why nothing here may store a
+    # task's state.
+    if workspaces is None:
+        workspaces = WorkspaceService(
+            config,
+            WorkspaceStore(config),
+            projects=lambda: tasks.projects,
+            tasks=tasks,
+        )
+
     # Native Remote Control (M2H, Lane A). Constructed unconditionally because
     # it holds no process and starts nothing: every operation is refused unless
     # the named project is registered, enabled, and — for start — has explicitly
@@ -789,6 +845,7 @@ def create_app(
     app.state.youtube_player = youtube_player
     app.state.youtube_actions = youtube_actions
     app.state.tasks = tasks
+    app.state.workspaces = workspaces
     overlays = DisplayOverlayStore(config, inventory)
     app.state.display_overlays = overlays
 
@@ -2389,6 +2446,225 @@ def create_app(
     async def list_task_projects() -> Dict[str, Any]:
         """Where tasks may run, by name. **No filesystem path is published.**"""
         return tasks.projects.to_dict()
+
+    # -- workspaces and Working Context (M2J PR1) ----------------------------
+    #
+    # Five routes, all on `require_token` — the private device-token surface —
+    # and deliberately **not** on `require_task_caller`. The Actions bridge holds
+    # a credential these have never heard of, so a bridge request arrives here as
+    # a 401 rather than as a refusal a later change could relax. That is the same
+    # structural argument D-2026-08-09-2 makes for the Remote Control routes, and
+    # it matters here for a specific reason: `syncWorkspace` is recorded as an
+    # M2J **PR4** Action, and until that is designed and reviewed the honest
+    # state is that no external surface can read this at all.
+    #
+    # There is no create route. Workspaces are host-owned configuration, edited
+    # in a text editor beside `task-projects.json`, for the reason projects have
+    # no create route either: a registry that can be written over the network is
+    # a registry that can grant access over the network. Nothing here writes
+    # `workspaces.json`, and nothing auto-registers a workspace for an existing
+    # project — D-2026-08-11-1's "suggested, never silently auto-created", taken
+    # to its simplest honest form, which is that PR1 suggests nothing yet.
+    #
+    # No body anywhere accepts a path, a root, an adapter, a model, a provider or
+    # a session id. The workspace *schema* refuses those by name at load; these
+    # routes refuse them by allowlist at the door.
+
+    async def _workspace_body(request: Request, allowed: set) -> Dict[str, Any]:
+        """One bounded workspace request body, refusing anything unexpected.
+
+        The allowlist is the surface, exactly as it is for task bodies. Unknown
+        keys are a 422 rather than a silent drop, because the difference between
+        "clear this field" and "I misspelled this field" is invisible otherwise —
+        and one of those blanks somebody's objective.
+        """
+        content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if content_type and content_type != "application/json":
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="this endpoint accepts application/json only",
+                status_code=415,
+            )
+        declared = request.headers.get("content-length")
+        if declared is not None:
+            try:
+                too_big = int(declared) > MAX_WORKSPACE_BODY_BYTES
+            except ValueError:
+                raise ApiError(
+                    code=CODE_INVALID_PARAMS, message="invalid Content-Length", status_code=400
+                )
+            if too_big:
+                raise ApiError(
+                    code=CODE_INVALID_PARAMS,
+                    message="the request body is too large",
+                    status_code=413,
+                )
+        raw = await request.body()
+        # Checked again after reading: Content-Length is a claim, not a fact.
+        if len(raw) > MAX_WORKSPACE_BODY_BYTES:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS, message="the request body is too large", status_code=413
+            )
+        if not raw:
+            payload: Any = {}
+        else:
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                raise ApiError(
+                    code=CODE_INVALID_PARAMS,
+                    message="the request body is not valid JSON",
+                    status_code=400,
+                )
+        if not isinstance(payload, dict):
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="the request body must be a JSON object",
+                status_code=400,
+            )
+        unexpected = sorted(set(payload) - allowed)
+        if unexpected:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="unexpected field: " + unexpected[0],
+                status_code=422,
+                detail="this endpoint accepts only: " + ", ".join(sorted(allowed)),
+            )
+        return payload
+
+    async def _run_workspace(operation, *args, **kwargs) -> Any:
+        try:
+            return await run_in_threadpool(operation, *args, **kwargs)
+        except WorkspaceError as rejection:
+            raise ApiError(
+                code=rejection.code,
+                message=rejection.message,
+                status_code=_WORKSPACE_STATUS.get(rejection.code, 422),
+                detail=rejection.detail,
+            )
+        except TaskError as rejection:
+            # A task reference that could not be resolved. Surfaced with the task
+            # code rather than re-labelled, so "no such task" reads the same here
+            # as it does everywhere else in the product.
+            raise ApiError(
+                code=rejection.code,
+                message=rejection.message,
+                status_code=_TASK_STATUS.get(rejection.code, 422),
+                detail=rejection.detail,
+            )
+
+    @app.get("/api/workspaces", dependencies=[Depends(require_token)])
+    async def list_workspaces() -> Dict[str, Any]:
+        """Every configured workspace, by name, with whether its project is usable.
+
+        Names and ids only. A workspace never publishes a path, because it never
+        holds one — the directory belongs to the project, and the project does not
+        publish it either.
+        """
+        await run_in_threadpool(workspaces.reload_workspaces)
+        return await run_in_threadpool(workspaces.list_workspaces)
+
+    @app.get("/api/workspace/current", dependencies=[Depends(require_token)])
+    async def workspace_current() -> JSONResponse:
+        """What are we working on right now.
+
+        Never an error for an ordinary state. No workspace configured, none
+        active, the active one renamed out of the file, its project disabled —
+        each is a `problem` word on a 200, because every one of them is a real
+        state of a working host and a client has to render it.
+
+        `no-store`, because the body carries somebody's objective and expected
+        next step: their own words about their own work, which is the same class
+        of content as a task result and gets the same header.
+        """
+        payload = await run_in_threadpool(workspaces.current)
+        return JSONResponse(content=payload, headers=TASK_CONTENT_HEADERS)
+
+    @app.put("/api/workspace/active", dependencies=[Depends(require_token)])
+    async def put_workspace_active(request: Request) -> JSONResponse:
+        """Switch the active workspace, or clear it.
+
+        `workspace_id: null` deactivates without forgetting anything: each
+        workspace keeps its own objective and references, so switching away and
+        back finds them where they were left.
+        """
+        payload = await _workspace_body(request, allowed={"workspace_id"})
+        if "workspace_id" not in payload:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="workspace_id is required",
+                status_code=422,
+                detail="pass a configured workspace id, or null to deactivate",
+            )
+        target = payload["workspace_id"]
+        if target is None:
+            result = await _run_workspace(workspaces.deactivate)
+        else:
+            result = await _run_workspace(workspaces.activate, target)
+        return JSONResponse(content=result, headers=TASK_CONTENT_HEADERS)
+
+    @app.put("/api/workspace/objective", dependencies=[Depends(require_token)])
+    async def put_workspace_objective(request: Request) -> JSONResponse:
+        """Set or clear the current objective on the active workspace.
+
+        Its own route rather than a field on the one below, because this write
+        has a consequence the others do not: the objective it replaces is
+        appended to history in the same transaction. A caller should be able to
+        see from the URL that they are changing the thing with a record.
+
+        `source` is **not** a client field. It is assigned here from the
+        authenticated surface, for the reason task `origin` is: a caller
+        describing its own provenance is the opposite of what provenance is for.
+        """
+        payload = await _workspace_body(request, allowed={"objective"})
+        if "objective" not in payload:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="objective is required",
+                status_code=422,
+                detail="pass a short objective, or null to clear it",
+            )
+        result = await _run_workspace(workspaces.set_objective, payload["objective"])
+        return JSONResponse(content=result, headers=TASK_CONTENT_HEADERS)
+
+    @app.put("/api/workspace/context", dependencies=[Depends(require_token)])
+    async def put_workspace_context(request: Request) -> JSONResponse:
+        """Update bounded continuity fields on the active workspace.
+
+        A **partial** update: only the keys present are touched, `null` clears,
+        and absence leaves alone. That distinction is why unknown keys are
+        refused rather than ignored — a typo that silently did nothing would look
+        exactly like a value that was accepted.
+
+        `active_task_id` must name a task Task Core actually has, in *this*
+        workspace's project. Nothing here changes a task; the reference is a
+        pointer and Task Core stays the authority for everything about it.
+        """
+        payload = await _workspace_body(
+            request,
+            allowed={
+                "active_task_id",
+                "expected_next_step",
+                "plan_checkpoint",
+                "pending_decision_ref",
+                "latest_evidence_ref",
+            },
+        )
+        if not payload:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="nothing to update",
+                status_code=422,
+                detail="pass at least one field to set or clear",
+            )
+        result = await _run_workspace(workspaces.update_context, payload)
+        return JSONResponse(content=result, headers=TASK_CONTENT_HEADERS)
+
+    @app.get("/api/workspace/objective-history", dependencies=[Depends(require_token)])
+    async def workspace_objective_history(limit: int = 20) -> JSONResponse:
+        """Previous objectives for the active workspace, newest first, bounded."""
+        result = await _run_workspace(workspaces.objective_history, limit=limit)
+        return JSONResponse(content=result, headers=TASK_CONTENT_HEADERS)
 
     # -- native Remote Control (M2H, Lane A) ---------------------------------
     #

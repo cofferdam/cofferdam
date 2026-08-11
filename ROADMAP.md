@@ -232,9 +232,14 @@ downstream reads from.
   Actions bridge because it "cannot be built honestly before the workspace model it reads from"
   (D-2026-08-09-1) — the same sentence applies verbatim to a local planner.
 - **Sub-phases:**
-  - **PR1 — workspace model + Working Context.** Workspaces over projects (host-owned config, the
-    same validation posture as `task-projects.json`); the objective and its history; Working
-    Context as durable state in SQLite under `state/`, **not** a second Markdown authority.
+  - **PR1 — workspace model + Working Context.** *Implemented on a branch; see
+    [`STATUS.md`](STATUS.md) and [`docs/WORKSPACES.md`](docs/WORKSPACES.md).* Workspaces over
+    projects (host-owned config, the same validation posture as `task-projects.json`); the
+    objective and its history; Working Context as durable state in SQLite under `state/`, **not** a
+    second Markdown authority. Context is keyed **per workspace** rather than stored once, so
+    switching cannot leak one workspace's objective into another. Task state and the delegated
+    worker are derived on every read and never stored. No document-role or profile fields yet —
+    they arrive with the components that read them.
   - **PR2 — mind access + grant + memory-proposal queue.** Project mind read from the project's own
     repository by **role** rather than filename; the global vault behind an explicit host-owned
     grant; the proposal → accept → hash-bound apply path (D-2026-08-11-4).
