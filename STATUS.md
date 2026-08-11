@@ -1,6 +1,18 @@
 # Status
 
-Accurate as of **2026-08-10**. **M2H is complete and merged**, closing the M1 post-reboot gate;
+Accurate as of **2026-08-11**. **M2I.5 is complete**: PR #34 is merged as `2386a54`, production
+normalization completed, and the live host runs that commit with the Claude Code adapter, the
+Claude Agent SDK adapter, explicit host-owned delegated-adapter selection, Task Core as authority,
+the private Custom GPT Actions bridge, same-session clarification continuation and follow-up,
+structured single-choice `AskUserQuestion` with Cofferdam-minted option ids, a tailnet-private
+PWA/API, and only the narrow Actions bridge public.
+
+**The work after it was replanned on 2026-08-11**: M2J is preserved and reshaped, and the queue is
+**M2J → M2K → M2L → M2M** with two isolated parallel tracks. Nothing is implemented yet. See
+[`ROADMAP.md`](ROADMAP.md) and [`DECISIONS.md`](DECISIONS.md) D-2026-08-11-1 … -12; the planning
+package is preserved as history in `handoffs/replan-2026-08-11/`.
+
+**M2H is complete and merged**, closing the M1 post-reboot gate;
 M2F Agent Task Core and M2G the Claude Code adapter merged; the isolated Custom GPT Actions mobile
 probe passed; client architecture and the active roadmap recorded as
 [`DECISIONS.md`](DECISIONS.md) D-2026-08-08-1 … -6.
@@ -123,8 +135,9 @@ says "on branch, not merged" it is describing the moment it was written, correct
 each milestone *did not* do, and which validations are still outstanding, is still current and is
 why these records are kept rather than collapsed into one line.
 
-**M2I is closed.** PR4 merged as `1a7d66b` with its real-phone validation passed. The queued work
-is M2I.5 → M2J; see [`ROADMAP.md`](ROADMAP.md). M2I.5 PR1 is on a branch — see *In progress* below.
+**M2I is closed.** PR4 merged as `1a7d66b` with its real-phone validation passed. **M2I.5 is closed
+too** — PR1 `e078251`, PR2 `de15bd73`, PR3 `2386a54` (#34). The queued work is
+M2J → M2K → M2L → M2M; see [`ROADMAP.md`](ROADMAP.md).
 
 - **M2G — Claude Code adapter.** Merged as PR #21. The first
   adapter that runs a real program, built on the merged M2F foundation. A phone picks an approved
@@ -665,12 +678,18 @@ remains covered by tests only. Automatic login is still not enabled on this host
 bind logic. Neither does M2B3A, M2B3A.1, M2C, M2D, M2E, M2F, or M2G. **M2H does**, which is why
 the gate closes there.
 
-## In progress (on a branch, not merged)
+## M2I.5 records (all merged; written while each was on its branch)
+
+As with the milestone records above, these were written while their branches were open and are
+kept as those PRs' records. **All three are merged on `main` now** — PR1 `e078251`, PR2 `de15bd73`,
+PR3 `2386a54` (#34) — so where an entry below says "on a branch" it is describing the moment it was
+written. Production runs `2386a54` in slot A with both Claude adapters registered.
 
 ### M2I.5 PR3 — Gate B, production Agent SDK delegation
 
-On `feat/m2i5-agent-sdk-gate-b`, from the merged `de15bd73`. **Implemented, deployed to the
-candidate slot and validated live through the real private Custom GPT.** Sanitized evidence:
+**Merged as `2386a54` (#34).** Written on `feat/m2i5-agent-sdk-gate-b`, from the merged `de15bd73`.
+**Implemented, deployed and validated live through the real private Custom GPT.** Sanitized
+evidence:
 [`docs/checklists/m2i5-gate-b-validation.md`](docs/checklists/m2i5-gate-b-validation.md).
 
 **The precondition, and it was worse than it read.** The Actions bridge has no `adapter_id` field —
@@ -1098,28 +1117,72 @@ and a Remote Control host must still be started deliberately after every reboot.
 
 ## Planned (active roadmap — see [`ROADMAP.md`](ROADMAP.md))
 
-Queued, in order:
+**Replanned 2026-08-11 and recorded as D-2026-08-11-1 … -12.** Nothing below is implemented; no
+code was written for any of it. Queued, in order:
 
-- **M2I.5 — private Custom GPT Actions bridge.** **PR1 is on a branch** (below). What remains in
-  the milestone is external exposure and real-device validation, both behind approval gates: a
-  dedicated HTTPS origin and tunnel design, the external key entered in the GPT editor, the schema
-  imported, and a first real Action call from an iPhone. No approval Action; no exposure of the
-  general API or the PWA.
-- **M2J — Project Workstation, workspaces and profiles:** workspace creation, project templates,
-  a code-owned model allowlist, Auto / Safe / Review profiles, project-context retrieval, and
-  handoff and history surfaces.
+- **M2J — workspace, Working Context, mind foundation, Context Builder.** The recorded M2J scope
+  preserved and reshaped: workspaces over projects, the current objective, durable Working Context
+  in SQLite, canonical Markdown memory access by **role** rather than filename, the memory
+  proposal → accept → hash-bound apply path, bounded provenance-tagged context assembly, and the
+  workspace surfaces including `get_project_context`. Four sub-phases; no planner, no vectors, no
+  automatic memory writes, no new public surface.
+- **M2K — evidence and evaluation foundation.** Model-free. Per-turn evidence bundles that keep
+  worker *claims* and Cofferdam *observations* structurally apart, deterministic criteria checks
+  before any model, risk levels derived from code and policy rather than model self-selection, and
+  the first machine-observed failure reason codes. Includes the five-step artifact/change-claims
+  Task Core PR that D-2026-08-09-3 specifies.
+- **M2L — Local Planner MVP.** One local model, one role, advisory throughout: Turkish-first
+  conversation, worker-prompt and follow-up drafting, evidence interpretation, next-step
+  recommendations, honest refusal. Every consequential proposal is explicitly confirmed; there is
+  no autonomous planner → worker continuation in this milestone.
+- **M2M — remote operations completion.** A consolidated status overview, the workspace dashboard
+  in the existing PWA, deterministic diagnosis synthesis over M2K's reason codes, and retry UX over
+  idempotent replays. The PWA and main API stay tailnet-private.
 
-Later, unordered: Codex app-server as a second delegated worker and reviewer · Guardian/Supervisor
-and Runtime A/B slots with the manual recovery command surface · update records and the A/B
-self-update demonstration · process, window and display control · natural-language intent routing
-(Ollama) · richer Markdown memory retrieval · an optional OpenClaw client.
+**Before M2J PR1 merges:** one supervised pass over the inherited live-validation debt below
+(D-2026-08-11-12). It does not block starting M2J PR1; it blocks that merge.
+
+Two **parallel tracks**, isolated from production and outside the milestone gates — neither is
+started: **Track B**, browser-actuator feasibility comparing Playwright, Kimi WebBridge and
+BrowserSkill on one narrow user-triggered spike, semantic automation only, dedicated automation
+profile; and **Track D**, Ollama host provisioning plus a Cofferdam-specific planner benchmark
+whose numbers must exist before M2L's model choice is frozen. Qwen3.5-9B quantized is the current
+candidate, not an architectural dependency; real and private fixtures stay local-only for now.
+
+Later, unordered: **M2N** richer Markdown memory retrieval (backlinks first, vectors second) ·
+**M2O** browser and desktop skills productized from Track B · **M2P** Codex app-server as a second
+delegated worker and reviewer · **M2Q** fast/deep planner routing, only on Track D evidence ·
+Guardian/Supervisor and Runtime A/B slots with the manual recovery command surface · update records
+and the A/B self-update demonstration · process, window and display control · an optional OpenClaw
+client.
+
+### Inherited live-validation debt (open, scheduled)
+
+Carried forward from earlier milestones and **not** silently absorbed into the new ones. One
+supervised pass clears them before M2J PR1 merges (D-2026-08-11-12):
+
+| Item | Where it is recorded |
+|---|---|
+| M2B logout/login cycle never run — lifecycle at GDM and across a real login unverified for the M2B runtime | M2B record above |
+| M2C audio **write** path (set volume, mute, switch output) not self-validated | M2C record above |
+| M2D / M2D.1 end-to-end run not repeated since the three reliability fixes | M2D.1 record above |
+| M2E YouTube player not validated on the real host | M2E record above |
+| Media provider credentials unconfigured, so the live provider validation is outstanding | M2B3A.1 record above |
+| Graphical-session capability reporting before and after login — covered by tests, not by a boot observation | closed M1 gate above |
 
 ## Deferred (preserved, not on the critical path)
 
 - Trust Core completion: finishing/reviewing/merging PR3c2, PR3d hash-chained audit log, PR4
   hardening. The module is preserved for future privileged-action and high-assurance-update use.
-- Obsidian integration, vector/advanced memory, council/multi-model review integration, voice
-  and wake words, native mobile apps, generalized multi-agent orchestration.
+- Council/multi-model review integration, voice and wake words, native mobile apps, generalized
+  multi-agent orchestration.
+- **Vector/advanced memory** — deferred as an *index*, not as memory: M2J reads canonical Markdown
+  with no retrieval layer at all, and M2N adds backlinks before embeddings. A derived index is
+  never canonical (D-2026-08-08-6).
+- **"Obsidian integration"** is no longer the right phrase for what is deferred. Reading and
+  proposing edits to an Obsidian-**compatible** vault (plain CommonMark, `[[wikilinks]]`, optional
+  frontmatter) is M2J. What stays deferred is integration *with the Obsidian application* —
+  Cofferdam never invokes it, never reads `.obsidian/`, and never writes its config.
 - Windows and macOS *host* support for the workstation product.
 - Domain/trademark registration and any productization gates.
 

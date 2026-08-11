@@ -5,9 +5,9 @@ remote Claude, then the A/B self-update demonstration, then natural-language rou
 depth follows the post-pivot policy in [`DECISIONS.md`](DECISIONS.md) D-2026-08-01-6. Items
 marked **OPEN QUESTION** are unresolved; each names the experiment that settles it.
 
-**Read [Active implementation order](#active-implementation-order-recorded-2026-08-08) first.**
+**Read [Active implementation order](#active-implementation-order-recorded-2026-08-08-replanned-2026-08-11) first.**
 The M1–M7 sections remain the reference for what each layer *is*, and the M2x sections are the
-record of what shipped; the work actually queued next is M2H → M2I → M2I.5 → M2J, and that
+record of what shipped; the work actually queued next is **M2J → M2K → M2L → M2M**, and that
 section takes precedence wherever the two disagree.
 
 ## Implementation philosophy (binding)
@@ -21,8 +21,10 @@ section takes precedence wherever the two disagree.
   Guardian protocol, and A/B state. These are Cofferdam's canonical models.
 - **OpenClaw is optional and replaceable** and must never become Cofferdam's canonical internal
   model. Nothing in the Guardian or activation path may depend on it.
-- **Ollama may classify natural-language intent** into typed actions (M7). It may never execute
-  arbitrary shell commands, and its output is always schema-validated before anything runs.
+- **A local model may classify intent and, from M2L, plan** — it may never execute arbitrary shell
+  commands, and its output is always schema-validated before anything runs. The Local Planner is
+  **advisory**: it drafts proposals, and every consequence passes through an existing validated,
+  user-confirmed path (D-2026-08-11-2). Implementation stays delegated to cloud workers.
 - **Trust Core is preserved but off the immediate critical path** — see
   [`DECISIONS.md`](DECISIONS.md) D-2026-08-01-7. Do not build on it now; do not delete it.
 - **Ship the smallest thing that a phone can actually do**, then improve it with itself.
@@ -74,12 +76,39 @@ contradicted by experiment):
 
 ---
 
-## Active implementation order (recorded 2026-08-08)
+## Active implementation order (recorded 2026-08-08, replanned 2026-08-11)
 
 Where the milestone sections below are the design reference, this is the queue. M2F (Task Core,
 PR #20) and M2G (the Claude Code CLI adapter, PR #21) are merged on `main`; the delegated-task
 lane exists and has been driven from a phone. Client architecture and authority for everything
 below are fixed by [`DECISIONS.md`](DECISIONS.md) D-2026-08-08-1 … -6.
+
+**M2H, M2I and M2I.5 are complete.** The queue from here is:
+
+```
+M2J  Workspace, Working Context, mind foundation, Context Builder   (foundation)
+M2K  Evidence & evaluation foundation, + machine reason codes       (deterministic, model-free)
+M2L  Local Planner MVP                                             (advisory, confirm-by-default)
+M2M  Remote operations completion — overview, dashboard, diagnosis
+──── later, in this order unless evidence reorders it ────
+M2N  Mind retrieval (backlinks first, vectors second)
+M2O  Browser and desktop skills, productized from Track B
+M2P  Codex adapter (second delegated worker)
+M2Q  Fast/deep planner routing — only if Track D data justifies it
+──── unchanged, still later ────
+Guardian / A-B slots (M5) · self-update (M6) · Opera Companion · Trust Core re-entry
+```
+
+Two **parallel tracks** run outside the milestone gates, isolated from production — see
+[Parallel tracks](#parallel-tracks-b-and-d-recorded-2026-08-11) below.
+
+Recorded as [`DECISIONS.md`](DECISIONS.md) D-2026-08-11-1 … -12, which are the authority for the
+sections that follow. The planning package that produced them is preserved as history in
+`handoffs/replan-2026-08-11/`; it is a draft that was edited before adoption, not a second
+roadmap.
+
+**Before M2J PR1 merges:** one supervised pass over the inherited live-validation debt listed in
+[`STATUS.md`](STATUS.md) (D-2026-08-11-12). It does not block starting M2J; it blocks that merge.
 
 ### M2H — Supervised Claude Remote Control (Lane A)
 
@@ -185,22 +214,186 @@ below are fixed by [`DECISIONS.md`](DECISIONS.md) D-2026-08-08-1 … -6.
 - **Review depth:** high-risk — this is an internet-reachable transport and a credential
   boundary. One focused architecture review before implementation, one after.
 
-### M2J — Project Workstation, workspaces and profiles
+### M2J — Workspace, Working Context, mind foundation, Context Builder
 
-- **Objective:** the surface a person actually works from, and the project context an Action can
-  retrieve.
-- **In scope:** existing / new / temporary workspace creation; project templates; a **code-owned**
-  model allowlist; Auto / Safe / Review profiles; the Project Workstation interface; project-context
-  retrieval for the Custom GPT (`get_project_context`); handoff and history surfaces.
-- **Review depth:** normal backend; the profile semantics deserve one focused review, because a
-  profile that quietly widens what a task may do is the failure worth designing against.
+**Reshaped 2026-08-11 (D-2026-08-11-1). The recorded scope is preserved** — workspaces, project
+templates, the code-owned model allowlist, Auto/Safe/Review profiles, `get_project_context`,
+handoff and history surfaces — and gains the durable "what are we working on" state everything
+downstream reads from.
+
+- **Objective:** Cofferdam owns which workspace is active, what the current objective is, which
+  task and worker are in flight, where the plan stands, what decision is pending, which evidence
+  was last produced, and what step is expected next. Plus bounded, provenance-tagged context
+  assembly over that state and over canonical Markdown memory.
+- **Why now:** everything after it reads from it. `get_project_context` was deferred out of the
+  Actions bridge because it "cannot be built honestly before the workspace model it reads from"
+  (D-2026-08-09-1) — the same sentence applies verbatim to a local planner.
+- **Sub-phases:**
+  - **PR1 — workspace model + Working Context.** Workspaces over projects (host-owned config, the
+    same validation posture as `task-projects.json`); the objective and its history; Working
+    Context as durable state in SQLite under `state/`, **not** a second Markdown authority.
+  - **PR2 — mind access + grant + memory-proposal queue.** Project mind read from the project's own
+    repository by **role** rather than filename; the global vault behind an explicit host-owned
+    grant; the proposal → accept → hash-bound apply path (D-2026-08-11-4).
+  - **PR3 — Context Builder.** `LocalContextPack` assembly, bounded by an explicit budget, every
+    part carrying `{source_kind, source_ref, observed_at}` — `user_instruction`, `working_state`,
+    `plan`, `decision`, `memory`, `worker_result`, `machine_observed`, `external_model_output`,
+    `planner_inference`. Priority order: the user's current message (never truncated) → Working
+    Context → workspace summary → the relevant plan section → recent decisions → latest evaluation
+    summary → bounded global style/preference extracts. **No vectors in M2J** — semantic memory is
+    M2N.
+  - **PR4 — surfaces.** The PWA workspace panel, and `get_project_context` / `syncWorkspace` for
+    the Custom GPT. The first OpenAPI edit since Gate B; note the `$ref` import pitfall PR2 found.
+- **The two context objects are separate types** (D-2026-08-11-5). The local pack may be rich;
+  anything leaving the host is a `CloudContextProjection` built by an explicit egress policy —
+  global personal memory, unrelated-project memory, vault paths and project roots excluded by
+  default, credentials structurally absent.
+- **Role mapping, not filename dogma.** For Cofferdam itself, `STATUS.md`, `ROADMAP.md`,
+  `DECISIONS.md` and `DESIGN.md` play the roles; **no `PLAN.md` is added** to satisfy a convention
+  (D-2026-08-11-3). Long files are handled by section selection, which the builder needs anyway.
+- **Security:** the vault grant is the product's second filesystem grant, so it gets the same
+  treatment as project roots — absolute literal path, `lstat`/symlink checks, no traversal,
+  re-verified at use. Memory apply is a device-token surface only. Bridge Actions stay names and
+  ids: no roots, no vault paths, no prompts. One focused review on the grant and the proposal-apply
+  path.
+- **Persistence:** a new SQLite store under `state/`, separate from `tasks.sqlite3`, same
+  WAL/FULL/0600 posture; `config/workspaces.json` with committed examples. Additive — no migration.
+  Existing projects get *suggested* workspace entries the user confirms, never auto-created.
+- **Validation:** the house style — switch workspace, set an objective, see it survive a daemon
+  restart; a memory proposal accepted, one refused, one refused on drift; a pack built under budget
+  with correct provenance; the Custom GPT retrieving project context from the iPhone.
+- **Rollback:** absent config means current behaviour; the new database is deletable without
+  touching tasks.
+- **Not in scope:** no planner, no vectors, no automatic memory writes, no worker changes, no new
+  public surface.
+- **Review depth:** normal backend, plus the one focused review above. The profile semantics still
+  deserve their own look, because a profile that quietly widens what a task may do is the failure
+  worth designing against — and under this replan profiles govern **evaluation depth and
+  confirmation defaults**, never what a task may do.
+
+### M2K — Evidence and evaluation foundation
+
+- **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
+  deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
+  tasks. **Model-free.**
+- **Why before the planner:** it is valuable on its own — the PWA and the Custom GPT can render
+  expected-vs-observed with honest `unverified` rows before any local model exists — it is what the
+  planner's evaluation feature reads, and it is what Track D's benchmark fixtures are made of. A
+  planner built first would evaluate claims it cannot check (D-2026-08-11-1).
+- **In scope:** the five-step artifact/change-claims Task Core PR that D-2026-08-09-3 already
+  specifies; evidence assembly; the deterministic check runner (M6's concept pulled forward,
+  narrowly); risk levels; reason-code records at the adapter and observer boundaries.
+- **The authority rules are the point** (D-2026-08-11-6): every field carries its source kind;
+  absent observation is `unknown`, never inferred; claims contradicting observations are kept and
+  flagged rather than reconciled; deterministic checks run first; **the model layer may only
+  downgrade, never upgrade**; worker-reported success never overrides missing evidence.
+- **Check-command authority is fixed and narrow** (D-2026-08-11-7): checks are code-owned named
+  checks or host/operator-owned validated definitions referenced by **stable id**. The planner, the
+  worker, a remote caller and a task prompt **never supply executable text**. Literal `argv`, no
+  shell, validated `cwd`, bounded timeout, bounded output, off by default per project. One focused
+  review — this is the first surface on which Cofferdam runs a project-scoped command.
+- **Reason codes begin here**, attached to task failures where the adapter boundary can classify a
+  real error; the consolidated overview is M2M's (D-2026-08-11-8).
+- **Persistence:** additive Task Core schema v4 (claims, criteria, evaluation records), the same
+  additive-only discipline as v2 and v3.
+- **Validation:** a real task whose claims disagree with Cofferdam's git observations renders a
+  flagged conflict; a task with criteria shows verified/unverified truthfully; a network cut
+  mid-turn produces `NETWORK_UNREACHABLE`/`PROVIDER_UNREACHABLE` on the task.
+- **Not in scope:** no model narrative, no automatic review of every task, no artifact *content*
+  serving beyond the bounded preview the five-step PR defines.
+- **Review depth:** normal backend, plus the focused check-runner review.
+
+### M2L — Local Planner MVP
+
+One model, one role, advisory throughout (D-2026-08-11-2).
+
+- **Objective:** conversation, drafting, delegation through existing validated paths, an evaluation
+  narrative over evidence bundles, and honest refusal when the context does not support an answer.
+- **In scope:** a per-workspace planner conversation in the PWA, Turkish-first, over Context
+  Builder packs, persisted bounded; a closed starter intent set — explain status, draft a worker
+  task, draft a follow-up, recommend a next step, answer plan questions, and say "I don't know" or
+  ask for clarification when the pack does not support an answer; worker-prompt drafting with
+  acceptance criteria taken from the plan checkpoint; a `MEDIUM` evaluation narrative that
+  distinguishes what the worker *claimed* from what Cofferdam *observed*.
+- **Confirmation is explicit, by default, for every consequential proposal. There is no autonomous
+  planner → worker continuation in this milestone.**
+- **Placement:** `cofferdam/workstation/planner/` plus routes; the model runtime is a separate
+  loopback process with its own systemd user unit, reached through a replaceable provider client
+  (D-2026-08-11-10). The planner is not a `TaskAdapter` and does not speak to Task Core through the
+  Actions bridge.
+- **Model choice comes from Track D**, not from intuition. Qwen3.5-9B quantized is the current
+  candidate and not an architectural dependency.
+- **Security:** off by default behind its own flag; no bridge exposure; proposals-only writes;
+  structured output schema-validated before use, never best-effort-parsed; bounded conversation
+  store under the existing `no-store` content rules. One focused review on the
+  proposal → confirm → create path, because it is a new route to task creation.
+- **Explicitly out:** autonomous continuation of any kind · browser/actuator invocation · the
+  ChatGPT browser skill · memory writes beyond proposals · multi-model routing · fast/deep second
+  models · vector retrieval · Codex · voice · automatic memory writes · any exposure of the planner
+  through the bridge or any new public surface.
+- **Validation:** a live phone run in Turkish, end to end — converse, draft, confirm, worker runs,
+  bundle assembles, planner explains with the claim/observation distinction intact, recommends a
+  follow-up — plus the refusal case demonstrated, plus a truthful `planner_unavailable` when the
+  model runtime is stopped, with tasks unaffected.
+- **Review depth:** normal backend, plus the focused review above.
+
+### M2M — Remote operations completion
+
+- **Objective:** answer "what is Cofferdam doing right now, and what happened while I was away" in
+  one glance.
+- **In scope:** a consolidated `GET /api/status/overview` (host, services, planner, actuators,
+  workers, workspace, attention) carrying names, ids and states only — no prompts, no paths, no
+  secrets, every claim stamped with `observed_at` and its method; typed `/ws` events for health and
+  working-context transitions; the workspace dashboard panel in the existing PWA; deterministic
+  diagnosis synthesis over the M2K reason codes; a `syncWorkspace` Action; and retry UX wired to
+  idempotent replays.
+- **Diagnosis states its confidence** — `observed`, `likely`, `unknown` — and when evidence is
+  insufficient the rendered sentence says Cofferdam could not determine the cause
+  (D-2026-08-11-8). Consequential operations are never retried automatically.
+- **The dashboard is the PWA**, over the tailnet. It is not published through the tunnel, and no
+  second public origin is added (D-2026-08-11-11). It is now also a decision surface — memory
+  proposals are accepted here — which is exactly why acceptance never reaches the bridge.
+- **Validation:** the failure walkthrough executed for real — pull the cable mid-task, kill the
+  helper, reboot the host, reconnect from the phone — each showing the specified truthful state,
+  with the evidence table in [`STATUS.md`](STATUS.md).
+- **Review depth:** normal backend.
+
+### Parallel tracks B and D (recorded 2026-08-11)
+
+Both are **isolated experiments outside the milestone gates**, run against no production
+component and merged into nothing. They are recorded here so their results have somewhere to land,
+not scheduled as milestones.
+
+**Track B — browser actuator feasibility and provider comparison** (D-2026-08-11-9). A
+provider-neutral `BrowserActuator` boundary, and one narrow user-triggered single-shot spike run
+identically against three candidates — Playwright on a dedicated Chrome/Chromium profile, Kimi
+WebBridge if its Ubuntu local-agent path can be driven semantically, and BrowserSkill. The spike:
+a known logged-in ChatGPT conversation → a nonce-tagged exact prompt → submit → wait for truthful
+completion → extract only the final assistant response → stop. Semantic automation only
+(D-2026-08-04-7): a provider that works by screenshots and coordinates is out regardless of its
+other merits. A dedicated automation profile, never the daily browser. Lives in
+`experiments/browser-actuator/`, importing nothing from `cofferdam/`. Productized, if at all, in
+M2O.
+
+**Track D — Ollama operations and the Cofferdam planner benchmark** (D-2026-08-11-10). Host
+provisioning as an ops task with no repository change, plus a harness that feeds fixture packs to
+a `(endpoint, model)` pair and scores the work Cofferdam actually does: messy Turkish intent
+understanding, project/context understanding, plan extraction, worker-prompt quality, follow-up
+quality, result explanation, expected-vs-observed evaluation, unsupported-claim detection, tool
+selection, deciding **not** to act, and asking for clarification. Deterministic scoring where
+possible; rubric scoring labeled advisory. **Real and private examples stay local-only**; committed
+fixtures are synthetic or public-safe until an explicit review decision says otherwise. Track D
+must produce numbers before M2L's model choice is frozen.
 
 ### Later, unordered
 
-Codex app-server as a second delegated worker and reviewer in Lane B · richer Markdown memory
-retrieval under D-2026-08-08-6 · an optional OpenClaw client under D-2026-08-08-5 · an MCP or App
-transport, only when it materially improves the Actions path that has been proven to work · a
-local personal assistant · voice, STT and TTS.
+**M2N** richer Markdown memory retrieval under D-2026-08-08-6 — backlinks and the wikilink graph
+first, embeddings second, the index never canonical · **M2O** browser and desktop skills
+productized from Track B · **M2P** Codex app-server as a second delegated worker and reviewer in
+Lane B, which needs nothing new architecturally once M2K's claims contract exists · **M2Q**
+fast/deep planner routing, only on Track D evidence · an optional OpenClaw client under
+D-2026-08-08-5 · an MCP or App transport, only when it materially improves the Actions path that
+has been proven to work · voice, STT and TTS.
 
 ---
 
@@ -743,6 +936,13 @@ follow the M2B identity rule — PID plus start time, verified.
 
 ## M7 — Natural-language routing and refinement
 
+> **Largely subsumed by the planner track (2026-08-11).** M2L handles natural language → typed
+> action through the planner's proposal path — schema-validated, user-confirmed, and reading a
+> provenance-tagged context pack rather than a bare classification prompt. M7 remains the reference
+> for **deterministic level-1 and level-2 routing** if that is ever built separately as a
+> model-light fast path; its "the model output is never executed directly" rule is unchanged and is
+> the same rule D-2026-08-11-2 applies to planner proposals.
+
 - **Objective:** free-text control: typed text (later voice) becomes typed actions via the
   three routing levels.
 - **Visible result:** type "search YouTube for X and open it on the second display" → the right
@@ -792,7 +992,9 @@ may be started before the milestones above.**
 Wayland support; OS-level candidate isolation (separate users/ACLs) and the **Trust Core
 re-entry**: wiring the preserved approval boundary in front of privileged actions (package
 installs, system config, Guardian updates, destructive migrations); Guardian's own supervised
-update path; Obsidian; voice; additional hosts; deeper multi-agent work.
+update path; voice; additional hosts; deeper multi-agent work. (**Obsidian moved forward**: an
+Obsidian-*compatible* vault is M2J's global mind and retrieval over it is M2N. Integration with the
+Obsidian application itself remains out — see D-2026-08-11-3.)
 
 ---
 
@@ -821,7 +1023,10 @@ in this table with removal criteria.
 - **Playwright + Chrome** — replaceable adapter, but the expected long-term browser workhorse.
 - **Tailscale** — the network boundary; replaceable in principle (WireGuard, local-only), out of
   the app's code path entirely.
-- **Ollama** — optional; level-2 routing degrades to level-1 buttons + level-3 delegation
-  without it.
+- **Ollama** — optional, and the initial recommended local-model runtime behind a replaceable
+  provider boundary (D-2026-08-11-10): its own systemd user unit on loopback, with llama.cpp server
+  as a drop-in alternative behind the same client. Without it, level-2 routing degrades to level-1
+  buttons plus level-3 delegation, and the planner routes answer `planner_unavailable` while
+  everything else is untouched. No exact model or tag is an architectural dependency.
 - **Remote-desktop fallback** (e.g. Sunshine/Moonlight or RustDesk installed beside Cofferdam) —
   optional escape hatch for raw screen control; never integrated into Cofferdam's code.
