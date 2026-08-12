@@ -1,5 +1,26 @@
 # M2E validation checklist — YouTube dedicated player
 
+> ## Read this before running anything (2026-08-12)
+>
+> **Do not apply the `95-youtube-player-validation` drop-in.** Section 0's pre-state, section 1's
+> install, and section 3's rollback all describe a **pre-merge runtime** that pointed the live
+> service at an unmerged feature clone. That runtime no longer exists. Production runs the
+> **merged A/B slot deployment** (slot `a`, plus adapter drop-ins only), and this feature is part
+> of it. Re-applying the drop-in would recreate the production-drift class that M2H PR4 removed
+> and `test_deployment_drift.py` guards.
+>
+> **Status (D-2026-08-12-1): the section 2 walkthrough is `DEFERRED_NON_BLOCKING` — not executed,
+> and not a pass.** It does not block M2J PR1. The endpoint exists in the merged build and reports
+> `disconnected` / empty queue / `idle` truthfully when no player window is open.
+>
+> One check in section 0 is also stale: `ss -ltnp 'src 127.0.0.1' | grep -c python` no longer
+> returns `0` before the first player opens, because the Actions bridge — which did not exist when
+> this was written — is itself a loopback Python listener. Read the player's own state from
+> `/api/youtube/player` instead.
+>
+> If the walkthrough is run later, run it against the **merged production build**, not against a
+> clone. The steps themselves remain the acceptance intent and are unchanged.
+
 Live validation of `feat/youtube-dedicated-player` on the real workstation, run
 under an isolated validation runtime that can be removed in one command.
 

@@ -9,8 +9,8 @@ PWA/API, and only the narrow Actions bridge public.
 
 **The work after it was replanned on 2026-08-11**: M2J is preserved and reshaped, and the queue is
 **M2J → M2K → M2L → M2M** with two isolated parallel tracks. Nothing is implemented yet. See
-[`ROADMAP.md`](ROADMAP.md) and [`DECISIONS.md`](DECISIONS.md) D-2026-08-11-1 … -12; the planning
-package is preserved as history in `handoffs/replan-2026-08-11/`.
+[`ROADMAP.md`](ROADMAP.md) and [`DECISIONS.md`](DECISIONS.md) D-2026-08-11-1 … -12 and
+D-2026-08-12-1; the planning package is preserved as history in `handoffs/replan-2026-08-11/`.
 
 **M2H is complete and merged**, closing the M1 post-reboot gate;
 M2F Agent Task Core and M2G the Claude Code adapter merged; the isolated Custom GPT Actions mobile
@@ -219,9 +219,11 @@ logged into the desktop.** Every item this gate listed as unverified is now obse
 Authentication survived: the token file persisted at mode 0600 and the phone's previously saved
 token was accepted with no re-entry. Unauthenticated requests still returned 401.
 
-**One expectation from the old text was not re-tested and is not claimed:** graphical-session
-detection reporting `open_application`/`open_url` as false before login and true afterwards. It
-remains covered by tests only. Automatic login is still not enabled on this host.
+**The last expectation from the old text is now observed too (2026-08-11).** Graphical-session
+detection reporting `open_application`/`open_url` as false before login and true afterwards was
+covered by tests only until the logout/login cycle ran; across 475 samples the pair tracked the
+real session exactly, with zero mismatches in either direction — see the
+[M2B record](#m2b--runtime-inventory). Automatic login is still not enabled on this host.
 
 ### M2A — control plane foundation
 
@@ -394,10 +396,29 @@ remains covered by tests only. Automatic login is still not enabled on this host
   *does* attest, across every sample: the unit stayed `active` with `NRestarts=0` and an unchanged
   MainPID, `Wants=`/`BindsTo=`/`PartOf=` stayed empty, `/healthz` stayed up, unauthenticated
   `/api/status` stayed 401, screenshot never became true, and windows never became `ok`.
-  The lifecycle behaviour at GDM and across a real login therefore remains **unverified on this
+  The lifecycle behaviour at GDM and across a real login therefore remained **unverified on this
   host** for the M2B runtime. M2B2 does not change graphical-session lifecycle behaviour, so it
-  does not close this gap and does not require a logout of its own; the cycle should be run once
-  to close it.
+  did not close this gap and did not require a logout of its own.
+
+  **Gap closed 2026-08-11 — the cycle ran.** A real GNOME logout to GDM, ~5m45s at the greeter,
+  then a normal login, recorded by a bounded read-only recorder running as a transient unit of the
+  systemd **user** manager (`KillUserProcesses=false`, `Linger=yes`), which is why it survived the
+  logout that killed the graphical session. **475 samples over 40 minutes.** This time the
+  transition is real and visible in the data: gnome-shell `5760` → **absent for 69 consecutive
+  samples** → `52993`, and the user's wayland session `3` → `9`.
+
+  Across every one of the 475 samples: the unit stayed `active/running` with **`MainPID` 43344
+  unchanged** and `NRestarts=0`, `Wants=`/`BindsTo=`/`PartOf=` stayed empty, `/healthz` returned
+  200, and unauthenticated `/api/status` returned **401**. Authenticated capability reporting
+  answered at the GDM greeter with `open_application`/`open_url` **false**, and returned to
+  **true** after login — **zero mismatches** against gnome-shell presence in either direction, and
+  no stale value on either side of the transition. While logged out, GDM's *own* greeter wayland
+  session was present under a different uid and was correctly **not** claimed as the user's. Two
+  samples at the login instant recorded a client-side timeout on `/api/status` and reported
+  nothing rather than something stale; `/healthz` stayed 200 through both.
+
+  Nothing was mutated by the validation: tasks/events/turns were `25/473/3` before and after, all
+  25 tasks terminal, and no provider helper was spawned.
 
 ### M2B3A — media and application launch profiles
 
@@ -450,9 +471,12 @@ remains covered by tests only. Automatic login is still not enabled on this host
   the API — the phone omitted `provider_id` on open, so every selection failed while every unit test
   passed — and it now has a regression test exercising the client's exact payload.
 
-  **Provider credentials are not configured on this host yet**, so the live provider validation in
-  [`docs/MEDIA_RESULTS.md`](docs/MEDIA_RESULTS.md) is still outstanding; the unconfigured path was
-  verified end to end instead.
+  **Provider credentials are configured and functional on this host (verified 2026-08-11).** Both
+  providers return real catalogue results — five selectable results each, through opaque result
+  handles, with no URI, URL or key leaking into any response. Spotify's user OAuth is connected
+  with all required scopes. The unconfigured path was verified end to end earlier and its
+  behaviour is unchanged; the live provider validation in
+  [`docs/MEDIA_RESULTS.md`](docs/MEDIA_RESULTS.md) is no longer outstanding.
 
   **Not in this milestone:** Netflix/Prime/TV+ result parsing, Opera Companion, DOM automation,
   Spotify playback or device control, a persistent auto-open-first preference, M2B3B, Agent Task
@@ -611,8 +635,17 @@ remains covered by tests only. Automatic login is still not enabled on this host
   exactly like the user turning it back up in the Spotify app, so the level to restore was dropped
   mid-mute and the following unmute refused.
 
-  **Not re-validated on the real host yet.** The `90-spotify-playback-validation` drop-in is still not
-  applied, and the live service still runs the M2C build under the unchanged `80` drop-in.
+  **Cold-start recovery validated on the real host 2026-08-11; the rest is deferred.** The first
+  of the three fixes above — Play now with Spotify fully closed — now has a real result. One
+  operation (`spop-3a0cbdd65646`): Spotify was absent beforehand, the launch was triggered *inside*
+  the operation, a real Connect device appeared, and the exact selected result was confirmed
+  playing in 9.36 s with no second dispatch. The remaining transport, queue and volume steps are
+  `DEFERRED_NON_BLOCKING`, and device transfer is `BLOCKED_BY_PREREQUISITE` — one device on this
+  host. Neither is a pass.
+
+  **The `90-spotify-playback-validation` drop-in is stale and must not be applied.** It points at
+  an unmerged feature clone. Production runs the merged A/B slot deployment, and this build is part
+  of it.
 
   **Not in this milestone:** seek, context playback, reading the Spotify queue, persisting a device
   preference, the YouTube dedicated player, and the Opera Companion.
@@ -668,8 +701,14 @@ remains covered by tests only. Automatic login is still not enabled on this host
   bound, the PWA's stale-response guard, loopback-only binding and the Host check, and arbitrary
   player-command rejection.
 
-  **Not re-validated on the real host yet.** The `95-youtube-player-validation` drop-in is not
-  applied, and the live service still runs the M2D build under the unchanged `90` drop-in.
+  **Live walkthrough deferred, non-blocking (D-2026-08-12-1).** The endpoint exists in the merged
+  production build and reports its state truthfully — `disconnected`, empty queue, `idle` — with no
+  player window open, which is the correct answer rather than a fabricated one. The numbered
+  walkthrough itself has **not** been executed and is `DEFERRED_NON_BLOCKING`; that is not a pass.
+
+  **The `95-youtube-player-validation` drop-in is stale and must not be applied.** It points at an
+  unmerged feature clone. Production runs the merged A/B slot deployment, and this build is part of
+  it.
 
   **Not in this milestone:** seek, automatic queue continuation when a video ends, queue
   persistence, and the Opera Companion for Netflix/Prime Video/TV+.
@@ -1111,9 +1150,10 @@ the environment, not to a launch, and Cofferdam has no account-level revocation 
 Transcript reading and prompt injection remain out of scope permanently under D-2026-08-08-3; no
 conversation content is read or stored anywhere in this lane.
 
-**Remaining limitations:** graphical-session capability reporting before and after login is still
-covered by tests rather than by a boot observation; automatic login is not enabled on this host;
-and a Remote Control host must still be started deliberately after every reboot.
+**Remaining limitations:** automatic login is not enabled on this host, and a Remote Control host
+must still be started deliberately after every reboot. Graphical-session capability reporting
+before and after login is no longer among them — it was observed across a real logout/login cycle
+on 2026-08-11 (see the [M2B record](#m2b--runtime-inventory)).
 
 ## Planned (active roadmap — see [`ROADMAP.md`](ROADMAP.md))
 
@@ -1139,8 +1179,11 @@ code was written for any of it. Queued, in order:
   in the existing PWA, deterministic diagnosis synthesis over M2K's reason codes, and retry UX over
   idempotent replays. The PWA and main API stay tailnet-private.
 
-**Before M2J PR1 merges:** one supervised pass over the inherited live-validation debt below
-(D-2026-08-11-12). It does not block starting M2J PR1; it blocks that merge.
+**Before M2J PR1 merges:** the supervised pass over the inherited live-validation debt ran on
+2026-08-11 (D-2026-08-11-12). The blocking set — lifecycle, authority, capability truthfulness and
+deployment integrity — is **cleared**; the remaining media-feature walkthroughs are deferred and
+**do not block** the merge (D-2026-08-12-1). States are recorded item by item
+[below](#inherited-live-validation-debt).
 
 Two **parallel tracks**, isolated from production and outside the milestone gates — neither is
 started: **Track B**, browser-actuator feasibility comparing Playwright, Kimi WebBridge and
@@ -1156,19 +1199,41 @@ Guardian/Supervisor and Runtime A/B slots with the manual recovery command surfa
 and the A/B self-update demonstration · process, window and display control · an optional OpenClaw
 client.
 
-### Inherited live-validation debt (open, scheduled)
+### Inherited live-validation debt
 
-Carried forward from earlier milestones and **not** silently absorbed into the new ones. One
-supervised pass clears them before M2J PR1 merges (D-2026-08-11-12):
+The supervised pass ran on **2026-08-11**. Its results are below with explicit states, and the
+blocking scope is now split by blast radius (D-2026-08-12-1): the core lifecycle, authority and
+deployment items **block** M2J PR1 and are cleared; the remaining media-feature walkthroughs are
+**deferred, non-blocking** debt and are tracked here rather than absorbed into a later milestone.
 
-| Item | Where it is recorded |
-|---|---|
-| M2B logout/login cycle never run — lifecycle at GDM and across a real login unverified for the M2B runtime | M2B record above |
-| M2C audio **write** path (set volume, mute, switch output) not self-validated | M2C record above |
-| M2D / M2D.1 end-to-end run not repeated since the three reliability fixes | M2D.1 record above |
-| M2E YouTube player not validated on the real host | M2E record above |
-| Media provider credentials unconfigured, so the live provider validation is outstanding | M2B3A.1 record above |
-| Graphical-session capability reporting before and after login — covered by tests, not by a boot observation | closed M1 gate above |
+States are exact. `DEFERRED_NON_BLOCKING` is **not** a pass, and neither is
+`BLOCKED_BY_PREREQUISITE`.
+
+| Item | State | Evidence | Blocks M2J PR1? |
+|---|---|---|---|
+| M2B logout/login cycle — lifecycle at GDM and across a real login | **PASS** (2026-08-11) | 475 samples, 40 min, real GNOME logout → GDM → login: `MainPID` 43344 and `NRestarts=0` unchanged throughout, `/healthz` 200 in every sample, `Wants=`/`BindsTo=`/`PartOf=` empty in every sample | No |
+| Graphical-session capability reporting before and after login | **PASS** (2026-08-11) | `open_application`/`open_url` observed `true → false → true` tracking the real session; **zero** mismatches against gnome-shell presence across 475 samples; GDM's own greeter session correctly not claimed | No |
+| Authenticated/unauthenticated boundary across the cycle | **PASS** (2026-08-11) | unauthenticated `/api/status` returned **401 in all 475 samples**, including every pre-login sample | No |
+| Production integrity and non-mutation during the cycle | **PASS** (2026-08-11) | slot commit, registry hashes and all three service `MainPID`s unchanged; tasks/events/turns `25/473/3` identical before and after; no provider helper spawned | No |
+| M2C audio **write** path (set volume, mute) | **PASS** (2026-08-11) | bounded write validated against independent `wpctl` observation; state restored; invalid writes refused `422`, unknown resource `404` | No |
+| M2C output **switching** | `BLOCKED_BY_PREREQUISITE` | host has one usable audio output; `move_audio_stream` unavailable. Not a pass | No |
+| M2D.1 cold-start Play-now recovery | **PASS** (2026-08-11) | single operation `spop-3a0cbdd65646`: Spotify absent beforehand, launch triggered *inside* the operation, real Connect device appeared, exact selected result confirmed playing, 9.36 s, no second dispatch | No |
+| Media provider credentials | **PASS** (2026-08-11) | Spotify and YouTube both configured and returning real catalogue results; Spotify OAuth connected with all required scopes. Supersedes the "unconfigured" text below | No |
+| M2D / M2D.1 remaining transport, queue and volume walkthrough | `DEFERRED_NON_BLOCKING` | not executed; peripheral media-feature debt (D-2026-08-12-1) | No |
+| M2D Spotify device transfer | `BLOCKED_BY_PREREQUISITE` | only one Connect device exists on this host. Not a pass | No |
+| M2E YouTube player live walkthrough | `DEFERRED_NON_BLOCKING` | not executed; the endpoint exists and reports `disconnected` truthfully with no player open | No |
+| M2D/M2E validation drop-in instructions | `DOCUMENTATION_STALE` | the `90-`/`95-` drop-ins point at unmerged feature clones and **must not be applied to production** — see below | No |
+
+**The `90-`/`95-` validation drop-ins must not be applied.** They were written for a pre-merge
+runtime that pointed the live service at unmerged feature clones. Production now runs the merged
+A/B slot deployment (slot `a`, plus adapter drop-ins only). Re-applying them would recreate the
+production-drift class M2H PR4 removed and `test_deployment_drift.py` guards. The affected
+checklists carry the same warning at the top.
+
+**Separately tracked, not part of this debt:** `open_media_provider` reports failure when Spotify
+is already running (the snap's second instance exits immediately). It fails closed and truthfully
+rather than fabricating success, so it is a low-priority defect **candidate**, not a blocker, and
+no fix is attempted here.
 
 ## Deferred (preserved, not on the critical path)
 
