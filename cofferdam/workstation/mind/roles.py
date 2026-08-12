@@ -43,15 +43,21 @@ and a project with no established vocabulary may use the compact template
 The union of those two is this list. **No ``PLAN.md`` is created anywhere** to
 satisfy a convention; the mapping is what makes that unnecessary.
 
-Why the vault has three roles and no freeform note
---------------------------------------------------
+Why the vault has four roles and no freeform note
+-------------------------------------------------
 
 ``USER.md``, ``COMMUNICATION_STYLE.md`` and ``PREFERENCES.md`` are the durable
 user-level documents D-2026-08-11-3 names, and each is a role the operator maps
-once. Freeform vault notes are deliberately absent: a freeform note is addressed
-by *filename*, and a caller-supplied filename is the authority this module
-exists to remove. Retrieval over the vault is M2N's problem, not a hole to leave
-open here.
+once. ``CROSS_PROJECT.md`` is the fourth: the standing constraints, recurring
+decisions and lessons that hold across more than one repository, which are
+user-level memory rather than any project's. It is the one the first real vault
+setup asked for and this vocabulary did not have.
+
+Freeform vault notes remain deliberately absent: a freeform note is addressed by
+*filename*, and a caller-supplied filename is the authority this module exists to
+remove. Adding a role is a code change with a test, which is the point — the set
+grows deliberately and never from a request. Retrieval over the vault is M2N's
+problem, not a hole to leave open here.
 """
 
 from __future__ import annotations
@@ -79,6 +85,7 @@ GLOBAL_ROLES: Tuple[str, ...] = (
     "user",
     "communication_style",
     "preferences",
+    "cross_project",
 )
 
 _ROLES_BY_SCOPE = {
@@ -110,7 +117,7 @@ def valid_role(scope: Any, role: Any) -> bool:
     """Whether this exact word is a role in this exact scope.
 
     Membership, not a pattern. There is no shape a hostile string can take that
-    passes this and is not one of nine literals.
+    passes this and is not one of the ten literals above.
     """
     return isinstance(role, str) and role in roles_for_scope(scope)
 

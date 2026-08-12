@@ -107,6 +107,12 @@ FORBIDDEN_GRANT_FIELDS = frozenset(
     }
 )
 
+#: Derived from the vocabulary rather than written as a number, so the two can
+#: never disagree. They did once in effect: a grant naming a role this build did
+#: not have was refused by *this* bound before the role check ran, so the message
+#: said "more document roles than this version has" rather than naming the role —
+#: and the whole vault failed closed rather than the one entry. Deriving it keeps
+#: the count correct the moment a role is added, and keeps the refusal specific.
 MAX_VAULT_DOCUMENTS = len(GLOBAL_ROLES)
 
 #: The key that actually activates the grant. Named as a constant because it is

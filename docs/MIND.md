@@ -27,7 +27,7 @@ runtime dependency and there is no plugin.
 | Granted by | `config/mind-grant.json` | the workspace's `documents` map |
 | Default | **absent** | **absent** |
 | Holds | user-level, cross-project memory | that project's own memory |
-| Roles | `user`, `communication_style`, `preferences` | `project`, `plan`, `research`, `decisions`, `status`, `design` |
+| Roles | `user`, `communication_style`, `preferences`, `cross_project` | `project`, `plan`, `research`, `decisions`, `status`, `design` |
 
 The two vocabularies are disjoint on purpose. Asking for `status` in the global scope, or `user`
 in the project scope, is not a sensible-looking question with a careful answer — it is a
@@ -45,7 +45,7 @@ This is the whole access model:
 
 There is no field, path segment, query parameter or body key anywhere in this API for an
 absolute path, a relative path, a root, a working directory, a filename, a filesystem URI or a
-shell command. `scope` and `role` are matched against closed, code-owned vocabularies — nine
+shell command. `scope` and `role` are matched against closed, code-owned vocabularies — ten
 words in total — **before** anything is resolved, so request text never becomes a path
 component. A role sent as `../../etc/passwd` is not sanitised; it is simply not a role, and the
 refusal happens before any filesystem call.
@@ -75,6 +75,12 @@ comes from the workspace's project in `task-projects.json`, where root validatio
 walk and the re-verification before every use already live. `root`, `path` and `directory` are
 still refused on a workspace by name.
 
+**A project root must be a source checkout, not the runtime home, and never a deployment slot**
+(D-2026-08-13-1). `COFFERDAM_HOME` holds `state/`, `secrets/` and `slots/`; a project root holds
+code and documents. Pointing a project at a slot would be worse than untidy: `slots/a` and
+`slots/b` swap on every deployment, so project memory would follow the rollback, and the target
+binding would refuse every pending proposal the moment the slot flipped.
+
 A role mapped twice is **refused**, not resolved by position: the file is parsed with a hook
 that rejects duplicate keys, because `json.loads` silently keeps the last one and that would
 make file order the authority over which document a role resolves to.
@@ -88,7 +94,12 @@ In `config/mind-grant.json` — a file that does not exist until you write it:
   "global_vault": {
     "root": "/home/you/cofferdam-mind",
     "enabled": true,
-    "documents": { "user": "USER.md", "preferences": "PREFERENCES.md" }
+    "documents": {
+      "user": "USER.md",
+      "communication_style": "COMMUNICATION_STYLE.md",
+      "preferences": "PREFERENCES.md",
+      "cross_project": "CROSS_PROJECT.md"
+    }
   }
 }
 ```

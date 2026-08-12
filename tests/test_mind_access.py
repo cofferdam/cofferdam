@@ -150,6 +150,33 @@ class GrantedVault(MindHarness):
         self.assertEqual(document["role"], "user")
         self.assertIn("original", document["content"])
 
+    def test_the_cross_project_role_reads_its_own_document(self):
+        """The fourth role, end to end through the service."""
+        self.activate()
+        document = self.mind.read_document("global", "cross_project")
+        self.assertEqual(document["scope"], "global")
+        self.assertEqual(document["role"], "cross_project")
+        self.assertIn("original", document["content"])
+
+    def test_all_four_global_roles_are_listed_together(self):
+        self.activate()
+        payload = self.mind.available()
+        globals_ = {d["role"]: d["available"] for d in payload["documents"] if d["scope"] == "global"}
+        self.assertEqual(
+            globals_, {"user": True, "preferences": True, "cross_project": True}
+        )
+        self.assertEqual(sorted(payload["global_vault"]["roles"]),
+                         ["cross_project", "preferences", "user"])
+
+    def test_cross_project_is_still_a_global_role_only(self):
+        """It did not leak into the project vocabulary."""
+        from cofferdam.workstation.mind.errors import MindError
+
+        self.activate()
+        with self.assertRaises(MindError) as caught:
+            self.mind.read_document("project", "cross_project")
+        self.assertEqual(caught.exception.code, "mind_role_invalid")
+
     def test_an_unmapped_global_role_is_not_a_filename_guess(self):
         from cofferdam.workstation.mind.errors import MindError
 

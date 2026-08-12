@@ -8,6 +8,11 @@
     "field for a command, argv, an environment, a shell string or a script, and an",
     "entry carrying one is refused by name rather than ignored.",
     "",
+    "'root' is the project's SOURCE, not the machine's runtime home and never an A/B",
+    "deployment slot (D-2026-08-13-1). $COFFERDAM_HOME holds state/, secrets/ and",
+    "slots/; a project root holds code and documents. A root pointing into slots/a or",
+    "slots/b would move with every deployment, taking project memory with it.",
+    "",
     "'root' must be a plain absolute path — no ~, no $VAR, no '..'. It is verified",
     "again immediately before every task starts: each component is checked for a",
     "symlink, the resolved path must equal the configured one, and it must be a",
@@ -35,7 +40,9 @@
       "project_id": "cofferdam",
       "display_name": "Cofferdam",
       "root": "/home/CHANGE-ME/cofferdam",
-      "adapters": ["validation"],
+      "adapters": [
+        "validation"
+      ],
       "enabled": true,
       "notes": "the main repository"
     },
@@ -43,7 +50,10 @@
       "project_id": "both-transports",
       "display_name": "A project that permits both Claude transports",
       "root": "/home/CHANGE-ME/some-project",
-      "adapters": ["claude-code", "claude-agent-sdk"],
+      "adapters": [
+        "claude-code",
+        "claude-agent-sdk"
+      ],
       "delegated_adapter": "claude-agent-sdk",
       "enabled": true,
       "notes": "delete the delegated_adapter line and no task can start here"
