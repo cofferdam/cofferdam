@@ -38,7 +38,7 @@ a second Markdown authority.
 }
 ```
 
-Five fields, and that is the whole schema. A copy-and-edit starting point is in
+Six fields, and that is the whole schema. A copy-and-edit starting point is in
 [`examples/workspaces.json`](../examples/workspaces.json).
 
 | Field | Meaning |
@@ -48,6 +48,7 @@ Five fields, and that is the whole schema. A copy-and-edit starting point is in
 | `project_id` | a project in `task-projects.json` — the binding that gives the workspace a directory and a worker |
 | `enabled` | `true` unless written otherwise; must be a real boolean |
 | `notes` | one short line, optional |
+| `documents` | **added by M2J PR2** — which file in that project plays which mind role; see [`docs/MIND.md`](MIND.md) |
 
 A missing file is not an error and is the shipped default: a workstation with no workspaces has
 none, and every existing task, Custom GPT and Claude flow works exactly as before.
@@ -70,7 +71,7 @@ An *unrecognised* field is different and is kept: it may be configuration writte
 version, and dropping the workspace would break a host that upgrades and rolls back. A forbidden
 field is an attempt to move a decision, and that is loud.
 
-### Why there are no document roles or profiles yet
+### Document roles arrived in PR2; profiles have not
 
 The recorded M2J scope includes document-role mappings for the mind (`plan_doc`, `status_doc`,
 `decisions_doc`) and Auto/Safe/Review evaluation profiles. Neither is here, deliberately.
@@ -79,6 +80,14 @@ A `plan_doc` would name a file nothing reads until PR3. A `profile` would name a
 that has no evaluator until M2K. Each would validate, persist, appear in an API response and mean
 nothing — and a field that means nothing is one somebody builds on before it means something. The
 schema is additive; a later PR widens it without migrating anything.
+
+**M2J PR2 built the reader, so `documents` is here now** — the rule was kept rather than broken.
+It maps a code-owned role word to a plain relative file name inside the workspace's project, and
+it is **not** a second path authority: the directory still comes from the project, where root
+validation, the symlink walk and the re-verification before every use already live. A role mapped
+twice is refused rather than resolved by load order. Full treatment in [`docs/MIND.md`](MIND.md).
+
+Profiles are still absent, for the original reason: there is no evaluator until M2K.
 
 ## What Working Context holds
 
@@ -204,7 +213,8 @@ and no file appears.
 
 ## What is not in this milestone
 
-No mind, vault, `USER.md`, project-memory reading or memory proposals (PR2). No Context Builder,
+No mind, vault, `USER.md`, project-memory reading or memory proposals — those are **PR2**, which
+is now built; see [`docs/MIND.md`](MIND.md). No Context Builder,
 `LocalContextPack` or `CloudContextProjection` (PR3). No PWA panel and no `syncWorkspace` (PR4). No
 evidence bundles or evaluation (M2K). No planner, model runtime or Ollama (M2L). No dashboard
 (M2M). No workspace creation over the API, and no automatic workspace for an existing project —

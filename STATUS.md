@@ -12,9 +12,13 @@ PWA/API, and only the narrow Actions bridge public.
 [`DECISIONS.md`](DECISIONS.md) D-2026-08-11-1 … -12 and D-2026-08-12-1; the planning package is
 preserved as history in `handoffs/replan-2026-08-11/`.
 
-**M2J PR1 is implemented on a branch** — workspaces and durable Working Context, so Cofferdam owns
-"what are we working on" without a model inferring it. See *In progress* below. Nothing else in
-M2J is started: no mind, no Context Builder, no planner, no evidence bundles.
+**M2J PR1 is merged as `ae5c025` (#36) and deployed** — workspaces and durable Working Context, so
+Cofferdam owns "what are we working on" without a model inferring it. Production runs it on slot B;
+slot A is retained unchanged at `2386a54` as the rollback.
+
+**M2J PR2 is implemented on a branch** — mind access by role, the host-owned vault grant, and the
+proposal → explicit acceptance → hash-bound atomic apply path. See *In progress* below. Nothing
+else in M2J is started: no Context Builder, no planner, no evidence bundles.
 
 **M2H is complete and merged**, closing the M1 post-reboot gate;
 M2F Agent Task Core and M2G the Claude Code adapter merged; the isolated Custom GPT Actions mobile
@@ -723,10 +727,79 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2J PR2 — mind access, the host-owned grant, and the memory-proposal queue
+
+On `feat/m2j-mind-proposals`, from the merged `ae5c025`. **Implemented and validated locally and
+against an isolated runtime; not deployed and not merged.** Documented in
+[`docs/MIND.md`](docs/MIND.md).
+
+**Cofferdam can now read memory by role, and can be *allowed* to change it — never on its own.**
+Two authorities, kept apart. **Project mind** is the project's own repository, reached through the
+active workspace's project and addressed by a code-owned role rather than a filename; Cofferdam's
+own `STATUS.md`, `ROADMAP.md`, `DECISIONS.md` and `DESIGN.md` are mapped, and **no `PLAN.md` was
+added** to satisfy a naming convention. **Global mind** is a dedicated Obsidian-compatible vault
+outside `$COFFERDAM_HOME`, readable only under an explicit host-owned grant in
+`config/mind-grant.json` — a file that does not exist until somebody writes it. Nothing scans a
+home directory, nothing offers a vault it found, and Cofferdam never chooses where yours lives.
+
+**A request names a role; the host decides which file that is.** Nine role words across two
+disjoint vocabularies, matched *before* anything is resolved — so a role sent as
+`../../etc/passwd` is not sanitised, it simply is not a role, and the refusal happens before any
+filesystem call. There is no field, path segment or query parameter anywhere for a path, root,
+working directory, filename, URI or command. Resolution re-verifies the root, walks every
+component below it with `lstat`, refuses a link anywhere, and confirms the resolved path is where
+it should have landed — `realpath` alone would follow a link out of the vault and report success.
+
+**Writing is proposal → explicit acceptance → hash-bound atomic apply.** Creating a proposal
+writes **zero Markdown** and records the target's current content hash. Acceptance re-resolves the
+role from configuration re-read at that moment, re-reads the document, re-hashes it, and refuses
+as `stale` if it differs — writing nothing. No three-way merge, no silent refresh: a stale
+proposal is terminal and a new proposal is a new review. The write is `mkstemp` in the target's
+own directory → mode copied from the file being replaced → `fsync` → `os.replace` → directory
+`fsync`, with no shell, no `git` and no subprocess. **Exactly one file changes.** A failed replace
+leaves the document byte-identical and the proposal pending.
+
+**Deletion is absent rather than refused.** The operation vocabulary has one word,
+`replace_document`, and no function in the package removes or creates a path. An *empty* proposed
+document is refused too, because a replace with nothing in it is a deletion wearing a mutation's
+clothes. PR2 modifies existing approved documents only.
+
+**Acceptance is the device token and nothing else.** All seven `/api/mind*` routes use
+`require_token`, which has never heard of the bridge credential — so a bridge request is a 401
+because nothing there can recognise it, not because a check refuses it. D-2026-08-11-4 requires
+that the planner and the bridge have *no acceptance route at all*, and a test builds the real
+bridge application and asserts no route of it mentions mind, memory, a proposal, a vault or a
+document. **The Actions bridge is not modified by this PR.**
+
+**`documents` on a workspace is PR1's own rule being kept, not broken.** PR1 left the role map out
+because nothing read it; PR2 is the reader, so it arrives now — and it is not a second path
+authority, because the directory still comes from the project. A role mapped twice is refused
+rather than resolved by load order: the file is parsed with a hook that rejects duplicate keys,
+since `json.loads` silently keeps the last one and that would make file order the authority over
+which document a role resolves to.
+
+**Nothing leaves the host.** This PR adds no provider client, no bridge Action, no worker context
+and no projection. `CloudContextProjection` (D-2026-08-11-5) still does not exist, which is the
+honest state and the reason a caller cannot accidentally be in a different one.
+
+**Backward compatible by absence.** No `documents` map means no project mind; no
+`config/mind-grant.json` means no global mind; and **no database is created by a read** — listing
+proposals on a host that has never proposed anything answers from nothing and leaves no file.
+Deleting `state/mind/` forgets the pending proposals and touches no Markdown.
+
+**Not in this PR:** the Context Builder, `LocalContextPack` and `CloudContextProjection` (PR3);
+the PWA panel and `syncWorkspace` (PR4); evidence and evaluation (M2K); the planner and any model
+runtime (M2L); the dashboard (M2M). No vectors, no retrieval, no summarization, no token budgets,
+no browser work, no new adapter, and no change to `delegated_adapter` or Task Core.
+
+## M2J records (written while each was on its branch)
+
 ### M2J PR1 — workspaces and durable Working Context
 
-On `feat/m2j-workspace-working-context`, from the merged `ebe1a78`. **Implemented and validated
-locally; not deployed and not merged.** Documented in [`docs/WORKSPACES.md`](docs/WORKSPACES.md).
+**Merged as `ae5c025` (#36) and deployed to slot B.** Written on
+`feat/m2j-workspace-working-context`, from the merged `ebe1a78`, while it was still a branch —
+where this entry says "not merged" it is describing the moment it was written. Documented in
+[`docs/WORKSPACES.md`](docs/WORKSPACES.md).
 
 **Cofferdam now owns "what are we working on", and it survives a restart.** A workspace is
 host-owned configuration in `config/workspaces.json` — a stable id, a label, and the id of a
@@ -779,7 +852,8 @@ regression tests.
 **Not in this PR:** the mind, the vault and memory proposals (PR2); the Context Builder,
 `LocalContextPack` and `CloudContextProjection` (PR3); the PWA workspace panel and `syncWorkspace`
 (PR4); evidence and evaluation (M2K); the planner and any model runtime (M2L); the dashboard
-(M2M). No document-role or profile fields were added, because nothing reads them yet.
+(M2M). No document-role or profile fields were added, because nothing reads them yet. *(PR2 added
+the `documents` role map once it had a reader; the profile fields are still absent.)*
 
 ## M2I.5 records (all merged; written while each was on its branch)
 

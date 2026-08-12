@@ -8,6 +8,34 @@ release.
 
 ### Added
 
+- **M2J PR2 — Cofferdam can read your memory, and can be *allowed* to change it.** Memory is
+  Markdown you own: your project's own documents, and a dedicated
+  [Obsidian](https://obsidian.md)-compatible vault for the personal, cross-project things. Both are
+  readable **by role** — you tell Cofferdam once, on the workstation, that `status` means
+  `STATUS.md` — so nothing that talks to Cofferdam ever names a file, a folder or a path. Setup and
+  the full model are in [`docs/MIND.md`](docs/MIND.md).
+
+  **The vault does not exist until you say where it is.** There is no default location, nothing
+  scans your home directory or an existing Obsidian vault, and no request can grant one: you write
+  the path down once in `config/mind-grant.json`. Delete that file and Cofferdam has no personal
+  memory at all. Your vault is plain Markdown in an ordinary folder and works in a text editor with
+  Cofferdam stopped — Obsidian is not required and is never launched.
+
+  **Nothing writes to your memory without you saying yes.** A change is queued as a *proposal*,
+  which touches nothing on disk, and you read it and decide. When you accept, Cofferdam re-reads
+  the document and checks it is still exactly what you reviewed. **If you edited it in the
+  meantime, the change is refused rather than dropped on top of your edit** — you read it again and
+  propose again. Applying replaces one file atomically: it either fully happens or the file is
+  untouched, and nothing else in the project or the vault is altered.
+
+  **Nothing can delete your memory.** There is no delete, rename or move operation to reach — not a
+  blocked one, an absent one — and a proposal that would empty a document is refused as the
+  deletion it is.
+
+  **Only your own device can accept.** The private Custom GPT cannot see any of this, and there is
+  no acceptance route for a model or an assistant of any kind. Reading is local, too: this release
+  sends memory to nothing and nobody.
+
 - **M2J PR1 — Cofferdam knows what you are working on, and remembers it.** Until now every surface
   worked that out again per request: the phone knew because you were looking at a task list, the
   Custom GPT knew because the conversation mentioned a project, and nothing survived a restart.

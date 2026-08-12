@@ -7,19 +7,40 @@ and in this PR it is deliberately nothing else.
 Why so little
 -------------
 
-The recorded M2J scope is larger: document-role mappings for the mind, an
-Auto/Safe/Review profile, a code-owned model allowlist. None of those can be
-*honest* yet. A ``plan_doc`` field would name a file nothing reads until PR3. A
-``profile`` field would name an evaluation depth that has no evaluator until
-M2K. A model allowlist would select for a planner that does not exist until M2L.
-Each would be a field that validates, persists, appears in an API response, and
-means nothing — and a field that means nothing is one somebody will later build
-on before it means something.
+The recorded M2J scope is larger: an Auto/Safe/Review profile and a code-owned
+model allowlist are still absent. Neither can be *honest* yet. A ``profile``
+field would name an evaluation depth that has no evaluator until M2K; a model
+allowlist would select for a planner that does not exist until M2L. Each would
+be a field that validates, persists, appears in an API response, and means
+nothing — and a field that means nothing is one somebody will later build on
+before it means something.
 
 So the rule this file follows is the one the replan wrote down: add a field when
 the thing that reads it exists. The schema is additive and a later PR widens it
 without migrating anything, because a workspace is a JSON object in a host-owned
 file.
+
+``documents`` is that rule being kept
+-------------------------------------
+
+PR1 left the mind's document-role mapping out under exactly the sentence above.
+M2J PR2 builds the thing that reads it — :mod:`..mind` resolves a role to a file
+and refuses when nothing is mapped — so the field arrives now, with a consumer,
+and not before.
+
+It maps a **code-owned role word** to a **repository-relative file name**:
+``{"status": "STATUS.md", "plan": "ROADMAP.md"}``. That is deliberately not a
+second path authority. The directory still comes from the workspace's project,
+where root validation, the symlink walk and the re-verification before every use
+already live; this field only says which file inside it plays which role. For
+Cofferdam itself the existing documents are mapped and **no ``PLAN.md`` is
+added** to satisfy a filename convention (D-2026-08-11-3).
+
+Two mappings for one role would make load order the authority over which
+document a role resolves to, and ``json.loads`` resolves duplicate keys silently
+by keeping the last. So the whole file is parsed with a hook that refuses a
+repeated key — the ambiguity fails the entry closed rather than being settled by
+position.
 
 What a workspace may never carry
 --------------------------------
@@ -48,9 +69,9 @@ from __future__ import annotations
 
 import json
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from ..tasks.models import MAX_LABEL_CHARS
 from ..tasks.projects import valid_project_id
@@ -69,6 +90,9 @@ MAX_WORKSPACES = 64
 
 #: Bounded like the project notes field, and for the same reason: it is rendered.
 MAX_NOTES_CHARS = 200
+
+#: The role-map key on a workspace entry. Consumed by :mod:`..mind`.
+DOCUMENTS_FIELD = "documents"
 
 #: Fields that must never appear in a workspace entry. See the module docstring
 #: for why each one is here — every entry is a decision that already has a home,
@@ -157,6 +181,15 @@ class Workspace:
     enabled: bool = True
     notes: Optional[str] = None
 
+    #: Which file in this workspace's project plays which mind role. Validated
+    #: at load — code-owned role words, plain relative names, no duplicates —
+    #: and resolved against the project root, with the symlink walk, at use.
+    #:
+    #: Empty is the shipped default and is not a misconfiguration: a workspace
+    #: with no mapping has no project mind, and every role read against it
+    #: refuses rather than guessing a filename.
+    documents: Mapping[str, str] = field(default_factory=dict)
+
     def to_dict(self, *, project_available: Optional[bool] = None) -> Dict[str, Any]:
         """The client-facing shape. Names and ids only.
 
@@ -164,6 +197,11 @@ class Workspace:
         registry rather than stored here, because whether a project exists is a
         fact about *another* file that can change between one request and the
         next. ``None`` means nobody asked — the raw configuration view.
+
+        **The role map is published as role names, never file names.** Which
+        roles a workspace carries is useful to a client rendering a memory
+        panel; which files they are is the host's business, and it is the same
+        rule that keeps the project root out of ``TaskProject.to_dict``.
         """
         payload: Dict[str, Any] = {
             "workspace_id": self.workspace_id,
@@ -171,6 +209,7 @@ class Workspace:
             "project_id": self.project_id,
             "enabled": self.enabled,
             "notes": self.notes,
+            "document_roles": sorted(self.documents),
         }
         if project_available is not None:
             payload["project_available"] = project_available
@@ -286,6 +325,10 @@ def _read_workspace(entry: Any) -> Tuple[Optional[Workspace], Optional[Dict[str,
             "problem": "notes must be a short single-line string",
         }
 
+    documents, document_problem = _read_documents(entry.get(DOCUMENTS_FIELD))
+    if documents is None:
+        return None, {"workspace_id": workspace_id, "problem": document_problem or "invalid documents"}
+
     return (
         Workspace(
             workspace_id=workspace_id,
@@ -293,9 +336,47 @@ def _read_workspace(entry: Any) -> Tuple[Optional[Workspace], Optional[Dict[str,
             project_id=project_id,
             enabled=enabled,
             notes=_bounded_label(notes, MAX_NOTES_CHARS) if notes is not None else None,
+            documents=documents,
         ),
         None,
     )
+
+
+def _read_documents(value: Any) -> Tuple[Optional[Dict[str, str]], Optional[str]]:
+    """The role → file-name map, or a reason it was refused.
+
+    Imports from :mod:`..mind` are local to this function on purpose. The mind
+    package's service reaches back into :mod:`..workspace` to resolve the active
+    workspace and its project, so a module-level import here would make the two
+    packages import each other at load time. Deferring it keeps the *runtime*
+    dependency — which is real and correct, the roles are code-owned by the mind
+    — without the import cycle. The same device this file already uses for
+    :mod:`.errors`.
+    """
+    from ..mind.roles import PROJECT_ROLES, valid_document_name
+
+    if value is None:
+        return {}, None
+    if not isinstance(value, dict):
+        return None, "documents must be an object mapping roles to file names"
+    if len(value) > len(PROJECT_ROLES):
+        return None, "more document roles than this version has"
+
+    mapping: Dict[str, str] = {}
+    for role, name in value.items():
+        if role not in PROJECT_ROLES:
+            # The role is safe to name in the message — it is a code-owned word,
+            # not a path. A *global* role here is refused by the same branch, and
+            # that is the point: the vault is a different authority, and a
+            # workspace entry may not map it.
+            return None, "'" + str(role)[:64] + "' is not a project document role"
+        cleaned = valid_document_name(name)
+        if cleaned is None:
+            # The refused value is deliberately not echoed: whoever wrote it may
+            # have written a real path, and a problem list is rendered on a phone.
+            return None, "the file name for role '" + role + "' must be a plain relative name"
+        mapping[role] = cleaned
+    return mapping, None
 
 
 def load_workspaces(config) -> WorkspaceRegistry:
@@ -317,8 +398,28 @@ def load_workspaces(config) -> WorkspaceRegistry:
             source_present=True,
         )
 
+    # Parsed with a hook that refuses a repeated key rather than with plain
+    # `json.loads`, which keeps the last occurrence silently. That default is
+    # tolerable for most documents and is not tolerable for this one: a
+    # `documents` object naming `status` twice would make *file order* the
+    # authority over which document a role resolves to, and the resulting
+    # mapping would look completely ordinary afterwards.
+    from ..mind.grant import DuplicateKey, reject_duplicate_keys
+
     try:
-        document = json.loads(raw)
+        document = json.loads(raw, object_pairs_hook=reject_duplicate_keys)
+    except DuplicateKey as duplicate:
+        return WorkspaceRegistry(
+            problems=(
+                {
+                    "workspace_id": "",
+                    "problem": "the workspace file names '"
+                    + str(duplicate.args[0])[:64]
+                    + "' twice",
+                },
+            ),
+            source_present=True,
+        )
     except ValueError:
         return WorkspaceRegistry(
             problems=({"workspace_id": "", "problem": "the workspace file is not valid JSON"},),
@@ -358,6 +459,7 @@ def load_workspaces(config) -> WorkspaceRegistry:
 
 
 __all__ = [
+    "DOCUMENTS_FIELD",
     "FORBIDDEN_WORKSPACE_FIELDS",
     "MAX_NOTES_CHARS",
     "MAX_WORKSPACES",
