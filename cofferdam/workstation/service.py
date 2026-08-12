@@ -61,6 +61,13 @@ route                                        auth  purpose
 ``PUT  /api/workspace/objective``            yes   set or clear the objective
 ``PUT  /api/workspace/context``              yes   bounded continuity fields
 ``GET  /api/workspace/objective-history``    yes   previous objectives, bounded
+``GET  /api/mind``                           yes   which memory roles are readable now
+``GET  /api/mind/documents/{scope}/{role}``  yes   one approved document's content
+``GET  /api/mind/proposals``                 yes   queued memory changes, bounded
+``GET  /api/mind/proposals/{id}``            yes   one proposal, with live staleness
+``POST /api/mind/proposals``                 yes   queue a change — writes nothing
+``POST /api/mind/proposals/{id}/accept``     yes   apply it, bound to its base hash
+``POST /api/mind/proposals/{id}/reject``     yes   refuse it
 ``WS   /ws``                                 yes   live events
 ``GET  /`` and static assets                 no    the PWA shell itself
 ===========================================  ====  =============================
@@ -337,6 +344,25 @@ from .tasks.models import (
     ORIGIN_PWA,
     TASK_API_VERSION,
 )
+from .mind import MindService, MindStore
+from .mind.errors import (
+    CODE_APPLY_FAILED,
+    CODE_RESOLUTION_UNSUPPORTED,
+    CODE_TARGET_AUTHORITY_CHANGED,
+    CODE_CONTENT_INVALID,
+    CODE_GLOBAL_GRANT_MISSING,
+    CODE_PROPOSAL_NOT_PENDING,
+    CODE_PROPOSAL_STALE,
+    CODE_PROPOSAL_UNKNOWN,
+    CODE_PROPOSAL_WORKSPACE_CHANGED,
+    CODE_REASON_INVALID,
+    CODE_ROLE_INVALID,
+    CODE_ROLE_UNAVAILABLE,
+    CODE_ROLE_UNCONFIGURED,
+    CODE_SCOPE_INVALID,
+    CODE_SOURCE_INVALID,
+    MindError,
+)
 from .workspace import (
     CODE_ACTIVE_WORKSPACE_UNSET,
     CODE_CONTEXT_FIELD_INVALID,
@@ -367,6 +393,41 @@ _WORKSPACE_STATUS = {
     CODE_ACTIVE_WORKSPACE_UNSET: 409,
     CODE_CONTEXT_FIELD_INVALID: 422,
     CODE_TASK_NOT_IN_WORKSPACE: 422,
+}
+
+# A mind request body carries a whole memory document, so it is the largest
+# body this API accepts — and still bounded well below anything that could be an
+# upload. The document bound itself is `MAX_DOCUMENT_BYTES` (512 KiB) and is
+# enforced by the service; this is the outer limit on the envelope around it,
+# with room for JSON escaping and the three short fields beside it.
+MAX_MIND_BODY_BYTES = 1024 * 1024
+
+# Refusal code -> HTTP status. 404 for something that is not there, 409 for a
+# world that is not in the state the request assumed — no grant, a drifted
+# document, an already-decided proposal — and 422 for what the request itself
+# got wrong. `mind_apply_failed` is the only 500: the request was right, the
+# state was right, and the disk refused.
+_MIND_STATUS = {
+    CODE_SCOPE_INVALID: 422,
+    CODE_ROLE_INVALID: 422,
+    CODE_ROLE_UNCONFIGURED: 404,
+    CODE_ROLE_UNAVAILABLE: 409,
+    CODE_GLOBAL_GRANT_MISSING: 409,
+    CODE_CONTENT_INVALID: 422,
+    CODE_REASON_INVALID: 422,
+    CODE_SOURCE_INVALID: 422,
+    CODE_PROPOSAL_UNKNOWN: 404,
+    CODE_PROPOSAL_NOT_PENDING: 409,
+    CODE_PROPOSAL_STALE: 409,
+    CODE_PROPOSAL_WORKSPACE_CHANGED: 409,
+    # The role now names a different document. A conflict rather than a bad
+    # request: the request was right when it was made, and the world moved.
+    CODE_TARGET_AUTHORITY_CHANGED: 409,
+    CODE_APPLY_FAILED: 500,
+    # Not a client error at all — this host cannot open memory documents safely,
+    # so it does not open them. 501 rather than 500: nothing failed, the
+    # capability is absent.
+    CODE_RESOLUTION_UNSUPPORTED: 501,
 }
 
 # An overlay is a short label and a handful of aliases. Anything larger is
@@ -685,6 +746,7 @@ def create_app(
     youtube_player=None,
     tasks=None,
     workspaces=None,
+    mind=None,
 ) -> FastAPI:
     """Build the application. Arguments are injectable for tests."""
     config = config or load_config()
@@ -787,6 +849,32 @@ def create_app(
             tasks=tasks,
         )
 
+    # Cofferdam Mind (M2J PR2). Constructed unconditionally and, like the
+    # workspace service, inert on a host that has configured nothing: no
+    # `documents` mapping means no project mind, no `mind-grant.json` means no
+    # global mind, and the proposal database is created on the first *write* so a
+    # host that never proposes anything never gains a file.
+    #
+    # It is given the workspace service rather than the workspace store, so that
+    # "which project is this workspace over, and is it usable" has exactly one
+    # implementation. It is given no adapter, no Task Core handle and no provider
+    # client, because reading and changing memory involves none of them.
+    if mind is None:
+        mind = MindService(config, MindStore(config), workspaces=workspaces)
+
+    # Classify any apply that was claimed and never finished, before the first
+    # request is served. **Nothing is resumed**: recovery reads the durable row
+    # and the document's own hash and records which of three things is true —
+    # the bytes landed, they did not, or somebody else changed the file — and it
+    # performs no canonical write of its own. A consequential operation continued
+    # by a restart is one nobody authorized at the moment it happened, which is
+    # the same reasoning `tasks.recover_after_restart` follows for a task whose
+    # process is gone.
+    #
+    # Harmless on a host that has never proposed anything: the read does not
+    # create the database, so there is nothing to classify and no file appears.
+    mind.recover_after_restart()
+
     # Native Remote Control (M2H, Lane A). Constructed unconditionally because
     # it holds no process and starts nothing: every operation is refused unless
     # the named project is registered, enabled, and — for start — has explicitly
@@ -846,6 +934,7 @@ def create_app(
     app.state.youtube_actions = youtube_actions
     app.state.tasks = tasks
     app.state.workspaces = workspaces
+    app.state.mind = mind
     overlays = DisplayOverlayStore(config, inventory)
     app.state.display_overlays = overlays
 
@@ -2664,6 +2753,223 @@ def create_app(
     async def workspace_objective_history(limit: int = 20) -> JSONResponse:
         """Previous objectives for the active workspace, newest first, bounded."""
         result = await _run_workspace(workspaces.objective_history, limit=limit)
+        return JSONResponse(content=result, headers=TASK_CONTENT_HEADERS)
+
+    # -- Cofferdam Mind (M2J PR2) --------------------------------------------
+    #
+    # Seven routes, all on `require_token`, and the authorization boundary here
+    # is the strongest statement in the file: **acceptance is the authority to
+    # write durable memory**, and D-2026-08-11-4 says the planner and the Actions
+    # bridge have no acceptance route *at all*. Not a refusal — an absence. The
+    # bridge holds a credential these routes have never heard of, so a bridge
+    # request is a 401 because nothing here can recognise it, which is the same
+    # structural argument D-2026-08-09-2 makes for Remote Control and is a
+    # promise a later refactor cannot quietly lose.
+    #
+    # **No route writes configuration.** There is no grant route, no role-mapping
+    # route, no vault route. `mind-grant.json` and the `documents` map in
+    # `workspaces.json` are edited in a text editor on the workstation, for the
+    # reason there is no create route for a project: configuration that can be
+    # written over the network is access that can be granted over the network.
+    #
+    # **No body or path segment anywhere carries a filesystem path.** `scope` and
+    # `role` are matched against closed code-owned vocabularies before anything
+    # is resolved, so request text never becomes a path component; the proposal
+    # id is Cofferdam-minted. A payload never publishes a root, a vault location
+    # or a file name.
+
+    async def _mind_body(request: Request, allowed: set) -> Dict[str, Any]:
+        """One bounded mind request body, refusing anything unexpected.
+
+        The same allowlist-at-the-door shape the workspace and task bodies use.
+        It matters more here: the accept and reject routes allow *no* fields at
+        all, so a client that tried to send its own `base_hash` — that is, to
+        supply the value the whole hash binding exists to have Cofferdam
+        determine — is refused rather than having it ignored.
+        """
+        content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if content_type and content_type != "application/json":
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="this endpoint accepts application/json only",
+                status_code=415,
+            )
+        declared = request.headers.get("content-length")
+        if declared is not None:
+            try:
+                too_big = int(declared) > MAX_MIND_BODY_BYTES
+            except ValueError:
+                raise ApiError(
+                    code=CODE_INVALID_PARAMS, message="invalid Content-Length", status_code=400
+                )
+            if too_big:
+                raise ApiError(
+                    code=CODE_INVALID_PARAMS,
+                    message="the request body is too large",
+                    status_code=413,
+                )
+        raw = await request.body()
+        # Checked again after reading: Content-Length is a claim, not a fact.
+        if len(raw) > MAX_MIND_BODY_BYTES:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS, message="the request body is too large", status_code=413
+            )
+        if not raw:
+            payload: Any = {}
+        else:
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                raise ApiError(
+                    code=CODE_INVALID_PARAMS,
+                    message="the request body is not valid JSON",
+                    status_code=400,
+                )
+        if not isinstance(payload, dict):
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="the request body must be a JSON object",
+                status_code=400,
+            )
+        unexpected = sorted(set(payload) - allowed)
+        if unexpected:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="unexpected field: " + unexpected[0],
+                status_code=422,
+                detail=(
+                    "this endpoint accepts only: " + ", ".join(sorted(allowed))
+                    if allowed
+                    else "this endpoint accepts no body fields"
+                ),
+            )
+        return payload
+
+    async def _run_mind(operation, *args, **kwargs) -> Any:
+        try:
+            return await run_in_threadpool(operation, *args, **kwargs)
+        except MindError as rejection:
+            raise ApiError(
+                code=rejection.code,
+                message=rejection.message,
+                status_code=_MIND_STATUS.get(rejection.code, 422),
+                detail=rejection.detail,
+            )
+        except WorkspaceError as rejection:
+            # Surfaced with the workspace code rather than re-labelled: "no
+            # workspace is active" reads the same here as it does on the
+            # workspace routes, and sending somebody to the wrong file to fix it
+            # is the failure `WorkspaceProjectMissing` was given its own code to
+            # avoid.
+            raise ApiError(
+                code=rejection.code,
+                message=rejection.message,
+                status_code=_WORKSPACE_STATUS.get(rejection.code, 422),
+                detail=rejection.detail,
+            )
+
+    @app.get("/api/mind", dependencies=[Depends(require_token)])
+    async def mind_overview() -> JSONResponse:
+        """Which memory roles are readable right now, and what is queued.
+
+        Never an error for an ordinary state. No workspace active, no grant, a
+        role mapped to a file that is not there — each is a word in the payload
+        on a 200, because each is a real state of a working host and a client has
+        to render it. That is the posture `GET /api/workspace/current` set.
+
+        Metadata only: a role, whether it is available, its size and hash. Never
+        a path, and never the content.
+        """
+        payload = await run_in_threadpool(mind.available)
+        return JSONResponse(content=payload, headers=TASK_CONTENT_HEADERS)
+
+    @app.get("/api/mind/documents/{scope}/{role}", dependencies=[Depends(require_token)])
+    async def mind_document(scope: str, role: str) -> JSONResponse:
+        """One approved document's content.
+
+        Both path segments are matched against closed vocabularies before
+        anything is resolved, so neither can become a path component. `no-store`,
+        because the body is somebody's own memory — the same class of content as
+        a task result, and it gets the same header.
+
+        This is a **local** read. Nothing in this milestone forwards it to a
+        model, a worker, the Custom GPT or a browser; the egress projection
+        D-2026-08-11-5 requires is later work and does not exist yet.
+        """
+        payload = await _run_mind(mind.read_document, scope, role)
+        return JSONResponse(content=payload, headers=TASK_CONTENT_HEADERS)
+
+    @app.get("/api/mind/proposals", dependencies=[Depends(require_token)])
+    async def mind_proposals(state: Optional[str] = None, limit: int = 20) -> JSONResponse:
+        """Queued memory changes, newest first, bounded, without their content."""
+        payload = await _run_mind(mind.list_proposals, state=state, limit=limit)
+        return JSONResponse(content=payload, headers=TASK_CONTENT_HEADERS)
+
+    @app.get("/api/mind/proposals/{proposal_id}", dependencies=[Depends(require_token)])
+    async def mind_proposal(proposal_id: str) -> JSONResponse:
+        """One proposal, with its content and whether the target has drifted.
+
+        `stale` is computed on this read rather than stored, because it is the
+        fact somebody uses to decide whether to press Accept and a stored copy
+        would be right for a few seconds and then quietly wrong.
+        """
+        payload = await _run_mind(mind.get_proposal, proposal_id)
+        return JSONResponse(content=payload, headers=TASK_CONTENT_HEADERS)
+
+    @app.post("/api/mind/proposals", status_code=201, dependencies=[Depends(require_token)])
+    async def create_mind_proposal(request: Request) -> JSONResponse:
+        """Queue an intended change to an approved document. **Writes nothing.**
+
+        Four fields and no others. There is no `path`, no `workspace_id` — the
+        active workspace is the context, exactly as it is for the objective — and
+        no `source`: provenance is assigned from the authenticated surface, for
+        the reason task `origin` is.
+        """
+        payload = await _mind_body(request, allowed={"scope", "role", "content", "reason"})
+        missing = sorted({"scope", "role", "content", "reason"} - set(payload))
+        if missing:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message=missing[0] + " is required",
+                status_code=422,
+                detail="a proposal needs a scope, a role, the whole document, and one line saying why",
+            )
+        result = await _run_mind(
+            mind.create_proposal,
+            payload["scope"],
+            payload["role"],
+            payload["content"],
+            payload["reason"],
+        )
+        return JSONResponse(content=result, status_code=201, headers=TASK_CONTENT_HEADERS)
+
+    @app.post("/api/mind/proposals/{proposal_id}/accept", dependencies=[Depends(require_token)])
+    async def accept_mind_proposal(proposal_id: str, request: Request) -> JSONResponse:
+        """Apply a proposal, atomically, bound to the hash it was made against.
+
+        **The only route in this product that writes canonical memory**, and the
+        only credential that reaches it is the device token. It takes no body
+        fields at all: everything about what is written was fixed when the
+        proposal was created and reviewed, and a field here would be a way to
+        change the reviewed thing at the moment of approval.
+
+        A document that changed since then is a `409 mind_proposal_stale` and
+        nothing is written.
+        """
+        await _mind_body(request, allowed=set())
+        result = await _run_mind(mind.accept_proposal, proposal_id)
+        return JSONResponse(content=result, headers=TASK_CONTENT_HEADERS)
+
+    @app.post("/api/mind/proposals/{proposal_id}/reject", dependencies=[Depends(require_token)])
+    async def reject_mind_proposal(proposal_id: str, request: Request) -> JSONResponse:
+        """Refuse a proposal. Touches no document.
+
+        A decided proposal is not decided again: rejecting one that was already
+        applied, rejected or found stale is a `409` naming the state, the same
+        convention `task_already_finished` uses. History is not rewritten.
+        """
+        await _mind_body(request, allowed=set())
+        result = await _run_mind(mind.reject_proposal, proposal_id)
         return JSONResponse(content=result, headers=TASK_CONTENT_HEADERS)
 
     # -- native Remote Control (M2H, Lane A) ---------------------------------

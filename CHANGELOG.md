@@ -8,6 +8,45 @@ release.
 
 ### Added
 
+- **M2J PR2 — Cofferdam can read your memory, and can be *allowed* to change it.** Memory is
+  Markdown you own: your project's own documents, and a dedicated
+  [Obsidian](https://obsidian.md)-compatible vault for the personal, cross-project things. Both are
+  readable **by role** — you tell Cofferdam once, on the workstation, that `status` means
+  `STATUS.md` — so nothing that talks to Cofferdam ever names a file, a folder or a path. Setup and
+  the full model are in [`docs/MIND.md`](docs/MIND.md).
+
+  **The vault does not exist until you say where it is, and say yes.** There is no default
+  location, nothing scans your home directory or an existing Obsidian vault, and no request can
+  grant one: you write the path down once in `config/mind-grant.json` **and set `"enabled": true`**.
+  Writing the file is not enough on its own — this one setting is stricter than the rest of
+  Cofferdam's configuration on purpose, because it is the only thing standing between your personal
+  notes and everything else. Delete the file, or set it back to `false`, and Cofferdam has no
+  personal memory at all — including for a change that was already waiting for your approval. Your
+  vault is plain Markdown in an ordinary folder and works in a text editor with Cofferdam stopped —
+  Obsidian is not required and is never launched.
+
+  **Nothing writes to your memory without you saying yes.** A change is queued as a *proposal*,
+  which touches nothing on disk, and you read it and decide. When you accept, Cofferdam re-reads
+  the document and checks it is still exactly what you reviewed. **If you edited it in the
+  meantime, the change is refused rather than dropped on top of your edit** — you read it again and
+  propose again. It also checks that the role still points at the *same document*: if you rewired
+  which file `status` means, the change is refused even when the new file happens to say the same
+  thing. Applying replaces one file atomically: it either fully happens or the file is untouched,
+  and nothing else in the project or the vault is altered.
+
+  **If the machine stops mid-apply, Cofferdam tells you the truth about it.** On the next start it
+  looks at the document and works out whether the change landed or not — and if it did not, it
+  says so and waits for you rather than quietly finishing the job. A restart never writes to your
+  memory on its own.
+
+  **Nothing can delete your memory.** There is no delete, rename or move operation to reach — not a
+  blocked one, an absent one — and a proposal that would empty a document is refused as the
+  deletion it is.
+
+  **Only your own device can accept.** The private Custom GPT cannot see any of this, and there is
+  no acceptance route for a model or an assistant of any kind. Reading is local, too: this release
+  sends memory to nothing and nobody.
+
 - **M2J PR1 — Cofferdam knows what you are working on, and remembers it.** Until now every surface
   worked that out again per request: the phone knew because you were looking at a task list, the
   Custom GPT knew because the conversation mentioned a project, and nothing survived a restart.

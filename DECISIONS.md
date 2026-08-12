@@ -1512,6 +1512,114 @@ Both are corrected in this change.
 **Device transfer stays honestly blocked.** Only one Spotify Connect device exists on this host,
 so transfer is `BLOCKED_BY_PREREQUISITE` — a missing prerequisite, never a pass.
 
+## D-2026-08-12-2 — The vault grant must say yes, and PR2 only edits documents that exist (EFE DECISION, ACTIVE)
+
+**Decision.** Two operator answers to questions M2J PR2 raised while it was on its branch. Both
+narrow [D-2026-08-11-4](#d-2026-08-11-4--memory-writes-are-proposal--user-accept--hash-bound-apply-efe-decision-active);
+neither changes it.
+
+**A. Global Mind access requires an explicit host-owned `"enabled": true`. The presence of the
+grant file alone does not activate access.**
+
+| State | Result |
+|---|---|
+| `config/mind-grant.json` absent | inaccessible |
+| present, `enabled` omitted | inaccessible |
+| `enabled: false` | inaccessible |
+| `enabled` present but not a boolean | configuration error, fails closed |
+| `enabled: true`, and otherwise valid | accessible |
+
+This is **deliberately stricter than the project and workspace convention**, where `enabled`
+defaults to `true` and omitting it means on. That convenience is correct for
+`task-projects.json` and `workspaces.json`: they say where work happens on this machine, an
+operator writes an entry in order to use it, and the cost of a mistake is a project that runs
+when it was meant to be parked.
+
+The vault is not that. It is **cross-project personal authority** — the one file on the host that
+makes somebody's private, non-project memory readable at all — and the failure mode is not a
+surprised operator but personal memory reachable by a component that was never meant to see it.
+When the two conventions disagree, the one that fails closed wins, and the activating act is
+made explicit rather than incidental.
+
+The type check is `isinstance(value, bool)` rather than truthiness, because `1`, `"true"` and
+`"yes"` are exactly what a person writes meaning yes and exactly what must not be read as
+consent. The three written-but-inactive states are **reported** rather than silent, so an
+operator can tell "I never granted one" from "I granted one and it is off".
+
+The grant is re-read on every resolution rather than cached, so revocation takes effect
+immediately and applies to a proposal that is already pending: acceptance re-resolves the grant
+and refuses, writing nothing. The proposal stays **pending** rather than being decided — the
+authority was withdrawn, not the change.
+
+**B. M2J PR2 modifies existing approved documents only. Creating a missing one is out of scope.**
+
+A role mapped to a file that does not exist fails closed, at proposal time and again at apply
+time. PR2 adds no file creation, directory creation, rename, move or deletion, and the absence is
+structural rather than a check: the operation vocabulary contains one word, and no function in
+the mind package removes or creates a path.
+
+**Creation of an approved-but-absent memory document requires its own future authority
+decision**, and it is recorded as out of scope rather than left as an implementation gap. The
+reason it is not a small extension: a grant that may create files is a grant over a *directory*,
+not over the documents an operator named, and every containment argument in
+[D-2026-08-11-3](#d-2026-08-11-3--three-minds-global-vault-project-repository-working-context-efe-decision-active)
+is written about named documents.
+
+## D-2026-08-12-3 — A memory apply is bound to authority, is crash-truthful, and resolves by descriptor (EFE DECISION, ACTIVE)
+
+**Decision.** Three hardenings of the path
+[D-2026-08-11-4](#d-2026-08-11-4--memory-writes-are-proposal--user-accept--hash-bound-apply-efe-decision-active)
+already specifies, adopted after the focused M2J PR2 security review reported them as residual
+risks. None widens what memory access can do; each closes a gap between what PR2 *claimed* and
+what it enforced.
+
+**A. A proposal is bound to the host authority, not only to the bytes.** The base content hash
+answers "is this still the text I reviewed"; it cannot answer "is this still the same
+*document*". Remap a role from one approved file to another holding byte-identical content and a
+content-only check sees no drift at all. So a proposal also records an opaque, domain-separated
+fingerprint of the authority that resolved it — scope, workspace, project, role, canonical root
+and the configured relative name — recomputed at acceptance and compared. A mismatch is
+`mind_target_authority_changed`, its own reason rather than a content conflict, because sending
+somebody to look for an edit that never happened is a worse answer than no answer.
+
+The fingerprint is **stored, never published, and never a path**: paths go in as bytes and come
+out as a digest. This is the one place a filesystem location influences durable state, and it does
+so one-way.
+
+**B. The store may never durably say `applied` while the document still holds the pre-apply
+bytes.** The first implementation committed `applied` and then wrote, which bought exclusivity —
+two accepts cannot both pass one compare-and-set — at the cost of exactly that lie in the crash
+window. The protocol is now `pending → applying → applied`: the claim is a statement of *intent*,
+true whenever it is written and however the process ends, and completion is recorded only after
+the rename returns. The claim remains a durable compare-and-set, so single-writer is unchanged.
+
+**Recovery classifies; it never writes.** At start-up each outstanding claim is compared against
+the document's own hash: equal to the proposed content means the bytes landed and only the record
+was lost, and the record is reconciled; equal to the base means the mutation did not land, and the
+proposal becomes `interrupted`, waiting for a person on the private surface; anything else is
+conflicted and terminal. **A consequential operation resumed by a restart is one nobody authorized
+at the moment it happened**, which is the same rule
+[D-2026-08-11-8](#d-2026-08-11-8--health-truth-is-evidence-led-and-consequential-work-is-never-auto-retried-efe-decision-active)
+applies to task creation and actuator sends.
+
+**C. Containment is enforced by descriptor-relative traversal, not by a pathname walk.** Checking
+a path with `lstat` and then opening it by name is two views of the filesystem with a usable gap
+between them. Resolution now opens a descriptor on the verified root and opens every component
+below it relative to the one above, `O_NOFOLLOW` throughout, and holds the parent descriptor for
+the whole operation — so the hash that authorizes a write and the write itself concern one file,
+and a directory swapped in afterwards redirects nothing. The temporary file and the rename are
+both relative to that descriptor.
+
+**There is no pathname fallback.** Where the platform lacks the primitives, resolution refuses
+(`mind_resolution_unsupported`) rather than quietly reverting to the racy version: a weaker
+guarantee that looks identical from the outside is worse than a refusal, because nothing
+downstream would know it had been weakened. The supported production host is Ubuntu, where every
+primitive is present.
+
+**What did not change.** Roles stay closed vocabularies, requests still carry no path, deletion
+and creation stay absent, acceptance stays a device-token surface, and the Actions bridge still
+has no route to any of it.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

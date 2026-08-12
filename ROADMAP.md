@@ -240,9 +240,13 @@ downstream reads from.
     switching cannot leak one workspace's objective into another. Task state and the delegated
     worker are derived on every read and never stored. No document-role or profile fields yet —
     they arrive with the components that read them.
-  - **PR2 — mind access + grant + memory-proposal queue.** Project mind read from the project's own
-    repository by **role** rather than filename; the global vault behind an explicit host-owned
-    grant; the proposal → accept → hash-bound apply path (D-2026-08-11-4).
+  - **PR2 — mind access + grant + memory-proposal queue.** *Implemented on a branch; see
+    [`STATUS.md`](STATUS.md) and [`docs/MIND.md`](docs/MIND.md).* Project mind read from the
+    project's own repository by **role** rather than filename, mapped by `documents` on the
+    workspace — the field PR1 left out until something read it; the global vault behind an explicit
+    host-owned grant in `config/mind-grant.json`, absent by default; the proposal → accept →
+    hash-bound apply path (D-2026-08-11-4), on the device-token surface alone, with deletion absent
+    rather than refused and no egress of any kind.
   - **PR3 — Context Builder.** `LocalContextPack` assembly, bounded by an explicit budget, every
     part carrying `{source_kind, source_ref, observed_at}` — `user_instruction`, `working_state`,
     `plan`, `decision`, `memory`, `worker_result`, `machine_observed`, `external_model_output`,
