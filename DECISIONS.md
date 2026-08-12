@@ -1672,6 +1672,40 @@ and useful on its own, and it is the thing a person can read. **M2N remains a la
 does not block M2J PR3, M2J PR4, M2K or M2L, and nothing in this decision authorizes implementing
 embeddings, vectors, backlinks or retrieval now.
 
+## D-2026-08-13-1 — The runtime home and the project root are different authorities (EFE DECISION, ACTIVE)
+
+**Decision.** Two roots that were the same directory on this host are now separated, because they
+answer different questions:
+
+- **`COFFERDAM_HOME`** (`~/cofferdam`) is the **operational** authority: `state/`, `secrets/`,
+  `config/`, `slots/`, `logs/`, `clones/`, `worktrees/`. It is where the product keeps its own
+  running.
+- **`project.root`** in `task-projects.json` is the **canonical source** authority: where a
+  project's code and documents live, where a worker runs, and where Project Mind resolves a role.
+
+For the `cofferdam` project itself, `project.root` becomes a **stable source checkout**
+(`~/cofferdam/repo`) and **must never point at an A/B deployment slot**. A slot is not a project:
+`slots/a` and `slots/b` swap on every deployment, so a role mapped into one would silently point
+project memory at the previous release after the next normalization — and PR2's target-binding
+hash would refuse every pending proposal the moment the slot flipped
+([D-2026-08-12-3](#d-2026-08-12-3--a-memory-apply-is-bound-to-authority-is-crash-truthful-and-resolves-by-descriptor-efe-decision-active)).
+Project-memory identity must not change when a deployment happens.
+
+**No new path authority is introduced.** There is no `mind_root`, no `docs_root`, no
+`memory_root`, no second project for Mind, and no symlink into a slot. The project registry stays
+the single root authority and every consumer keeps reading it.
+
+**The separation was already true in code; only this host's configuration conflated them.** A task
+row stores `project_id` and never a path — the root is resolved live from the registry at every
+create, follow-up, answer and cancel — so no history is invalidated by moving it. `Config` owns the
+home; nothing writes runtime state under a project root.
+
+**It also narrows a real exposure.** While `project.root` was `$COFFERDAM_HOME`, a worker in the
+`cofferdam` project would have had `secrets/`, `state/tasks/`, `slots/` and the service environment
+files inside its working directory. That was latent rather than active — the project permitted no
+adapter and no Remote Control — but a project root is a grant, and it should name source rather
+than the machine's own operational insides.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

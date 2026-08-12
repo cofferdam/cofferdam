@@ -28,7 +28,11 @@ class MindHarness(unittest.TestCase):
     grant_vault = False
 
     project_documents = {"status": "STATUS.md", "plan": "ROADMAP.md"}
-    vault_documents = {"user": "USER.md", "preferences": "PREFERENCES.md"}
+    vault_documents = {
+        "user": "USER.md",
+        "preferences": "PREFERENCES.md",
+        "cross_project": "CROSS_PROJECT.md",
+    }
 
     def setUp(self) -> None:
         from cofferdam.workstation.config import load_config
@@ -47,6 +51,9 @@ class MindHarness(unittest.TestCase):
         self.vault_root.mkdir()
         (self.vault_root / "USER.md").write_text("# User\n\noriginal\n", encoding="utf-8")
         (self.vault_root / "PREFERENCES.md").write_text("# Preferences\n", encoding="utf-8")
+        (self.vault_root / "CROSS_PROJECT.md").write_text(
+            "# Cross-project\n\noriginal\n", encoding="utf-8"
+        )
 
         self.config = load_config(self.home)
         self.config.ensure_dirs()

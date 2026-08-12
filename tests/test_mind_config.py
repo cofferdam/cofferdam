@@ -59,10 +59,25 @@ class Roles(MindConfigTestCase):
     def test_the_global_role_vocabulary_is_closed_and_separate(self):
         from cofferdam.workstation.mind.roles import GLOBAL_ROLES, valid_role, SCOPE_GLOBAL
 
-        self.assertEqual(set(GLOBAL_ROLES), {"user", "communication_style", "preferences"})
+        self.assertEqual(
+            set(GLOBAL_ROLES),
+            {"user", "communication_style", "preferences", "cross_project"},
+        )
         self.assertTrue(valid_role(SCOPE_GLOBAL, "user"))
+        self.assertTrue(valid_role(SCOPE_GLOBAL, "cross_project"))
         # A project role does not become a global one by being asked for.
         self.assertFalse(valid_role(SCOPE_GLOBAL, "status"))
+        # And the set is still closed: a plausible neighbour is still not a role.
+        for invented in ("notes", "cross-project", "crossproject", "journal", "inbox"):
+            self.assertFalse(valid_role(SCOPE_GLOBAL, invented), invented)
+
+    def test_the_document_bound_is_derived_from_the_vocabulary(self):
+        """The two must never disagree — that mismatch is what made a four-role
+        grant fail with a count message instead of naming the role."""
+        from cofferdam.workstation.mind.grant import MAX_VAULT_DOCUMENTS
+        from cofferdam.workstation.mind.roles import GLOBAL_ROLES
+
+        self.assertEqual(MAX_VAULT_DOCUMENTS, len(GLOBAL_ROLES))
 
     def test_an_unknown_scope_has_no_roles(self):
         from cofferdam.workstation.mind.roles import roles_for_scope, valid_role
@@ -301,6 +316,73 @@ class GrantActivation(MindConfigTestCase):
                     {"global_vault": {"root": str(self.vault()), "enabled": hostile}}
                 )
                 self.assertIsNone(self.load().vault)
+
+    def test_all_four_roles_can_be_granted_at_once(self):
+        """The case the first real vault setup could not express.
+
+        Before `cross_project` existed, a four-role grant was refused *whole* —
+        not the one entry, the whole vault — because the document bound was
+        three. The operator's own `CROSS_PROJECT.md` was therefore unreachable.
+        """
+        from cofferdam.workstation.mind.grant import load_mind_grant
+
+        vault = self.vault()
+        for name in ("COMMUNICATION_STYLE.md", "PREFERENCES.md", "CROSS_PROJECT.md"):
+            (vault / name).write_text("# " + name + "\n", encoding="utf-8")
+        self.write_grant(
+            {
+                "global_vault": {
+                    "root": str(vault),
+                    "enabled": True,
+                    "documents": {
+                        "user": "USER.md",
+                        "communication_style": "COMMUNICATION_STYLE.md",
+                        "preferences": "PREFERENCES.md",
+                        "cross_project": "CROSS_PROJECT.md",
+                    },
+                }
+            }
+        )
+        grant = self.load()
+        self.assertIsNotNone(grant.vault)
+        self.assertEqual(
+            sorted(grant.vault.documents),
+            ["communication_style", "cross_project", "preferences", "user"],
+        )
+
+    def test_a_grant_without_cross_project_is_still_valid(self):
+        """Adding a role must not require every existing grant to be rewritten."""
+        from cofferdam.workstation.mind.grant import load_mind_grant
+
+        vault = self.vault()
+        self.write_grant(
+            {
+                "global_vault": {
+                    "root": str(vault),
+                    "enabled": True,
+                    "documents": {"user": "USER.md"},
+                }
+            }
+        )
+        grant = self.load()
+        self.assertIsNotNone(grant.vault)
+        self.assertEqual(sorted(grant.vault.documents), ["user"])
+
+    def test_a_fifth_invented_role_still_fails_the_grant_closed(self):
+        """The set grew by one word; it did not become open."""
+        vault = self.vault()
+        self.write_grant(
+            {
+                "global_vault": {
+                    "root": str(vault),
+                    "enabled": True,
+                    "documents": {"user": "USER.md", "journal": "JOURNAL.md"},
+                }
+            }
+        )
+        grant = self.load()
+        self.assertIsNone(grant.vault)
+        self.assertTrue(grant.problems)
 
     def test_enabled_does_not_rescue_an_otherwise_invalid_grant(self):
         """Saying yes louder does not make a bad path, or a bad role, acceptable."""

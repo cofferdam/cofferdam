@@ -113,6 +113,40 @@ class Creation(MindHarness):
         self.assertEqual(caught.exception.code, "mind_role_unavailable")
         self.assertFalse((self.project_root / "STATUS.md").exists())
 
+    def test_the_new_role_gains_no_file_creation_authority(self):
+        """Adding a role adds a name, not a permission.
+
+        `cross_project` goes through exactly the same existing-document-only
+        rule as every other role: mapped but missing is a refusal at proposal
+        time, and the file is not created on the way past.
+        """
+        from cofferdam.workstation.mind.errors import MindError
+
+        (self.vault_root / "CROSS_PROJECT.md").unlink()
+        self.activate()
+        with self.assertRaises(MindError) as caught:
+            self.mind.create_proposal(
+                scope="global", role="cross_project", content="x\n", reason="y"
+            )
+        self.assertEqual(caught.exception.code, "mind_role_unavailable")
+        self.assertFalse((self.vault_root / "CROSS_PROJECT.md").exists())
+
+    def test_the_new_role_applies_through_the_unchanged_path(self):
+        """And when the document does exist, nothing about the path is special."""
+        self.activate()
+        before = self.snapshot()
+        created = self.mind.create_proposal(
+            scope="global", role="cross_project", content="# Cross-project\n\nnew\n",
+            reason="prove the fourth role uses the same path",
+        )
+        self.assertEqual(self.snapshot(), before)  # creation still writes nothing
+        self.assertEqual(self.mind.accept_proposal(created["proposal_id"])["state"], "applied")
+        self.assertEqual(self.vault_text("CROSS_PROJECT.md"), "# Cross-project\n\nnew\n")
+        # And exactly one file moved.
+        after = self.snapshot()
+        changed = [k for k in before if before[k] != after[k]]
+        self.assertEqual(changed, [str(self.vault_root / "CROSS_PROJECT.md")])
+
     def test_empty_content_is_refused(self):
         """An empty document is a deletion wearing a mutation's clothes."""
         from cofferdam.workstation.mind.errors import MindError

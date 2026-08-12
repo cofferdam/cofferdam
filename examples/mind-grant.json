@@ -21,9 +21,9 @@
     "$COFFERDAM_HOME: the vault is yours, and Cofferdam does not own it.",
     "",
     "'documents' maps a code-owned ROLE to a file inside the vault. The global roles",
-    "are user, communication_style and preferences. An unmapped role has no file at",
-    "all — Cofferdam never guesses a filename, even an obvious one sitting right",
-    "there — and a role named twice is refused rather than resolved by position.",
+    "are user, communication_style, preferences and cross_project. An unmapped role has",
+    "no file at all — Cofferdam never guesses a filename, even an obvious one sitting",
+    "right there — and a role named twice is refused rather than resolved by position.",
     "",
     "'enabled': true is REQUIRED, and writing the file is not enough. This is",
     "deliberately stricter than task-projects.json and workspaces.json, where 'enabled'",
@@ -57,7 +57,8 @@
     "documents": {
       "user": "USER.md",
       "communication_style": "COMMUNICATION_STYLE.md",
-      "preferences": "PREFERENCES.md"
+      "preferences": "PREFERENCES.md",
+      "cross_project": "CROSS_PROJECT.md"
     }
   }
 }

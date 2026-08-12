@@ -18,7 +18,7 @@ from the grant. Neither is reachable from a request.
 workspace entry, validated at load and re-read here on every resolution, because
 somebody edits that file in a text editor while the daemon runs.
 
-**The caller decides nothing except the role.** Two closed vocabularies, nine
+**The caller decides nothing except the role.** Two closed vocabularies, ten
 words between them.
 
 Why resolution happens twice
