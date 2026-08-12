@@ -1,0 +1,51 @@
+{
+  "_comment": [
+    "Example workspace configuration. Copy to $COFFERDAM_HOME/config/workspaces.json",
+    "and edit on the workstation — this file is an example and is never read by the",
+    "service.",
+    "",
+    "A workspace is a stable name for WHAT YOU ARE WORKING ON, bound to a project that",
+    "already exists in task-projects.json. It carries the objective, the expected next",
+    "step and a few continuity references; the project carries the directory and the",
+    "adapters.",
+    "",
+    "A workspace never says WHERE: there is no 'root' and no 'path'. The directory",
+    "belongs to the project it names, which is where root validation, the symlink walk",
+    "and the re-check before every task already live.",
+    "",
+    "A workspace never says WHO RUNS: there is no 'adapters', 'delegated_adapter',",
+    "'model' or 'provider'. Which agent runs is the project's decision (PR #34), and a",
+    "workspace that could name one would put that authority back where ordering used",
+    "to be. An entry carrying one of those fields is refused by name.",
+    "",
+    "'project_id' must name a project in task-projects.json. It is checked for shape at",
+    "load and for existence at use, so a workspace written before its project is added",
+    "stays in the file and reports the missing project rather than disappearing.",
+    "",
+    "Nothing is auto-registered. Cofferdam never creates a workspace for a project it",
+    "finds, and there is no API route that writes this file.",
+    "",
+    "Document roles (plan_doc, status_doc, decisions_doc) and evaluation profiles are",
+    "NOT in this schema yet. They arrive with the components that read them — the mind",
+    "in M2J PR2/PR3, evaluation depth in M2K. A field nothing reads is a field somebody",
+    "builds on before it means anything.",
+    "",
+    "See docs/WORKSPACES.md."
+  ],
+  "workspaces": [
+    {
+      "workspace_id": "cofferdam",
+      "display_name": "Cofferdam",
+      "project_id": "cofferdam",
+      "enabled": true,
+      "notes": "the main repository"
+    },
+    {
+      "workspace_id": "sandbox",
+      "display_name": "Sandbox",
+      "project_id": "claude-sandbox",
+      "enabled": false,
+      "notes": "disabled: configured but not something to activate by accident"
+    }
+  ]
+}

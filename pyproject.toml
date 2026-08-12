@@ -123,6 +123,7 @@ packages = [
     "cofferdam.workstation.tasks.adapters",
     "cofferdam.workstation.tasks.adapters.claude_agent_sdk",
     "cofferdam.workstation.tasks.adapters.claude_code",
+    "cofferdam.workstation.workspace",
     "cofferdam.workstation.youtubeplayer",
 ]
 
