@@ -1706,6 +1706,45 @@ files inside its working directory. That was latent rather than active — the p
 adapter and no Remote Control — but a project root is a grant, and it should name source rather
 than the machine's own operational insides.
 
+## D-2026-08-13-2 — Read authority is not context inclusion (EFE DECISION, ACTIVE)
+
+**Decision.** Closes OQ-5. There are **three** separate permissions over a piece of memory, and
+Cofferdam must never let one imply the next:
+
+| | Question it answers | Decided by |
+|---|---|---|
+| **Read authority** | may Cofferdam open this at all? | the host-owned grant and the role map |
+| **Context inclusion** | should this be in *this* pack? | context policy — **this decision** |
+| **Egress permission** | may this leave the host? | `CloudContextProjection` and its egress policy ([D-2026-08-11-5](#d-2026-08-11-5--local-context-and-external-context-are-two-security-objects-efe-decision-active)) |
+
+**Mind read authority ≠ automatic context inclusion. LocalContextPack inclusion ≠
+CloudContextProjection permission.** Cloud egress remains an entirely separate policy and nothing
+here touches it.
+
+**The default automatically eligible Global Mind roles are `communication_style` and
+`preferences`.** `user` and `cross_project` are **not automatically injected**, and that is
+intentional rather than an unfinished edge:
+
+- A `LocalContextPack` should carry context appropriate to the **current interaction**, not every
+  piece of locally accessible memory.
+- `USER.md` may eventually hold broad personal information irrelevant to most requests.
+- `CROSS_PROJECT.md` is especially prone to context pollution when the active workspace concerns
+  one project.
+- That Cofferdam is *allowed* to read a role does not mean every planner request should receive
+  it.
+
+**How the excluded roles are meant to arrive later.** `user` through an explicit local
+policy or reference when relevant; `cross_project` primarily through an explicit reference or
+future M2N semantic retrieval, when another project's memory is **actually** related. Either way
+the material enters as a typed candidate through the Context Builder's existing seam and is
+subject to the same budget, provenance and omission machinery — retrieval never bypasses it.
+
+**This authorizes nothing to be built now.** No M2N, no semantic relevance, and specifically **no
+keyword heuristic** invented to guess when `user` or `cross_project` is relevant — the failure
+[D-2026-08-12-4](#d-2026-08-12-4--semantic-retrieval-is-a-required-mind-capability-and-its-index-is-never-authority-efe-decision-active)
+describes, where an approximation gets believed because it is labelled "relevant", applies exactly
+here. Widening the default set is a change to this decision, with a test.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

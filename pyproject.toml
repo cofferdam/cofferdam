@@ -114,6 +114,7 @@ packages = [
     "cofferdam.workstation",
     "cofferdam.workstation.adapters",
     "cofferdam.workstation.audio",
+    "cofferdam.workstation.context",
     "cofferdam.workstation.mediasearch",
     "cofferdam.workstation.mind",
     "cofferdam.workstation.registries",
