@@ -1620,6 +1620,58 @@ primitive is present.
 and creation stay absent, acceptance stays a device-token surface, and the Actions bridge still
 has no route to any of it.
 
+## D-2026-08-12-4 — Semantic retrieval is a required Mind capability, and its index is never authority (EFE DECISION, ACTIVE)
+
+**Decision.** Cofferdam Mind requires **two** relationship mechanisms over canonical Markdown, and
+they are complementary rather than alternatives:
+
+- **explicit links and backlinks** — intentional, human-readable, written by a person, and legible
+  in a text editor with Cofferdam stopped;
+- **semantic/vector retrieval** — which surfaces memory that is relevant but was never explicitly
+  linked, and that does not share the words used to look for it.
+
+**Semantic retrieval is a required capability, not an optional search enhancement.** Recorded here
+because the roadmap previously implied otherwise: M2N sat under a "Later, unordered" heading beside
+items explicitly marked optional or conditional, and nothing anywhere stated that the capability
+was needed at all. Ordering was clear; necessity was not.
+
+The intended product behaviour is specific. When a new idea arrives, Cofferdam should be able to
+relate it to prior ideas, decisions and project context **even when they share no exact words and
+no explicit link**, so the planner can surface the related material, a possible contradiction, a
+prior decision the idea affects, and a suggested durable link worth writing down.
+
+**Retrieval reads. It never writes.** Everything above is a *reading* capability whose output is
+material for a person and, later, for the planner. Any resulting change to canonical Markdown goes
+through the path
+[D-2026-08-11-4](#d-2026-08-11-4--memory-writes-are-proposal--user-accept--hash-bound-apply-efe-decision-active)
+and [D-2026-08-12-3](#d-2026-08-12-3--a-memory-apply-is-bound-to-authority-is-crash-truthful-and-resolves-by-descriptor-efe-decision-active)
+already define — MemoryProposal, explicit private acceptance, hash- and authority-bound apply —
+unchanged and with no exception for a suggestion that came from retrieval. Finding a link worth
+writing is not permission to write it.
+
+**The index is never a second memory authority.** Extending
+[D-2026-08-08-6](#d-2026-08-08-6--memory-is-human-readable-and-user-owned-efe-decision-active),
+any embedding, vector or full-text relationship index is:
+
+- **derived** — built from canonical or approved source material, never authored;
+- **rebuildable** from that material alone;
+- **discardable** — deleting it must not delete or alter one byte of canonical memory, and must
+  leave a host that reads memory exactly as it did before, only without the extra recall;
+- **non-canonical** — where the index and the Markdown disagree, **the Markdown is right**;
+- **provenance-preserving** — a retrieved fragment carries where it came from, so the planner can
+  tell memory from observation from external text
+  ([D-2026-08-11-5](#d-2026-08-11-5--local-context-and-external-context-are-two-security-objects-efe-decision-active));
+- **local by default** — the index is built and queried on the host. This was the second thing the
+  record never said: derived and rebuildable were binding, locality was not. A vector store is a
+  lossy copy of somebody's private memory, and shipping one to a service by default would move
+  personal memory off the machine through a component nobody thinks of as memory. Anything leaving
+  the host is still a `CloudContextProjection` built by an explicit egress policy.
+
+**Ordering is unchanged: backlinks first, vectors second** — the explicit graph is cheaper, exact,
+and useful on its own, and it is the thing a person can read. **M2N remains a later milestone.** It
+does not block M2J PR3, M2J PR4, M2K or M2L, and nothing in this decision authorizes implementing
+embeddings, vectors, backlinks or retrieval now.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

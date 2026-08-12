@@ -267,6 +267,19 @@ device-token surface, and Cofferdam applies atomically against the **base conten
 reviewed — a drifted file refuses rather than overwriting. The planner and the Actions bridge have
 no acceptance route at all, and deletion is never planner-proposable.
 
+**Memory is related two ways, and both are required** (D-2026-08-12-4). Explicit links and
+backlinks carry the relationships a person meant and wrote down. **Semantic retrieval** carries the
+ones nobody thought to write: a new idea should reach the prior decisions and context it actually
+relates to even when they share no words and no link, so the planner can raise a contradiction or a
+decision the idea affects rather than waiting to be asked the right way. Backlinks first, vectors
+second (M2N); neither exists yet.
+
+Any such index — embedding, vector or full-text — is **derived, rebuildable, discardable,
+provenance-preserving, local by default, and never canonical**. Deleting it removes recall and not
+one byte of memory, and where it and the Markdown disagree the Markdown is right. Retrieval reads
+only: a relationship it finds becomes durable memory through the same proposal-and-acceptance path
+as anything else.
+
 ### Local context and external context are different objects
 
 A pack assembled for the local planner and a pack **leaving the host** are two security objects,

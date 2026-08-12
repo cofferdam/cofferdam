@@ -91,7 +91,7 @@ M2K  Evidence & evaluation foundation, + machine reason codes       (determinist
 M2L  Local Planner MVP                                             (advisory, confirm-by-default)
 M2M  Remote operations completion — overview, dashboard, diagnosis
 ──── later, in this order unless evidence reorders it ────
-M2N  Mind retrieval (backlinks first, vectors second)
+M2N  Mind retrieval — required (backlinks first, vectors second)
 M2O  Browser and desktop skills, productized from Track B
 M2P  Codex adapter (second delegated worker)
 M2Q  Fast/deep planner routing — only if Track D data justifies it
@@ -397,15 +397,32 @@ possible; rubric scoring labeled advisory. **Real and private examples stay loca
 fixtures are synthetic or public-safe until an explicit review decision says otherwise. Track D
 must produce numbers before M2L's model choice is frozen.
 
-### Later, unordered
+### Later, in this order unless evidence reorders it
 
-**M2N** richer Markdown memory retrieval under D-2026-08-08-6 — backlinks and the wikilink graph
-first, embeddings second, the index never canonical · **M2O** browser and desktop skills
-productized from Track B · **M2P** Codex app-server as a second delegated worker and reviewer in
-Lane B, which needs nothing new architecturally once M2K's claims contract exists · **M2Q**
-fast/deep planner routing, only on Track D evidence · an optional OpenClaw client under
-D-2026-08-08-5 · an MCP or App transport, only when it materially improves the Actions path that
-has been proven to work · voice, STT and TTS.
+These are milestones, not ideas. They come after M2M and none of them blocks it.
+
+**M2N — Mind retrieval. Required, not optional.** Canonical Markdown gains **two** complementary
+derived relationship mechanisms: explicit links and backlinks, which are intentional and
+human-readable, and **semantic/vector retrieval**, which surfaces memory that is relevant but was
+never explicitly linked and does not share the words used to look for it. The point is the
+behaviour: a new idea should reach the prior decisions and context it actually relates to, so the
+planner can raise a contradiction or a decision it affects rather than waiting to be asked the
+right way. Backlinks and the wikilink graph first, embeddings second — the explicit graph is
+cheaper, exact and readable on its own. The index stays derived, rebuildable, discardable,
+provenance-preserving, **local by default** and never canonical; where it and the Markdown
+disagree, the Markdown is right. Retrieval reads only: any resulting change to memory still goes
+through MemoryProposal → explicit private acceptance → hash-bound apply. See
+[`DECISIONS.md`](DECISIONS.md) D-2026-08-08-6 and D-2026-08-12-4.
+
+**M2O** browser and desktop skills productized from Track B · **M2P** Codex app-server as a second
+delegated worker and reviewer in Lane B, which needs nothing new architecturally once M2K's claims
+contract exists · **M2Q** fast/deep planner routing, only on Track D evidence.
+
+### Optional or conditional, genuinely unordered
+
+Not milestones, and none is committed to: an optional OpenClaw client under D-2026-08-08-5 · an MCP
+or App transport, only when it materially improves the Actions path that has been proven to work ·
+voice, STT and TTS.
 
 ---
 
