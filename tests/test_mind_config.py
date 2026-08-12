@@ -215,6 +215,106 @@ class WorkspaceDocumentRoles(MindConfigTestCase):
         self.assertEqual(registry.workspaces, ())
 
 
+class GrantActivation(MindConfigTestCase):
+    """`enabled: true` is the grant. Writing the file is not (D-2026-08-12-2).
+
+    Five states and exactly one of them grants anything. This is deliberately
+    stricter than the project and workspace convention, where `enabled` defaults
+    to true — those files say where work happens, and this one says whether
+    somebody's personal cross-project memory is readable at all.
+
+    The whole class asserts the same property from five directions, because the
+    failure it guards against is not a bug in one branch: it is the day somebody
+    finds the default convenient and makes this file behave like the other two.
+    """
+
+    def vault(self):
+        vault = self.home / "vault"
+        vault.mkdir(exist_ok=True)
+        (vault / "USER.md").write_text("# User\n", encoding="utf-8")
+        return vault
+
+    def load(self):
+        from cofferdam.workstation.mind.grant import load_mind_grant
+
+        return load_mind_grant(self.config)
+
+    def test_no_grant_file_means_no_vault(self):
+        grant = self.load()
+        self.assertIsNone(grant.vault)
+        self.assertFalse(grant.source_present)
+        self.assertEqual(grant.problems, ())
+
+    def test_a_grant_without_enabled_means_no_vault(self):
+        """The file exists, the path is real, the documents are valid. Still no."""
+        self.write_grant(
+            {"global_vault": {"root": str(self.vault()), "documents": {"user": "USER.md"}}}
+        )
+        grant = self.load()
+        self.assertIsNone(grant.vault)
+        self.assertTrue(grant.source_present)
+        # Reported, not silent: somebody wrote this file expecting it to work.
+        self.assertTrue(grant.problems)
+        self.assertIn("enabled", grant.problems[0]["problem"])
+
+    def test_enabled_false_means_no_vault(self):
+        self.write_grant({"global_vault": {"root": str(self.vault()), "enabled": False}})
+        grant = self.load()
+        self.assertIsNone(grant.vault)
+        self.assertTrue(grant.problems)
+
+    def test_enabled_true_with_a_valid_grant_is_the_only_yes(self):
+        self.write_grant(
+            {
+                "global_vault": {
+                    "root": str(self.vault()),
+                    "enabled": True,
+                    "documents": {"user": "USER.md"},
+                }
+            }
+        )
+        grant = self.load()
+        self.assertIsNotNone(grant.vault)
+        self.assertTrue(grant.vault.enabled)
+        self.assertEqual(grant.vault.documents["user"], "USER.md")
+
+    def test_a_truthy_non_boolean_enabled_fails_closed(self):
+        """`1`, `"true"` and `"yes"` are what a person writes meaning yes.
+
+        Each is refused rather than read as consent. `isinstance(1, bool)` is
+        False in Python, so this is a type check and not a truthiness test — the
+        distinction is the whole point, since every value below is truthy.
+        """
+        for hostile in (1, "true", "True", "yes", "on", [True], {"value": True}, 1.0):
+            with self.subTest(enabled=hostile):
+                self.write_grant(
+                    {"global_vault": {"root": str(self.vault()), "enabled": hostile}}
+                )
+                grant = self.load()
+                self.assertIsNone(grant.vault)
+                self.assertTrue(grant.problems)
+
+    def test_a_falsy_non_boolean_enabled_also_fails_closed(self):
+        for hostile in (0, "", None, [], "false"):
+            with self.subTest(enabled=hostile):
+                self.write_grant(
+                    {"global_vault": {"root": str(self.vault()), "enabled": hostile}}
+                )
+                self.assertIsNone(self.load().vault)
+
+    def test_enabled_does_not_rescue_an_otherwise_invalid_grant(self):
+        """Saying yes louder does not make a bad path, or a bad role, acceptable."""
+        for entry in (
+            {"root": "relative/vault", "enabled": True},
+            {"root": "~/vault", "enabled": True},
+            {"root": str(self.vault()), "enabled": True, "documents": {"status": "STATUS.md"}},
+            {"root": str(self.vault()), "enabled": True, "command": "rm -rf /"},
+        ):
+            with self.subTest(entry=sorted(entry)):
+                self.write_grant({"global_vault": entry})
+                self.assertIsNone(self.load().vault)
+
+
 class GlobalVaultGrant(MindConfigTestCase):
     """The second filesystem grant, and the fact that it is absent by default."""
 
@@ -243,7 +343,13 @@ class GlobalVaultGrant(MindConfigTestCase):
         vault = self.home / "vault"
         vault.mkdir()
         self.write_grant(
-            {"global_vault": {"root": str(vault), "documents": {"user": "USER.md"}}}
+            {
+                "global_vault": {
+                    "root": str(vault),
+                    "enabled": True,
+                    "documents": {"user": "USER.md"},
+                }
+            }
         )
         grant = load_mind_grant(self.config)
         self.assertIsNotNone(grant.vault)
@@ -296,7 +402,13 @@ class GlobalVaultGrant(MindConfigTestCase):
         vault = self.home / "vault"
         vault.mkdir()
         self.write_grant(
-            {"global_vault": {"root": str(vault), "documents": {"status": "STATUS.md"}}}
+            {
+                "global_vault": {
+                    "root": str(vault),
+                    "enabled": True,
+                    "documents": {"status": "STATUS.md"},
+                }
+            }
         )
         grant = load_mind_grant(self.config)
         self.assertIsNone(grant.vault)
@@ -307,7 +419,7 @@ class GlobalVaultGrant(MindConfigTestCase):
         vault = self.home / "vault"
         vault.mkdir()
         self.write_grant(
-            '{"global_vault": {"root": ' + json.dumps(str(vault)) + ','
+            '{"global_vault": {"root": ' + json.dumps(str(vault)) + ', "enabled": true,'
             ' "documents": {"user": "USER.md", "user": "OTHER.md"}}}'
         )
         grant = load_mind_grant(self.config)

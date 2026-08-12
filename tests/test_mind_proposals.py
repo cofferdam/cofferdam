@@ -441,6 +441,67 @@ class AtomicWrite(MindHarness):
 
         self.assertEqual(self.project_text("STATUS.md"), "local only\n")
 
+    def test_a_store_failure_during_repair_does_not_mask_the_write_failure(self):
+        """The caller must hear about the disk, not about the database.
+
+        The apply claims `applied` before it writes, so a failed write has to put
+        the row back. If that repair itself raises, the original `mind_apply_failed`
+        must still be what reaches the caller — otherwise they are told the wrong
+        thing about the wrong subsystem, while the row stays `applied`, which is
+        the state the repair existed to undo.
+        """
+        from cofferdam.workstation.mind import documents as documents_module
+        from cofferdam.workstation.mind.errors import MindError
+
+        self.activate()
+        created = self.mind.create_proposal(
+            scope="project", role="status", content="new\n", reason="y"
+        )
+
+        original_replace = os.replace
+
+        def refuse(src, dst):
+            raise OSError("no")
+
+        def also_broken(_proposal_id):
+            raise RuntimeError("the store is gone too")
+
+        documents_module.os.replace = refuse
+        self.mind_store.reopen = also_broken
+        try:
+            with self.assertRaises(MindError) as caught:
+                self.mind.accept_proposal(created["proposal_id"])
+        finally:
+            documents_module.os.replace = original_replace
+
+        self.assertEqual(caught.exception.code, "mind_apply_failed")
+        self.assertEqual(self.project_text("STATUS.md"), "# Status\n\noriginal\n")
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "the platform has no symlinks")
+    def test_a_symlink_swapped_in_after_resolution_is_refused_by_the_open(self):
+        """The read refuses a link itself, not only the check before it.
+
+        `resolve_document` walks with `lstat`, but that check and the open are
+        two syscalls. Reaching straight past the walk into the read proves the
+        open is independently safe: `O_NOFOLLOW` refuses, so the window between
+        them cannot be used to read a file outside the root.
+        """
+        from cofferdam.workstation.mind.documents import read_document
+        from cofferdam.workstation.mind.errors import MindError
+
+        outside = self.home / "outside.md"
+        outside.write_text("secrets\n", encoding="utf-8")
+        target = self.project_root / "STATUS.md"
+        target.unlink()
+        try:
+            os.symlink(outside, target)
+        except (OSError, NotImplementedError):  # pragma: no cover
+            self.skipTest("this platform cannot create a symlink")
+
+        with self.assertRaises(MindError) as caught:
+            read_document(target)
+        self.assertEqual(caught.exception.code, "mind_role_unavailable")
+
     def test_the_apply_uses_no_shell_and_no_subprocess(self):
         import subprocess
 

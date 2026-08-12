@@ -47,12 +47,13 @@ nothing for a caller, a route, or a later planner to reach.
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 from ..tasks.errors import ProjectRootInvalid
 from ..tasks.projects import verify_root
@@ -148,32 +149,78 @@ def resolve_document(root: Path, relative: str) -> Path:
     return expected
 
 
+def _open_document(path: Path) -> int:
+    """Open a document for reading, refusing a symlink at the final component.
+
+    ``O_NOFOLLOW`` is the point. :func:`resolve_document` has already walked the
+    path with ``lstat`` and found no link — but that check and this open are two
+    separate syscalls, and between them the final component can be replaced. The
+    flag closes that window by making the *open itself* refuse a link, so the
+    file that gets read is a file that was not a link at the moment it was
+    opened, rather than one that was not a link a moment earlier.
+
+    It does not make the whole path atomic — an intermediate directory can still
+    be swapped, which needs an ``openat`` walk — and it does not need to: the
+    remaining window has the same shape as the project-root boundary Task Core
+    already documents, and winning it requires write access to the vault as the
+    user who owns it.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        return os.open(path, flags)
+    except OSError as failure:
+        # ELOOP is what O_NOFOLLOW raises on a symlink. Named separately so the
+        # message is the truthful one rather than the generic read failure.
+        if getattr(failure, "errno", None) == errno.ELOOP:
+            raise RoleUnavailable(
+                "the document is reached through a link, which is not accepted"
+            )
+        raise RoleUnavailable("the document cannot be read")
+
+
 def read_document(path: Path) -> bytes:
     """The document's exact bytes, bounded.
 
     The size is checked from the open descriptor rather than from a prior
     ``stat`` of the name, so the thing measured is the thing read.
     """
+    return _read_open_document(path)[0]
+
+
+def _read_open_document(path: Path) -> Tuple[bytes, float]:
+    """The bytes and the modification time, from **one** descriptor.
+
+    Both come from the same ``fstat``/``read`` pair rather than from a second
+    ``stat`` by name, so they describe one file at one instant instead of two
+    lookups that a rename could land between.
+    """
+    descriptor = _open_document(path)
     try:
-        with open(path, "rb") as stream:
-            size = os.fstat(stream.fileno()).st_size
-            if size > MAX_DOCUMENT_BYTES:
-                raise RoleUnavailable("the document is larger than this version reads")
-            return stream.read(MAX_DOCUMENT_BYTES + 1)[:MAX_DOCUMENT_BYTES]
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise RoleUnavailable("the document is not an ordinary file")
+        if info.st_size > MAX_DOCUMENT_BYTES:
+            raise RoleUnavailable("the document is larger than this version reads")
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = -1  # the context manager owns it now
+            data = stream.read(MAX_DOCUMENT_BYTES + 1)[:MAX_DOCUMENT_BYTES]
+        return data, info.st_mtime
     except RoleUnavailable:
         raise
     except OSError:
         raise RoleUnavailable("the document cannot be read")
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:  # pragma: no cover - already closed
+                pass
 
 
 def inspect_document(root: Path, relative: str) -> DocumentState:
     """Resolve and hash one document in a single pass."""
     path = resolve_document(root, relative)
-    data = read_document(path)
-    try:
-        modified = os.stat(path).st_mtime
-    except OSError:  # pragma: no cover - it was just read
-        raise RoleUnavailable("the document cannot be read")
+    data, modified = _read_open_document(path)
     return DocumentState(
         path=path,
         size=len(data),

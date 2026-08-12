@@ -101,7 +101,36 @@ over the network would be access that could be granted over the network.
 
 It gets the same treatment as a project root, because it is the product's second filesystem
 grant: absolute literal path, no `~`/`$`/`..`, `lstat` over every component, re-verified at use.
-`enabled: false` turns it off without deleting it; deleting the file is the complete revocation.
+
+### `enabled: true` is the grant — writing the file is not
+
+Deliberately **stricter than the project and workspace convention**, where `enabled` defaults to
+`true` and omitting it means on. Those files say where work happens on this machine; this one
+decides whether your personal, cross-project memory is readable at all, so the convenient default
+is the wrong default (D-2026-08-12-2).
+
+| State | Result |
+|---|---|
+| file absent | no vault |
+| present, `enabled` omitted | no vault, **reported** |
+| `enabled: false` | no vault, reported |
+| `enabled` not a boolean (`1`, `"true"`, `"yes"`) | no vault, reported |
+| `enabled: true` and otherwise valid | **the vault** |
+
+The three written-but-inactive states are reported rather than silent, because each is somebody
+having written the file and not got what they expected — and "I never granted one" and "I granted
+one and it is off" send you to different lines. The check is an `isinstance` against `bool`, not a
+truthiness test: `1` and `"true"` are exactly what a person writes meaning yes, and exactly what
+must not be read as consent.
+
+`enabled: true` never rescues an otherwise invalid grant — a relative root, a `~`, a project role
+in the vault's `documents`, or a forbidden field still refuses.
+
+**The grant is re-read on every resolution**, so turning it off takes effect immediately, without
+a restart, and applies to a proposal that is already pending: acceptance re-resolves the grant and
+refuses with `mind_global_grant_missing`, writing nothing. The proposal stays `pending` rather
+than being decided — the authority was withdrawn, not the change — so restoring the grant lets the
+same proposal be accepted.
 
 ### What resolution actually checks
 
@@ -187,9 +216,11 @@ move, no `mkdir`, no recursion.
 An **empty** proposed document is refused too, because a replace with nothing in it is a
 deletion wearing a mutation's clothes.
 
-PR2 modifies **existing** approved documents only. A mapped role whose file is missing refuses
-at proposal time. Creating a file the host never wrote down would turn a document grant into a
-directory grant.
+PR2 modifies **existing** approved documents only. A mapped role whose file is missing refuses at
+proposal time. Creating a file the host never wrote down would turn a document grant into a
+directory grant, so **creating an approved-but-absent memory document is out of scope and needs
+its own authority decision** — recorded as D-2026-08-12-2 rather than left as an implementation
+gap.
 
 ### Lifecycle
 

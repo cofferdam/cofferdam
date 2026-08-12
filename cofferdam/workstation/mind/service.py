@@ -479,7 +479,18 @@ class MindService:
             # The write failed and the document is untouched, so the row is put
             # back to pending. Recording it as applied would claim a change that
             # is not on disk — the one lie this whole path exists to prevent.
-            self._store.reopen(proposal.proposal_id)
+            #
+            # The repair is best-effort *and the original failure always wins*.
+            # If the store itself is what broke, a raising `reopen` would replace
+            # "the document could not be written" with a database error, and the
+            # caller would be told the wrong thing about the wrong subsystem —
+            # while the row stayed `applied`, which is the very state this is
+            # trying to undo. Losing the repair is bad; losing the report of the
+            # failure that caused it is worse.
+            try:
+                self._store.reopen(proposal.proposal_id)
+            except Exception:  # pragma: no cover - a store failure during repair
+                pass
             raise
 
         return self._publish(decided, include_content=True)

@@ -89,12 +89,20 @@ class MindHarness(unittest.TestCase):
             json.dumps({"workspaces": [entry]}), encoding="utf-8"
         )
 
-    def write_grant(self, *, root=None, documents=None, enabled=True) -> None:
+    def write_grant(self, *, root=None, documents=None, enabled=True, omit_enabled=False) -> None:
+        """Write the grant. ``enabled: true`` is what activates it.
+
+        ``omit_enabled`` reaches the state D-2026-08-12-2 made fail closed: a
+        grant somebody wrote and never turned on. It is a parameter rather than
+        a separate helper because the tests need to move a live host *between*
+        these states while a proposal is pending.
+        """
         vault = {
             "root": str(self.vault_root if root is None else root),
-            "enabled": enabled,
             "documents": dict(self.vault_documents if documents is None else documents),
         }
+        if not omit_enabled:
+            vault["enabled"] = enabled
         (self.config.config_dir / "mind-grant.json").write_text(
             json.dumps({"global_vault": vault}), encoding="utf-8"
         )

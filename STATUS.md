@@ -739,8 +739,17 @@ active workspace's project and addressed by a code-owned role rather than a file
 own `STATUS.md`, `ROADMAP.md`, `DECISIONS.md` and `DESIGN.md` are mapped, and **no `PLAN.md` was
 added** to satisfy a naming convention. **Global mind** is a dedicated Obsidian-compatible vault
 outside `$COFFERDAM_HOME`, readable only under an explicit host-owned grant in
-`config/mind-grant.json` — a file that does not exist until somebody writes it. Nothing scans a
-home directory, nothing offers a vault it found, and Cofferdam never chooses where yours lives.
+`config/mind-grant.json` — a file that does not exist until somebody writes it, **and that grants
+nothing until it says `"enabled": true`** (D-2026-08-12-2). That is deliberately stricter than the
+project and workspace convention, where `enabled` defaults to on: those files say where work
+happens on this machine, while this one decides whether personal cross-project memory is readable
+at all, so the activating act is made explicit rather than incidental. A grant with `enabled`
+omitted, set to `false`, or set to `1`/`"true"` grants nothing and reports why — the check is a
+type check rather than truthiness, because `1` and `"true"` are exactly what somebody writes
+meaning yes. It is re-read on every resolution, so revocation reaches a pending proposal:
+acceptance refuses and writes nothing, and the proposal stays pending rather than being decided.
+Nothing scans a home directory, nothing offers a vault it found, and Cofferdam never chooses where
+yours lives.
 
 **A request names a role; the host decides which file that is.** Nine role words across two
 disjoint vocabularies, matched *before* anything is resolved — so a role sent as
@@ -762,7 +771,10 @@ leaves the document byte-identical and the proposal pending.
 **Deletion is absent rather than refused.** The operation vocabulary has one word,
 `replace_document`, and no function in the package removes or creates a path. An *empty* proposed
 document is refused too, because a replace with nothing in it is a deletion wearing a mutation's
-clothes. PR2 modifies existing approved documents only.
+clothes. PR2 modifies existing approved documents only, and **creating an approved-but-absent
+memory document is recorded as out of scope pending its own authority decision** (D-2026-08-12-2)
+rather than left as an implementation gap: a grant that may create files is a grant over a
+*directory*, not over the documents an operator named.
 
 **Acceptance is the device token and nothing else.** All seven `/api/mind*` routes use
 `require_token`, which has never heard of the bridge credential — so a bridge request is a 401

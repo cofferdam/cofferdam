@@ -53,6 +53,93 @@ class NoGrant(MindHarness):
         self.assertFalse(self.mind.available()["global_vault"]["granted"])
 
 
+class GrantWrittenButNotEnabled(MindHarness):
+    """The state D-2026-08-12-2 made fail closed, at the service boundary.
+
+    A grant file that names a real vault, with real documents, and no
+    `enabled: true`. Under the project/workspace convention this would have been
+    a working grant. Here it is nothing at all — and the vault it names is real,
+    which is what makes the assertion worth making.
+    """
+
+    grant_vault = True
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.write_grant(omit_enabled=True)
+        self.build_services()
+
+    def test_the_vault_is_not_readable(self):
+        from cofferdam.workstation.mind.errors import MindError
+
+        self.assertTrue((self.vault_root / "USER.md").exists())
+        with self.assertRaises(MindError) as caught:
+            self.mind.read_document("global", "user")
+        self.assertEqual(caught.exception.code, "mind_global_grant_missing")
+
+    def test_no_global_role_is_listed(self):
+        payload = self.mind.available()
+        self.assertFalse(payload["global_vault"]["granted"])
+        self.assertEqual([d for d in payload["documents"] if d["scope"] == "global"], [])
+
+    def test_a_proposal_cannot_be_created_against_it(self):
+        from cofferdam.workstation.mind.errors import MindError
+
+        with self.assertRaises(MindError) as caught:
+            self.mind.create_proposal(scope="global", role="user", content="x", reason="y")
+        self.assertEqual(caught.exception.code, "mind_global_grant_missing")
+
+    def test_adding_enabled_true_activates_it_without_a_restart(self):
+        self.write_grant(enabled=True)
+        self.assertIn("original", self.mind.read_document("global", "user")["content"])
+
+
+class GrantTurnedOffWhileAProposalIsPending(MindHarness):
+    """Authority withdrawn between review and acceptance."""
+
+    grant_vault = True
+
+    def pending(self):
+        return self.mind.create_proposal(
+            scope="global", role="user", content="# User\n\nnew\n", reason="y"
+        )["proposal_id"]
+
+    def check_refused(self, proposal_id, label):
+        from cofferdam.workstation.mind.errors import MindError
+
+        before = self.vault_text("USER.md")
+        with self.assertRaises(MindError) as caught:
+            self.mind.accept_proposal(proposal_id)
+        self.assertEqual(caught.exception.code, "mind_global_grant_missing", label)
+        self.assertEqual(self.vault_text("USER.md"), before, label)
+        # Not decided: the authority went away, the proposal did not.
+        self.assertEqual(self.mind.get_proposal(proposal_id)["state"], "pending", label)
+
+    def test_enabled_true_to_false_refuses_and_writes_nothing(self):
+        proposal_id = self.pending()
+        self.write_grant(enabled=False)
+        self.check_refused(proposal_id, "enabled false")
+
+    def test_enabled_removed_refuses_and_writes_nothing(self):
+        proposal_id = self.pending()
+        self.write_grant(omit_enabled=True)
+        self.check_refused(proposal_id, "enabled removed")
+
+    def test_enabled_corrupted_to_a_non_boolean_refuses(self):
+        proposal_id = self.pending()
+        self.write_grant(enabled="true")
+        self.check_refused(proposal_id, "enabled not a boolean")
+
+    def test_restoring_the_grant_lets_the_same_proposal_apply(self):
+        """It was never decided, so it is still there to accept."""
+        proposal_id = self.pending()
+        self.write_grant(enabled=False)
+        self.check_refused(proposal_id, "off")
+        self.write_grant(enabled=True)
+        self.assertEqual(self.mind.accept_proposal(proposal_id)["state"], "applied")
+        self.assertEqual(self.vault_text("USER.md"), "# User\n\nnew\n")
+
+
 class GrantedVault(MindHarness):
     grant_vault = True
 

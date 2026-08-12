@@ -14,6 +14,34 @@ that is an *absence* rather than a refusal, so there is nothing for a later
 change to relax. :class:`MindGrant.vault` is ``None`` and the service has no
 root to resolve against.
 
+``enabled: true`` is required, and writing the file is not enough
+-----------------------------------------------------------------
+
+This is deliberately **stricter than the project and workspace convention**,
+where ``enabled`` defaults to ``true`` and omitting it means on. Those files
+describe places work happens on this machine. This one describes the user's
+personal, cross-project memory, and it is the only configuration on the host
+that can make it readable at all — so the convenient default is the wrong
+default, and the operator decision recorded as D-2026-08-12-2 makes the
+activating act explicit rather than incidental.
+
+Five states, and only one of them grants anything:
+
+======================================  ==========================
+file absent                             no vault
+present, ``enabled`` omitted            no vault (reported)
+``enabled: false``                      no vault (reported)
+``enabled`` not a boolean               no vault (reported)
+``enabled: true`` and otherwise valid   **the vault**
+======================================  ==========================
+
+The middle three are *reported* rather than silent: each is somebody having
+written the file and not got what they expected, and the difference between "I
+never granted one" and "I granted one and it is off" is what tells them which
+line to fix. The type check is an ``isinstance`` against ``bool`` rather than a
+truthiness test, because ``1`` and ``"true"`` are exactly the values a person
+would write meaning yes and exactly the ones that must not be read as consent.
+
 Its own file, not a field somewhere else
 ----------------------------------------
 
@@ -80,6 +108,11 @@ FORBIDDEN_GRANT_FIELDS = frozenset(
 )
 
 MAX_VAULT_DOCUMENTS = len(GLOBAL_ROLES)
+
+#: The key that actually activates the grant. Named as a constant because it is
+#: the single most consequential word in the host's configuration and it is
+#: asserted by name in the tests.
+ENABLED_FIELD = "enabled"
 
 
 class DuplicateKey(ValueError):
@@ -268,11 +301,29 @@ def load_mind_grant(config) -> MindGrant:
             source_present=True,
         )
 
-    enabled = entry.get("enabled", True)
+    # `enabled` is REQUIRED and must be literally `true`. See the module
+    # docstring: writing the file is not the grant, `enabled: true` is.
+    if ENABLED_FIELD not in entry:
+        return MindGrant(
+            problems=(
+                {
+                    "problem": "the grant is inactive: add \"enabled\": true to turn"
+                    " global memory access on"
+                },
+            ),
+            source_present=True,
+        )
+
+    enabled = entry.get(ENABLED_FIELD)
     if not isinstance(enabled, bool):
         # A rejection rather than a coerced default, for the reason the project
-        # loader gives: "true", 1 and "yes" all read as consent to a person, and
-        # guessing either way hides a mistake about whether a grant is in force.
+        # loader gives and more so here: "true", 1 and "yes" all read as consent
+        # to a person, and guessing either way hides a mistake about whether the
+        # user's personal memory is reachable.
+        #
+        # `True` and `False` are `bool`, and `1`/`0` are not — `isinstance(1,
+        # bool)` is False in Python, which is the type confusion this branch has
+        # to catch rather than rely on truthiness for.
         return MindGrant(
             problems=({"problem": "enabled must be true or false"},),
             source_present=True,
@@ -282,7 +333,7 @@ def load_mind_grant(config) -> MindGrant:
     if documents is None:
         return MindGrant(problems=({"problem": problem or "invalid documents"},), source_present=True)
 
-    if not enabled:
+    if enabled is not True:
         # Configured and switched off. Distinct from absent in the problems list
         # so an operator can tell "I never granted one" from "I turned it off",
         # and identical to absent in effect: there is no vault.
@@ -298,6 +349,7 @@ def load_mind_grant(config) -> MindGrant:
 
 
 __all__ = [
+    "ENABLED_FIELD",
     "FORBIDDEN_GRANT_FIELDS",
     "GRANT_FILENAME",
     "DuplicateKey",

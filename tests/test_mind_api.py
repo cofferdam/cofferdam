@@ -88,23 +88,31 @@ class MindApiTestCase(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        if self.grant_vault:
-            (config.config_dir / "mind-grant.json").write_text(
-                json.dumps(
-                    {
-                        "global_vault": {
-                            "root": str(self.vault_root),
-                            "documents": {"user": "USER.md"},
-                        }
-                    }
-                ),
-                encoding="utf-8",
-            )
-
         self.config = config
+        if self.grant_vault:
+            self.write_grant(enabled=True)
+
         self.app = create_app(config=config, token=TOKEN, adapter=StubAdapter(config))
         self.client = TestClient(self.app)
         self.auth = {"Authorization": "Bearer " + TOKEN}
+
+    def write_grant(self, *, enabled=True, omit_enabled=False):
+        """Write the host's grant, exactly as an operator would.
+
+        `enabled` is a parameter rather than a constant because the tests below
+        have to reach the states an operator can actually be in: granted, turned
+        off, and — the one this milestone made fail closed — written but never
+        activated.
+        """
+        vault = {"root": str(self.vault_root), "documents": {"user": "USER.md"}}
+        if not omit_enabled:
+            vault["enabled"] = enabled
+        (self.config.config_dir / "mind-grant.json").write_text(
+            json.dumps({"global_vault": vault}), encoding="utf-8"
+        )
+
+    def remove_grant(self):
+        (self.config.config_dir / "mind-grant.json").unlink()
 
     def activate(self):
         return self.client.put(
@@ -331,6 +339,176 @@ class NoGrantRoutes(MindApiTestCase):
                 )
                 self.assertIn(response.status_code, (404, 405), method + " " + path)
         self.assertFalse((self.config.config_dir / "mind-grant.json").exists())
+
+
+class GrantAuthorityOverTheApi(MindApiTestCase):
+    """`enabled: true` is the grant, enforced at every route (D-2026-08-12-2).
+
+    The loader tests prove the parse. These prove the *consequence*: that every
+    state short of an explicit yes leaves the global mind unreadable and
+    unchangeable through the real API, and that nothing reachable over the
+    network can move the host into a yes.
+    """
+
+    def global_read(self):
+        return self.client.get("/api/mind/documents/global/user", headers=self.auth)
+
+    def propose_global(self):
+        return self.client.post(
+            "/api/mind/proposals",
+            json={
+                "scope": "global",
+                "role": "user",
+                "content": "# User\n\nproposed\n",
+                "reason": "y",
+            },
+            headers=self.auth,
+        )
+
+    def test_the_four_inactive_states_all_refuse(self):
+        for label, write in (
+            ("absent", self.remove_grant),
+            ("enabled omitted", lambda: self.write_grant(omit_enabled=True)),
+            ("enabled false", lambda: self.write_grant(enabled=False)),
+            ("enabled not a boolean", lambda: self.write_grant(enabled="true")),
+        ):
+            with self.subTest(state=label):
+                write()
+                read = self.global_read()
+                self.assertEqual(read.status_code, 409, label)
+                self.assertEqual(
+                    read.json()["error"]["code"], "mind_global_grant_missing", label
+                )
+                overview = self.client.get("/api/mind", headers=self.auth).json()
+                self.assertFalse(overview["global_vault"]["granted"], label)
+                self.assertEqual(
+                    [d for d in overview["documents"] if d["scope"] == "global"], [], label
+                )
+
+    def test_only_enabled_true_reads(self):
+        self.write_grant(enabled=True)
+        self.assertEqual(self.global_read().status_code, 200)
+
+    def test_proposal_creation_follows_the_same_grant_authority(self):
+        """A proposal is not a way in around the read refusal."""
+        for label, write in (
+            ("absent", self.remove_grant),
+            ("enabled omitted", lambda: self.write_grant(omit_enabled=True)),
+            ("enabled false", lambda: self.write_grant(enabled=False)),
+            ("enabled not a boolean", lambda: self.write_grant(enabled=1)),
+        ):
+            with self.subTest(state=label):
+                write()
+                self.activate()
+                response = self.propose_global()
+                self.assertEqual(response.status_code, 409, label)
+                self.assertEqual(
+                    response.json()["error"]["code"], "mind_global_grant_missing", label
+                )
+
+    def test_acceptance_re_resolves_the_grant_and_revocation_refuses(self):
+        """The grant is re-read at apply time, not trusted from creation time.
+
+        Each variant turns a *valid, pending* proposal into one whose authority
+        has been withdrawn, and asserts the vault file is byte-identical
+        afterwards. This is the case a cached grant would get wrong.
+        """
+        for label, revoke in (
+            ("removed", self.remove_grant),
+            ("enabled dropped", lambda: self.write_grant(omit_enabled=True)),
+            ("enabled false", lambda: self.write_grant(enabled=False)),
+            ("enabled not a boolean", lambda: self.write_grant(enabled="yes")),
+        ):
+            with self.subTest(revocation=label):
+                self.write_grant(enabled=True)
+                self.activate()
+                created = self.propose_global()
+                self.assertEqual(created.status_code, 201, label)
+                proposal_id = created.json()["proposal_id"]
+                before = (self.vault_root / "USER.md").read_bytes()
+
+                revoke()
+                response = self.client.post(
+                    "/api/mind/proposals/" + proposal_id + "/accept", headers=self.auth
+                )
+                self.assertEqual(response.status_code, 409, label)
+                self.assertEqual(
+                    response.json()["error"]["code"], "mind_global_grant_missing", label
+                )
+                self.assertEqual((self.vault_root / "USER.md").read_bytes(), before, label)
+
+                # Still pending: the authority was withdrawn, the proposal was
+                # not decided, and restoring the grant must not have lost it.
+                self.write_grant(enabled=True)
+                fetched = self.client.get(
+                    "/api/mind/proposals/" + proposal_id, headers=self.auth
+                ).json()
+                self.assertEqual(fetched["state"], "pending", label)
+
+    def test_no_route_can_write_the_grant_file(self):
+        """Not a refused write — there is nowhere to send one."""
+        self.remove_grant()
+        bodies = (
+            {"root": str(self.vault_root)},
+            {"enabled": True},
+            {"global_vault": {"root": str(self.vault_root), "enabled": True}},
+        )
+        for method in ("POST", "PUT", "PATCH", "DELETE"):
+            for path in (
+                "/api/mind",
+                "/api/mind/grant",
+                "/api/mind/vault",
+                "/api/mind/documents/global/user",
+                "/api/mind/proposals",
+            ):
+                for body in bodies:
+                    response = self.client.request(method, path, json=body, headers=self.auth)
+                    self.assertNotEqual(response.status_code, 200, method + " " + path)
+        self.assertFalse((self.config.config_dir / "mind-grant.json").exists())
+
+    def test_the_grant_path_is_never_published(self):
+        self.write_grant(omit_enabled=True)
+        for path in ("/api/mind", "/api/mind/documents/global/user"):
+            body = self.client.get(path, headers=self.auth).text
+            self.assertNotIn(str(self.vault_root), body, path)
+            self.assertNotIn("mind-grant.json", body, path)
+
+
+class BridgeCannotReachTheGrant(MindApiTestCase):
+    """The bridge credential cannot read, activate or change the grant."""
+
+    grant_vault = True
+    enable_bridge_caller = True
+
+    def setUp(self) -> None:
+        super().setUp()
+        from cofferdam.workstation.config import load_or_create_actions_bridge_token
+
+        self.bridge_token = load_or_create_actions_bridge_token(self.config)
+        self.bridge_auth = {"Authorization": "Bearer " + self.bridge_token}
+
+    def test_the_bridge_cannot_read_or_change_the_grant(self):
+        self.assertIsNotNone(self.bridge_token)
+        for method, path in (
+            ("GET", "/api/mind"),
+            ("GET", "/api/mind/documents/global/user"),
+            ("POST", "/api/mind"),
+            ("PUT", "/api/mind"),
+            ("POST", "/api/mind/grant"),
+            ("PUT", "/api/mind/grant"),
+        ):
+            response = self.client.request(
+                method, path, json={"enabled": True}, headers=self.bridge_auth
+            )
+            self.assertNotEqual(response.status_code, 200, method + " " + path)
+
+    def test_the_grant_file_is_unchanged_by_every_bridge_attempt(self):
+        before = (self.config.config_dir / "mind-grant.json").read_bytes()
+        for method in ("POST", "PUT", "PATCH", "DELETE"):
+            self.client.request(
+                method, "/api/mind", json={"enabled": False}, headers=self.bridge_auth
+            )
+        self.assertEqual((self.config.config_dir / "mind-grant.json").read_bytes(), before)
 
 
 class ClosedVocabulary(MindApiTestCase):

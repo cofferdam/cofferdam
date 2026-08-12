@@ -15,11 +15,15 @@ release.
   `STATUS.md` — so nothing that talks to Cofferdam ever names a file, a folder or a path. Setup and
   the full model are in [`docs/MIND.md`](docs/MIND.md).
 
-  **The vault does not exist until you say where it is.** There is no default location, nothing
-  scans your home directory or an existing Obsidian vault, and no request can grant one: you write
-  the path down once in `config/mind-grant.json`. Delete that file and Cofferdam has no personal
-  memory at all. Your vault is plain Markdown in an ordinary folder and works in a text editor with
-  Cofferdam stopped — Obsidian is not required and is never launched.
+  **The vault does not exist until you say where it is, and say yes.** There is no default
+  location, nothing scans your home directory or an existing Obsidian vault, and no request can
+  grant one: you write the path down once in `config/mind-grant.json` **and set `"enabled": true`**.
+  Writing the file is not enough on its own — this one setting is stricter than the rest of
+  Cofferdam's configuration on purpose, because it is the only thing standing between your personal
+  notes and everything else. Delete the file, or set it back to `false`, and Cofferdam has no
+  personal memory at all — including for a change that was already waiting for your approval. Your
+  vault is plain Markdown in an ordinary folder and works in a text editor with Cofferdam stopped —
+  Obsidian is not required and is never launched.
 
   **Nothing writes to your memory without you saying yes.** A change is queued as a *proposal*,
   which touches nothing on disk, and you read it and decide. When you accept, Cofferdam re-reads

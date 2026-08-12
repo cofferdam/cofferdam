@@ -1512,6 +1512,59 @@ Both are corrected in this change.
 **Device transfer stays honestly blocked.** Only one Spotify Connect device exists on this host,
 so transfer is `BLOCKED_BY_PREREQUISITE` — a missing prerequisite, never a pass.
 
+## D-2026-08-12-2 — The vault grant must say yes, and PR2 only edits documents that exist (EFE DECISION, ACTIVE)
+
+**Decision.** Two operator answers to questions M2J PR2 raised while it was on its branch. Both
+narrow [D-2026-08-11-4](#d-2026-08-11-4--memory-writes-are-proposal--user-accept--hash-bound-apply-efe-decision-active);
+neither changes it.
+
+**A. Global Mind access requires an explicit host-owned `"enabled": true`. The presence of the
+grant file alone does not activate access.**
+
+| State | Result |
+|---|---|
+| `config/mind-grant.json` absent | inaccessible |
+| present, `enabled` omitted | inaccessible |
+| `enabled: false` | inaccessible |
+| `enabled` present but not a boolean | configuration error, fails closed |
+| `enabled: true`, and otherwise valid | accessible |
+
+This is **deliberately stricter than the project and workspace convention**, where `enabled`
+defaults to `true` and omitting it means on. That convenience is correct for
+`task-projects.json` and `workspaces.json`: they say where work happens on this machine, an
+operator writes an entry in order to use it, and the cost of a mistake is a project that runs
+when it was meant to be parked.
+
+The vault is not that. It is **cross-project personal authority** — the one file on the host that
+makes somebody's private, non-project memory readable at all — and the failure mode is not a
+surprised operator but personal memory reachable by a component that was never meant to see it.
+When the two conventions disagree, the one that fails closed wins, and the activating act is
+made explicit rather than incidental.
+
+The type check is `isinstance(value, bool)` rather than truthiness, because `1`, `"true"` and
+`"yes"` are exactly what a person writes meaning yes and exactly what must not be read as
+consent. The three written-but-inactive states are **reported** rather than silent, so an
+operator can tell "I never granted one" from "I granted one and it is off".
+
+The grant is re-read on every resolution rather than cached, so revocation takes effect
+immediately and applies to a proposal that is already pending: acceptance re-resolves the grant
+and refuses, writing nothing. The proposal stays **pending** rather than being decided — the
+authority was withdrawn, not the change.
+
+**B. M2J PR2 modifies existing approved documents only. Creating a missing one is out of scope.**
+
+A role mapped to a file that does not exist fails closed, at proposal time and again at apply
+time. PR2 adds no file creation, directory creation, rename, move or deletion, and the absence is
+structural rather than a check: the operation vocabulary contains one word, and no function in
+the mind package removes or creates a path.
+
+**Creation of an approved-but-absent memory document requires its own future authority
+decision**, and it is recorded as out of scope rather than left as an implementation gap. The
+reason it is not a small extension: a grant that may create files is a grant over a *directory*,
+not over the documents an operator named, and every containment argument in
+[D-2026-08-11-3](#d-2026-08-11-3--three-minds-global-vault-project-repository-working-context-efe-decision-active)
+is written about named documents.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when
