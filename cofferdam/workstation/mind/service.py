@@ -44,6 +44,7 @@ accidentally be in a different one.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -56,9 +57,9 @@ from ..workspace.errors import (
 )
 from .documents import (
     MAX_DOCUMENT_BYTES,
+    DocumentState,
     inspect_document,
-    read_document,
-    replace_document,
+    open_target,
 )
 from .errors import (
     ContentInvalid,
@@ -74,16 +75,26 @@ from .errors import (
     RoleUnconfigured,
     ScopeInvalid,
     SourceInvalid,
+    TargetAuthorityChanged,
 )
 from .grant import load_mind_grant
-from .hashing import document_hash
+from .hashing import document_hash, target_binding_hash
 from .identity import new_proposal_id
 from .roles import SCOPE_GLOBAL, SCOPE_PROJECT, roles_for_scope, valid_role, valid_scope
 from .store import (
     DEFAULT_LIST_LIMIT,
     PROPOSAL_STATES,
+    REASON_AUTHORITY_CHANGED,
+    REASON_CONTENT_DRIFTED,
+    REASON_INTERRUPTED,
+    REASON_RECOVERED_APPLIED,
+    REASON_RECOVERY_CONFLICTED,
+    REASON_TARGET_MISSING,
     SOURCE_USER,
     STATE_APPLIED,
+    STATE_APPLYING,
+    STATE_INTERRUPTED,
+    STATE_PENDING,
     STATE_REJECTED,
     STATE_STALE,
     MindStore,
@@ -98,6 +109,12 @@ MIND_API_VERSION = 1
 #: short enough that it cannot become a second document.
 MAX_REASON_CHARS = 300
 
+#: How many interrupted applies one start-up will classify. Bounded because
+#: recovery runs before the first request is served, and an unbounded scan on a
+#: damaged database would turn a start into a hang. Reaching it would mean
+#: hundreds of applies were interrupted, which is a different problem.
+MAX_RECOVERY_PER_START = 100
+
 
 @dataclass(frozen=True)
 class _Target:
@@ -109,9 +126,48 @@ class _Target:
 
     scope: str
     workspace_id: Optional[str]
+    project_id: Optional[str]
     role: str
     root: Path
     relative: str
+
+    @property
+    def binding_hash(self) -> str:
+        """A fingerprint of the host authority that produced this target.
+
+        Everything a change to which would mean the role now names a *different
+        document*, and nothing else:
+
+        * the scope, so a project target and a global one can never alias;
+        * the workspace and the project it binds to — project scope only;
+        * the canonical root, as raw filesystem bytes, so a re-pointed project
+          root or a re-granted vault is a different binding even when the
+          relative name is unchanged;
+        * the role;
+        * the configured relative document name for that role.
+
+        The root goes in as ``os.fsencode`` bytes rather than a decoded string:
+        a path is bytes on this platform, and decoding it would make two
+        genuinely different roots that differ only in undecodable bytes hash the
+        same. **It is hashed, never stored and never published** — a one-way
+        digest is what is durable, and the location it came from stays on the
+        host.
+
+        Absent fields are written as empty rather than skipped, so a global
+        target (no workspace, no project) cannot produce the same field sequence
+        as some project target that happens to line up. Length prefixing makes
+        that unambiguous either way; this makes it obvious.
+        """
+        return target_binding_hash(
+            [
+                self.scope.encode("utf-8"),
+                (self.workspace_id or "").encode("utf-8"),
+                (self.project_id or "").encode("utf-8"),
+                self.role.encode("utf-8"),
+                os.fsencode(self.root),
+                self.relative.encode("utf-8"),
+            ]
+        )
 
 
 class MindService:
@@ -170,6 +226,7 @@ class MindService:
             return _Target(
                 scope=SCOPE_GLOBAL,
                 workspace_id=None,
+                project_id=None,
                 role=str(role),
                 root=vault.root,
                 relative=relative,
@@ -189,6 +246,7 @@ class MindService:
         return _Target(
             scope=SCOPE_PROJECT,
             workspace_id=workspace.workspace_id,
+            project_id=project.project_id,
             role=str(role),
             root=project.root,
             relative=relative,
@@ -288,8 +346,16 @@ class MindService:
         result off the host.
         """
         target = self._resolve(scope, role)
-        state = inspect_document(target.root, target.relative)
-        data = read_document(state.path)
+        # One descriptor for the bytes and the metadata: the size and hash
+        # published here describe the same read that produced the text, rather
+        # than a second look at the name a moment later.
+        with open_target(target.root, target.relative) as handle:
+            data, modified = handle.read()
+        state = DocumentState(
+            size=len(data),
+            content_hash=document_hash(data),
+            modified_at=modified,
+        )
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError:
@@ -354,6 +420,10 @@ class MindService:
             content_hash=document_hash(text.encode("utf-8")),
             base_hash=state.content_hash,
             base_bytes=state.size,
+            # The second half of what acceptance is bound to. Computed from the
+            # authority that produced `state`, in the same call, so the two
+            # cannot describe different resolutions of the same role.
+            target_binding_hash=target.binding_hash,
             reason=why,
             source=source,
         )
@@ -403,9 +473,9 @@ class MindService:
         return self._publish(proposal, include_content=True)
 
     def reject_proposal(self, proposal_id: object) -> Dict[str, Any]:
-        """Refuse a pending proposal. Touches no document, ever."""
+        """Refuse a proposal. Touches no document, ever."""
         proposal = self._require(proposal_id)
-        if not proposal.pending:
+        if not proposal.decidable:
             raise ProposalNotPending(proposal.state)
         decided = self._store.decide(proposal.proposal_id, state=STATE_REJECTED)
         if decided is None:
@@ -415,85 +485,206 @@ class MindService:
         return self._publish(decided, include_content=True)
 
     def accept_proposal(self, proposal_id: object) -> Dict[str, Any]:
-        """Apply a pending proposal, atomically, bound to the hash it was made against.
+        """Apply a proposal, atomically, bound to what it was reviewed against.
 
         The order is the design. Everything that could make this the wrong write
-        is checked *before* any byte is written, and the last thing checked is
-        the one most likely to have changed:
+        is checked *before* the claim, and the claim happens before any byte
+        moves:
 
-        1. the proposal is pending;
+        1. the proposal is decidable — pending, or interrupted and re-approved;
         2. it belongs to the workspace that is active now;
-        3. the role still resolves, from configuration re-read at this moment;
-        4. the document on disk still hashes to the recorded base;
-        5. only then, the atomic replace.
+        3. the role still resolves, from configuration re-read at this moment —
+           a revoked grant, a removed mapping or a disabled project refuses here
+           with its own code, because each is a statement about *permission*
+           rather than about drift;
+        4. **the host authority that resolved it is the same one** — the role
+           still names the same document. A content check cannot see this: remap
+           a role to a byte-identical file and the base hash still matches;
+        5. the document on disk still hashes to the recorded base;
+        6. the apply is **claimed** durably — this is the concurrency boundary;
+        7. the parent directory is opened and held, and the replace happens
+           through that descriptor;
+        8. only then is `applied` recorded.
 
-        A failure at 4 marks the proposal **stale** and writes nothing. A failure
-        at 5 leaves it **pending** — the document is unchanged, so accepting
-        again once the disk problem is fixed is the right thing to do, and
-        marking it decided would have thrown away a change nobody rejected.
+        Steps 5 and 7 use the **same held descriptor**, so nothing is
+        re-resolved between the hash that authorized the write and the write
+        itself.
+
+        Failure at 4 marks it `stale` with `authority_changed`; at 5 with
+        `content_drifted`; at 7 it goes back to `pending` with the document
+        byte-identical; a crash anywhere after 6 is classified by
+        :meth:`recover_after_restart` rather than assumed.
         """
         proposal = self._require(proposal_id)
-        if not proposal.pending:
+        if not proposal.decidable:
             raise ProposalNotPending(proposal.state)
 
         if proposal.scope == SCOPE_PROJECT:
             self._workspaces.reload_workspaces()
             workspace = self._workspaces.require_active_workspace()
             if workspace.workspace_id != proposal.workspace_id:
-                # Left pending, not marked stale: nothing is wrong with the
+                # Left decidable, not marked stale: nothing is wrong with the
                 # proposal, the wrong workspace is active. Switching back and
                 # accepting is a legitimate thing to do.
                 raise ProposalWorkspaceChanged()
 
-        # Resolved again from current host authority. A revoked grant, a removed
-        # mapping or a disabled project raises out of here with its own code —
-        # each is a statement about *permission*, which is not the same thing as
-        # drift and should not be recorded as it.
         target = self._resolve(proposal.scope, proposal.role)
 
+        if target.binding_hash != proposal.target_binding_hash:
+            # The role now names a different document. Terminal, because the
+            # review was of a different file — and reported with its own code so
+            # the operator is not sent to look for an edit that never happened.
+            self._store.decide(
+                proposal.proposal_id,
+                state=STATE_STALE,
+                reason=REASON_AUTHORITY_CHANGED,
+            )
+            raise TargetAuthorityChanged()
+
         try:
-            state = inspect_document(target.root, target.relative)
+            with open_target(target.root, target.relative) as handle:
+                current = handle.inspect()
+
+                if current.content_hash != proposal.base_hash:
+                    self._store.decide(
+                        proposal.proposal_id,
+                        state=STATE_STALE,
+                        reason=REASON_CONTENT_DRIFTED,
+                    )
+                    raise ProposalStale()
+
+                # Claimed only once every check has passed, and *inside* the
+                # held descriptor so the file that was hashed is the file that
+                # is written. A second accept arriving now finds the proposal no
+                # longer decidable and is refused rather than queued.
+                claimed = self._store.claim(proposal.proposal_id)
+                if claimed is None:
+                    raise ProposalNotPending(self._require(proposal_id).state)
+
+                try:
+                    handle.replace(proposal.content.encode("utf-8"))
+                except MindError:
+                    # The document is byte-identical to what it was, so the claim
+                    # is given back and the proposal is decidable again.
+                    #
+                    # Best-effort *and the original failure always wins*: if the
+                    # store is what broke, a raising release would replace "the
+                    # document could not be written" with a database error while
+                    # leaving the row claimed — the state this is undoing.
+                    try:
+                        self._store.release(
+                            proposal.proposal_id, to_state=STATE_PENDING
+                        )
+                    except Exception:  # pragma: no cover - store failure in repair
+                        pass
+                    raise
         except RoleUnavailable:
-            # The document the base hash describes is gone. That is drift of the
-            # most complete kind, so it is recorded as staleness rather than as
-            # a configuration problem.
-            self._store.decide(proposal.proposal_id, state=STATE_STALE)
+            # The document the base hash describes is gone, or became something
+            # that is not an ordinary file. That is drift of the most complete
+            # kind, so it is recorded as staleness.
+            self._store.decide(
+                proposal.proposal_id, state=STATE_STALE, reason=REASON_TARGET_MISSING
+            )
             raise ProposalStale("the document is no longer there")
 
-        if state.content_hash != proposal.base_hash:
-            self._store.decide(proposal.proposal_id, state=STATE_STALE)
-            raise ProposalStale()
-
-        # Every check has passed and the state is claimed *before* the write, so
-        # two concurrent accepts cannot both reach the filesystem: the second
-        # `decide` changes no row and returns None.
-        decided = self._store.decide(
-            proposal.proposal_id, state=STATE_APPLIED, applied_hash=proposal.content_hash
+        # The bytes have landed. If this commit fails the row stays `applying`
+        # and recovery reconciles it truthfully from the file's own hash — which
+        # is exactly the case that used to be recorded as a completed apply.
+        decided = self._store.finalize_applied(
+            proposal.proposal_id, applied_hash=proposal.content_hash
         )
-        if decided is None:
+        if decided is None:  # pragma: no cover - the claim was ours
             raise ProposalNotPending(self._require(proposal_id).state)
-
-        try:
-            replace_document(state.path, proposal.content.encode("utf-8"))
-        except MindError:
-            # The write failed and the document is untouched, so the row is put
-            # back to pending. Recording it as applied would claim a change that
-            # is not on disk — the one lie this whole path exists to prevent.
-            #
-            # The repair is best-effort *and the original failure always wins*.
-            # If the store itself is what broke, a raising `reopen` would replace
-            # "the document could not be written" with a database error, and the
-            # caller would be told the wrong thing about the wrong subsystem —
-            # while the row stayed `applied`, which is the very state this is
-            # trying to undo. Losing the repair is bad; losing the report of the
-            # failure that caused it is worse.
-            try:
-                self._store.reopen(proposal.proposal_id)
-            except Exception:  # pragma: no cover - a store failure during repair
-                pass
-            raise
-
         return self._publish(decided, include_content=True)
+
+    # -- recovery ------------------------------------------------------------
+
+    def recover_after_restart(self) -> Dict[str, int]:
+        """Classify every apply that was claimed and never finished.
+
+        Called once at start-up, before the first request. Nothing is resumed:
+        **recovery never performs a canonical write.** A consequential operation
+        continued by a restart is one nobody authorized at the moment it
+        happened, and the whole point of this milestone is that a person
+        authorizes each one.
+
+        What it does instead is decide which of three things is true, from the
+        durable row plus the file's own hash:
+
+        ``applied``
+            the file already hashes to the proposed content — the bytes landed
+            and only the record was lost. Reconciled to `applied`, which writes
+            no canonical memory and removes a row that would otherwise claim
+            less than actually happened.
+
+        ``interrupted``
+            the file still hashes to the recorded base — the mutation did not
+            land. Left for a person to decide again on the private surface.
+
+        ``stale``
+            the file is neither — somebody else changed it. Terminal, and no
+            write.
+
+        A target that cannot be resolved or whose authority moved is also
+        `interrupted`: the honest answer is that Cofferdam could not determine
+        what happened, which is not the same as knowing nothing happened.
+        """
+        tally = {STATE_APPLIED: 0, STATE_INTERRUPTED: 0, STATE_STALE: 0}
+        for proposal in self._store.list_proposals(
+            state=STATE_APPLYING, limit=MAX_RECOVERY_PER_START
+        ):
+            outcome = self._classify_interrupted(proposal)
+            if outcome == STATE_APPLIED:
+                self._store.finalize_applied(
+                    proposal.proposal_id,
+                    applied_hash=proposal.content_hash,
+                    reason=REASON_RECOVERED_APPLIED,
+                )
+            elif outcome == STATE_STALE:
+                self._store.decide(
+                    proposal.proposal_id,
+                    state=STATE_STALE,
+                    reason=REASON_RECOVERY_CONFLICTED,
+                    from_states=(STATE_APPLYING,),
+                )
+            else:
+                self._store.release(
+                    proposal.proposal_id,
+                    to_state=STATE_INTERRUPTED,
+                    reason=REASON_INTERRUPTED,
+                )
+            tally[outcome] += 1
+        return tally
+
+    def _classify_interrupted(self, proposal) -> str:
+        """Which of the three outcomes an interrupted apply had. Reads only.
+
+        **Total by construction.** This runs during start-up, before the first
+        request is served, so anything it fails to handle is a daemon that will
+        not start. The refusals it must absorb are not only this package's: a
+        project-scope proposal resolves through the workspace service, which
+        raises its *own* error type when no workspace is active — a completely
+        ordinary state for a host that was restarted with nothing selected.
+
+        So every failure resolves to `interrupted`, which is the conservative
+        answer and the truthful one: Cofferdam could not see the document, so it
+        cannot say whether the write landed, and saying so is not the same as
+        claiming nothing happened.
+        """
+        try:
+            target = self._resolve(proposal.scope, proposal.role)
+            if target.binding_hash != proposal.target_binding_hash:
+                # A different document now. Comparing hashes against it would
+                # answer a question about the wrong file.
+                return STATE_INTERRUPTED
+            current = inspect_document(target.root, target.relative)
+        except Exception:
+            return STATE_INTERRUPTED
+        if current.content_hash == proposal.content_hash:
+            return STATE_APPLIED
+        if current.content_hash == proposal.base_hash:
+            return STATE_INTERRUPTED
+        return STATE_STALE
 
     # -- helpers -------------------------------------------------------------
 
@@ -510,18 +701,26 @@ class MindService:
         return payload
 
     def _is_stale(self, proposal) -> bool:
-        """Whether the target has drifted from the recorded base, right now.
+        """Whether accepting this now would refuse. Derived, never stored.
 
-        Total and quiet: a decided proposal is not stale (it is decided), and a
-        target that cannot be resolved counts as drifted rather than raising —
-        this is a rendering hint on a read, and a read must not fail because a
-        project was disabled.
+        Covers **both** halves of the binding: the bytes drifting, and the
+        authority moving so that the role names a different document. A client
+        rendering an Accept button needs one answer to "would this work", and a
+        flag that only watched content would say yes to a proposal the apply is
+        going to refuse.
+
+        Total and quiet: a proposal that is not decidable is not stale (it is
+        decided, or claimed), and anything that cannot be resolved counts as
+        drifted rather than raising — this is a rendering hint on a read, and a
+        read must not fail because a project was disabled.
         """
-        if not proposal.pending:
+        if not proposal.decidable:
             return False
         try:
             target = self._resolve(proposal.scope, proposal.role)
             if proposal.scope == SCOPE_PROJECT and target.workspace_id != proposal.workspace_id:
+                return True
+            if target.binding_hash != proposal.target_binding_hash:
                 return True
             state = inspect_document(target.root, target.relative)
         except Exception:

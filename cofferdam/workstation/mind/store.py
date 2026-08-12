@@ -74,18 +74,78 @@ BUSY_TIMEOUT_MS = 5000
 OPERATION_REPLACE = "replace_document"
 OPERATIONS: Tuple[str, ...] = (OPERATION_REPLACE,)
 
-#: The lifecycle. `pending` is the only state anything can be decided from.
+#: The lifecycle.
+#:
+#:      pending ──claim──► applying ──write──► applied
+#:         ▲                   │
+#:         │                   └──write failed──► pending
+#:         │                   └──interrupted, bytes not landed──► interrupted
+#:         └───────────────────── interrupted ◄──────────────────────┘
+#:
+#: plus the two refusals that never touch a document: `rejected` and `stale`.
 STATE_PENDING = "pending"
+
+#: **The durable claim.** Written and committed *before* the filesystem is
+#: touched, and it is what makes the protocol crash-truthful in both directions.
+#:
+#: The earlier design committed `applied` and then wrote. That ordering gave the
+#: concurrency guarantee — two accepts cannot both pass a compare-and-set — at
+#: the cost of a window where the store durably said a change had been applied
+#: while the document still held its old bytes. A record that claims a change
+#: which is not on disk is precisely the lie this whole path exists to prevent,
+#: so the claim is now a *statement of intent* rather than of completion, and
+#: `applied` is written only once the rename has returned.
+STATE_APPLYING = "applying"
+
 STATE_APPLIED = "applied"
 STATE_REJECTED = "rejected"
+
 #: The document moved underneath a pending proposal. Terminal on purpose: a
 #: stale proposal is **not** silently refreshed into a fresh one, because the
 #: diff a person reviewed is not the diff that would now land, and re-reviewing
-#: is the entire point of the base hash.
+#: is the entire point of the base hash. Also used when the *authority* moved —
+#: the role now names a different document — with the reason recorded.
 STATE_STALE = "stale"
 
-PROPOSAL_STATES: Tuple[str, ...] = (STATE_PENDING, STATE_APPLIED, STATE_REJECTED, STATE_STALE)
+#: An apply was claimed and did not finish, and recovery proved the bytes never
+#: landed. **Decidable, not terminal**: the document is at its pre-apply content,
+#: so accepting again is a legitimate thing for a person to do — and it has to be
+#: a person, on the private surface. Recovery itself never performs the write.
+STATE_INTERRUPTED = "interrupted"
+
+PROPOSAL_STATES: Tuple[str, ...] = (
+    STATE_PENDING,
+    STATE_APPLYING,
+    STATE_INTERRUPTED,
+    STATE_APPLIED,
+    STATE_REJECTED,
+    STATE_STALE,
+)
+
+#: The states a person may act on. `applying` is deliberately absent: a claimed
+#: apply belongs to whoever claimed it until it finishes or recovery classifies
+#: it, and a second acceptance arriving meanwhile is refused rather than queued.
+DECIDABLE_STATES: Tuple[str, ...] = (STATE_PENDING, STATE_INTERRUPTED)
+
 DECIDED_STATES: Tuple[str, ...] = (STATE_APPLIED, STATE_REJECTED, STATE_STALE)
+
+#: Why a proposal reached the state it is in, when the state alone does not say.
+#: A closed vocabulary, because "why is this stale" is a question somebody asks
+#: months later and a free-form string would answer it differently every time.
+REASON_CONTENT_DRIFTED = "content_drifted"
+REASON_TARGET_MISSING = "target_missing"
+REASON_AUTHORITY_CHANGED = "authority_changed"
+REASON_RECOVERY_CONFLICTED = "recovery_conflicted"
+REASON_RECOVERED_APPLIED = "recovered_applied"
+REASON_INTERRUPTED = "interrupted"
+DECIDED_REASONS: Tuple[str, ...] = (
+    REASON_CONTENT_DRIFTED,
+    REASON_TARGET_MISSING,
+    REASON_AUTHORITY_CHANGED,
+    REASON_RECOVERY_CONFLICTED,
+    REASON_RECOVERED_APPLIED,
+    REASON_INTERRUPTED,
+)
 
 #: Who proposed it. A closed vocabulary, assigned from the authenticated surface
 #: and never from a request body — the reason task `origin` is assigned that way.
@@ -117,22 +177,31 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 -- `base_hash` is what makes acceptance mean something. It is the hash of the
 -- document as it was when somebody was shown the change, and the apply refuses
 -- unless the document still hashes to it.
+-- `target_binding_hash` is the second half of what acceptance is bound to. The
+-- base hash answers "is this still the text I reviewed"; it cannot answer "is
+-- this still the same document". Remap a role to a byte-identical file and a
+-- content-only check sees no drift at all. This column is an opaque
+-- domain-separated fingerprint of the host authority that resolved the target —
+-- never a path, and not reversible into one.
 CREATE TABLE IF NOT EXISTS memory_proposals (
-    proposal_id   TEXT PRIMARY KEY,
-    scope         TEXT    NOT NULL,
-    workspace_id  TEXT,
-    role          TEXT    NOT NULL,
-    operation     TEXT    NOT NULL,
-    content       TEXT    NOT NULL,
-    content_hash  TEXT    NOT NULL,
-    base_hash     TEXT    NOT NULL,
-    base_bytes    INTEGER NOT NULL,
-    reason        TEXT    NOT NULL,
-    source        TEXT    NOT NULL,
-    state         TEXT    NOT NULL,
-    created_at    TEXT    NOT NULL,
-    decided_at    TEXT,
-    applied_hash  TEXT
+    proposal_id         TEXT PRIMARY KEY,
+    scope               TEXT    NOT NULL,
+    workspace_id        TEXT,
+    role                TEXT    NOT NULL,
+    operation           TEXT    NOT NULL,
+    content             TEXT    NOT NULL,
+    content_hash        TEXT    NOT NULL,
+    base_hash           TEXT    NOT NULL,
+    base_bytes          INTEGER NOT NULL,
+    target_binding_hash TEXT    NOT NULL,
+    reason              TEXT    NOT NULL,
+    source              TEXT    NOT NULL,
+    state               TEXT    NOT NULL,
+    decided_reason      TEXT,
+    created_at          TEXT    NOT NULL,
+    claimed_at          TEXT,
+    decided_at          TEXT,
+    applied_hash        TEXT
 );
 
 CREATE INDEX IF NOT EXISTS memory_proposals_by_state
@@ -162,16 +231,30 @@ class MemoryProposal:
     content_hash: str
     base_hash: str
     base_bytes: int
+    target_binding_hash: str
     reason: str
     source: str
     state: str
+    decided_reason: Optional[str]
     created_at: str
+    claimed_at: Optional[str]
     decided_at: Optional[str]
     applied_hash: Optional[str]
 
     @property
     def pending(self) -> bool:
         return self.state == STATE_PENDING
+
+    @property
+    def decidable(self) -> bool:
+        """Whether a person may act on this proposal now.
+
+        `interrupted` is decidable and `applying` is not. An interrupted apply
+        left the document at its pre-apply bytes, so accepting again is a
+        legitimate thing for a person to do; a claimed apply belongs to whoever
+        claimed it until it finishes or recovery classifies it.
+        """
+        return self.state in DECIDABLE_STATES
 
     def to_dict(self, *, include_content: bool = False) -> Dict[str, Any]:
         """The client-facing shape. **No path, and no content unless asked.**
@@ -180,6 +263,13 @@ class MemoryProposal:
         each; the single-proposal read does. Keeping content out of the list is
         not only bandwidth — it keeps somebody's draft out of a payload that a
         client is most likely to poll and cache.
+
+        `target_binding_hash` is **not** published. It is an opaque fingerprint
+        and publishing it would hand a client a stable identifier for a host
+        location it is otherwise never told about — which is the same reasoning
+        that keeps the project root out of `TaskProject.to_dict`. The client
+        needs to know *that* the target moved, which `decided_reason` and the
+        refusal code both say; it does not need the fingerprint that proved it.
         """
         payload: Dict[str, Any] = {
             "proposal_id": self.proposal_id,
@@ -193,6 +283,7 @@ class MemoryProposal:
             "reason": self.reason,
             "source": self.source,
             "state": self.state,
+            "decided_reason": self.decided_reason,
             "created_at": self.created_at,
             "decided_at": self.decided_at,
             "applied_hash": self.applied_hash,
@@ -213,10 +304,13 @@ def _row_to_proposal(row: sqlite3.Row) -> MemoryProposal:
         content_hash=row["content_hash"],
         base_hash=row["base_hash"],
         base_bytes=int(row["base_bytes"]),
+        target_binding_hash=row["target_binding_hash"],
         reason=row["reason"],
         source=row["source"],
         state=row["state"],
+        decided_reason=row["decided_reason"],
         created_at=row["created_at"],
+        claimed_at=row["claimed_at"],
         decided_at=row["decided_at"],
         applied_hash=row["applied_hash"],
     )
@@ -375,6 +469,7 @@ class MindStore:
         content_hash: str,
         base_hash: str,
         base_bytes: int,
+        target_binding_hash: str,
         reason: str,
         source: str,
     ) -> MemoryProposal:
@@ -390,8 +485,9 @@ class MindStore:
                 INSERT INTO memory_proposals (
                     proposal_id, scope, workspace_id, role, operation,
                     content, content_hash, base_hash, base_bytes,
-                    reason, source, state, created_at, decided_at, applied_hash
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                    target_binding_hash, reason, source, state, decided_reason,
+                    created_at, claimed_at, decided_at, applied_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL)
                 """,
                 (
                     proposal_id,
@@ -403,6 +499,7 @@ class MindStore:
                     content_hash,
                     base_hash,
                     int(base_bytes),
+                    target_binding_hash,
                     reason,
                     source,
                     STATE_PENDING,
@@ -419,10 +516,13 @@ class MindStore:
             content_hash=content_hash,
             base_hash=base_hash,
             base_bytes=int(base_bytes),
+            target_binding_hash=target_binding_hash,
             reason=reason,
             source=source,
             state=STATE_PENDING,
+            decided_reason=None,
             created_at=stamp,
+            claimed_at=None,
             decided_at=None,
             applied_hash=None,
         )
@@ -459,28 +559,48 @@ class MindStore:
                 ).fetchall()
         return [_row_to_proposal(row) for row in rows]
 
-    def decide(
-        self, proposal_id: str, *, state: str, applied_hash: Optional[str] = None
+    def _transition(
+        self,
+        proposal_id: str,
+        *,
+        to_state: str,
+        from_states: Tuple[str, ...],
+        decided_reason: Optional[str] = None,
+        applied_hash: Optional[str] = None,
+        stamp_claim: bool = False,
+        stamp_decision: bool = False,
     ) -> Optional[MemoryProposal]:
-        """Move a **pending** proposal to a decided state, once.
+        """One durable compare-and-set on a proposal's state.
 
-        The ``state = 'pending'`` predicate is in the ``UPDATE`` rather than in a
-        read-then-write, so two accepts racing on the same proposal cannot both
-        see `pending` and both proceed: exactly one row is changed and the loser
-        gets ``None``. That is the same single-use shape the Trust Core's
-        approval consume has, expressed in SQL.
+        **Every** state change goes through here, and the permitted source
+        states are always in the ``UPDATE`` predicate rather than in a preceding
+        read. That is what makes the protocol safe under concurrency without a
+        lock held across the filesystem: two callers racing on the same proposal
+        both issue the same conditional update, SQLite serializes them, exactly
+        one changes a row, and the loser gets ``None`` and can report what
+        actually happened. It is the single-use shape the Trust Core's approval
+        consume has, expressed in SQL.
         """
-        if state not in DECIDED_STATES:  # pragma: no cover - callers pass constants
-            raise ValueError("not a decided state: " + str(state))
         stamp = now_iso()
+        placeholders = ", ".join("?" for _ in from_states)
+        assignments = ["state = ?", "decided_reason = ?"]
+        values: list = [to_state, decided_reason]
+        if stamp_claim:
+            assignments.append("claimed_at = ?")
+            values.append(stamp)
+        if stamp_decision:
+            assignments.append("decided_at = ?")
+            values.append(stamp)
+        assignments.append("applied_hash = ?")
+        values.append(applied_hash)
         with self._write() as connection:
             cursor = connection.execute(
-                """
-                UPDATE memory_proposals
-                   SET state = ?, decided_at = ?, applied_hash = ?
-                 WHERE proposal_id = ? AND state = ?
-                """,
-                (state, stamp, applied_hash, proposal_id, STATE_PENDING),
+                "UPDATE memory_proposals SET "
+                + ", ".join(assignments)
+                + " WHERE proposal_id = ? AND state IN ("
+                + placeholders
+                + ")",
+                tuple(values) + (proposal_id,) + tuple(from_states),
             )
             if cursor.rowcount != 1:
                 return None
@@ -489,34 +609,80 @@ class MindStore:
             ).fetchone()
         return _row_to_proposal(row) if row is not None else None
 
-    def reopen(self, proposal_id: str) -> Optional[MemoryProposal]:
-        """Put an **applied** proposal back to pending, after a failed write.
+    def claim(self, proposal_id: str) -> Optional[MemoryProposal]:
+        """Take ownership of an apply, durably, **before** the filesystem is touched.
 
-        The narrow inverse of :meth:`decide`, and it exists for exactly one
-        caller: the apply claims `applied` before touching the filesystem, so
-        that two concurrent accepts cannot both reach it. If the write then
-        fails, the document is byte-identical to what it was and the row is a
-        lie — this puts it back.
+        This is the concurrency boundary and the crash-truth boundary at once.
 
-        Deliberately not a general "undo". The predicate is ``state =
-        'applied'`` and it clears the applied hash, so it cannot revive a
-        rejected or stale proposal, which are decisions a person made.
+        *Concurrency*: the transition is conditional on the proposal being
+        decidable, so of two accepts arriving together exactly one becomes the
+        writer and the other is told the proposal is no longer decidable.
+
+        *Crash truth*: what is committed here is an **intent**, not a
+        completion. The earlier design committed `applied` and then wrote, which
+        bought the same exclusivity at the cost of a window where the store
+        durably claimed a change that was not on disk. `applying` says only that
+        somebody started, which is true at the instant it is written and stays
+        true however the process ends.
         """
-        with self._write() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE memory_proposals
-                   SET state = ?, decided_at = NULL, applied_hash = NULL
-                 WHERE proposal_id = ? AND state = ?
-                """,
-                (STATE_PENDING, proposal_id, STATE_APPLIED),
-            )
-            if cursor.rowcount != 1:  # pragma: no cover - only one caller, under lock
-                return None
-            row = connection.execute(
-                "SELECT * FROM memory_proposals WHERE proposal_id = ?", (proposal_id,)
-            ).fetchone()
-        return _row_to_proposal(row) if row is not None else None
+        return self._transition(
+            proposal_id,
+            to_state=STATE_APPLYING,
+            from_states=DECIDABLE_STATES,
+            stamp_claim=True,
+        )
+
+    def finalize_applied(self, proposal_id: str, *, applied_hash: str,
+                         reason: Optional[str] = None) -> Optional[MemoryProposal]:
+        """Record that the bytes landed. Only ever from ``applying``."""
+        return self._transition(
+            proposal_id,
+            to_state=STATE_APPLIED,
+            from_states=(STATE_APPLYING,),
+            applied_hash=applied_hash,
+            decided_reason=reason,
+            stamp_decision=True,
+        )
+
+    def release(self, proposal_id: str, *, to_state: str, reason: Optional[str] = None):
+        """Give a claim back, to ``pending`` or ``interrupted``. Never to applied.
+
+        Used when the write failed (the document is byte-identical, so the
+        proposal is decidable again) and by recovery when an interrupted apply
+        provably did not land.
+        """
+        if to_state not in DECIDABLE_STATES:  # pragma: no cover - callers pass constants
+            raise ValueError("release targets a decidable state: " + str(to_state))
+        return self._transition(
+            proposal_id,
+            to_state=to_state,
+            from_states=(STATE_APPLYING,),
+            decided_reason=reason,
+        )
+
+    def decide(
+        self,
+        proposal_id: str,
+        *,
+        state: str,
+        reason: Optional[str] = None,
+        from_states: Optional[Tuple[str, ...]] = None,
+    ) -> Optional[MemoryProposal]:
+        """Refuse a proposal — ``rejected`` or ``stale``. Touches no document.
+
+        ``from_states`` defaults to the decidable ones. Recovery passes
+        ``(STATE_APPLYING,)`` so it can retire a claim it has classified as
+        conflicted without going through :meth:`release` first.
+        """
+        if state not in (STATE_REJECTED, STATE_STALE):  # pragma: no cover
+            raise ValueError("not a refusal state: " + str(state))
+        return self._transition(
+            proposal_id,
+            to_state=state,
+            from_states=from_states or DECIDABLE_STATES,
+            decided_reason=reason,
+            stamp_decision=True,
+        )
 
     def counts(self) -> Dict[str, int]:
         """How many proposals sit in each state. Empty on an unconfigured host."""
@@ -533,6 +699,8 @@ class MindStore:
 
 
 __all__ = [
+    "DECIDABLE_STATES",
+    "DECIDED_REASONS",
     "DECIDED_STATES",
     "DEFAULT_LIST_LIMIT",
     "MAX_LIST_LIMIT",
@@ -545,7 +713,15 @@ __all__ = [
     "SOURCE_COFFERDAM",
     "SOURCE_PLANNER",
     "SOURCE_USER",
+    "REASON_AUTHORITY_CHANGED",
+    "REASON_CONTENT_DRIFTED",
+    "REASON_INTERRUPTED",
+    "REASON_RECOVERED_APPLIED",
+    "REASON_RECOVERY_CONFLICTED",
+    "REASON_TARGET_MISSING",
     "STATE_APPLIED",
+    "STATE_APPLYING",
+    "STATE_INTERRUPTED",
     "STATE_PENDING",
     "STATE_REJECTED",
     "STATE_STALE",

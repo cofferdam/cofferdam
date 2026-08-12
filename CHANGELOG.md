@@ -29,8 +29,15 @@ release.
   which touches nothing on disk, and you read it and decide. When you accept, Cofferdam re-reads
   the document and checks it is still exactly what you reviewed. **If you edited it in the
   meantime, the change is refused rather than dropped on top of your edit** — you read it again and
-  propose again. Applying replaces one file atomically: it either fully happens or the file is
-  untouched, and nothing else in the project or the vault is altered.
+  propose again. It also checks that the role still points at the *same document*: if you rewired
+  which file `status` means, the change is refused even when the new file happens to say the same
+  thing. Applying replaces one file atomically: it either fully happens or the file is untouched,
+  and nothing else in the project or the vault is altered.
+
+  **If the machine stops mid-apply, Cofferdam tells you the truth about it.** On the next start it
+  looks at the document and works out whether the change landed or not — and if it did not, it
+  says so and waits for you rather than quietly finishing the job. A restart never writes to your
+  memory on its own.
 
   **Nothing can delete your memory.** There is no delete, rename or move operation to reach — not a
   blocked one, an absent one — and a proposal that would empty a document is refused as the

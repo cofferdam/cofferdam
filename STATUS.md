@@ -760,13 +760,28 @@ component below it with `lstat`, refuses a link anywhere, and confirms the resol
 it should have landed — `realpath` alone would follow a link out of the vault and report success.
 
 **Writing is proposal → explicit acceptance → hash-bound atomic apply.** Creating a proposal
-writes **zero Markdown** and records the target's current content hash. Acceptance re-resolves the
-role from configuration re-read at that moment, re-reads the document, re-hashes it, and refuses
-as `stale` if it differs — writing nothing. No three-way merge, no silent refresh: a stale
-proposal is terminal and a new proposal is a new review. The write is `mkstemp` in the target's
-own directory → mode copied from the file being replaced → `fsync` → `os.replace` → directory
-`fsync`, with no shell, no `git` and no subprocess. **Exactly one file changes.** A failed replace
-leaves the document byte-identical and the proposal pending.
+writes **zero Markdown** and records both the target's current content hash and an opaque
+fingerprint of the host authority that resolved it. Acceptance re-resolves the role from
+configuration re-read at that moment and refuses if *either* moved: a different document behind
+the same role is `mind_target_authority_changed`, drifted bytes are `mind_proposal_stale`, and
+both write nothing. A content hash alone could not tell those apart — remap a role to a
+byte-identical file and it still matches — which is why the binding is recorded as well
+(D-2026-08-12-3). No three-way merge, no silent refresh: a new proposal is a new review.
+
+**The apply protocol is crash-truthful.** `pending → applying → applied`: the claim is committed
+before the filesystem is touched and says only that somebody started, so the store can never
+durably say `applied` while the document still holds the pre-apply bytes. The claim is a durable
+compare-and-set, so two acceptances can never both write. At start-up each outstanding claim is
+classified from the document's own hash — landed, did not land, or conflicted — and **recovery
+never performs a write**: an apply that did not land becomes `interrupted` and waits for a person.
+
+**Containment is descriptor-relative.** A descriptor is opened on the verified root, every
+component below it is opened relative to the one above with `O_NOFOLLOW`, and the parent
+descriptor is held for the whole operation — so the hash that authorizes a write and the write
+itself concern one file, and an intermediate directory swapped in afterwards redirects nothing.
+The temporary file and the rename are both relative to that descriptor. There is no pathname
+fallback: a platform without the primitives refuses rather than degrading. **Exactly one file
+changes.** A failed replace leaves the document byte-identical and the proposal decidable.
 
 **Deletion is absent rather than refused.** The operation vocabulary has one word,
 `replace_document`, and no function in the package removes or creates a path. An *empty* proposed

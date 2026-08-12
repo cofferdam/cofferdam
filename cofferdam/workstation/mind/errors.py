@@ -79,6 +79,20 @@ CODE_PROPOSAL_NOT_PENDING = "mind_proposal_not_pending"
 #: and no silent refresh: a new proposal is a new review.
 CODE_PROPOSAL_STALE = "mind_proposal_stale"
 
+#: **The host authority that resolved the target changed.** Distinct from
+#: staleness on purpose: staleness means "this document says something else
+#: now", and this means "this role *is* something else now". A content-only
+#: check cannot tell them apart — remap a role to a byte-identical file and the
+#: base hash still matches — so the proposal carries a fingerprint of the
+#: authority as well as of the bytes, and this is what a mismatch reports.
+CODE_TARGET_AUTHORITY_CHANGED = "mind_target_authority_changed"
+
+#: This platform cannot resolve a target without a pathname race, so it does not
+#: resolve one at all. There is deliberately no fallback to a pathname walk: a
+#: weaker guarantee that looks identical from the outside is worse than a
+#: refusal, because nothing downstream would know it had been weakened.
+CODE_RESOLUTION_UNSUPPORTED = "mind_resolution_unsupported"
+
 #: The active workspace is not the one the proposal was made in. Refused rather
 #: than applied against the current workspace, because a proposal that followed
 #: a workspace switch would land somebody's edit in a different project's
@@ -202,6 +216,24 @@ class ProposalStale(MindError):
         )
 
 
+class TargetAuthorityChanged(MindError):
+    def __init__(self, detail: Optional[str] = None) -> None:
+        super().__init__(
+            CODE_TARGET_AUTHORITY_CHANGED,
+            "that role now refers to a different document, so nothing was written",
+            detail or "the change was reviewed against the previous one; read it again and propose",
+        )
+
+
+class ResolutionUnsupported(MindError):
+    def __init__(self) -> None:
+        super().__init__(
+            CODE_RESOLUTION_UNSUPPORTED,
+            "this workstation cannot open memory documents safely",
+            "the platform lacks directory-relative file access, and there is no fallback",
+        )
+
+
 class ProposalWorkspaceChanged(MindError):
     def __init__(self) -> None:
         super().__init__(
@@ -233,6 +265,8 @@ __all__ = [
     "CODE_ROLE_INVALID",
     "CODE_ROLE_UNAVAILABLE",
     "CODE_ROLE_UNCONFIGURED",
+    "CODE_RESOLUTION_UNSUPPORTED",
+    "CODE_TARGET_AUTHORITY_CHANGED",
     "CODE_SCOPE_INVALID",
     "CODE_SOURCE_INVALID",
     "ContentInvalid",
@@ -246,6 +280,8 @@ __all__ = [
     "RoleInvalid",
     "RoleUnavailable",
     "RoleUnconfigured",
+    "ResolutionUnsupported",
     "ScopeInvalid",
     "SourceInvalid",
+    "TargetAuthorityChanged",
 ]

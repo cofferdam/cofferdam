@@ -347,6 +347,8 @@ from .tasks.models import (
 from .mind import MindService, MindStore
 from .mind.errors import (
     CODE_APPLY_FAILED,
+    CODE_RESOLUTION_UNSUPPORTED,
+    CODE_TARGET_AUTHORITY_CHANGED,
     CODE_CONTENT_INVALID,
     CODE_GLOBAL_GRANT_MISSING,
     CODE_PROPOSAL_NOT_PENDING,
@@ -418,7 +420,14 @@ _MIND_STATUS = {
     CODE_PROPOSAL_NOT_PENDING: 409,
     CODE_PROPOSAL_STALE: 409,
     CODE_PROPOSAL_WORKSPACE_CHANGED: 409,
+    # The role now names a different document. A conflict rather than a bad
+    # request: the request was right when it was made, and the world moved.
+    CODE_TARGET_AUTHORITY_CHANGED: 409,
     CODE_APPLY_FAILED: 500,
+    # Not a client error at all — this host cannot open memory documents safely,
+    # so it does not open them. 501 rather than 500: nothing failed, the
+    # capability is absent.
+    CODE_RESOLUTION_UNSUPPORTED: 501,
 }
 
 # An overlay is a short label and a handful of aliases. Anything larger is
@@ -852,6 +861,19 @@ def create_app(
     # client, because reading and changing memory involves none of them.
     if mind is None:
         mind = MindService(config, MindStore(config), workspaces=workspaces)
+
+    # Classify any apply that was claimed and never finished, before the first
+    # request is served. **Nothing is resumed**: recovery reads the durable row
+    # and the document's own hash and records which of three things is true —
+    # the bytes landed, they did not, or somebody else changed the file — and it
+    # performs no canonical write of its own. A consequential operation continued
+    # by a restart is one nobody authorized at the moment it happened, which is
+    # the same reasoning `tasks.recover_after_restart` follows for a task whose
+    # process is gone.
+    #
+    # Harmless on a host that has never proposed anything: the read does not
+    # create the database, so there is nothing to classify and no file appears.
+    mind.recover_after_restart()
 
     # Native Remote Control (M2H, Lane A). Constructed unconditionally because
     # it holds no process and starts nothing: every operation is refused unless

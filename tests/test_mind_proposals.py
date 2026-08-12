@@ -20,8 +20,30 @@ from __future__ import annotations
 import os
 import stat
 import unittest
+from contextlib import contextmanager
 
 from ._mind_doubles import MindHarness
+
+
+@contextmanager
+def failing_rename(documents_module):
+    """Make the atomic replace fail, exactly at the rename.
+
+    Patched on the module's own `os` reference rather than on a path string, so
+    the temporary file is still created and fsynced and the failure lands where
+    a full disk or a read-only mount would put it — which is the point of the
+    test. Accepts the descriptor keywords the real call passes.
+    """
+    original = documents_module.os.rename
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("the rename failed")
+
+    documents_module.os.rename = refuse
+    try:
+        yield
+    finally:
+        documents_module.os.rename = original
 
 
 class Creation(MindHarness):
@@ -316,8 +338,13 @@ class HashBoundApply(MindHarness):
         self.assertEqual(caught.exception.code, "mind_global_grant_missing")
         self.assertEqual(self.vault_text("USER.md"), "# User\n\noriginal\n")
 
-    def test_a_remapped_role_makes_the_proposal_stale_rather_than_moving_it(self):
-        """The apply resolves the role again, and the new file is not the base."""
+    def test_a_remapped_role_is_an_authority_change_not_a_content_conflict(self):
+        """The role now names a different document, and that has its own code.
+
+        Reported as `mind_target_authority_changed` rather than as staleness so
+        the operator is not sent to look for an edit to a file that nobody
+        edited. The stored reason says the same thing durably.
+        """
         from cofferdam.workstation.mind.errors import MindError
 
         self.activate()
@@ -327,7 +354,11 @@ class HashBoundApply(MindHarness):
 
         with self.assertRaises(MindError) as caught:
             self.mind.accept_proposal(created["proposal_id"])
-        self.assertEqual(caught.exception.code, "mind_proposal_stale")
+        self.assertEqual(caught.exception.code, "mind_target_authority_changed")
+        self.assertEqual(
+            self.mind.get_proposal(created["proposal_id"])["decided_reason"],
+            "authority_changed",
+        )
         self.assertEqual(self.project_text("ROADMAP.md"), "# Roadmap\n\noriginal\n")
         self.assertEqual(self.project_text("STATUS.md"), "# Status\n\noriginal\n")
 
@@ -393,22 +424,16 @@ class AtomicWrite(MindHarness):
             scope="project", role="status", content="new\n", reason="y"
         )
 
-        original = os.replace
-
-        def refuse(src, dst):
-            raise OSError("no")
-
-        documents_module.os.replace = refuse
-        try:
+        with failing_rename(documents_module):
             with self.assertRaises(MindError) as caught:
                 self.mind.accept_proposal(created["proposal_id"])
-        finally:
-            documents_module.os.replace = original
 
         self.assertEqual(caught.exception.code, "mind_apply_failed")
         self.assertEqual(self.project_text("STATUS.md"), "# Status\n\noriginal\n")
         leftovers = [p.name for p in self.project_root.iterdir() if p.name.startswith(".")]
         self.assertEqual(leftovers, [])
+        # Back to decidable: the document is byte-identical, so accepting again
+        # once the disk problem is fixed is the right thing to do.
         self.assertEqual(self.mind.get_proposal(created["proposal_id"])["state"], "pending")
 
     def test_nothing_in_the_whole_path_opens_a_socket(self):
@@ -458,21 +483,13 @@ class AtomicWrite(MindHarness):
             scope="project", role="status", content="new\n", reason="y"
         )
 
-        original_replace = os.replace
-
-        def refuse(src, dst):
-            raise OSError("no")
-
-        def also_broken(_proposal_id):
+        def also_broken(_proposal_id, **_kwargs):
             raise RuntimeError("the store is gone too")
 
-        documents_module.os.replace = refuse
-        self.mind_store.reopen = also_broken
-        try:
+        self.mind_store.release = also_broken
+        with failing_rename(documents_module):
             with self.assertRaises(MindError) as caught:
                 self.mind.accept_proposal(created["proposal_id"])
-        finally:
-            documents_module.os.replace = original_replace
 
         self.assertEqual(caught.exception.code, "mind_apply_failed")
         self.assertEqual(self.project_text("STATUS.md"), "# Status\n\noriginal\n")
@@ -499,8 +516,9 @@ class AtomicWrite(MindHarness):
             self.skipTest("this platform cannot create a symlink")
 
         with self.assertRaises(MindError) as caught:
-            read_document(target)
+            read_document(self.project_root, "STATUS.md")
         self.assertEqual(caught.exception.code, "mind_role_unavailable")
+        self.assertEqual(outside.read_text(encoding="utf-8"), "secrets\n")
 
     def test_the_apply_uses_no_shell_and_no_subprocess(self):
         import subprocess

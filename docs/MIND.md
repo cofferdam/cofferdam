@@ -134,16 +134,27 @@ same proposal be accepted.
 
 ### What resolution actually checks
 
-Every read and every apply, never cached:
+Every read and every apply, never cached. **Resolution is descriptor-relative**: the check and
+the use are the same act, rather than two views of the filesystem with a gap between them.
 
 1. the root is re-verified — it exists, is a directory, is enterable, and no component of it is
    a symlink;
-2. every component **below** the root is walked with `lstat`, and a link anywhere fails closed;
-3. the resolved real path must equal where it should have landed;
-4. the target must be a readable regular file.
+2. a descriptor is opened on that root, `O_DIRECTORY | O_NOFOLLOW`;
+3. every component **below** it is opened *relative to the descriptor above it*, `O_NOFOLLOW`
+   throughout — so a link at any level is refused by the kernel at open time;
+4. the final component is opened relative to its verified parent and must be a readable regular
+   file;
+5. **the parent descriptor is held for the whole operation** — the read, the hash, the temporary
+   file and the rename all happen inside the directory that was verified.
 
-`realpath` alone would not do: it happily follows a link out of the vault and reports success,
-because the file it lands on is real. The walk asks a different question.
+The obvious implementation — walk with `lstat`, decide it is safe, then open by name — leaves a
+window: an intermediate directory replaced between the check and the open sends the open somewhere
+else entirely, and containment, the base hash and the atomic replace are then all about the wrong
+file. Holding descriptors closes it.
+
+**There is no pathname fallback.** Where a platform lacks the primitives, resolution refuses
+(`mind_resolution_unsupported`) rather than quietly reverting to the racy version: a weaker
+guarantee that looks identical from the outside is worse than a refusal.
 
 A missing role is not permission to guess a filename. An unmapped `preferences` role refuses
 even when `PREFERENCES.md` is sitting in the vault.
@@ -168,8 +179,8 @@ No model — local or cloud, now or later — writes durable memory. The path is
 ### What a proposal stores
 
 Its Cofferdam-minted id and timestamps; the target as `scope` + `role` (+ the workspace it was
-made in); the operation; the proposed document and its hash; **the base content hash**; the size
-it was; one line saying why; and the provenance word.
+made in); the operation; the proposed document and its hash; **the base content hash**; **the
+target binding fingerprint**; the size it was; one line saying why; and the provenance word.
 
 It does **not** store a path, a root, a vault location, a provider session id, a model name, an
 adapter id, a credential, or any reasoning transcript. The mapping from a role to a file is
@@ -179,33 +190,98 @@ that an edit to that configuration would silently invalidate.
 `source` is assigned from the authenticated surface and is never a request field, for the reason
 task `origin` is. In this milestone it can only be `user`.
 
+### Bound to the bytes *and* to the authority
+
+A content hash answers "is this still the text I reviewed". It cannot answer "is this still the
+same **document**", and the two come apart: remap a role from one approved file to another holding
+byte-identical content and a content-only check sees no drift at all.
+
+So a proposal also records a **target binding fingerprint** — an opaque, domain-separated digest
+over the host authority that resolved it:
+
+| Scope | Bound to |
+|---|---|
+| project | scope · workspace id · project id · role · canonical project root · configured relative name |
+| global | scope · role · canonical vault root · configured relative name |
+
+Paths go **in** as bytes and come **out** as a digest. The fingerprint is stored so the check is
+real; it is never published in any payload, and it is not reversible into a location.
+
 ### Hash-bound apply
 
 Acceptance does not mean "write whatever was proposed earlier". Before a byte is written:
 
-1. the proposal must be **pending**;
+1. the proposal must be **decidable** — pending, or interrupted and being re-approved;
 2. it must belong to the workspace that is active now — otherwise a workspace switch would land
    your edit in a different project's repository, and it would render perfectly well afterwards;
 3. the role is resolved **again**, from configuration re-read at that moment, so a revoked
    grant, a removed mapping or a disabled project refuses with its own code;
-4. the document on disk is re-read and re-hashed, and must still equal the recorded base.
+4. **the binding fingerprint must match** — the role must still name the same document;
+5. the document on disk is re-read and re-hashed, and must still equal the recorded base.
 
-A mismatch marks the proposal **stale** and writes nothing. There is no three-way merge and no
-silent refresh: the diff you reviewed is not the diff that would land, so a person re-reads the
-document and proposes again. A stale proposal never becomes a fresh one — **a new proposal is a
-new review.**
+Step 5 and the write use the **same held descriptor**, so nothing is re-resolved between the hash
+that authorized the write and the write itself.
+
+A failure at 4 is `mind_target_authority_changed`, recorded with reason `authority_changed` — its
+own answer rather than a content conflict, because sending you to look for an edit that never
+happened is worse than no answer. A failure at 5 is `mind_proposal_stale` with
+`content_drifted`. Both write nothing.
+
+There is no three-way merge and no silent refresh: the diff you reviewed is not the diff that
+would land, so a person re-reads the document and proposes again. A stale proposal never becomes a
+fresh one — **a new proposal is a new review.**
 
 ### Atomic write
 
-`mkstemp` in the target's own directory → the mode copied from the file being replaced → write →
-`fsync` → `os.replace` → a best-effort `fsync` of the directory. The temporary file is in the
-same directory because `os.replace` is only atomic within one filesystem.
+Everything is relative to the held parent descriptor: the temporary file is created there
+(`O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600), the mode of the file being replaced is copied onto it
+before the rename, `os.rename` swaps it in with the same directory descriptor on both sides, and
+that descriptor is `fsync`ed after. Content is `fsync`ed before the rename.
+
+A rename within one directory cannot become a copy across a filesystem boundary, and cannot land
+outside the directory that was verified.
 
 No shell, no `git`, no `subprocess`, no `shutil`. On failure the temporary file is removed, the
-target is byte-identical to what it was, and the proposal goes back to **pending** — because
-recording it as applied would claim a change that is not on disk.
+target is byte-identical to what it was, and the proposal becomes decidable again.
 
 An apply changes **exactly one file**. Nothing else in the project or the vault is touched.
+
+### The apply protocol, and what a crash leaves behind
+
+```
+  pending ──claim──► applying ──rename──► applied
+     ▲                   │
+     │                   ├── write failed ──────────► pending
+     │                   └── process stopped ─┐
+     └────────────── interrupted ◄────────────┘   (recovery, if the bytes did not land)
+```
+
+**The store must never durably say `applied` while the document still holds the pre-apply bytes.**
+The claim is committed *before* the filesystem is touched and says only that somebody started —
+which is true at the instant it is written and stays true however the process ends. `applied` is
+recorded only once the rename has returned.
+
+The claim is also the concurrency boundary: it is a durable compare-and-set, so of two acceptances
+arriving together exactly one becomes the writer and the other is refused with
+`mind_proposal_not_pending`. **Two acceptances can never both write.**
+
+At start-up, every outstanding claim is classified from the durable row plus the document's own
+hash — and **recovery never performs a write**:
+
+| The document now hashes to | Meaning | Outcome |
+|---|---|---|
+| the proposed content | the bytes landed; only the record was lost | reconciled to `applied` (`recovered_applied`) — no write, the bytes were already there |
+| the recorded base | the mutation did not land | `interrupted` — waiting for a person |
+| neither | somebody else changed it | `stale` (`recovery_conflicted`) — terminal, no write |
+
+A target that cannot be resolved, or whose binding moved, is also `interrupted`: the honest answer
+is that Cofferdam could not determine what happened, which is not the same as knowing nothing
+happened.
+
+`interrupted` is **decidable, not terminal**. The document is at its pre-apply content, so
+accepting again is a legitimate thing to do — and it must be a person doing it, on the private
+surface, going through every check again. A consequential operation resumed by a restart is one
+nobody authorized at the moment it happened (D-2026-08-11-8, D-2026-08-12-3).
 
 ### No deletion, no creation
 
@@ -224,16 +300,21 @@ gap.
 
 ### Lifecycle
 
-| State | Means |
-|---|---|
-| `pending` | queued, nothing written, decidable |
-| `applied` | written atomically against the hash it was reviewed against |
-| `rejected` | a person said no; no document was touched |
-| `stale` | the target drifted; the apply refused and wrote nothing |
+| State | Means | Decidable |
+|---|---|---|
+| `pending` | queued, nothing written | yes |
+| `applying` | an apply is claimed and in flight | no — it belongs to whoever claimed it |
+| `interrupted` | an apply was cut short and the bytes provably did not land | yes |
+| `applied` | written atomically against what it was reviewed against | no |
+| `rejected` | a person said no; no document was touched | no |
+| `stale` | the target drifted, or the role now names another document | no |
 
-Only `pending` can be decided. Accepting or rejecting anything else is a `409` naming the
-current state — the same convention `task_already_finished` uses. A decided proposal's history
-is not rewritten, and an applied proposal cannot be replayed.
+`decided_reason` says *why*, from a closed vocabulary: `content_drifted`, `target_missing`,
+`authority_changed`, `recovery_conflicted`, `recovered_applied`, `interrupted`.
+
+Accepting or rejecting a proposal that is not decidable is a `409` naming the current state — the
+same convention `task_already_finished` uses. A decided proposal's history is not rewritten, and
+an applied proposal cannot be replayed.
 
 `stale` is a **stored state** when an apply discovers drift, and a **derived flag** on every
 read (`"stale": true`), computed fresh rather than cached — it is the fact somebody uses to
@@ -283,7 +364,8 @@ the moment of approval.
 Semantic reason codes: `mind_scope_invalid`, `mind_role_invalid`, `mind_role_unconfigured`,
 `mind_role_unavailable`, `mind_global_grant_missing`, `mind_content_invalid`,
 `mind_reason_invalid`, `mind_proposal_unknown`, `mind_proposal_not_pending`,
-`mind_proposal_stale`, `mind_proposal_workspace_changed`, `mind_apply_failed`.
+`mind_proposal_stale`, `mind_target_authority_changed`, `mind_proposal_workspace_changed`,
+`mind_apply_failed`, `mind_resolution_unsupported`.
 
 `mind_role_unavailable` is deliberately one code covering missing, not-a-regular-file,
 symlinked, escaped and unreadable. Publishing which it was would describe the host's filesystem

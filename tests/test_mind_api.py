@@ -671,6 +671,89 @@ class Lifecycle(MindApiTestCase):
         self.assertEqual(tasks["tasks"], [])
 
 
+class AuthorityChangeOverTheApi(MindApiTestCase):
+    """The binding refusal reaches a client as its own code, not as staleness."""
+
+    def test_a_remapped_role_is_a_409_with_its_own_code(self):
+        self.activate()
+        # A second file with byte-identical content: a content check alone would
+        # see no drift and let the proposal land on it.
+        identical = (self.project_root / "STATUS.md").read_text(encoding="utf-8")
+        (self.project_root / "TWIN.md").write_text(identical, encoding="utf-8")
+
+        proposal_id = self.propose().json()["proposal_id"]
+
+        (self.config.config_dir / "workspaces.json").write_text(
+            json.dumps(
+                {
+                    "workspaces": [
+                        {
+                            "workspace_id": WORKSPACE_ID,
+                            "project_id": PROJECT_ID,
+                            "documents": {"status": "TWIN.md"},
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        response = self.client.post(
+            "/api/mind/proposals/" + proposal_id + "/accept", headers=self.auth
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["error"]["code"], "mind_target_authority_changed"
+        )
+        self.assertEqual(
+            (self.project_root / "STATUS.md").read_text(encoding="utf-8"), identical
+        )
+        self.assertEqual(
+            (self.project_root / "TWIN.md").read_text(encoding="utf-8"), identical
+        )
+
+    def test_the_refusal_names_no_file(self):
+        self.activate()
+        identical = (self.project_root / "STATUS.md").read_text(encoding="utf-8")
+        (self.project_root / "TWIN.md").write_text(identical, encoding="utf-8")
+        proposal_id = self.propose().json()["proposal_id"]
+        (self.config.config_dir / "workspaces.json").write_text(
+            json.dumps(
+                {
+                    "workspaces": [
+                        {
+                            "workspace_id": WORKSPACE_ID,
+                            "project_id": PROJECT_ID,
+                            "documents": {"status": "TWIN.md"},
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        body = self.client.post(
+            "/api/mind/proposals/" + proposal_id + "/accept", headers=self.auth
+        ).text
+        for secret in ("STATUS.md", "TWIN.md", str(self.project_root)):
+            self.assertNotIn(secret, body)
+
+    def test_the_proposal_payload_never_carries_the_binding_fingerprint(self):
+        self.activate()
+        proposal_id = self.propose().json()["proposal_id"]
+        for path in ("/api/mind/proposals", "/api/mind/proposals/" + proposal_id):
+            body = self.client.get(path, headers=self.auth).text
+            self.assertNotIn("target_binding_hash", body, path)
+
+    def test_the_lifecycle_vocabulary_is_published_and_closed(self):
+        """A client branches on `state`, so the set has to be stable."""
+        from cofferdam.workstation.mind.store import PROPOSAL_STATES
+
+        self.assertEqual(
+            set(PROPOSAL_STATES),
+            {"pending", "applying", "interrupted", "applied", "rejected", "stale"},
+        )
+
+
 class UnconfiguredHost(MindApiTestCase):
     """A host with no workspaces, no roles and no grant answers rather than failing."""
 
