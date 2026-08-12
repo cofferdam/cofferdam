@@ -37,13 +37,31 @@ visible. Adding it is a policy change with a test.
 Why only two global roles
 -------------------------
 
-The recorded order names **"bounded global style/preference extracts"** and
-nothing else. `user` and `cross_project` are granted and readable on the
-production host, and they are still excluded, because no current canonical rule
-authorizes putting a person's identity document into every request. That is a
-gap to close deliberately in a later PR — with a decision — rather than an
-inclusion to widen quietly here, and the same reasoning D-2026-08-11-5 applies
-to the egress projection applies inside the host.
+**D-2026-08-13-2: read authority is not context inclusion.** There are three
+separate permissions over a piece of memory and none of them implies the next —
+*may Cofferdam open this* (the grant and the role map), *should this be in this
+pack* (here), and *may this leave the host* (`CloudContextProjection` and its
+egress policy, D-2026-08-11-5). Cloud egress is an entirely separate policy and
+nothing in this file touches it.
+
+So :data:`GLOBAL_CONTEXT_ROLES` is deliberately narrower than the vocabulary in
+:mod:`..mind.roles`. `user` and `cross_project` are granted, mapped and readable
+on the production host, and they are **not automatically injected**: a pack
+should carry context appropriate to the current interaction rather than every
+piece of locally accessible memory, `USER.md` may hold broad personal
+information irrelevant to most requests, and `CROSS_PROJECT.md` pollutes a pack
+badly when the active workspace concerns one project.
+
+Granting all four roles therefore does not widen a pack, and a test asserts that
+any global role outside this tuple stays out however the vault is configured.
+
+Those two are meant to arrive **when they are actually relevant**, through an
+explicit reference or a future M2N retrieval candidate, as typed candidates
+through the seam :meth:`~.builder.ContextBuilder.build` already accepts — same
+budget, same provenance, same omission machinery. There is deliberately no
+keyword heuristic here guessing at relevance: an approximation labelled
+"relevant" gets believed, which is the failure D-2026-08-12-4 exists to prevent.
+Widening this tuple is a change to D-2026-08-13-2, with a test.
 """
 
 from __future__ import annotations
@@ -56,8 +74,10 @@ from .kinds import KIND_DECISION, KIND_MEMORY, KIND_PLAN
 #: never iterates "whatever roles are mapped".
 PROJECT_CONTEXT_ROLES: Tuple[str, ...] = ("status", "plan", "decisions")
 
-#: Global roles this build reads. See the module docstring for the two that are
-#: readable and deliberately absent.
+#: Global roles **automatically eligible** for a pack (D-2026-08-13-2). Not the
+#: roles Cofferdam may read — that is :data:`..mind.roles.GLOBAL_ROLES`, and it
+#: is a different question. `user` and `cross_project` are readable and are
+#: deliberately not here; see the module docstring.
 GLOBAL_CONTEXT_ROLES: Tuple[str, ...] = ("communication_style", "preferences")
 
 #: What kind of truth each role's material is.

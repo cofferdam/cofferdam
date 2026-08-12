@@ -4,8 +4,9 @@ M2J PR3. What Cofferdam gathers to answer *"given what you just said and what
 this host currently knows, what context is appropriate?"* — and why every part
 of that answer stays on the machine.
 
-Decided in [`DECISIONS.md`](../DECISIONS.md) D-2026-08-11-3, D-2026-08-11-5 and
-D-2026-08-12-4; scoped in [`ROADMAP.md`](../ROADMAP.md) under M2J. Reads through
+Decided in [`DECISIONS.md`](../DECISIONS.md) D-2026-08-11-3, D-2026-08-11-5,
+D-2026-08-12-4 and D-2026-08-13-2; scoped in [`ROADMAP.md`](../ROADMAP.md) under
+M2J. Reads through
 the workspace model in [`docs/WORKSPACES.md`](WORKSPACES.md) and the memory
 model in [`docs/MIND.md`](MIND.md), and adds no authority of its own.
 
@@ -227,21 +228,67 @@ the source.
 
 ## Global Mind policy
 
-**Two roles: `communication_style` and `preferences`.** The recorded priority
-order names "bounded global style/preference extracts" and nothing else.
+### Three permissions, never one
 
-`user` and `cross_project` are granted, mapped and readable on the production
-host, and they are **still excluded**. No current canonical rule authorizes
-putting a person's identity document into every request, and widening what
-Cofferdam reads about somebody because a document happens to be available is
-exactly the drift the policy file exists to make visible. Adding a role is a
-policy change with a test — and, given what these two documents are, it deserves
-a decision first.
+D-2026-08-13-2 is the decision this section implements, and its whole point is
+that these are separate questions with separate answers:
 
-The grant is still the gate. No `config/mind-grant.json`, or `enabled` not
-literally `true`, means no global material and a `grant_absent` row
-(D-2026-08-12-2). Revoking it between two builds takes effect on the second one,
-because the grant is re-read every time.
+| | Question | Decided by |
+|---|---|---|
+| **Read authority** | may Cofferdam open this at all? | the host-owned grant and the role map |
+| **Context inclusion** | should this be in *this* pack? | context policy — this page |
+| **Egress permission** | may this leave the host? | `CloudContextProjection`, D-2026-08-11-5 |
+
+> **Mind read authority ≠ automatic context inclusion.**
+> **`LocalContextPack` inclusion ≠ `CloudContextProjection` permission.**
+
+Cloud egress is an entirely separate policy and nothing on this page touches it.
+A part being in a local pack says nothing whatsoever about whether it may leave
+the machine.
+
+### The default eligible roles
+
+**`communication_style` and `preferences`.** These are automatically eligible
+whenever the grant is active and the role is mapped.
+
+**`user` and `cross_project` are not automatically injected.** On the production
+host both are granted, mapped and readable — and the builder still excludes
+them. Granting all four roles does not widen the pack, and a test asserts that
+directly.
+
+That is intentional, not an unfinished edge:
+
+- a pack should carry context appropriate to the **current interaction**, not
+  every piece of locally accessible memory;
+- `USER.md` may eventually hold broad personal information irrelevant to most
+  requests;
+- `CROSS_PROJECT.md` is especially prone to context pollution when the active
+  workspace concerns one project;
+- being *allowed* to read a role is not a reason for every planner request to
+  receive it.
+
+### How the excluded roles are meant to arrive
+
+Not by widening the default set, and **not by a heuristic**. `user` enters
+through an explicit local policy or reference when it is relevant;
+`cross_project` primarily through an explicit reference or, later, M2N semantic
+retrieval when another project's memory is *actually* related.
+
+Either way the material arrives as a typed [`RetrievedCandidate`](#the-m2n-seam)
+and goes through the same budget, provenance and omission machinery as
+everything else — retrieval never bypasses it, and `LocalContextPack` does not
+need redesigning to accept it. There is deliberately **no keyword heuristic**
+guessing when these roles are relevant: an approximation labelled "relevant"
+gets believed, which is the failure D-2026-08-12-4 exists to prevent.
+
+Widening the default set is a change to D-2026-08-13-2, with a test.
+
+### The grant is still the gate
+
+No `config/mind-grant.json`, or `enabled` not literally `true`, means no global
+material at all and a `grant_absent` row (D-2026-08-12-2). Revoking it between
+two builds takes effect on the second one, because the grant is re-read every
+time.
 
 ## Project Mind policy
 

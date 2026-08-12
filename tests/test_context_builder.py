@@ -18,6 +18,7 @@ the filesystem, and a double that returned strings would assert nothing.
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from ._mind_doubles import PROJECT_ID, WORKSPACE_ID, MindHarness
 
@@ -511,8 +512,15 @@ class SectionSelection(ContextHarness):
 
 
 class GlobalMind(ContextHarness):
-    def test_only_style_and_preferences_are_included(self):
-        """`user` and `cross_project` are granted, readable, and still excluded."""
+    """D-2026-08-13-2: read authority is not context inclusion.
+
+    Three separate permissions, and none implies the next — *may Cofferdam open
+    this*, *should this be in this pack*, *may this leave the host*. This class
+    pins the middle one. The vault in this harness grants **all four** roles, so
+    every exclusion below is a policy decision rather than a missing grant.
+    """
+
+    def test_only_style_and_preferences_are_automatically_eligible(self):
         self.activate()
         pack = self.build()
 
@@ -527,6 +535,135 @@ class GlobalMind(ContextHarness):
         from cofferdam.workstation.context import GLOBAL_CONTEXT_ROLES
 
         self.assertEqual(GLOBAL_CONTEXT_ROLES, ("communication_style", "preferences"))
+
+    def test_read_authority_exists_for_the_roles_the_policy_excludes(self):
+        """The distinction, asserted from both sides in one test.
+
+        Cofferdam *can* read `user` — the grant is live and the role is mapped,
+        and this asserts the read succeeds. It is still not in the pack. If the
+        read failed, the exclusion below would prove nothing.
+        """
+        self.activate()
+        for role in ("user", "cross_project"):
+            payload = self.mind.read_document("global", role)
+            self.assertTrue(payload["content"].strip())
+
+        pack = self.build()
+        self.assertIsNone(self.part(pack, "global:user"))
+        self.assertIsNone(self.part(pack, "global:cross_project"))
+
+    def test_granting_every_global_role_does_not_widen_the_pack(self):
+        """A grant is permission to read, not a request to include."""
+        from cofferdam.workstation.mind.roles import GLOBAL_ROLES
+
+        self.write_grant(documents={role: role.upper() + ".md" for role in GLOBAL_ROLES})
+        for role in GLOBAL_ROLES:
+            (self.vault_root / (role.upper() + ".md")).write_text(
+                "# " + role + "\n\nSENTINEL-ROLE-" + role.upper() + "\n", encoding="utf-8"
+            )
+        self.activate()
+        pack = self.build()
+
+        globals_in_pack = [ref for ref in self.refs(pack) if ref.startswith("global:")]
+        self.assertEqual(
+            globals_in_pack, ["global:communication_style", "global:preferences"]
+        )
+
+    def test_no_global_role_outside_the_policy_can_ever_be_automatic(self):
+        """Drift-proof: derived from the vocabulary, so a fifth role stays out too."""
+        from cofferdam.workstation.context import GLOBAL_CONTEXT_ROLES
+        from cofferdam.workstation.mind.roles import GLOBAL_ROLES
+
+        self.activate()
+        pack = self.build()
+        for role in GLOBAL_ROLES:
+            if role in GLOBAL_CONTEXT_ROLES:
+                continue
+            self.assertIsNone(
+                self.part(pack, "global:" + role),
+                role + " is readable but must not be injected automatically",
+            )
+
+    def test_an_excluded_role_is_not_even_reported_as_an_omission(self):
+        """It was never a candidate. An omission row would imply it was considered."""
+        self.activate()
+        pack = self.build()
+        for role in ("user", "cross_project"):
+            self.assertIsNone(self.omission(pack, "global:" + role))
+
+    def test_an_excluded_role_can_still_arrive_as_a_typed_candidate(self):
+        """The future path, working today, with no redesign of the pack.
+
+        This is how `user` arrives through an explicit reference and how
+        `cross_project` arrives through M2N retrieval: as a typed candidate
+        through the existing seam, budgeted and provenanced like everything
+        else. **Nothing in this build produces one** — the test supplies it by
+        hand, which is exactly the point.
+        """
+        from cofferdam.workstation.context import (
+            KIND_MEMORY,
+            SELECTION_RETRIEVED,
+            RetrievedCandidate,
+        )
+
+        self.activate()
+        pack = self.build(
+            candidates=[
+                RetrievedCandidate(
+                    source_kind=KIND_MEMORY,
+                    source_ref="global:cross_project",
+                    text="A standing constraint that is genuinely related.",
+                )
+            ]
+        )
+        part = self.part(pack, "global:cross_project")
+        self.assertEqual(part.selection, SELECTION_RETRIEVED)
+        self.assertEqual(part.observed_at, FROZEN)
+        self.assertEqual(pack.budget.consumed, sum(p.content_bytes for p in pack.parts))
+
+    def test_a_candidate_does_not_bypass_the_budget(self):
+        """Retrieval flows through the machinery; it never goes around it."""
+        from cofferdam.workstation.context import (
+            KIND_MEMORY,
+            OMIT_BUDGET_EXHAUSTED,
+            RetrievedCandidate,
+        )
+
+        self.activate()
+        pack = self.build(
+            "a question",
+            budget_bytes=120,
+            candidates=[
+                RetrievedCandidate(
+                    source_kind=KIND_MEMORY,
+                    source_ref="global:user",
+                    text="x" * 500,
+                )
+            ],
+        )
+        self.assertLessEqual(pack.budget.consumed, 120)
+        self.assertEqual(self.omission(pack, "global:user").reason, OMIT_BUDGET_EXHAUSTED)
+
+    def test_inclusion_in_a_local_pack_grants_no_egress(self):
+        """The third permission, and nothing in this build implements it.
+
+        The name appears in docstrings, saying it does not exist. What must not
+        exist is a **definition** — the moment one does, something can hold an
+        outbound object, and a local pack's contents become a question about
+        egress.
+        """
+        import re
+
+        import cofferdam
+
+        defined = re.compile(r"^\s*(class|def)\s+CloudContextProjection\b|^\s*CloudContextProjection\s*=")
+        root = Path(cofferdam.__file__).parent
+        hits = [
+            path.name
+            for path in root.rglob("*.py")
+            if any(defined.match(line) for line in path.read_text(encoding="utf-8").splitlines())
+        ]
+        self.assertEqual(hits, [], "CloudContextProjection must not be defined in this build")
 
     def test_no_grant_means_no_global_material(self):
         from cofferdam.workstation.context import OMIT_GRANT_ABSENT

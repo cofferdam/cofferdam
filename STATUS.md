@@ -796,14 +796,21 @@ summary, M2K does not exist, and every pack therefore carries an omission row fo
 `evaluation:latest` with the reason `source_not_in_this_build`. No evaluator was written to fill a
 priority position and nothing is fabricated to stand in for one.
 
-**Global mind is two roles, not four.** The recorded priority names "bounded global
-style/preference extracts", so `communication_style` and `preferences` are included and `user` and
-`cross_project` are **excluded — while granted, mapped and readable on the production host**.
-Widening what Cofferdam reads about a person because a document happens to be available is the
-drift the policy file exists to make visible; adding a role is a policy change with a test, and
-given what those two documents are it deserves a decision first. **This is recorded as an open
-question rather than closed silently.** The grant remains the gate: revoking it between two builds
-takes effect on the second one, because it is re-read every time.
+**Global mind is two roles, not four — and that is now a decision** (D-2026-08-13-2, which closes
+OQ-5). **Read authority is not context inclusion**, and neither is inclusion egress permission:
+three separate questions — *may Cofferdam open this*, *should this be in this pack*, *may this
+leave the host* — and none implies the next. `communication_style` and `preferences` are
+automatically eligible; `user` and `cross_project` are **not automatically injected while granted,
+mapped and readable on the production host**. A pack should carry context appropriate to the
+current interaction rather than every piece of locally accessible memory; `USER.md` may hold broad
+personal information irrelevant to most requests; `CROSS_PROJECT.md` pollutes a pack badly when the
+active workspace concerns one project. Tests assert that granting all four roles does not widen the
+pack, that the read of an excluded role genuinely succeeds (so the exclusion proves something), and
+that any global role outside the policy stays out however the vault is configured. Those two are
+meant to arrive **when actually relevant** — through an explicit reference or future M2N retrieval,
+as typed candidates through the existing seam, budgeted and provenanced like everything else.
+**No keyword heuristic guesses at that relevance**, deliberately. The grant remains the gate:
+revoking it between two builds takes effect on the second one, because it is re-read every time.
 
 **`source_ref` is a semantic address and never a location.** `project:cofferdam:plan#m2j`,
 `global:communication_style`, `workspace:cofferdam:working_context`. A separator, a home marker, a
