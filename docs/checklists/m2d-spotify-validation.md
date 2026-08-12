@@ -1,9 +1,30 @@
 # M2D — Spotify playback: live validation checklist
 
-The validation runtime for `feat/spotify-playback-oauth` (PR #18) is **applied**:
-the `90-spotify-playback-validation` drop-in is in place and the service runs from
-this clone. Round 1 was run from the phone on 2026-08-05 and found three
-reliability defects; round 2, after the M2D.1 fixes, is outstanding.
+> ## Read this before running anything (2026-08-12)
+>
+> **Do not apply the `90-spotify-playback-validation` drop-in.** The Apply, *Pick up new code*
+> and Roll back sections below, and the pre-state they record, describe a **pre-merge runtime**
+> that pointed the live service at an unmerged feature clone. That runtime no longer exists.
+> Production runs the **merged A/B slot deployment** (slot `a`, plus adapter drop-ins only), and
+> this feature is part of it. Re-applying the drop-in would recreate the production-drift class
+> that M2H PR4 removed and `test_deployment_drift.py` guards.
+>
+> **Current status of this checklist (D-2026-08-12-1):**
+>
+> | Steps | State |
+> |---|---|
+> | 19 — cold start: Play now with Spotify fully closed | **PASS** (2026-08-11, `spop-3a0cbdd65646`) |
+> | 1, 7 — catalogue search, connected panel with no token shown | **PASS** (2026-08-11) |
+> | 15 — device transfer | `BLOCKED_BY_PREREQUISITE` — one Connect device on this host. **Not a pass** |
+> | 8–14, 16–18, 20–24 | `DEFERRED_NON_BLOCKING` — not executed. **Not a pass** |
+>
+> The deferred steps do not block M2J PR1. If they are run later, run them against the **merged
+> production build**, not against a clone. The steps themselves remain the acceptance intent and
+> are unchanged.
+
+Round 1 was run from the phone on 2026-08-05 and found three reliability defects;
+round 2, after the M2D.1 fixes, is partially closed — see the status block above.
+The historical text below is preserved as written.
 
 Two reasons the steps are not automated. Authorizing Spotify means signing into a
 real account in a real browser, and pressing play changes what is coming out of

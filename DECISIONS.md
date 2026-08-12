@@ -1448,7 +1448,14 @@ confirms, the worker implements, the planner evaluates, the user decides. Autono
 planner → worker → planner loops are **not** recorded as the roadmap's direction. They would need
 their own explicit decision.
 
-## D-2026-08-11-12 — One supervised validation-debt pass before M2J PR1 merges (EFE DECISION, ACTIVE)
+## D-2026-08-11-12 — One supervised validation-debt pass before M2J PR1 merges (EFE DECISION, SUPERSEDED IN PART BY D-2026-08-12-1)
+
+> **Status note, 2026-08-12.** The supervised pass ran. Its *blocking scope* is narrowed by
+> [D-2026-08-12-1](#d-2026-08-12-1--validation-debt-is-classified-by-blast-radius-efe-decision-active):
+> the core lifecycle, authority and deployment items below were cleared and are now PASS; the
+> remaining media-feature walkthroughs are reclassified as deferred, non-blocking debt. The
+> original text stands unedited as history — it was correct when written, and the items it names
+> were not silently absorbed.
 
 **Decision.** The inherited unclosed live validations — the M2B logout/login cycle, the M2C write
 path, M2D/M2D.1 and M2E re-validation, and the unconfigured media provider credentials — get **one
@@ -1460,6 +1467,50 @@ must not land while that agreed debt is unresolved without a new explicit decisi
 **The reason is habit rather than tidiness.** Every milestone in this replan is validated live on
 the real host by design, and the debt is a record of that habit slipping. Clearing it costs little
 and stops STATUS carrying caveats that readers learn to skip.
+
+## D-2026-08-12-1 — Validation debt is classified by blast radius (EFE DECISION, ACTIVE)
+
+**Decision.** [D-2026-08-11-12](#d-2026-08-11-12--one-supervised-validation-debt-pass-before-m2j-pr1-merges-efe-decision-superseded-in-part-by-d-2026-08-12-1)
+treated all inherited live-validation debt as one undifferentiated blocker. It is now split by
+what the debt actually threatens:
+
+- **Blocking.** Unresolved validation debt that threatens the **core architecture, lifecycle,
+  authority, or deployment boundaries** blocks M2J PR1. These are the properties every later
+  milestone builds on, and a wrong assumption there is not recoverable by a later fix.
+- **Non-blocking.** Peripheral **media-feature** live-validation debt does **not** block
+  workspace/mind/planner development, and is tracked separately in
+  [`STATUS.md`](STATUS.md#inherited-live-validation-debt).
+
+**This is a priority decision, not a validation result.** Nothing here asserts that a deferred
+item passed. The supervised pass of 2026-08-11 closed the blocking set on the real host:
+
+- the real GNOME logout → GDM → login cycle, 475 bounded read-only samples across 40 minutes;
+- workstation survival under the systemd **user** manager, unchanged `MainPID`, `NRestarts=0`;
+- truthful pre-login/post-login capability transitions, with zero mismatches against the real
+  session;
+- no graphical-session ownership confusion — GDM's own greeter session was present while logged
+  out and was correctly **not** claimed;
+- the authenticated/unauthenticated boundary, 401 in every sample;
+- production integrity across the cycle, and **zero** task or provider mutation during it;
+- the M2C bounded audio write path, including refusal behaviour for invalid writes;
+- production A/B deployment integrity, with **no** stale validation drop-ins present.
+
+**What stays open is named, not erased.** The remaining media walkthroughs — Spotify transport,
+queue, volume and device transfer, and the M2E YouTube player run — keep an explicit state in
+STATUS rather than dissolving into prose. The vocabulary is fixed so a later reader cannot
+mistake one for another: `PASS`, `DEFERRED_NON_BLOCKING`, `BLOCKED_BY_PREREQUISITE`,
+`DOCUMENTATION_STALE`.
+
+**Do not restart the media validation loop on the strength of stale text.** Two things repeatedly
+sent sessions back into it. First, the `90-`/`95-` validation drop-in instructions in the M2D and
+M2E checklists describe a pre-merge runtime that pointed the live service at unmerged feature
+clones; production now runs the merged A/B slot deployment, and re-applying them would recreate
+exactly the production drift M2H PR4 removed and `test_deployment_drift.py` guards. Second, STATUS
+described the media provider credentials as unconfigured; they are configured and functional.
+Both are corrected in this change.
+
+**Device transfer stays honestly blocked.** Only one Spotify Connect device exists on this host,
+so transfer is `BLOCKED_BY_PREREQUISITE` — a missing prerequisite, never a pass.
 
 ## OPEN QUESTIONS
 

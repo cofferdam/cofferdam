@@ -102,13 +102,16 @@ Guardian / A-B slots (M5) · self-update (M6) · Opera Companion · Trust Core r
 Two **parallel tracks** run outside the milestone gates, isolated from production — see
 [Parallel tracks](#parallel-tracks-b-and-d-recorded-2026-08-11) below.
 
-Recorded as [`DECISIONS.md`](DECISIONS.md) D-2026-08-11-1 … -12, which are the authority for the
+Recorded as [`DECISIONS.md`](DECISIONS.md) D-2026-08-11-1 … -12 and D-2026-08-12-1, which are the authority for the
 sections that follow. The planning package that produced them is preserved as history in
 `handoffs/replan-2026-08-11/`; it is a draft that was edited before adoption, not a second
 roadmap.
 
-**Before M2J PR1 merges:** one supervised pass over the inherited live-validation debt listed in
-[`STATUS.md`](STATUS.md) (D-2026-08-11-12). It does not block starting M2J; it blocks that merge.
+**Before M2J PR1 merges:** the supervised pass over the inherited live-validation debt listed in
+[`STATUS.md`](STATUS.md) ran on 2026-08-11 (D-2026-08-11-12). The blocking set — lifecycle,
+authority, capability truthfulness and deployment integrity — is **cleared**. The remaining
+media-feature walkthroughs are deferred, non-blocking debt and **do not block** the merge
+(D-2026-08-12-1); they keep explicit states in STATUS rather than being absorbed.
 
 ### M2H — Supervised Claude Remote Control (Lane A)
 
