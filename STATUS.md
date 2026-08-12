@@ -16,9 +16,15 @@ preserved as history in `handoffs/replan-2026-08-11/`.
 Cofferdam owns "what are we working on" without a model inferring it. Production runs it on slot B;
 slot A is retained unchanged at `2386a54` as the rollback.
 
-**M2J PR2 is implemented on a branch** — mind access by role, the host-owned vault grant, and the
-proposal → explicit acceptance → hash-bound atomic apply path. See *In progress* below. Nothing
-else in M2J is started: no Context Builder, no planner, no evidence bundles.
+**M2J PR2 is merged as `1c45b26` (#38) and PR2.1 as `f279fc2` (#40), and both are deployed** —
+mind access by role, the host-owned vault grant, the proposal → explicit acceptance → hash-bound
+atomic apply path, and the `cross_project` global role. Production runs `f279fc2` on slot B; slot
+A is retained unchanged at `1c45b26` as the rollback.
+
+**M2J PR3 is implemented on a branch** — the deterministic Context Builder and `LocalContextPack`:
+bounded local context assembly with provenance on every part, a UTF-8-byte budget, and no model,
+network call, index or persistence anywhere in it. See *In progress* below. Nothing after it in
+M2J is started: no PWA workspace panel, no `get_project_context`, no planner, no evidence bundles.
 
 **M2H is complete and merged**, closing the M1 post-reboot gate;
 M2F Agent Task Core and M2G the Claude Code adapter merged; the isolated Custom GPT Actions mobile
@@ -727,11 +733,119 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2J PR3 — the Context Builder and `LocalContextPack`
+
+On `feat/m2j-context-builder`, from the merged `f279fc2`. **Implemented and validated locally and
+against an isolated runtime; not deployed and not merged.** Documented in
+[`docs/CONTEXT.md`](docs/CONTEXT.md).
+
+**Cofferdam can now assemble bounded local context deterministically, with no model anywhere in
+the path.** Given the current user message and the host's current state, the builder produces a
+`LocalContextPack`: an ordered list of typed parts, each carrying
+`{source_kind, source_ref, observed_at}` and how it was selected, plus the budget it was built
+under and **one row for every source that is not in it, with a reason**. It reads Working Context
+through `WorkspaceService` and memory through `MindService` **by role**, and adds no authority of
+its own — no path, no root, no reader, no store.
+
+**The pack is a value, not a record.** Nothing persists it, caches it, indexes it or reuses it,
+and no database, directory or file is created by building one. A restart is irrelevant to this PR
+because it introduces no durable state at all.
+
+**Nothing leaves the host, and there is no code path that could make it.** No provider client, no
+bridge Action, no worker context, no serializer to a wire format, no prompt, no message array, no
+system string, no template. `CloudContextProjection` (D-2026-08-11-5) still does not exist, and a
+test asserts the package imports nothing that could send anything — no `socket`, `urllib`,
+`http.client`, `httpx`, `requests`, `subprocess` or provider SDK — while another builds a pack
+with `socket` monkeypatched to raise.
+
+**The budget is UTF-8 bytes, and that is a decision rather than a default.** `DECISIONS.md`
+requires a bounded pack and names no unit. A token count would have been wrong twice: it would
+make a model-free component depend on a provider's tokenizer, and it would make the same pack cost
+different amounts on different models. Bytes are defined by the encoding, identical on every host,
+and already this repository's unit for a document. 64 KiB total by default, with per-source
+ceilings — Working Context 4 KiB, status 8 KiB, plan 12 KiB, decisions 12 KiB, each global extract
+4 KiB — so a 120 KB `DECISIONS.md` cannot crowd out everything after it, and the accounting is
+enforced in one place and asserted to equal the sum of the parts.
+
+**The current message is never trimmed.** If it alone exceeds the budget the build **refuses** and
+returns **no pack** — before a single document is read, so an oversize message never causes memory
+to be touched. Trimming would show a planner a sentence the person did not write, which is the
+rule the workspace objective and the memory-proposal reason already follow; a partial pack would
+present the incomplete thing as complete; and summarising it would need the model this milestone
+does not have.
+
+**Selection is explicit or structural, and each part says which.** An `explicit` part is a section
+a **person** named through `plan_checkpoint` or `pending_decision_ref` — the PR1 fields that were
+recorded as opaque with nothing resolving them, and this is the reader they were reserved for.
+Matching is literal equality on a slug; there is no fuzzy matching and no scoring. A reference that
+names no section **omits the role** with `explicit_section_missing` and puts **no structural
+substitute in its place**, because a substitute would answer a question nobody asked and would look
+identical afterwards. A `structural` part is whole sections taken by position — from the top, or
+from the **end** for `decisions`, which is how "recent decisions" is implemented without any
+judgement about content.
+
+**No relevance is claimed that is not real.** D-2026-08-12-4 makes semantic retrieval a *required*
+Mind capability, and requiring it is exactly why it is not approximated: a keyword heuristic
+labelled "relevant" would be believed by everything downstream and would be wrong invisibly. The
+M2N seam is one typed parameter — `build(..., candidates=[RetrievedCandidate(...)])` — validated,
+ordered and budgeted like everything else. **Nothing in this build supplies a candidate**, and a
+test exercises the seam so it is a boundary rather than dead code.
+
+**The evaluation slot is empty and says so.** Priority position six is the latest evaluation
+summary, M2K does not exist, and every pack therefore carries an omission row for
+`evaluation:latest` with the reason `source_not_in_this_build`. No evaluator was written to fill a
+priority position and nothing is fabricated to stand in for one.
+
+**Global mind is two roles, not four.** The recorded priority names "bounded global
+style/preference extracts", so `communication_style` and `preferences` are included and `user` and
+`cross_project` are **excluded — while granted, mapped and readable on the production host**.
+Widening what Cofferdam reads about a person because a document happens to be available is the
+drift the policy file exists to make visible; adding a role is a policy change with a test, and
+given what those two documents are it deserves a decision first. **This is recorded as an open
+question rather than closed silently.** The grant remains the gate: revoking it between two builds
+takes effect on the second one, because it is re-read every time.
+
+**`source_ref` is a semantic address and never a location.** `project:cofferdam:plan#m2j`,
+`global:communication_style`, `workspace:cofferdam:working_context`. A separator, a home marker, a
+parent segment or an unknown scheme is refused **at construction**, so a reference that could leak
+a path never exists to be filtered later — and section identities are restricted to `[a-z0-9-]`,
+which is what stops a heading like `## ../../etc/passwd` putting a path-shaped string into
+provenance. `observed_at` is when Cofferdam read the source, never when the document was written.
+
+**Nothing is logged.** Not "logged carefully" — the package emits no log records, the same posture
+the mind and workspace packages take. `pack.summary()` exists for a caller that wants a journal
+line and carries structural facts only: counts, kinds, references, byte totals, truncation count
+and omission reasons. Tests assert that building a pack emits no record at all and that the
+summary contains none of the sentinel personal strings the fixtures plant.
+
+**A read is a read.** Tests assert no canonical Markdown is written, no memory proposal is created,
+no Working Context revision advances, and **no file appears anywhere under the home** during a
+build. Unmapped project documents, unmapped vault notes, nested vault directories and `.obsidian/`
+are not filtered but **unreachable**: the builder has no way to name a file.
+
+**One packaging defect was found by the tests rather than by reading the code** — the new package
+was missing from `[tool.setuptools] packages`, which `tests/test_packaging.py` caught and which
+would otherwise have shipped a wheel without it.
+
+**No routes.** PR3 adds no HTTP route to the workstation or the Actions bridge and no PWA surface.
+Route surfaces are compared against `f279fc2` and are byte-for-byte identical, and the OpenAPI
+document is unchanged.
+
+**Not in this PR:** `CloudContextProjection` and any egress (still D-2026-08-11-5's separate
+object); the PWA workspace panel and `get_project_context` / `syncWorkspace` (PR4); evidence and
+evaluation (M2K); the planner, any model runtime, tokenizer or prompt construction (M2L); the
+dashboard (M2M); embeddings, vectors, links and backlinks traversal (M2N). No persistence, no
+cache, no new configuration file, no browser work, no new adapter, and no change to the mind
+proposal/apply path, `delegated_adapter` or Task Core.
+
+## M2J records (written while each was on its branch)
+
 ### M2J PR2 — mind access, the host-owned grant, and the memory-proposal queue
 
-On `feat/m2j-mind-proposals`, from the merged `ae5c025`. **Implemented and validated locally and
-against an isolated runtime; not deployed and not merged.** Documented in
-[`docs/MIND.md`](docs/MIND.md).
+**Merged as `1c45b26` (#38) and deployed to slot B**, with the `cross_project` role following as
+PR2.1, **merged as `f279fc2` (#40)**. Written on `feat/m2j-mind-proposals`, from the merged
+`ae5c025`, while it was still a branch — where this entry says "not merged" or "not deployed" it
+is describing the moment it was written. Documented in [`docs/MIND.md`](docs/MIND.md).
 
 **Cofferdam can now read memory by role, and can be *allowed* to change it — never on its own.**
 Two authorities, kept apart. **Project mind** is the project's own repository, reached through the
@@ -818,8 +932,6 @@ Deleting `state/mind/` forgets the pending proposals and touches no Markdown.
 the PWA panel and `syncWorkspace` (PR4); evidence and evaluation (M2K); the planner and any model
 runtime (M2L); the dashboard (M2M). No vectors, no retrieval, no summarization, no token budgets,
 no browser work, no new adapter, and no change to `delegated_adapter` or Task Core.
-
-## M2J records (written while each was on its branch)
 
 ### M2J PR1 — workspaces and durable Working Context
 

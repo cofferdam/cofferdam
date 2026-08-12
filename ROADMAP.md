@@ -247,13 +247,19 @@ downstream reads from.
     host-owned grant in `config/mind-grant.json`, absent by default; the proposal → accept →
     hash-bound apply path (D-2026-08-11-4), on the device-token surface alone, with deletion absent
     rather than refused and no egress of any kind.
-  - **PR3 — Context Builder.** `LocalContextPack` assembly, bounded by an explicit budget, every
-    part carrying `{source_kind, source_ref, observed_at}` — `user_instruction`, `working_state`,
-    `plan`, `decision`, `memory`, `worker_result`, `machine_observed`, `external_model_output`,
-    `planner_inference`. Priority order: the user's current message (never truncated) → Working
+  - **PR3 — Context Builder.** *Implemented on a branch; see [`STATUS.md`](STATUS.md) and
+    [`docs/CONTEXT.md`](docs/CONTEXT.md).* `LocalContextPack` assembly, bounded by an explicit
+    budget in **UTF-8 bytes** (model-independent by construction), every part carrying
+    `{source_kind, source_ref, observed_at}` — `user_instruction`, `working_state`, `plan`,
+    `decision`, `memory`, `worker_result`, `machine_observed`, `external_model_output`,
+    `planner_inference`, of which the first five are producible and the rest are declared and
+    unreachable. Priority order: the user's current message (never truncated) → Working
     Context → workspace summary → the relevant plan section → recent decisions → latest evaluation
-    summary → bounded global style/preference extracts. **No vectors in M2J** — semantic memory is
-    M2N.
+    summary → bounded global style/preference extracts. The evaluation slot is **empty and says
+    so**: M2K does not exist, and no evaluator was written to fill a priority position. Selection
+    is a reference a person recorded or a bounded structural slice, and each part is labelled with
+    which. **No vectors in M2J** — semantic memory is M2N, and its candidates already have a typed
+    seam into the builder.
   - **PR4 — surfaces.** The PWA workspace panel, and `get_project_context` / `syncWorkspace` for
     the Custom GPT. The first OpenAPI edit since Gate B; note the `$ref` import pitfall PR2 found.
 - **The two context objects are separate types** (D-2026-08-11-5). The local pack may be rich;

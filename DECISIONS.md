@@ -1708,6 +1708,17 @@ than the machine's own operational insides.
 
 ## OPEN QUESTIONS
 
+- **OQ-5 — which global mind roles belong in a local context pack.** M2J PR3 includes
+  `communication_style` and `preferences`, because the recorded priority order names "bounded
+  global style/preference extracts" and nothing else. `user` and `cross_project` are granted,
+  mapped and readable on the production host, and the builder **excludes them** rather than
+  widening the rule to match what happens to be available. Both are plausibly useful to a local
+  planner — `cross_project` in particular holds standing constraints that apply everywhere — but
+  putting a person's identity document into every request is a privacy posture, not an
+  implementation detail, and D-2026-08-11-5's reasoning about inference-versus-naming applies
+  inside the host as well as at its edge. Needs a decision naming which roles, under what
+  condition, before the policy is widened. Until then the omission is deliberate and recorded in
+  [`docs/CONTEXT.md`](docs/CONTEXT.md).
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when
   reproducible Ubuntu installs matter.
 - **OQ-4 — YouTube search quota.** The documented default allocation is 100 `search.list` calls per

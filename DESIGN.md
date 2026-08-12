@@ -298,6 +298,11 @@ Each part of a pack carries `{source_kind, source_ref, observed_at}`, so the pla
 an observation, what is a worker claim, what is memory and what is external text. Text read from a
 web page or another model is `external_model_output`: data with provenance, never instructions.
 
+The local half exists (M2J PR3): a deterministic builder over Working Context and role-addressed
+mind, bounded by a UTF-8-byte budget, with every omission explained and no model, index or network
+call in the path. `source_ref` is a semantic address such as `project:cofferdam:plan#m2j`, never a
+filesystem location. See [`docs/CONTEXT.md`](docs/CONTEXT.md). The outbound half is still absent.
+
 ### Evidence outranks claims
 
 **Adapter-reported evidence is a claim; only machine, git and Cofferdam observations are
