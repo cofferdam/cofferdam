@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import List, NamedTuple, Optional, Tuple
 
 from .policy import REDACTION_PATH
@@ -147,8 +148,19 @@ _SECRET_PATTERNS: Tuple[re.Pattern, ...] = (
 #: separately, because canonical documentation explains these variables
 #: constantly and a rule that could not tell `TOKEN=<your-token>` from a real one
 #: would omit most of this repository's own decision record.
+#:
+#: The host-specific prefix is **optional** (M2J PR3.5.1). It was mandatory until
+#: the PR3.5 post-deployment validation, which meant `COFFERDAM_ACTIONS_TOKEN=`
+#: matched and a bare `TOKEN=` did not — so the form most likely to appear in a
+#: pasted snippet was the one form the policy could not see. The prefix is the
+#: part that varies between hosts; the keyword is the part that carries the
+#: meaning, and requiring the variable half to be present inverted that.
+#:
+#: The bound on the prefix stays: an unbounded run before a required literal is
+#: what made a long token-free line backtrack from every start position, and that
+#: cost 84 seconds once already.
 _ENV_ASSIGNMENT = re.compile(
-    r"\b[A-Z][A-Z0-9_]{0,63}"
+    r"\b(?:[A-Z][A-Z0-9_]{0,63})?"
     r"(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?|AUTH)"
     r"\s*[:=]\s*(\S+)"
 )
@@ -208,17 +220,70 @@ def _looks_sensitive(text: str) -> bool:
 
 # -- path shapes -------------------------------------------------------------
 
+#: A run of separators, wherever one separator is meaningful. POSIX collapses
+#: `//` to `/`, so `/home//someone/x` and `/home/someone/x` name the same file —
+#: and a pattern that accepts one slash while the kernel accepts many is a
+#: difference nobody has to be clever to find (M2J PR3.5.1).
+#:
+#: The trailing `(?!/)` is load-bearing, and a plain `/+` is a performance
+#: defect rather than a style preference. A run of separators is followed by a
+#: required literal — `/+tmp`, `/home`, `slots` — so a bare `/+` matching a long
+#: run and then failing that literal backtracks through every shorter length, at
+#: every start position: quadratic, and 50 000 slashes took over four seconds.
+#: Requiring the run to be maximal prunes those branches, because any shorter
+#: match leaves a slash next and fails the lookahead immediately. It is the
+#: portable spelling of an atomic group — possessive quantifiers need 3.11 and
+#: this package supports 3.9.
+#:
+#: This is the same failure PR3.5 already paid for once, so the regression tests
+#: in `tests/test_cloud_projection_adversarial.py` assert the growth stays linear
+#: rather than trusting the reading above.
+_SEP = r"/+(?!/)"
+
+#: The same run, where it *starts* a pattern rather than joining two components.
+#: `(?<!/)` is the other half of the cost fix: without it every position inside a
+#: run of slashes is a candidate start, and each one rescans the rest of the run
+#: before failing the literal that follows — linear work at linear positions, so
+#: 32 000 slashes cost 0.85 seconds per known root. A run has exactly one
+#: beginning, and this says so. Internal separators need no such guard: they are
+#: always preceded by a name character.
+_SEP_LEADING = r"(?<!/)/+(?!/)"
+
 #: Anchored on things that genuinely are filesystem roots. Deliberately **not** a
 #: general "slash-separated word" rule: `/api/tasks` is a route this product
 #: documents constantly, `state/tasks/tasks.sqlite3` is a relative name, and
 #: treating either as a location would shred canonical text to no benefit.
 _PATH_PATTERNS: Tuple[re.Pattern, ...] = (
-    re.compile(r"~/[A-Za-z0-9._\-/]*"),
-    re.compile(r"/home/[A-Za-z0-9._\-]+(?:/[A-Za-z0-9._\-]+)*"),
-    re.compile(r"/root(?:/[A-Za-z0-9._\-]+)+"),
-    re.compile(r"\bslots/[ab](?:/[A-Za-z0-9._\-]+)*"),
-    re.compile(r"\.obsidian(?:/[A-Za-z0-9._\-]+)*"),
+    re.compile(r"~" + _SEP + r"[A-Za-z0-9._\-/]*"),
+    re.compile(r"/home" + _SEP + r"[A-Za-z0-9._\-]+(?:" + _SEP + r"[A-Za-z0-9._\-]+)*"),
+    re.compile(r"/root(?:" + _SEP + r"[A-Za-z0-9._\-]+)+"),
+    re.compile(r"\bslots" + _SEP + r"[ab](?:" + _SEP + r"[A-Za-z0-9._\-]+)*"),
+    re.compile(r"\.obsidian(?:" + _SEP + r"[A-Za-z0-9._\-]+)*"),
 )
+
+
+@lru_cache(maxsize=64)
+def _literal_patterns(literals: Tuple[str, ...]) -> Tuple[re.Pattern, ...]:
+    """Compile each known host value into a separator-tolerant pattern.
+
+    Until M2J PR3.5.1 this was `str.replace`, and a substring test cannot see a
+    separator the operator did not type: a caller that said "never emit
+    `/home/me/cofferdam`" still emitted `/home//me/cofferdam`. Every literal
+    separator becomes a run, and nothing else about the value is reinterpreted —
+    the components are escaped, so a dot in a root is still a dot.
+
+    Cached on the literals tuple because a projection sanitizes one part after
+    another against the same environment, and recompiling per part would put the
+    cost of the fix in the wrong place.
+    """
+    patterns = []
+    for literal in literals:
+        components = [re.escape(part) for part in literal.split("/") if part]
+        if not components:
+            continue
+        prefix = _SEP_LEADING if literal.startswith("/") else ""
+        patterns.append(re.compile(prefix + _SEP.join(components)))
+    return tuple(patterns)
 
 #: A URL is an address, not a filesystem authority, so its path is masked out of
 #: the way before the patterns above run and restored afterwards. Without this,
@@ -269,9 +334,9 @@ def sanitize(text: str, environment: HostRedactionEnvironment) -> Sanitized:
 
     redacted = False
     result = text
-    for literal in environment.literals:
-        if literal in result:
-            result = result.replace(literal, PLACEHOLDER)
+    for pattern in _literal_patterns(environment.literals):
+        result, count = pattern.subn(PLACEHOLDER, result)
+        if count:
             redacted = True
 
     masked, urls = _mask_urls(result)
@@ -290,6 +355,7 @@ def sanitize(text: str, environment: HostRedactionEnvironment) -> Sanitized:
 RESIDUAL_LIMITATIONS: Tuple[str, ...] = (
     "Pattern matching cannot prove text contains no secret; this is one layer, not the boundary.",
     "A credential in an unrecognised shape, or a passphrase in prose, is not detected.",
+    "A credential variable name is matched in upper case only, as environment variables are written.",
     "A secret split across a line break is not reassembled, because that would change the text.",
     "A relative path with no recognised root is not treated as a location.",
     "Windows-style paths are not recognised; this product's hosts are Linux.",

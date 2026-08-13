@@ -171,6 +171,114 @@ class PathShapes(AdversarialHarness):
         self.assertEqual(projection.parts[0].redactions, ())
 
 
+class SeparatorDuplication(AdversarialHarness):
+    """Regression: PR3.5 matched exactly one slash between path components.
+
+    `/home//someone/x` names the same file as `/home/someone/x` on every POSIX
+    host — the kernel collapses the run — so a pattern that accepts one slash
+    and a filesystem that accepts many is a difference an attacker does not have
+    to be clever to find. It defeated the known-host literals too, which are the
+    strongest rule here: those were a substring test, and a substring test cannot
+    see a separator the operator did not type. Found by the PR3.5
+    post-deployment validation.
+    """
+
+    def assert_redacted(self, text, *absent):
+        from cofferdam.workstation.context.projection import REDACTION_PATH
+
+        projection, blob = self.project_text("Path is " + text + " on the host.\n")
+        self.assertEqual(len(projection.parts), 1)
+        for fragment in absent or (text,):
+            self.assertNotIn(fragment, blob)
+        self.assertIn(REDACTION_PATH, projection.parts[0].redactions)
+
+    def test_a_doubled_home_separator(self):
+        self.assert_redacted("/home//fake-user/project")
+
+    def test_a_tripled_home_separator(self):
+        self.assert_redacted("/home///fake-user/project")
+
+    def test_a_doubled_separator_inside_a_home_path(self):
+        self.assert_redacted("/home/fake-user//project", "fake-user")
+
+    def test_a_doubled_root_separator(self):
+        self.assert_redacted("/root//secret")
+
+    def test_a_tilde_path_with_one_and_with_two_separators(self):
+        self.assert_redacted("~/foo")
+        self.assert_redacted("~//foo")
+
+    def test_doubled_slot_separators(self):
+        self.assert_redacted("slots//a")
+        self.assert_redacted("slots///b")
+
+    def test_a_doubled_separator_inside_an_obsidian_path(self):
+        self.assert_redacted(".obsidian//workspace.json", ".obsidian")
+
+    def test_a_known_cofferdam_home_with_duplicated_separators(self):
+        """Duplicate an *internal* separator: a doubled leading slash leaves the
+        literal intact as a substring and would pass without proving anything."""
+        literal = str(self.home)
+        head, _, tail = literal.rpartition("/")
+        self.assert_redacted(head + "//" + tail, literal)
+
+    def test_a_known_project_root_with_duplicated_separators(self):
+        literal = str(self.project_root)
+        self.assert_redacted(literal.replace("/", "//"), literal)
+
+    def test_a_known_vault_root_with_duplicated_separators(self):
+        literal = str(self.vault_root)
+        self.assert_redacted(literal.replace("/", "//"), literal)
+
+    def test_a_known_slot_root_with_duplicated_separators(self):
+        literal = str(self.home / "slots" / "a")
+        self.assert_redacted(literal.replace("/", "///"), literal)
+
+    def test_many_repeated_separators_do_not_bypass(self):
+        self.assert_redacted("/home/" + "/" * 40 + "fake-user/project", "fake-user")
+
+    def test_a_known_root_inside_a_url_with_duplicated_separators(self):
+        """The known-literal rule reaches inside a URL, and still must."""
+        literal = str(self.project_root)
+        _, blob = self.project_text(
+            "See https://example.com" + literal.replace("/", "//") + "/x for details.\n"
+        )
+        self.assertNotIn(literal, blob)
+
+    def test_api_routes_survive_separator_tolerance(self):
+        """Widening the separator must not start eating routes."""
+        text = (
+            "The bridge exposes /v1/projects and the daemon exposes /api/tasks.\n"
+            "A doubled route //api/tasks is still not a filesystem path.\n"
+        )
+        projection, blob = self.project_text(text)
+        self.assertEqual(len(projection.parts), 1)
+        self.assertIn("/api/tasks", blob)
+        self.assertIn("/v1/projects", blob)
+        self.assertEqual(projection.parts[0].redactions, ())
+
+    def test_ordinary_urls_survive_separator_tolerance(self):
+        text = (
+            "See https://example.com/path and https://example.com/home/docs.\n"
+            "Locally that is http://localhost/api/tasks instead.\n"
+        )
+        projection, blob = self.project_text(text)
+        self.assertEqual(len(projection.parts), 1)
+        for url in (
+            "https://example.com/path",
+            "https://example.com/home/docs",
+            "http://localhost/api/tasks",
+        ):
+            self.assertIn(url, blob)
+        self.assertEqual(projection.parts[0].redactions, ())
+
+    def test_the_scheme_separator_is_never_collapsed(self):
+        """`https://` is two slashes that must survive verbatim."""
+        _, blob = self.project_text("Read https://example.com/a and http://example.org/b.\n")
+        self.assertIn("https://example.com", blob)
+        self.assertIn("http://example.org", blob)
+
+
 # -- secrets -----------------------------------------------------------------
 
 
@@ -228,6 +336,110 @@ class SecretShapes(AdversarialHarness):
         text = "The bridge reads COFFERDAM_ACTIONS_TOKEN from actions-bridge.env.\n"
         projection, _ = self.project_text(text)
         self.assertEqual(len(projection.parts), 1)
+
+
+# -- the bare-name gap (M2J PR3.5.1) -----------------------------------------
+
+#: A fake value, long enough to clear the placeholder floor. Not a credential.
+FAKE_VALUE = "ZQXFAKEtok9d2f81b40c7ae653aa10"
+
+
+class BareCredentialAssignments(SecretShapes):
+    """Regression: PR3.5 required at least one character before the keyword.
+
+    `COFFERDAM_ACTIONS_TOKEN=` matched and `TOKEN=` did not, because the name
+    pattern opened with a mandatory `[A-Z]`. The prefix is what varies between
+    hosts, so the form most likely to appear in a pasted snippet was the one
+    form the policy could not see. Found by the PR3.5 post-deployment
+    validation, before any surface could transmit a projection.
+    """
+
+    def assert_bare_key_omits(self, key):
+        blob = self.assert_omits(key + "=" + FAKE_VALUE + "\n")
+        self.assertNotIn(FAKE_VALUE, blob)
+
+    def test_a_bare_api_key_assignment(self):
+        self.assert_bare_key_omits("API_KEY")
+
+    def test_a_bare_apikey_assignment(self):
+        self.assert_bare_key_omits("APIKEY")
+
+    def test_a_bare_secret_assignment(self):
+        self.assert_bare_key_omits("SECRET")
+
+    def test_a_bare_token_assignment(self):
+        self.assert_bare_key_omits("TOKEN")
+
+    def test_a_bare_password_assignment(self):
+        self.assert_bare_key_omits("PASSWORD")
+
+    def test_a_bare_auth_assignment(self):
+        self.assert_bare_key_omits("AUTH")
+
+    def test_a_bare_access_token_assignment(self):
+        self.assert_bare_key_omits("ACCESS_TOKEN")
+
+    def test_a_bare_refresh_token_assignment(self):
+        self.assert_bare_key_omits("REFRESH_TOKEN")
+
+    def test_a_bare_private_key_assignment(self):
+        self.assert_bare_key_omits("PRIVATE_KEY")
+
+    def test_a_prefixed_assignment_is_still_detected(self):
+        """The fix widens the pattern; it must not narrow it."""
+        for key in ("COFFERDAM_ACTIONS_TOKEN", "MY_API_KEY", "APP_SECRET", "DB_PASSWORD"):
+            with self.subTest(key=key):
+                self.assert_bare_key_omits(key)
+
+    def test_whitespace_around_the_assignment_does_not_hide_it(self):
+        self.assert_omits("API_KEY = " + FAKE_VALUE + "\n")
+        self.assert_omits("TOKEN\t:\t" + FAKE_VALUE + "\n")
+
+    def test_a_quoted_value_does_not_hide_it(self):
+        self.assert_omits('SECRET="' + FAKE_VALUE + '"\n')
+        self.assert_omits("SECRET='" + FAKE_VALUE + "'\n")
+
+    def test_markdown_formatting_around_the_key_does_not_hide_it(self):
+        self.assert_omits("`API_KEY=" + FAKE_VALUE + "`\n")
+        self.assert_omits("**TOKEN=" + FAKE_VALUE + "**\n")
+
+    def test_a_list_item_does_not_hide_it(self):
+        self.assert_omits("- API_KEY=" + FAKE_VALUE + "\n")
+        self.assert_omits("  * SECRET=" + FAKE_VALUE + "\n")
+
+    def test_a_fenced_code_block_does_not_hide_it(self):
+        self.assert_omits("```sh\nexport TOKEN=" + FAKE_VALUE + "\n```\n")
+
+    def test_yaml_shaped_formatting_does_not_hide_it(self):
+        self.assert_omits("env:\n  API_KEY: " + FAKE_VALUE + "\n")
+
+    def test_a_path_and_a_fake_secret_together_omit_the_whole_part(self):
+        """A high-risk part is dropped whole; the path redaction does not save it."""
+        text = "Deploy from /home/fake-user/app with API_KEY=" + FAKE_VALUE + "\n"
+        blob = self.assert_omits(text)
+        self.assertNotIn("/home/fake-user", blob)
+
+    def test_a_documentation_placeholder_with_a_bare_key_is_still_kept(self):
+        """Widening the name must not start eating canonical documentation."""
+        text = (
+            "The example uses API_KEY=xxxxx and SECRET=changeme.\n"
+            "Set TOKEN=<your-token> before starting.\n"
+            "AUTH=${AUTH_VALUE} is read from the environment.\n"
+        )
+        projection, blob = self.project_text(text)
+        self.assertEqual(len(projection.parts), 1)
+        self.assertIn("API_KEY", blob)
+
+    def test_a_short_value_is_still_not_treated_as_a_credential(self):
+        projection, _ = self.project_text("API_KEY=1\nTOKEN=abc\n")
+        self.assertEqual(len(projection.parts), 1)
+
+    def test_naming_a_bare_variable_without_a_value_is_not_a_secret(self):
+        projection, _ = self.project_text("Set API_KEY in the environment file.\n")
+        self.assertEqual(len(projection.parts), 1)
+
+    def test_unicode_beside_the_assignment_does_not_hide_it(self):
+        self.assert_omits("→ API_KEY=" + FAKE_VALUE + " ←\n")
 
 
 # -- references that lie -----------------------------------------------------
@@ -333,6 +545,54 @@ class ProjectionShapes(AdversarialHarness):
         self.assertLess(time.monotonic() - started, 2.0)
         self.assertEqual(len(projection.parts), 1)
 
+    def test_separator_tolerance_stays_linear_in_the_input(self):
+        """M2J PR3.5.1 regression.
+
+        Accepting a run of slashes puts a `+` quantifier next to a character
+        class inside a repeating group, which is the shape that produced the
+        84-second stall PR3.5 had to fix. The two classes are disjoint, so the
+        match is deterministic — this asserts that empirically rather than
+        trusting the reading. Doubling the input must roughly double the time,
+        not square it.
+        """
+        import time
+
+        def elapsed(size):
+            text = ("/" * size + "a" * size + " x" + "y" * size + "\n") * 4
+            started = time.monotonic()
+            self.project_parts(
+                _part("memory", "project:" + PROJECT_ID + ":status", text)
+            )
+            return time.monotonic() - started
+
+        small = max(elapsed(4000), 0.001)
+        large = elapsed(8000)
+        self.assertLess(large, 2.0)
+        self.assertLess(large / small, 8.0, "growth looks superlinear")
+
+    def test_a_long_run_of_separators_alone_does_not_stall(self):
+        import time
+
+        text = ("/" * 50000 + "\n") + ("~" * 20000 + "\n")
+        started = time.monotonic()
+        projection = self.project_parts(
+            _part("memory", "project:" + PROJECT_ID + ":status", text)
+        )
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertEqual(len(projection.parts), 1)
+
+    def test_many_known_literals_do_not_recompile_per_part(self):
+        """The literal patterns are built once, not once per part sanitized."""
+        import time
+
+        parts = [
+            _part("memory", "project:" + PROJECT_ID + ":status", "body " + str(n) + "\n")
+            for n in range(200)
+        ]
+        started = time.monotonic()
+        self.project_parts(*parts)
+        self.assertLess(time.monotonic() - started, 2.0)
+
     def test_a_projection_of_only_denied_parts_is_empty_and_explained(self):
         projection = self.project_parts(
             _part("user_instruction", "user:current_message", "hello", selection="whole"),
@@ -402,6 +662,20 @@ class SanitizerLimits(AdversarialHarness):
         text = "key: sk-testonly00000000\n0000000000000000000000\n"
         projection, _ = self.project_text(text)
         self.assertEqual(len(projection.parts), 1)
+
+    def test_a_lower_case_credential_variable_name_is_not_detected(self):
+        """M2J PR3.5.1 widened the *prefix*, not the case.
+
+        `_ENV_ASSIGNMENT` reads upper case because that is how environment
+        variables are written, and the value test is what keeps the rule from
+        eating documentation. Lowering the case would widen it against ordinary
+        prose — `auth: <a sentence>` — where the consequence is dropping a whole
+        eligible part. Recorded as a limit rather than fixed by reflex.
+        """
+        text = "The client sends api_key=ZQXFAKEtok9d2f81b40c7ae653aa10 here.\n"
+        projection, blob = self.project_text(text)
+        self.assertEqual(len(projection.parts), 1)
+        self.assertIn("api_key=", blob)
 
     def test_a_windows_style_path_is_not_redacted(self):
         text = "On another machine it was C:\\Users\\someone\\notes.md instead.\n"
