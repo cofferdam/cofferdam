@@ -17,6 +17,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+try:  # the Actions bridge needs the workstation extras; the Trust Core run has none
+    import httpx as _httpx
+except ImportError:  # pragma: no cover - exercised on the stdlib-only runner
+    _httpx = None
+
 from cofferdam.workstation.tasks.claims import (
     ARTIFACT_ID_PREFIX,
     CLAIM_CREATED,
@@ -395,6 +400,7 @@ class StructuralBoundaryTests(unittest.TestCase):
         for forbidden in ("read_file", "read_path", "open_path", "cat", "fetch"):
             self.assertFalse(hasattr(claims, forbidden), forbidden)
 
+    @unittest.skipIf(_httpx is None, "workstation extras are not installed")
     def test_no_bridge_artifact_operation_exists(self):
         from cofferdam.actions_bridge.internal import ALLOWED_UPSTREAM_ROUTES
         from cofferdam.actions_bridge.service import OPERATION_IDS
@@ -407,11 +413,20 @@ class StructuralBoundaryTests(unittest.TestCase):
             self.assertNotIn("claim", route)
 
     def test_the_bridge_still_reports_artifacts_unsupported(self):
-        import inspect
+        """Read as source, so it holds on the stdlib-only runner too.
 
-        from cofferdam.actions_bridge import normalize
+        ``normalize`` itself imports nothing outside the standard library, but
+        importing it by name would pull the package `__init__`; reading the file
+        keeps this assertion available where the bridge extras are absent.
+        """
+        import pathlib
 
-        source = inspect.getsource(normalize)
+        source = pathlib.Path(
+            pathlib.Path(__file__).resolve().parents[1]
+            / "cofferdam"
+            / "actions_bridge"
+            / "normalize.py"
+        ).read_text(encoding="utf-8")
         self.assertIn('"artifacts_supported": False', source)
         self.assertIn("no_task_owned_artifact_model", source)
 
