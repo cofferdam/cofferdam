@@ -353,7 +353,8 @@ pack = builder.build("what should I do next?")
 ## What is not in this milestone
 
 - `CloudContextProjection`, and any egress of any kind. That is **PR3.5**, which
-  is now built on its own branch and is a hard gate on PR4 (D-2026-08-13-3).
+  is merged and deployed, and which gated PR4 (D-2026-08-13-3). Nothing in *this*
+  milestone sends anything anywhere.
 - Any provider, model runtime, tokenizer or local model.
 - Embeddings, vectors, semantic retrieval, links or backlinks traversal (M2N).
 - Evidence, evaluation and the `EvidenceBundle` (M2K).

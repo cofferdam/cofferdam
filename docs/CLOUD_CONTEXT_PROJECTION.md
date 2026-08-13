@@ -17,7 +17,7 @@ project_context_external_v1        the egress policy
         ↓
 CloudContextProjection      bounded, reduced, eligible
         ↓
-[ an explicitly authorized surface — PR4, not in this build ]
+[ an explicitly authorized surface — PR4, merged and deployed ]
 ```
 
 D-2026-08-11-5 made these two types rather than one, and the reasoning is worth
