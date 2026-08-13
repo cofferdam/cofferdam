@@ -340,8 +340,11 @@ downstream reads from.
 - **Sub-phases:**
   - **PR1 — adapter-reported change claims + the task-owned artifact foundation.** *Implemented on
     a branch; see [`STATUS.md`](STATUS.md).* The **claim** side of evidence, which the product did
-    not have: `ChangeClaim` (always `adapter_reported`, never verified) and `ArtifactRecord` (always
-    `os_observed`) as two tables in an additive **schema v4**, with project-root containment and a
+    not have: `ChangeClaim` (always `adapter_reported`, never verified), `ArtifactRecord` (always
+    `os_observed`) and a bounded `ClaimIngestion` summary that makes refused or truncated
+    submissions durable **without storing any rejected payload**, so a later bundle can tell a
+    complete claim set from an incomplete one — three tables in an additive **schema v4** — with
+    project-root containment and a
     code-owned secret-path deny list applied at **record time** per D-2026-08-09-3, a server-minted
     `artifact_id`, a machine-observed domain-tagged SHA-256 with no partial digest, and a bounded
     preview over a code-owned type allowlist. **No comparison, no verdict, no risk level, no check

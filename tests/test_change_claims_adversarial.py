@@ -87,7 +87,7 @@ class EscapeTests(AdversarialFixture):
         target = self.outside / "loot.txt"
         target.write_text(FAKE_SECRET + "\n", encoding="utf-8")
         os.symlink(target, self.root / "innocent.md")
-        _, artifacts = self.record(
+        _, artifacts, _ = self.record(
             ClaimSubmission(operation=CLAIM_MODIFIED, path="innocent.md")
         )
         self.assertIsNone(artifacts[0].digest)
@@ -98,7 +98,7 @@ class EscapeTests(AdversarialFixture):
         (self.outside / "sub").mkdir()
         (self.outside / "sub" / "loot.md").write_text(FAKE_SECRET, encoding="utf-8")
         os.symlink(self.outside / "sub", self.root / "sub")
-        _, artifacts = self.record(
+        _, artifacts, _ = self.record(
             ClaimSubmission(operation=CLAIM_MODIFIED, path="sub/loot.md")
         )
         self.assertIsNone(artifacts[0].digest)
@@ -106,7 +106,7 @@ class EscapeTests(AdversarialFixture):
 
     def test_a_dot_dot_traversal_never_becomes_a_claim(self):
         (self.outside / "loot.md").write_text(FAKE_SECRET, encoding="utf-8")
-        claims, _ = self.record(
+        claims, _, _ = self.record(
             ClaimSubmission(operation=CLAIM_MODIFIED, path="../outside/loot.md")
         )
         self.assertEqual(claims, ())
@@ -115,14 +115,14 @@ class EscapeTests(AdversarialFixture):
     def test_an_absolute_path_never_becomes_a_claim(self):
         loot = self.outside / "loot.md"
         loot.write_text(FAKE_SECRET, encoding="utf-8")
-        claims, _ = self.record(
+        claims, _, _ = self.record(
             ClaimSubmission(operation=CLAIM_MODIFIED, path=str(loot))
         )
         self.assertEqual(claims, ())
         self.assertNotIn(FAKE_SECRET.encode(), self.db_bytes())
 
     def test_a_doubled_separator_is_refused_rather_than_collapsed(self):
-        claims, _ = self.record(
+        claims, _, _ = self.record(
             ClaimSubmission(operation=CLAIM_MODIFIED, path="a//../outside/loot.md")
         )
         self.assertEqual(claims, ())
@@ -141,7 +141,7 @@ class EscapeTests(AdversarialFixture):
         import shutil
 
         shutil.rmtree(self.root)
-        _, artifacts = self.record(
+        _, artifacts, _ = self.record(
             ClaimSubmission(operation=CLAIM_MODIFIED, path="a.md")
         )
         self.assertIsNone(artifacts[0].digest)
@@ -151,7 +151,7 @@ class EscapeTests(AdversarialFixture):
 class SecretPolicyTests(AdversarialFixture):
     def test_a_denied_file_with_real_looking_content_never_enters_the_database(self):
         (self.root / ".env").write_text("API_KEY=%s\n" % FAKE_SECRET, encoding="utf-8")
-        claims, artifacts = self.record(
+        claims, artifacts, _ = self.record(
             ClaimSubmission(operation=CLAIM_MODIFIED, path=".env")
         )
         self.assertEqual(claims[0].reason, REASON_PATH_DENIED_SENSITIVE)
@@ -175,7 +175,7 @@ class SecretPolicyTests(AdversarialFixture):
             ClaimSubmission(operation=CLAIM_MODIFIED, path=relative)
             for relative in cases
         ]
-        _, artifacts = self.store.record_change_claims(
+        _, artifacts, _ = self.store.record_change_claims(
             self.task_id, submissions, project_root=self.root
         )
         for record in artifacts:
@@ -192,7 +192,7 @@ class SecretPolicyTests(AdversarialFixture):
 
     def test_a_denied_path_is_still_recorded_as_a_claim_for_auditability(self):
         (self.root / ".env").write_text("A=%s" % FAKE_SECRET, encoding="utf-8")
-        claims, _ = self.record(ClaimSubmission(operation=CLAIM_MODIFIED, path=".env"))
+        claims, _, _ = self.record(ClaimSubmission(operation=CLAIM_MODIFIED, path=".env"))
         self.assertEqual(len(claims), 1)
         self.assertEqual(claims[0].path, ".env")
 
@@ -216,7 +216,7 @@ class ForgedAuthorityTests(AdversarialFixture):
     def test_a_claim_cannot_pretend_to_be_git_observed(self):
         self.assertNotIn("source", set(ClaimSubmission.__dataclass_fields__))
         (self.root / "a.md").write_text("x", encoding="utf-8")
-        claims, _ = self.record(
+        claims, _, _ = self.record(
             ClaimSubmission(operation=CLAIM_MODIFIED, path="a.md", label="git_observed")
         )
         self.assertEqual(claims[0].source, EVIDENCE_ADAPTER_REPORTED)
@@ -225,7 +225,7 @@ class ForgedAuthorityTests(AdversarialFixture):
 
     def test_a_label_claiming_verification_changes_nothing(self):
         (self.root / "a.md").write_text("x", encoding="utf-8")
-        claims, _ = self.record(
+        claims, _, _ = self.record(
             ClaimSubmission(operation=CLAIM_MODIFIED, path="a.md", label="VERIFIED")
         )
         self.assertFalse(claims[0].verified)
@@ -242,7 +242,7 @@ class ForgedAuthorityTests(AdversarialFixture):
 
     def test_a_minted_artifact_id_is_not_the_claimed_path(self):
         (self.root / "a.md").write_text("x", encoding="utf-8")
-        _, artifacts = self.record(ClaimSubmission(operation=CLAIM_MODIFIED, path="a.md"))
+        _, artifacts, _ = self.record(ClaimSubmission(operation=CLAIM_MODIFIED, path="a.md"))
         self.assertTrue(valid_artifact_id(artifacts[0].artifact_id))
         self.assertNotIn("a.md", artifacts[0].artifact_id)
 
@@ -253,27 +253,27 @@ class VolumeAndContentTests(AdversarialFixture):
             ClaimSubmission(operation=CLAIM_MODIFIED, path="f%d.md" % i)
             for i in range(5000)
         ]
-        claims, _ = self.store.record_change_claims(
+        claims, _, _ = self.store.record_change_claims(
             self.task_id, submissions, project_root=self.root
         )
         self.assertEqual(len(claims), MAX_CLAIMS_PER_OUTCOME)
 
     def test_a_huge_path_string_is_refused(self):
-        claims, _ = self.record(
+        claims, _, _ = self.record(
             ClaimSubmission(operation=CLAIM_MODIFIED, path="a/" * 10000 + "b.md")
         )
         self.assertEqual(claims, ())
 
     def test_unicode_and_control_characters_are_refused(self):
         for candidate in ("a\x00b.md", "a\u202eb.md", "a\rb.md", "a\x07b.md"):
-            claims, _ = self.record(
+            claims, _, _ = self.record(
                 ClaimSubmission(operation=CLAIM_MODIFIED, path=candidate)
             )
             self.assertEqual(claims, (), candidate)
 
     def test_duplicate_claims_are_each_recorded_with_their_own_identity(self):
         (self.root / "a.md").write_text("x", encoding="utf-8")
-        claims, _ = self.record(
+        claims, _, _ = self.record(
             ClaimSubmission(operation=CLAIM_MODIFIED, path="a.md"),
             ClaimSubmission(operation=CLAIM_MODIFIED, path="a.md"),
         )
@@ -282,7 +282,7 @@ class VolumeAndContentTests(AdversarialFixture):
 
     def test_a_very_large_file_yields_no_digest(self):
         (self.root / "big.md").write_bytes(b"z" * (MAX_ARTIFACT_READ_BYTES + 1024))
-        _, artifacts = self.record(
+        _, artifacts, _ = self.record(
             ClaimSubmission(operation=CLAIM_MODIFIED, path="big.md")
         )
         self.assertEqual(artifacts[0].reason, REASON_ARTIFACT_TOO_LARGE)
@@ -291,7 +291,7 @@ class VolumeAndContentTests(AdversarialFixture):
 
     def test_a_binary_file_is_never_decoded_into_the_preview(self):
         (self.root / "blob.md").write_bytes(bytes(range(256)) * 8)
-        _, artifacts = self.record(
+        _, artifacts, _ = self.record(
             ClaimSubmission(operation=CLAIM_MODIFIED, path="blob.md")
         )
         self.assertIsNone(artifacts[0].preview)
@@ -308,7 +308,7 @@ class VolumeAndContentTests(AdversarialFixture):
     def test_a_directory_claim_stores_no_content(self):
         (self.root / "pkg").mkdir()
         (self.root / "pkg" / "inner.md").write_text(FAKE_SECRET, encoding="utf-8")
-        _, artifacts = self.record(
+        _, artifacts, _ = self.record(
             ClaimSubmission(operation=CLAIM_MODIFIED, path="pkg")
         )
         self.assertIsNone(artifacts[0].digest)
@@ -316,9 +316,9 @@ class VolumeAndContentTests(AdversarialFixture):
 
     def test_content_changing_between_two_records_changes_the_digest(self):
         (self.root / "a.md").write_text("one", encoding="utf-8")
-        _, first = self.record(ClaimSubmission(operation=CLAIM_MODIFIED, path="a.md"))
+        _, first, _ = self.record(ClaimSubmission(operation=CLAIM_MODIFIED, path="a.md"))
         (self.root / "a.md").write_text("two", encoding="utf-8")
-        _, second = self.record(ClaimSubmission(operation=CLAIM_MODIFIED, path="a.md"))
+        _, second, _ = self.record(ClaimSubmission(operation=CLAIM_MODIFIED, path="a.md"))
         self.assertNotEqual(first[0].digest, second[0].digest)
         self.assertEqual(first[0].digest, artifact_digest(b"one"))
         self.assertEqual(second[0].digest, artifact_digest(b"two"))
@@ -326,7 +326,7 @@ class VolumeAndContentTests(AdversarialFixture):
     def test_the_digest_and_size_describe_the_same_bytes(self):
         body = b"consistent bytes\n" * 40
         (self.root / "c.md").write_bytes(body)
-        _, artifacts = self.record(ClaimSubmission(operation=CLAIM_MODIFIED, path="c.md"))
+        _, artifacts, _ = self.record(ClaimSubmission(operation=CLAIM_MODIFIED, path="c.md"))
         self.assertEqual(artifacts[0].size_bytes, len(body))
         self.assertEqual(artifacts[0].digest, artifact_digest(body))
 

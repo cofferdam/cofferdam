@@ -778,7 +778,19 @@ is not marked verified, not cross-referenced, not counted as agreement. That is 
 at record time would let a claim become believed as a side effect of arriving next to an
 observation. There is no verdict, no confidence, no risk level and no column for one.
 
-**Schema v4, additive.** Two new tables — `task_change_claims` and `task_artifacts` — created by
+**Claim ingestion is bounded, and the loss is durable.** Both limits and every deterministic
+validation refusal are counted into `task_claim_ingestion` — submitted, accepted, rejected, a
+truncation flag and counts by closed reason code — written in the same transaction as the claims
+they describe. **No rejected payload is stored**: there is no column for a refused path, operation
+or label, because a refused path may be an absolute location, a traversal attempt or a credential
+file name. A future `EvidenceBundle` can therefore tell a *complete* claim set from an *incomplete*
+one after a restart, without any of the refused material having been kept. It is bookkeeping, not
+evaluation: no verified, passed, matched, confidence or risk field exists on it. A rejected claim
+and a valid claim whose bytes could not be read stay different facts — the second is still a stored
+claim carrying its artifact reason.
+
+**Schema v4, additive.** Three new tables — `task_change_claims`, `task_artifacts` and
+`task_claim_ingestion` — created by
 the same `CREATE TABLE IF NOT EXISTS` script every start already runs. No existing column moved,
 changed type or gained a constraint; `task_events.evidence_json` is untouched and a v3 task reads
 back byte-identical. A task from before the tables simply has no claims.

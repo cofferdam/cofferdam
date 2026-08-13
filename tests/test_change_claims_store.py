@@ -86,11 +86,26 @@ class SchemaTests(StoreFixture):
     def test_the_schema_version_is_four(self):
         self.assertEqual(SCHEMA_VERSION, 4)
 
-    def test_both_new_tables_exist(self):
+    def test_all_new_tables_exist(self):
         with sqlite3.connect(str(self.home / "state" / "tasks" / "tasks.sqlite3")) as db:
             names = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertIn("task_change_claims", names)
         self.assertIn("task_artifacts", names)
+        self.assertIn("task_claim_ingestion", names)
+
+    def test_the_ingestion_table_has_no_payload_column(self):
+        with sqlite3.connect(str(self.home / "state" / "tasks" / "tasks.sqlite3")) as db:
+            columns = {
+                r[1] for r in db.execute("PRAGMA table_info(task_claim_ingestion)")
+            }
+        self.assertEqual(
+            columns,
+            {
+                "task_id", "sequence", "turn_number", "submitted_count",
+                "accepted_count", "rejected_count", "truncated",
+                "reason_counts_json", "recorded_at",
+            },
+        )
 
     def test_the_recorded_version_is_four(self):
         with sqlite3.connect(str(self.home / "state" / "tasks" / "tasks.sqlite3")) as db:
@@ -270,8 +285,24 @@ class MigrationTests(unittest.TestCase):
         try:
             self.assertEqual(store.change_claims("task_old"), ())
             self.assertEqual(store.task_artifacts("task_old"), ())
+            self.assertEqual(store.claim_ingestion("task_old"), ())
         finally:
             store.close()
+
+    def test_the_migration_creates_the_ingestion_table_too(self):
+        self._build_v3()
+        store = _open_store(self.home)
+        try:
+            store.get("task_old")
+        finally:
+            store.close()
+        with sqlite3.connect(str(self.path)) as db:
+            names = {
+                r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            rows = db.execute("SELECT COUNT(*) FROM task_claim_ingestion").fetchone()[0]
+        self.assertIn("task_claim_ingestion", names)
+        self.assertEqual(rows, 0)
 
     def test_the_migration_is_idempotent_across_reopens(self):
         self._build_v3()
@@ -306,7 +337,7 @@ class MigrationTests(unittest.TestCase):
 class RecordingTests(StoreFixture):
     def test_a_valid_claim_is_recorded_with_an_artifact(self):
         self.write("src/foo.py", "print('x')\n")
-        claims, artifacts = self.store.record_change_claims(
+        claims, artifacts, _ = self.store.record_change_claims(
             self.task_id,
             [ClaimSubmission(operation=CLAIM_MODIFIED, path="src/foo.py")],
             project_root=self.root,
@@ -322,7 +353,7 @@ class RecordingTests(StoreFixture):
 
     def test_the_claim_is_adapter_reported_and_the_artifact_is_os_observed(self):
         self.write("src/foo.py", "x\n")
-        claims, artifacts = self.store.record_change_claims(
+        claims, artifacts, _ = self.store.record_change_claims(
             self.task_id,
             [ClaimSubmission(operation=CLAIM_MODIFIED, path="src/foo.py")],
             project_root=self.root,
@@ -335,7 +366,7 @@ class RecordingTests(StoreFixture):
     def test_the_digest_is_not_attributed_to_the_adapter(self):
         """The specific confusion D-2026-08-11-6 forbids."""
         self.write("src/foo.py", "x\n")
-        _, artifacts = self.store.record_change_claims(
+        _, artifacts, _ = self.store.record_change_claims(
             self.task_id,
             [ClaimSubmission(operation=CLAIM_MODIFIED, path="src/foo.py")],
             project_root=self.root,
@@ -347,7 +378,7 @@ class RecordingTests(StoreFixture):
 
     def test_ids_are_server_minted(self):
         self.write("a.py", "x\n")
-        claims, artifacts = self.store.record_change_claims(
+        claims, artifacts, _ = self.store.record_change_claims(
             self.task_id,
             [ClaimSubmission(operation=CLAIM_CREATED, path="a.py")],
             project_root=self.root,
@@ -358,7 +389,7 @@ class RecordingTests(StoreFixture):
 
     def test_a_denied_path_records_the_claim_and_stores_no_content(self):
         self.write(".env", "SECRET_TOKEN=abcdefghijklmnop\n")
-        claims, artifacts = self.store.record_change_claims(
+        claims, artifacts, _ = self.store.record_change_claims(
             self.task_id,
             [ClaimSubmission(operation=CLAIM_MODIFIED, path=".env")],
             project_root=self.root,
@@ -382,7 +413,7 @@ class RecordingTests(StoreFixture):
         self.assertNotIn(b"abcdefghijklmnop", raw)
 
     def test_a_deleted_file_claim_is_kept_with_an_honest_reason(self):
-        claims, artifacts = self.store.record_change_claims(
+        claims, artifacts, _ = self.store.record_change_claims(
             self.task_id,
             [ClaimSubmission(operation=CLAIM_DELETED, path="src/gone.py")],
             project_root=self.root,
@@ -393,7 +424,7 @@ class RecordingTests(StoreFixture):
         self.assertIsNone(artifacts[0].digest)
 
     def test_an_invalid_claim_is_dropped_rather_than_stored_raw(self):
-        claims, _ = self.store.record_change_claims(
+        claims, _, _ = self.store.record_change_claims(
             self.task_id,
             [
                 ClaimSubmission(operation=CLAIM_MODIFIED, path="../escape.py"),
@@ -410,7 +441,7 @@ class RecordingTests(StoreFixture):
             ClaimSubmission(operation=CLAIM_MODIFIED, path="f%d.py" % i)
             for i in range(MAX_CLAIMS_PER_OUTCOME + 25)
         ]
-        claims, _ = self.store.record_change_claims(
+        claims, _, _ = self.store.record_change_claims(
             self.task_id, submissions, project_root=self.root
         )
         self.assertEqual(len(claims), MAX_CLAIMS_PER_OUTCOME)
@@ -430,7 +461,7 @@ class RecordingTests(StoreFixture):
         )
 
     def test_a_rename_keeps_both_paths(self):
-        claims, _ = self.store.record_change_claims(
+        claims, _, _ = self.store.record_change_claims(
             self.task_id,
             [ClaimSubmission(operation=CLAIM_RENAMED, path="a.py", to_path="b.py")],
             project_root=self.root,
@@ -457,7 +488,7 @@ class RecordingTests(StoreFixture):
         self.assertEqual(after[0].path, "a.py")
 
     def test_the_turn_number_is_recorded(self):
-        claims, _ = self.store.record_change_claims(
+        claims, _, _ = self.store.record_change_claims(
             self.task_id,
             [ClaimSubmission(operation=CLAIM_DELETED, path="a.py")],
             project_root=self.root,
@@ -480,7 +511,7 @@ class RecordingTests(StoreFixture):
     def test_a_stale_artifact_id_returns_nothing_for_the_wrong_task(self):
         other = self._make_task("three")
         self.write("a.py", "x\n")
-        _, artifacts = self.store.record_change_claims(
+        _, artifacts, _ = self.store.record_change_claims(
             self.task_id,
             [ClaimSubmission(operation=CLAIM_CREATED, path="a.py")],
             project_root=self.root,
@@ -490,7 +521,7 @@ class RecordingTests(StoreFixture):
 
     def test_no_verdict_field_exists_anywhere_on_the_records(self):
         self.write("a.py", "x\n")
-        claims, artifacts = self.store.record_change_claims(
+        claims, artifacts, _ = self.store.record_change_claims(
             self.task_id,
             [ClaimSubmission(operation=CLAIM_CREATED, path="a.py")],
             project_root=self.root,
@@ -547,7 +578,7 @@ class GitObservedCompatibilityTests(StoreFixture):
                 ),
             ),
         )
-        claims, _ = self.store.record_change_claims(
+        claims, _, _ = self.store.record_change_claims(
             self.task_id,
             [ClaimSubmission(operation=CLAIM_MODIFIED, path="src/foo.py")],
             project_root=self.root,

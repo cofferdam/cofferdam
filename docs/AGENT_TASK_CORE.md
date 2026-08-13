@@ -331,6 +331,7 @@ opened and a task written before them simply has no claims.
 | --- | --- | --- |
 | `task_change_claims` | what a worker **said** it changed: a closed operation (`created`, `modified`, `deleted`, `renamed`), a project-relative path, the turn it was claimed in | `adapter_reported`, always |
 | `task_artifacts` | what Cofferdam **saw** when it opened that path: digest, byte size, bounded preview, or a reason it saw nothing | `os_observed`, always |
+| `task_claim_ingestion` | how much of one report became stored claims: submitted, accepted and rejected counts, a truncation flag, and counts by closed reason code | host-owned bookkeeping |
 
 **Why two tables and not more columns on one.** D-2026-08-11-6 says every field carries its source
 kind. A single row holding both a claimed path and a Cofferdam-computed SHA-256 would need one
@@ -351,6 +352,33 @@ the kernel rather than by a comparison afterwards. Denied content is never read,
 the database and cannot be served later by a surface that does not exist yet. The claim is still
 recorded: that a worker claimed a credential file and Cofferdam refused to look is a fact worth
 keeping.
+
+**Claim ingestion is bounded, and the bound is visible.** Both limits — per outcome and per task —
+and every deterministic validation refusal are **counted**, never silently applied. The counts land
+in `task_claim_ingestion` in the same transaction as the claims they describe, so a crash cannot
+leave a stored claim set with no record of how complete it is.
+
+**Rejected submissions are represented without being stored.** There is no column for a refused
+path, operation or label. A rejected path may be an absolute location, a traversal attempt or a
+credential file name, and keeping one *for reporting* would be a second door into the database for
+exactly the material the deny list exists to keep out. What survives is a count against a closed,
+code-owned reason code.
+
+Because of that, a future `EvidenceBundle` can distinguish two situations that otherwise look
+identical once the process that did the counting has exited:
+
+* a **complete** claim set — everything the worker reported was stored, and
+* an **incomplete** one — some was refused or truncated, with the reasons counted.
+
+**A refused claim and a refused observation are different facts, and stay different.** A claim whose
+path is unusable is *rejected* and never becomes a row. A valid claim whose bytes could not be
+read — a deleted file, a file that is gone, a path the deny list withholds — is *accepted*, becomes
+a row, and carries its artifact reason. Reading the second as the first would report that a worker
+sent nothing when it reported a deletion.
+
+**None of this is an evaluation.** The ingestion summary reports completeness, not truth. It has no
+field for verified, passed, matched, confidence or risk, and it says nothing about whether the
+claims are accurate.
 
 **No comparison lives here.** Nothing matches a claim against an observation, and no field records a
 verdict, a confidence or a risk level. That is the next milestone's work, and doing it at record

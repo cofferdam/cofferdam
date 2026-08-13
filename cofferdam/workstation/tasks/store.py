@@ -114,8 +114,9 @@ from .turns import FOLLOWUP_SOURCES, MAX_TURNS_PER_TASK, TURN_OUTCOMES, TaskTurn
 #: turns" as the ordinary answer for a task from an older build rather than as a
 #: missing record — see :meth:`TaskStore.latest_completed_turn`.
 #:
-#: Version 4 adds ``task_change_claims`` and ``task_artifacts`` (M2K PR1), and is
-#: additive in exactly the same way: two new tables, no column of an existing
+#: Version 4 adds ``task_change_claims``, ``task_artifacts`` and
+#: ``task_claim_ingestion`` (M2K PR1), and is additive in exactly the same way:
+#: three new tables, no column of an existing
 #: table moved, changed type or gained a constraint, and no row rewritten.
 #: ``task_events.evidence_json`` is untouched and keeps meaning what it meant —
 #: a v3 task read on a v4 build produces byte-identical evidence. A task that
@@ -360,6 +361,47 @@ CREATE TABLE IF NOT EXISTS task_artifacts (
 
 CREATE INDEX IF NOT EXISTS artifacts_by_task
     ON task_artifacts (task_id, observed_at, artifact_id);
+
+-- How much of one adapter's report became stored claims.
+--
+-- This table exists because **absence has to be durable**. Thirty-two stored
+-- claims out of forty submitted look identical to thirty-two out of thirty-two
+-- once the process that did the counting has exited, and an evidence bundle
+-- built on the second reading would describe work nobody reported. After a
+-- restart, this row is the only thing that still knows the difference.
+--
+-- **No rejected payload, deliberately.** There is no column for a refused path,
+-- operation or label. A rejected path may be an absolute location, a traversal
+-- attempt or a credential file name, and storing one *for reporting* would put
+-- the material the deny list exists to keep out into the database by a second
+-- door. What survives is a count against a closed, code-owned reason code —
+-- `reason_counts_json` is a mapping of those codes to integers and can hold
+-- nothing else, because nothing else is ever put in it.
+--
+-- A row per ingestion rather than per task: one task can report across several
+-- turns, and "the second turn's report was truncated" is not a fact about the
+-- first. `sequence` is allocated MAX+1 inside the recording transaction, the
+-- same way `task_turns.turn_number` is.
+--
+-- It carries no verdict. There is no column for verified, passed, matched,
+-- confidence or risk, and there is not going to be one here: this says how
+-- complete the claim set is and nothing about whether the claims are true.
+CREATE TABLE IF NOT EXISTS task_claim_ingestion (
+    task_id            TEXT    NOT NULL,
+    sequence           INTEGER NOT NULL,
+    turn_number        INTEGER,
+    submitted_count    INTEGER NOT NULL,
+    accepted_count     INTEGER NOT NULL,
+    rejected_count     INTEGER NOT NULL,
+    truncated          INTEGER NOT NULL DEFAULT 0,
+    reason_counts_json TEXT,
+    recorded_at        TEXT    NOT NULL,
+    PRIMARY KEY (task_id, sequence),
+    FOREIGN KEY (task_id) REFERENCES tasks (task_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS claim_ingestion_by_task
+    ON task_claim_ingestion (task_id, sequence);
 """
 
 
@@ -1647,7 +1689,11 @@ class TaskStore:
         project_root: object,
         turn_number: Optional[int] = None,
         reported_at: Optional[str] = None,
-    ) -> Tuple[Tuple["ChangeClaim", ...], Tuple["ArtifactRecord", ...]]:
+    ) -> Tuple[
+        Tuple["ChangeClaim", ...],
+        Tuple["ArtifactRecord", ...],
+        "ClaimIngestion",
+    ]:
         """Record what an adapter said it changed, and what this host then saw.
 
         The only way a claim enters the database. An adapter never writes here:
@@ -1664,18 +1710,30 @@ class TaskStore:
         ``.env`` and Cofferdam refused to look" is an auditable fact and
         dropping it would make the record quieter than the truth.
 
+        **Every loss is counted.** A submission refused for any deterministic
+        reason — either limit, an invalid operation, an unusable path — is not
+        written, and the reason is counted into a durable
+        :class:`~.claims.ClaimIngestion` row written in the same transaction.
+        The refused submission itself is not kept in any form: a rejected path
+        may be an absolute location, a traversal attempt or a credential file
+        name, and storing one *for reporting* would be a second door into the
+        database for the material the deny list exists to keep out.
+
         Nothing here compares a claim to an observation, and nothing returns a
-        verdict. Both are M2K PR2's.
+        verdict. The ingestion summary reports completeness, not truth. Both the
+        comparison and any judgement are M2K PR2's.
         """
         from .claims import (
             ArtifactRecord,
             ChangeClaim,
+            ClaimIngestion,
             ClaimPathInvalid,
             MAX_CLAIMS_PER_OUTCOME,
             MAX_CLAIMS_PER_TASK,
             REASON_CLAIM_LIMIT_EXCEEDED,
             REASON_OK,
             REASON_PATH_DENIED_SENSITIVE,
+            REASON_TASK_CLAIM_LIMIT_EXCEEDED,
             is_denied_path,
             new_artifact_id,
             new_claim_id,
@@ -1684,7 +1742,22 @@ class TaskStore:
         )
 
         stamp = reported_at or now_iso()
-        accepted = list(submissions)[:MAX_CLAIMS_PER_OUTCOME]
+        offered = list(submissions)
+        submitted_count = len(offered)
+
+        # Counted, never silently sliced. Each of the two limits contributes its
+        # own reason code, because "this one report was too long" and "this task
+        # has been reporting for a long time" are different facts and an
+        # evaluator reading the summary should not have to infer which happened.
+        reason_counts: Dict[str, int] = {}
+
+        def _count(reason: str, amount: int = 1) -> None:
+            if amount > 0:
+                reason_counts[reason] = reason_counts.get(reason, 0) + amount
+
+        candidates = offered[:MAX_CLAIMS_PER_OUTCOME]
+        over_outcome = submitted_count - len(candidates)
+        _count(REASON_CLAIM_LIMIT_EXCEEDED, over_outcome)
 
         claims: list = []
         artifacts: list = []
@@ -1695,18 +1768,24 @@ class TaskStore:
                 (task_id,),
             ).fetchone()[0]
             room = max(0, MAX_CLAIMS_PER_TASK - int(existing))
-            if len(accepted) > room:
-                accepted = accepted[:room]
+            if len(candidates) > room:
+                _count(REASON_TASK_CLAIM_LIMIT_EXCEEDED, len(candidates) - room)
+                candidates = candidates[:room]
 
-            for submission in accepted:
+            for submission in candidates:
                 try:
                     operation, path, to_path, label = validate_submission(submission)
                 except ClaimPathInvalid as rejection:
                     # A refused claim is not written. There is nothing to record
                     # honestly: the path it named is not a path, so a row would
-                    # have to store either the raw input or nothing meaningful.
-                    # The count difference is what a reader sees.
-                    _ = rejection
+                    # have to store either the raw input or nothing meaningful —
+                    # and the raw input is the one thing that must not be kept,
+                    # since a refused path may be an absolute location, a
+                    # traversal attempt or a credential file name.
+                    #
+                    # What is kept is the *reason*, counted. That is what makes
+                    # the loss survive a restart without the payload doing so.
+                    _count(rejection.reason)
                     continue
 
                 claim_id = new_claim_id()
@@ -1751,6 +1830,15 @@ class TaskStore:
                             observed_at=stamp,
                         )
                     )
+
+                # An accepted claim whose bytes were not read is still accepted:
+                # the claim was fine, the *observation* failed. Counted here so
+                # the summary shows it, and counted under its artifact reason
+                # rather than as a rejection, because "the worker claimed a file
+                # that is gone" and "the worker sent something that was not a
+                # claim" are different facts.
+                if reason != REASON_OK:
+                    _count(reason)
 
                 claims.append(
                     ChangeClaim(
@@ -1803,9 +1891,97 @@ class TaskStore:
                         artifact.observed_at,
                     ),
                 )
+
+            # The ingestion summary, written in the same transaction as the
+            # claims it describes. Separately would allow a crash between them
+            # to leave a stored claim set with no record of how complete it is,
+            # which is the one state this table exists to prevent.
+            rejected_count = submitted_count - len(claims)
+            truncated = bool(
+                reason_counts.get(REASON_CLAIM_LIMIT_EXCEEDED)
+                or reason_counts.get(REASON_TASK_CLAIM_LIMIT_EXCEEDED)
+            )
+            sequence = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM task_claim_ingestion"
+                    " WHERE task_id = ?",
+                    (task_id,),
+                ).fetchone()[0]
+            )
+            ingestion = ClaimIngestion(
+                task_id=task_id,
+                turn_number=turn_number,
+                submitted=submitted_count,
+                accepted=len(claims),
+                rejected=rejected_count,
+                truncated=truncated,
+                reason_counts=dict(reason_counts),
+                recorded_at=stamp,
+            )
+            connection.execute(
+                "INSERT INTO task_claim_ingestion (task_id, sequence, turn_number,"
+                " submitted_count, accepted_count, rejected_count, truncated,"
+                " reason_counts_json, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    task_id,
+                    sequence,
+                    turn_number,
+                    submitted_count,
+                    len(claims),
+                    rejected_count,
+                    1 if truncated else 0,
+                    # Closed reason codes to integers, and nothing else ever.
+                    # Serialized field by field from a mapping this method built,
+                    # never `json.dumps` of anything an adapter handed over.
+                    json.dumps(
+                        {str(k): int(v) for k, v in sorted(reason_counts.items())},
+                        ensure_ascii=False,
+                    )
+                    if reason_counts
+                    else None,
+                    stamp,
+                ),
+            )
         self._tighten_new_siblings()
-        _ = REASON_CLAIM_LIMIT_EXCEEDED  # reserved for the PR2 reporting surface
-        return tuple(claims), tuple(artifacts)
+        return tuple(claims), tuple(artifacts), ingestion
+
+    def claim_ingestion(self, task_id: str) -> Tuple["ClaimIngestion", ...]:
+        """Every ingestion summary for one task, oldest first. Task-scoped.
+
+        This is what tells a later reader whether the stored claim set is the
+        whole set. A task with no rows here reported no claims at all; a task
+        whose rows all have ``rejected == 0`` and ``truncated`` false reported
+        claims that were all stored.
+        """
+        from .claims import ClaimIngestion
+
+        with self._read() as connection:
+            rows = connection.execute(
+                "SELECT * FROM task_claim_ingestion WHERE task_id = ?"
+                " ORDER BY sequence",
+                (task_id,),
+            ).fetchall()
+        summaries = []
+        for row in rows:
+            try:
+                counts = json.loads(row["reason_counts_json"] or "{}")
+            except ValueError:  # pragma: no cover - defensive
+                counts = {}
+            if not isinstance(counts, dict):  # pragma: no cover - defensive
+                counts = {}
+            summaries.append(
+                ClaimIngestion(
+                    task_id=row["task_id"],
+                    turn_number=row["turn_number"],
+                    submitted=int(row["submitted_count"]),
+                    accepted=int(row["accepted_count"]),
+                    rejected=int(row["rejected_count"]),
+                    truncated=bool(row["truncated"]),
+                    reason_counts={str(k): int(v) for k, v in counts.items()},
+                    recorded_at=row["recorded_at"],
+                )
+            )
+        return tuple(summaries)
 
     def change_claims(self, task_id: str) -> Tuple["ChangeClaim", ...]:
         """Every claim recorded against one task, oldest first.

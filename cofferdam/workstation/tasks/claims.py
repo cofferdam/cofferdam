@@ -202,7 +202,25 @@ REASON_ARTIFACT_UNREADABLE = "artifact_unreadable"
 REASON_PREVIEW_UNSUPPORTED_TYPE = "preview_unsupported_type"
 REASON_PREVIEW_OMITTED = "preview_omitted"
 REASON_CLAIM_INVALID = "claim_invalid"
+#: More claims arrived in one outcome than :data:`MAX_CLAIMS_PER_OUTCOME` allows.
 REASON_CLAIM_LIMIT_EXCEEDED = "claim_limit_exceeded"
+#: The task had already accumulated :data:`MAX_CLAIMS_PER_TASK` across its turns.
+#: Its own code rather than a reuse of the one above, because "this report was
+#: too long" and "this task has been reporting for a long time" are different
+#: facts and an evaluator reading the summary should not have to guess which.
+REASON_TASK_CLAIM_LIMIT_EXCEEDED = "task_claim_limit_exceeded"
+
+#: Every reason a submission may fail to become a stored claim. Closed, and
+#: disjoint from the artifact reasons above: these describe a claim that was
+#: **not recorded**, those describe a claim that was recorded and whose bytes
+#: were not read.
+REJECTION_REASONS: Tuple[str, ...] = (
+    REASON_CLAIM_INVALID,
+    REASON_PATH_INVALID,
+    REASON_PATH_ESCAPE,
+    REASON_CLAIM_LIMIT_EXCEEDED,
+    REASON_TASK_CLAIM_LIMIT_EXCEEDED,
+)
 
 ARTIFACT_REASONS: Tuple[str, ...] = (
     REASON_OK,
@@ -539,6 +557,63 @@ class ArtifactRecord:
 
 
 @dataclass(frozen=True)
+class ClaimIngestion:
+    """How much of one adapter's report actually became stored claims.
+
+    **The point of this record is absence.** A stored claim set is only useful
+    to a later evaluator if the evaluator can tell whether it is the *whole*
+    set. Without this, thirty-two stored claims out of forty submitted look
+    exactly like thirty-two out of thirty-two, and an evidence bundle built on
+    the second reading would describe work that was never reported.
+
+    So the counts are durable and the rejected submissions are not. There is no
+    column here for a path, an operation or any other fragment of what was
+    refused: a rejected path may be an absolute location, a traversal attempt or
+    a credential file name, and keeping it *for reporting* would put exactly the
+    material the deny list exists to exclude into the database by a second door.
+    What survives is a count against a **closed, code-owned reason code**.
+
+    ``accepted`` counts claims that became rows. A valid claim whose bytes could
+    not be read is accepted — the claim was fine, the observation failed — and
+    shows up in ``reason_counts`` under its artifact reason rather than as a
+    rejection. That distinction is the milestone's, not a detail: "the worker
+    claimed a file that is gone" and "the worker sent something that was not a
+    claim" are different facts.
+
+    **This is not a verdict.** It says nothing about whether the work was done,
+    whether the claims were true, or whether anything matched an observation. It
+    reports one thing: how complete the stored claim set is.
+    """
+
+    task_id: str
+    turn_number: Optional[int]
+    submitted: int
+    accepted: int
+    rejected: int
+    truncated: bool
+    reason_counts: Dict[str, int]
+    recorded_at: Optional[str] = None
+
+    @property
+    def complete(self) -> bool:
+        """Whether every submitted claim became a stored claim."""
+        return self.rejected == 0 and not self.truncated
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "turn_number": self.turn_number,
+            "submitted": self.submitted,
+            "accepted": self.accepted,
+            "rejected": self.rejected,
+            "truncated": self.truncated,
+            "complete": self.complete,
+            "reason_counts": dict(self.reason_counts),
+            "recorded_at": self.recorded_at,
+        }
+
+
+@dataclass(frozen=True)
 class ClaimSubmission:
     """What an adapter may hand over. Deliberately smaller than a `ChangeClaim`.
 
@@ -714,6 +789,7 @@ __all__ = [
     "CLAIM_OPERATIONS",
     "CLAIM_RENAMED",
     "ChangeClaim",
+    "ClaimIngestion",
     "ClaimPathInvalid",
     "ClaimSubmission",
     "MAX_ARTIFACT_READ_BYTES",
@@ -739,6 +815,8 @@ __all__ = [
     "REASON_PREVIEW_OMITTED",
     "REASON_PREVIEW_UNSUPPORTED_TYPE",
     "REASON_PROJECT_UNAVAILABLE",
+    "REASON_TASK_CLAIM_LIMIT_EXCEEDED",
+    "REJECTION_REASONS",
     "TAG_ARTIFACT",
     "artifact_digest",
     "is_denied_path",

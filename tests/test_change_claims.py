@@ -431,6 +431,85 @@ class StructuralBoundaryTests(unittest.TestCase):
         self.assertIn("no_task_owned_artifact_model", source)
 
 
+class ResolverHardeningTests(unittest.TestCase):
+    """The `O_NONBLOCK` fix in `mind/documents.py`, from the Mind side.
+
+    The regression is a **hang**, not a wrong answer, so each case is bounded by
+    the test process finishing at all. The refusal semantics around it must be
+    exactly what they were: one coarse code for every way a target can fail to
+    be a readable regular file, so a refusal cannot describe the host's
+    filesystem one attempt at a time.
+    """
+
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory(prefix="m2k-resolver-")
+        self.root = Path(self._temp.name) / "vault"
+        self.root.mkdir()
+
+    def tearDown(self):
+        self._temp.cleanup()
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "platform has no FIFO")
+    def test_a_fifo_does_not_block_the_resolver(self):
+        from cofferdam.workstation.mind.documents import open_target
+        from cofferdam.workstation.mind.errors import RoleUnavailable
+
+        os.mkfifo(str(self.root / "pipe.md"))
+        with self.assertRaises(RoleUnavailable):
+            with open_target(self.root, "pipe.md"):
+                pass  # pragma: no cover - reached only if the refusal regresses
+
+    def test_a_regular_file_reads_exactly_as_before(self):
+        from cofferdam.workstation.mind.documents import read_document
+
+        (self.root / "doc.md").write_text("unchanged\n", encoding="utf-8")
+        self.assertEqual(read_document(self.root, "doc.md"), b"unchanged\n")
+
+    def test_a_regular_files_inspection_is_unchanged(self):
+        from cofferdam.workstation.mind.documents import inspect_document
+
+        (self.root / "doc.md").write_text("hello\n", encoding="utf-8")
+        state = inspect_document(self.root, "doc.md")
+        self.assertEqual(state.size, 6)
+        self.assertEqual(len(state.content_hash), 64)
+
+    def test_symlink_directory_and_device_all_refuse_the_same_way(self):
+        from cofferdam.workstation.mind.documents import open_target
+        from cofferdam.workstation.mind.errors import RoleUnavailable
+
+        outside = Path(self._temp.name) / "outside.md"
+        outside.write_text("secret\n", encoding="utf-8")
+        os.symlink(outside, self.root / "link.md")
+        (self.root / "adir").mkdir()
+
+        messages = set()
+        cases = ["link.md", "adir", "missing.md"]
+        if Path("/dev/null").exists():
+            os.symlink("/dev/null", self.root / "dev.md")
+            cases.append("dev.md")
+        for name in cases:
+            with self.assertRaises(RoleUnavailable) as caught:
+                with open_target(self.root, name):
+                    pass  # pragma: no cover
+            messages.add(str(caught.exception))
+
+        # The refusal must not tell the caller which kind of thing it was.
+        for message in messages:
+            for leak in ("fifo", "pipe", "socket", "device", "symlink", "link"):
+                self.assertNotIn(leak, message.lower(), message)
+            self.assertNotIn(str(self.root), message)
+
+    def test_the_nonblock_flag_is_actually_set(self):
+        """Asserted on source, so a later edit that drops it fails here."""
+        import pathlib
+
+        from cofferdam.workstation.mind import documents
+
+        source = pathlib.Path(documents.__file__).read_text(encoding="utf-8")
+        self.assertIn("_O_NONBLOCK", source)
+        self.assertIn("os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK", source)
+
+
 class ObservationTests(unittest.TestCase):
     """Record-time observation against a real synthetic project root."""
 
