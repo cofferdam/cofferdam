@@ -167,8 +167,10 @@ All six routes are on the private device-token surface, over the tailnet.
 
 **The Actions bridge reaches none of them.** These routes use `require_token`, which has never
 heard of the bridge credential, so a bridge request is a 401 because nothing here can recognise it
-— not because a check refuses it. `syncWorkspace` is an M2J **PR4** decision; until it is designed
-and reviewed, no external surface reads the workspace at all. A test presents a real bridge
+— not because a check refuses it. `syncWorkspace` **belongs to M2M** (D-2026-08-13-4): it mutates,
+and the egress policy authorizes no mutation. M2J PR4 added the one external read that exists —
+`getProjectContext`, which returns a bounded `CloudContextProjection` for the **active** workspace's
+project and reaches none of the routes above. A test presents a real bridge
 credential to every route and to a task route as a control.
 
 `GET /api/workspace/current` **never errors for an ordinary state.** No workspace configured, none

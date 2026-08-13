@@ -1,30 +1,54 @@
 # Status
 
-Accurate as of **2026-08-11**. **M2I.5 is complete**: PR #34 is merged as `2386a54`, production
+Accurate as of **2026-08-13**. **M2J is complete**: all seven sub-phases are merged and deployed,
+and production is normalized on PR4 (`44e4994`). See *M2J closeout* immediately below. The queue
+from here is **M2K → M2L → M2M**.
+
+**M2I.5 is complete**: PR #34 is merged as `2386a54`, production
 normalization completed, and the live host runs that commit with the Claude Code adapter, the
 Claude Agent SDK adapter, explicit host-owned delegated-adapter selection, Task Core as authority,
 the private Custom GPT Actions bridge, same-session clarification continuation and follow-up,
 structured single-choice `AskUserQuestion` with Cofferdam-minted option ids, a tailnet-private
 PWA/API, and only the narrow Actions bridge public.
 
-**The work after it was replanned on 2026-08-11**: M2J is preserved and reshaped, and the queue is
-**M2J → M2K → M2L → M2M** with two isolated parallel tracks. See [`ROADMAP.md`](ROADMAP.md) and
+**The work after it was replanned on 2026-08-11**: M2J is preserved and reshaped, and the queue was
+**M2J → M2K → M2L → M2M** with two isolated parallel tracks. M2J is now complete, so the
+remaining queue is **M2K → M2L → M2M**. See [`ROADMAP.md`](ROADMAP.md) and
 [`DECISIONS.md`](DECISIONS.md) D-2026-08-11-1 … -12 and D-2026-08-12-1; the planning package is
 preserved as history in `handoffs/replan-2026-08-11/`.
 
-**M2J PR1 is merged as `ae5c025` (#36) and deployed** — workspaces and durable Working Context, so
-Cofferdam owns "what are we working on" without a model inferring it. Production runs it on slot B;
-slot A is retained unchanged at `2386a54` as the rollback.
+## M2J closeout
 
-**M2J PR2 is merged as `1c45b26` (#38) and PR2.1 as `f279fc2` (#40), and both are deployed** —
-mind access by role, the host-owned vault grant, the proposal → explicit acceptance → hash-bound
-atomic apply path, and the `cross_project` global role. Production runs `f279fc2` on slot B; slot
-A is retained unchanged at `1c45b26` as the rollback.
+**All seven sub-phases are merged and deployed.** Each has its own record below; this is the index.
 
-**M2J PR3 is implemented on a branch** — the deterministic Context Builder and `LocalContextPack`:
-bounded local context assembly with provenance on every part, a UTF-8-byte budget, and no model,
-network call, index or persistence anywhere in it. See *In progress* below. Nothing after it in
-M2J is started: no PWA workspace panel, no `get_project_context`, no planner, no evidence bundles.
+| Sub-phase | What it added | Merge |
+|---|---|---|
+| PR1 | workspace model + durable Working Context | `ae5c025` (#36) |
+| PR2 | mind access by role, host-owned grant, `MemoryProposal` | `1c45b26` (#38) |
+| PR2.1 | the `cross_project` global role + stable project-root authority | `f279fc2` (#40) |
+| PR3 | `LocalContextPack` — the deterministic Context Builder | `31ab114` (#41) |
+| PR3.5 | `CloudContextProjection` — the egress boundary | `c24be24` (#42) |
+| PR3.5.1 | projection sanitizer hardening | `5afaa8e` (#43) |
+| PR4 | read-only project-context surfaces | `44e4994` (#44) |
+
+**Production as normalized on PR4.** Both the workstation and the Actions bridge run `44e4994` on
+slot B; slot A is retained unchanged at `5afaa8e` (PR3.5.1) as the rollback.
+
+- **Private route:** `GET /api/projects/{project_id}/context`
+- **Public bridge route:** `GET /v1/projects/{project_id}/context`, operationId `getProjectContext`
+- **Authority is active-workspace-only.** A `project_id` resolves to the one enabled workspace
+  naming it, and that workspace must be the active one. Every other resolution refuses under its
+  own reason code — `project_not_found`, `project_disabled`, `workspace_not_configured`,
+  `workspace_ambiguous`, `workspace_disabled`, `workspace_not_active` — and none carries a path.
+  The caller supplies no root, path, policy, role or redaction input.
+- **`CloudContextProjection` is the only wire type.** `serialize_project_context` refuses anything
+  else by type, so a **`LocalContextPack` never crosses transport**.
+- **No Global Mind egress** under `project_context_external_v1` — all four roles stay denied —
+  and **no current user message**, which the pack is built without rather than with a fake one.
+- **Read-only.** No mutation of any kind: no workspace switch, no objective edit, no proposal, no
+  task. **`syncWorkspace` remains M2M's** (D-2026-08-13-4).
+
+**M2K is next.** Nothing in it is started: no evidence bundle, no evaluator, no planner.
 
 **M2H is complete and merged**, closing the M1 post-reboot gate;
 M2F Agent Task Core and M2G the Claude Code adapter merged; the isolated Custom GPT Actions mobile
@@ -731,11 +755,16 @@ real session exactly, with zero mismatches in either direction — see the
 bind logic. Neither does M2B3A, M2B3A.1, M2C, M2D, M2E, M2F, or M2G. **M2H does**, which is why
 the gate closes there.
 
-## In progress (on a branch, not merged)
+## M2J records — the egress boundary and the read surface (written while each was on its branch)
+
+**Nothing is in progress.** M2J is complete and M2K has not started.
 
 ### M2J PR4 — read-only project-context surfaces
 
-On `feat/m2j-pr4-project-context-read`, from the merged `5afaa8e`. **Not deployed and not merged.**
+**Merged as `44e4994` (#44) and deployed**: workstation and Actions bridge both run it from slot B,
+with slot A at `5afaa8e` (PR3.5.1) retained as the rollback. The record below was written on
+`feat/m2j-pr4-project-context-read`, from the merged `5afaa8e`, while it was still a branch —
+where this entry says "not merged" or "not deployed" it is describing the moment it was written.
 The first milestone that may expose project context outside this host, and it consumes the PR3.5
 boundary rather than reopening it.
 
@@ -772,11 +801,13 @@ It makes no "secret-free" claim.
 
 ### M2J PR3.5.1 — projection sanitizer hardening
 
-On `feat/m2j-pr351-projection-sanitizer-hardening`, from the merged `c24be24f`. **Not deployed and
-not merged.** Two recognition-layer defects found by PR3.5's post-deployment validation. Sanitizer
-and documentation only: no schema change, no policy-id change, no source-allowlist, Global Mind,
-Working Context, budget, candidate-model, type-boundary, persistence or logging change, no route
-and no OpenAPI edit.
+**Merged as `5afaa8e` (#43) and deployed**; it is now the rollback slot's release. The record below
+was written on `feat/m2j-pr351-projection-sanitizer-hardening`, from the merged `c24be24f`, while it
+was still a branch — where this entry says "not merged" or "not deployed" it is describing the
+moment it was written. Two recognition-layer defects found by PR3.5's post-deployment validation.
+Sanitizer and documentation only: no schema change, no policy-id change, no source-allowlist,
+Global Mind, Working Context, budget, candidate-model, type-boundary, persistence or logging
+change, no route and no OpenAPI edit.
 
 **Neither defect was ever externally reachable.** Nothing under `cofferdam/` imports the
 projection package, so PR3.5 shipped the egress boundary with no surface able to call it. That is
@@ -1594,20 +1625,23 @@ on 2026-08-11 (see the [M2B record](#m2b--runtime-inventory)).
 
 ## Planned (active roadmap — see [`ROADMAP.md`](ROADMAP.md))
 
-**Replanned 2026-08-11 and recorded as D-2026-08-11-1 … -12.** Nothing below is implemented; no
-code was written for any of it. Queued, in order:
+**Replanned 2026-08-11 and recorded as D-2026-08-11-1 … -12.** **M2J is done** (see *M2J closeout*
+above); nothing else below is implemented, and no code was written for any of it. Queued, in order:
 
-- **M2J — workspace, Working Context, mind foundation, Context Builder.** The recorded M2J scope
-  preserved and reshaped: workspaces over projects, the current objective, durable Working Context
-  in SQLite, canonical Markdown memory access by **role** rather than filename, the memory
-  proposal → accept → hash-bound apply path, bounded provenance-tagged context assembly, and the
-  workspace surfaces including `get_project_context`. Four sub-phases; no planner, no vectors, no
-  automatic memory writes, no new public surface.
-- **M2K — evidence and evaluation foundation.** Model-free. Per-turn evidence bundles that keep
-  worker *claims* and Cofferdam *observations* structurally apart, deterministic criteria checks
-  before any model, risk levels derived from code and policy rather than model self-selection, and
-  the first machine-observed failure reason codes. Includes the five-step artifact/change-claims
-  Task Core PR that D-2026-08-09-3 specifies.
+- **M2K — evidence and evaluation foundation. Next.** Model-free. Per-turn evidence bundles that
+  keep worker *claims* and Cofferdam *observations* structurally apart, deterministic criteria
+  checks before any model, risk levels derived from code and policy rather than model
+  self-selection, and the first machine-observed failure reason codes.
+
+  **The handoff, in the terms M2K is bound to.** A worker's final message is **only a claim**;
+  deterministic, machine-observed evidence comes first, and a model may later **downgrade**
+  confidence but must **never upgrade** failed or unverified evidence (D-2026-08-11-6).
+  Check-command authority is **code-owned or host-owned** — the planner, the worker, a remote
+  caller and a task prompt never supply executable text (D-2026-08-11-7). Task Core is currently at
+  **schema v3**, and M2K's persistence is an additive **v4** on the same additive-only discipline.
+  **Start with the five-step artifact/change-claims Task Core PR that D-2026-08-09-3 already
+  specifies** — it is the foundation the rest of the milestone reads from, and it is deterministic
+  and model-free.
 - **M2L — Local Planner MVP.** One local model, one role, advisory throughout: Turkish-first
   conversation, worker-prompt and follow-up drafting, evidence interpretation, next-step
   recommendations, honest refusal. Every consequential proposal is explicitly confirmed; there is
@@ -1676,7 +1710,8 @@ no fix is attempted here.
 
 | Item | State | Observed | Blocks the roadmap? |
 |---|---|---|---|
-| cloudflared tunnel HA/edge connection flapping — investigate separately | `OPEN_NON_BLOCKING` | Chronic HA connection churn in `cofferdam-actions-tunnel.service`, noted during the M2J PR3 deployment and **pre-existing** — it predates PR3 and is not attributed to PR3 or PR3.5. The tunnel still served successfully throughout and the process neither crashed nor restarted, so the external Actions surface remained usable. **Root cause unknown.** | No |
+| cloudflared tunnel HA/edge connection flapping — investigate separately | `OPEN_NON_BLOCKING` | Chronic HA connection churn in `cofferdam-actions-tunnel.service`, noted during the M2J PR3 deployment and **pre-existing** — it predates PR3 and is **not attributed to M2J**. Re-observed during the PR4 deployment: a brief edge-reconnect window returned Cloudflare 530s and then **self-recovered** to a byte-identical response, with the connector process neither crashing nor restarting. The tunnel serves successfully outside those windows, so the external Actions surface remains usable. **Root cause unknown.** | No |
+| Context transport bounds are not harmonized | `OPEN_NON_BLOCKING` | Three deliberately different bounds sit on one path: the projection **content** budget is 16 KiB, the workstation **transport** ceiling is 128 KiB, and the Actions bridge applies its own 60 KiB. The **effective external bound is therefore 60 KiB** — the bridge binds first. All three **fail closed** and **none truncates**: over-bound is refused (`response_too_large` on the daemon, a 500 on the bridge) rather than sliced, because half a JSON document is worse than an error. Recorded as design debt to revisit deliberately, **not** an M2K blocker and not to be "fixed" by quietly aligning the numbers. | No |
 
 **No cause is claimed.** The churn has not been attributed to the ISP, to Cloudflare's edge, to
 local networking or to the service unit, because nothing here probed any of them — recording an

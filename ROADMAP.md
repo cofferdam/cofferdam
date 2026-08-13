@@ -7,8 +7,8 @@ marked **OPEN QUESTION** are unresolved; each names the experiment that settles 
 
 **Read [Active implementation order](#active-implementation-order-recorded-2026-08-08-replanned-2026-08-11) first.**
 The M1–M7 sections remain the reference for what each layer *is*, and the M2x sections are the
-record of what shipped; the work actually queued next is **M2J → M2K → M2L → M2M**, and that
-section takes precedence wherever the two disagree.
+record of what shipped; **M2J is complete** and the work actually queued next is
+**M2K → M2L → M2M**, and that section takes precedence wherever the two disagree.
 
 ## Implementation philosophy (binding)
 
@@ -83,10 +83,10 @@ PR #20) and M2G (the Claude Code CLI adapter, PR #21) are merged on `main`; the 
 lane exists and has been driven from a phone. Client architecture and authority for everything
 below are fixed by [`DECISIONS.md`](DECISIONS.md) D-2026-08-08-1 … -6.
 
-**M2H, M2I and M2I.5 are complete.** The queue from here is:
+**M2H, M2I, M2I.5 and M2J are complete.** The queue from here is:
 
 ```
-M2J  Workspace, Working Context, mind foundation, Context Builder   (foundation)
+M2J  Workspace, Working Context, mind foundation, Context Builder   COMPLETE (merged + deployed)
 M2K  Evidence & evaluation foundation, + machine reason codes       (deterministic, model-free)
 M2L  Local Planner MVP                                             (advisory, confirm-by-default)
 M2M  Remote operations completion — overview, dashboard, diagnosis
@@ -232,7 +232,7 @@ downstream reads from.
   Actions bridge because it "cannot be built honestly before the workspace model it reads from"
   (D-2026-08-09-1) — the same sentence applies verbatim to a local planner.
 - **Sub-phases:**
-  - **PR1 — workspace model + Working Context.** *Implemented on a branch; see
+  - **PR1 — workspace model + Working Context.** *Merged as `ae5c025` (#36) and deployed; see
     [`STATUS.md`](STATUS.md) and [`docs/WORKSPACES.md`](docs/WORKSPACES.md).* Workspaces over
     projects (host-owned config, the same validation posture as `task-projects.json`); the
     objective and its history; Working Context as durable state in SQLite under `state/`, **not** a
@@ -240,14 +240,20 @@ downstream reads from.
     switching cannot leak one workspace's objective into another. Task state and the delegated
     worker are derived on every read and never stored. No document-role or profile fields yet —
     they arrive with the components that read them.
-  - **PR2 — mind access + grant + memory-proposal queue.** *Implemented on a branch; see
-    [`STATUS.md`](STATUS.md) and [`docs/MIND.md`](docs/MIND.md).* Project mind read from the
-    project's own repository by **role** rather than filename, mapped by `documents` on the
+  - **PR2 — mind access + grant + memory-proposal queue.** *Merged as `1c45b26` (#38) and
+    deployed; see [`STATUS.md`](STATUS.md) and [`docs/MIND.md`](docs/MIND.md).* Project mind read
+    from the project's own repository by **role** rather than filename, mapped by `documents` on the
     workspace — the field PR1 left out until something read it; the global vault behind an explicit
     host-owned grant in `config/mind-grant.json`, absent by default; the proposal → accept →
     hash-bound apply path (D-2026-08-11-4), on the device-token surface alone, with deletion absent
     rather than refused and no egress of any kind.
-  - **PR3 — Context Builder.** *Implemented on a branch; see [`STATUS.md`](STATUS.md) and
+  - **PR2.1 — the `cross_project` global role + stable project-root authority.** *Merged as
+    `f279fc2` (#40) and deployed; see [`STATUS.md`](STATUS.md) and [`docs/MIND.md`](docs/MIND.md).*
+    A fourth Global Mind role, and the `cofferdam` project root moved off `$COFFERDAM_HOME` to the
+    stable source checkout so project memory does not move with an A/B deployment
+    (D-2026-08-13-1).
+  - **PR3 — Context Builder.** *Merged as `31ab114` (#41) and deployed; see
+    [`STATUS.md`](STATUS.md) and
     [`docs/CONTEXT.md`](docs/CONTEXT.md).* `LocalContextPack` assembly, bounded by an explicit
     budget in **UTF-8 bytes** (model-independent by construction), every part carrying
     `{source_kind, source_ref, observed_at}` — `user_instruction`, `working_state`, `plan`,
@@ -260,8 +266,8 @@ downstream reads from.
     is a reference a person recorded or a bounded structural slice, and each part is labelled with
     which. **No vectors in M2J** — semantic memory is M2N, and its candidates already have a typed
     seam into the builder.
-  - **PR3.5 — `CloudContextProjection`, the egress boundary.** *Implemented on a branch; see
-    [`STATUS.md`](STATUS.md) and
+  - **PR3.5 — `CloudContextProjection`, the egress boundary.** *Merged as `c24be24` (#42) and
+    deployed; see [`STATUS.md`](STATUS.md) and
     [`docs/CLOUD_CONTEXT_PROJECTION.md`](docs/CLOUD_CONTEXT_PROJECTION.md).* The **second** of
     D-2026-08-11-5's two security objects, and a **hard gate on PR4** (D-2026-08-13-3). One narrow,
     code-owned, versioned profile — `project_context_external_v1` — that is deny-by-default and
@@ -276,13 +282,15 @@ downstream reads from.
     credential-shaped material omitting the whole part rather than being rewritten. Its **own**
     16 KiB budget, not the pack's 64 KiB. **No transport, no surface, no model, no retrieval, no
     persistence**: projection prepares an object and never sends it.
-  - **PR3.5.1 — sanitizer hardening.** *Follow-up to PR3.5.* Two recognition-layer defects found
+  - **PR3.5.1 — sanitizer hardening.** *Follow-up to PR3.5; merged as `5afaa8e` (#43) and
+    deployed.* Two recognition-layer defects found
     by PR3.5's post-deployment validation, neither ever externally reachable because nothing in
     that build imports the projection package: bare `TOKEN=` / `API_KEY=` / `SECRET=` assignments
     were not detected where prefixed ones were, and a doubled slash bypassed every path rule
     including the known host literals. Sanitizer and documentation only — no schema, policy id,
     allowlist, budget or surface change.
-  - **PR4 — the read surface.** *Implemented on a branch; see [`STATUS.md`](STATUS.md).* The PWA workspace/context panel and a **read-only**
+  - **PR4 — the read surface.** *Merged as `44e4994` (#44) and deployed; see
+    [`STATUS.md`](STATUS.md).* The PWA workspace/context panel and a **read-only**
     `get_project_context` for the Custom GPT. The first OpenAPI edit since Gate B; note the `$ref`
     import pitfall PR2 found. **Gated on PR3.5 (D-2026-08-13-3):** no surface here may return a
     `LocalContextPack`, or anything derived from one, except a `CloudContextProjection` built by
@@ -291,6 +299,14 @@ downstream reads from.
     that go with them. **`syncWorkspace` is not here** (D-2026-08-13-4): it mutates, the egress
     policy authorizes no mutation, and M2M owns it. PR4 contains no workspace, project or memory
     mutation of any kind.
+- **M2J is COMPLETE.** All seven sub-phases are merged and deployed; production is normalized on
+  PR4 (`44e4994`) with the previous release retained as the rollback. As shipped, the read surface
+  is `GET /api/projects/{project_id}/context` privately and
+  `GET /v1/projects/{project_id}/context` (`getProjectContext`) on the Actions bridge; authority is
+  **active-workspace-only**; the wire type is `CloudContextProjection` and nothing else, so a
+  `LocalContextPack` never crosses transport; no Global Mind role and no current user message are
+  eligible under `project_context_external_v1`; and there is no mutation anywhere in it —
+  `syncWorkspace` remains M2M's. Details in [`STATUS.md`](STATUS.md).
 - **The two context objects are separate types** (D-2026-08-11-5), and they are **separate
   milestones** (D-2026-08-13-3): PR3 owns the local pack, PR3.5 owns the projection. The local
   pack may be rich; anything leaving the host is a `CloudContextProjection` built by an explicit
