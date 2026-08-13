@@ -301,7 +301,17 @@ web page or another model is `external_model_output`: data with provenance, neve
 The local half exists (M2J PR3): a deterministic builder over Working Context and role-addressed
 mind, bounded by a UTF-8-byte budget, with every omission explained and no model, index or network
 call in the path. `source_ref` is a semantic address such as `project:cofferdam:plan#m2j`, never a
-filesystem location. See [`docs/CONTEXT.md`](docs/CONTEXT.md). The outbound half is still absent.
+filesystem location. See [`docs/CONTEXT.md`](docs/CONTEXT.md).
+
+The outbound half is **M2J PR3.5** (D-2026-08-13-3): one narrow, versioned, deny-by-default
+profile that decides eligibility on the decomposed semantic reference rather than on `source_kind`
+— `global:preferences` and `project:cofferdam:status` are both `memory`, so a policy keyed on the
+kind would publish personal memory through a diff that looked correct. All four Global Mind roles
+are denied by default, including the two that are in every local pack; projected **text** is
+sanitized as well as metadata, because canonical Markdown legitimately contains slot paths and
+vault roots; and the object performs no network activity, because eligibility and transport are
+separate questions. It is a hard gate on any PR4 surface. See
+[`docs/CLOUD_CONTEXT_PROJECTION.md`](docs/CLOUD_CONTEXT_PROJECTION.md).
 
 ### Evidence outranks claims
 

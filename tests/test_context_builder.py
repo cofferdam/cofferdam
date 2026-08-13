@@ -645,12 +645,15 @@ class GlobalMind(ContextHarness):
         self.assertEqual(self.omission(pack, "global:user").reason, OMIT_BUDGET_EXHAUSTED)
 
     def test_inclusion_in_a_local_pack_grants_no_egress(self):
-        """The third permission, and nothing in this build implements it.
+        """The third permission, and this package still does not implement it.
 
-        The name appears in docstrings, saying it does not exist. What must not
-        exist is a **definition** — the moment one does, something can hold an
-        outbound object, and a local pack's contents become a question about
-        egress.
+        Until M2J PR3.5 this test asserted that `CloudContextProjection` had **no
+        definition anywhere**, because the moment one existed something could
+        hold an outbound object. PR3.5 built it, so the invariant moves rather
+        than disappears: the definition exists in exactly one place, that place
+        is the projection package, and **nothing the builder produces can reach
+        it**. A pack is still not an egress object, and the way to get one is
+        still an explicit policy step somewhere else.
         """
         import re
 
@@ -658,12 +661,28 @@ class GlobalMind(ContextHarness):
 
         defined = re.compile(r"^\s*(class|def)\s+CloudContextProjection\b|^\s*CloudContextProjection\s*=")
         root = Path(cofferdam.__file__).parent
-        hits = [
-            path.name
+        hits = sorted(
+            str(path.relative_to(root))
             for path in root.rglob("*.py")
             if any(defined.match(line) for line in path.read_text(encoding="utf-8").splitlines())
-        ]
-        self.assertEqual(hits, [], "CloudContextProjection must not be defined in this build")
+        )
+        self.assertEqual(
+            hits,
+            ["workstation/context/projection/model.py"],
+            "CloudContextProjection is defined outside the projection package",
+        )
+
+        builder_package = root / "workstation" / "context"
+        for module in sorted(builder_package.glob("*.py")):
+            source = module.read_text(encoding="utf-8")
+            for line in source.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("import ") or stripped.startswith("from "):
+                    self.assertNotIn(
+                        "projection",
+                        stripped,
+                        module.name + " imports the egress package: " + stripped,
+                    )
 
     def test_no_grant_means_no_global_material(self):
         from cofferdam.workstation.context import OMIT_GRANT_ABSENT

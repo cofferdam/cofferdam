@@ -733,10 +733,80 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2J PR3.5 — `CloudContextProjection` and the egress boundary
+
+On `feat/m2j-cloud-context-projection`, from the merged `31ab1149`. **Implemented and validated
+locally against synthetic data; not deployed and not merged.** Documented in
+[`docs/CLOUD_CONTEXT_PROJECTION.md`](docs/CLOUD_CONTEXT_PROJECTION.md) and decided in
+D-2026-08-13-3.
+
+**The second of D-2026-08-11-5's two security objects now exists, and PR4 is gated on it.** PR3
+built the rich local pack. This PR builds the bounded object that a later authorized surface may
+send, and the gap between them is deliberate: a `LocalContextPack` is not structurally
+cloud-authorized, and there is no method on it, and no helper anywhere, that turns it into one.
+The only route is `ContextProjector.project`, under the named profile
+`project_context_external_v1`.
+
+**Eligibility is decided on the reference, not the kind.** `global:preferences` and
+`project:cofferdam:status` are both `memory`, so a policy keyed on `source_kind` would have
+published personal memory the first time somebody wrote the obvious condition. The projector
+decomposes the semantic reference — scheme, identity, role — and then requires the kind to
+*agree*; disagreement is its own refusal rather than a fallthrough.
+
+**Allowed:** project `status`, `plan` and `decisions` for the pack's own project, and four Working
+Context fields — objective, expected next step, plan checkpoint, pending decision — projected from
+PR3's structured `fields` and **never** from its rendered text, which already contains
+`delegated worker:` and `active task:` lines.
+
+**Denied by default:** all four Global Mind roles, **including the `communication_style` and
+`preferences` that are in every pack on the production host**; the current user message; `design`;
+every other project and workspace; the evaluation slot; and every scheme the profile cannot
+classify. Sentinels in all four vault documents are searched for in the whole serialized
+projection, so the proof is about bytes rather than about structure.
+
+**Content is sanitized, not just metadata.** PR3's production validation established that
+canonical Markdown legitimately contains `slots/a`, vault roots and operational paths, so a clean
+`source_ref` proves nothing about the text beneath it. Recognised local paths are replaced with a
+visible placeholder and the transformation is declared on the part; credential-shaped material
+omits the **whole part** rather than being rewritten, because a lossy edit of a possible secret is
+a guess that is permanent when wrong. URLs and API routes such as `/api/tasks` are deliberately
+not treated as filesystem authority.
+
+**No claim that pattern matching is security.** The protection is layered — narrow source
+allowlist, Global Mind excluded by default, structured field allowlist, semantic reference
+grammar, known-host-value redaction, conservative secret detection, fail-closed omission, byte
+bound — and only two of those steps are recognition. The residual limits are carried on every
+projection and asserted as passing tests, so they are recorded behaviour rather than a caveat.
+
+**Its own budget:** 16 KiB of UTF-8, a quarter of the pack's 64 KiB and deliberately a different
+number, with per-slot caps and exact accounting. Nothing is dropped silently: every part of the
+pack is either projected or carries an omission row with a closed reason code.
+
+**One defect found and fixed in this PR.** Three sanitizer patterns had an unbounded character run
+before a required literal, so a long token-free line backtracked from every start position and one
+large canonical document turned a projection into an 84-second operation. The runs are bounded and
+a regression test asserts the behaviour is not quadratic.
+
+**Nothing leaves the host, and nothing here could make it.** No HTTP route, no Actions bridge
+operation, no OpenAPI change, no PWA surface, no provider client, no model, no retrieval and no
+persistence. A test asserts the package imports nothing that could send anything, another projects
+a pack with `socket` monkeypatched to raise, and another asserts the projector's entire public
+surface is one method named `project`. Route surfaces and the OpenAPI document are byte-for-byte
+unchanged from `31ab1149`.
+
+**Not in this PR:** any transport or surface (PR4); authentication, authorization or a destination
+contract, which a surface owns and projection deliberately does not; evidence and evaluation
+(M2K); the planner and any model runtime (M2L); the dashboard (M2M); embeddings, vectors and
+retrieval (M2N). No workspace policy override permitting selected Global Mind extracts — allowed
+later by D-2026-08-11-5, not built here, and today's default stays exclusion.
+
+## M2J records (written while each was on its branch)
+
 ### M2J PR3 — the Context Builder and `LocalContextPack`
 
-On `feat/m2j-context-builder`, from the merged `f279fc2`. **Implemented and validated locally and
-against an isolated runtime; not deployed and not merged.** Documented in
+Merged as PR #41, squash-merged as `31ab1149`, and deployed to slot `a`; the rollback slot holds
+PR2.1 (`f279fc2`). **Implemented and validated locally and against an isolated runtime before
+merge**, and the record below was written while it was on `feat/m2j-context-builder`. Documented in
 [`docs/CONTEXT.md`](docs/CONTEXT.md).
 
 **Cofferdam can now assemble bounded local context deterministically, with no model anywhere in
@@ -845,7 +915,6 @@ dashboard (M2M); embeddings, vectors, links and backlinks traversal (M2N). No pe
 cache, no new configuration file, no browser work, no new adapter, and no change to the mind
 proposal/apply path, `delegated_adapter` or Task Core.
 
-## M2J records (written while each was on its branch)
 
 ### M2J PR2 — mind access, the host-owned grant, and the memory-proposal queue
 
@@ -935,8 +1004,8 @@ honest state and the reason a caller cannot accidentally be in a different one.
 proposals on a host that has never proposed anything answers from nothing and leaves no file.
 Deleting `state/mind/` forgets the pending proposals and touches no Markdown.
 
-**Not in this PR:** the Context Builder, `LocalContextPack` and `CloudContextProjection` (PR3);
-the PWA panel and `syncWorkspace` (PR4); evidence and evaluation (M2K); the planner and any model
+**Not in this PR:** the Context Builder and `LocalContextPack` (PR3); `CloudContextProjection`
+and the egress policy (PR3.5); the PWA panel and `syncWorkspace` (PR4); evidence and evaluation (M2K); the planner and any model
 runtime (M2L); the dashboard (M2M). No vectors, no retrieval, no summarization, no token budgets,
 no browser work, no new adapter, and no change to `delegated_adapter` or Task Core.
 
@@ -995,9 +1064,9 @@ had just decided not to touch, and a plain read created the database on an uncon
 which contradicted the backward-compatibility claim this PR makes. Both are fixed and both have
 regression tests.
 
-**Not in this PR:** the mind, the vault and memory proposals (PR2); the Context Builder,
-`LocalContextPack` and `CloudContextProjection` (PR3); the PWA workspace panel and `syncWorkspace`
-(PR4); evidence and evaluation (M2K); the planner and any model runtime (M2L); the dashboard
+**Not in this PR:** the mind, the vault and memory proposals (PR2); the Context Builder and
+`LocalContextPack` (PR3); `CloudContextProjection` and the egress policy (PR3.5); the PWA
+workspace panel and `syncWorkspace` (PR4); evidence and evaluation (M2K); the planner and any model runtime (M2L); the dashboard
 (M2M). No document-role or profile fields were added, because nothing reads them yet. *(PR2 added
 the `documents` role map once it had a reader; the profile fields are still absent.)*
 
@@ -1518,6 +1587,17 @@ checklists carry the same warning at the top.
 is already running (the snap's second instance exits immediately). It fails closed and truthfully
 rather than fabricating success, so it is a low-priority defect **candidate**, not a blocker, and
 no fix is attempted here.
+
+### Operations debt
+
+| Item | State | Observed | Blocks the roadmap? |
+|---|---|---|---|
+| cloudflared tunnel HA/edge connection flapping — investigate separately | `OPEN_NON_BLOCKING` | Chronic HA connection churn in `cofferdam-actions-tunnel.service`, noted during the M2J PR3 deployment and **pre-existing** — it predates PR3 and is not attributed to PR3 or PR3.5. The tunnel still served successfully throughout and the process neither crashed nor restarted, so the external Actions surface remained usable. **Root cause unknown.** | No |
+
+**No cause is claimed.** The churn has not been attributed to the ISP, to Cloudflare's edge, to
+local networking or to the service unit, because nothing here probed any of them — recording an
+observation is not the same as diagnosing it, and a guess written down becomes a fact somebody
+cites later. It gets a dedicated audit or it stays open.
 
 ## Deferred (preserved, not on the critical path)
 

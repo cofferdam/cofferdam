@@ -54,7 +54,10 @@ class Egress(ContextHarness):
             "ollama",
             "fastapi",
         )
-        for module in sorted(root.glob("*.py")):
+        # `rglob` rather than `glob`: M2J PR3.5 added the `projection`
+        # subpackage, and a scan that stopped at the top level would have
+        # exempted the one part of this package written for egress.
+        for module in sorted(root.rglob("*.py")):
             source = module.read_text(encoding="utf-8")
             for line in source.splitlines():
                 stripped = line.strip()

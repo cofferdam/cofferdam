@@ -260,12 +260,33 @@ downstream reads from.
     is a reference a person recorded or a bounded structural slice, and each part is labelled with
     which. **No vectors in M2J** — semantic memory is M2N, and its candidates already have a typed
     seam into the builder.
+  - **PR3.5 — `CloudContextProjection`, the egress boundary.** *Implemented on a branch; see
+    [`STATUS.md`](STATUS.md) and
+    [`docs/CLOUD_CONTEXT_PROJECTION.md`](docs/CLOUD_CONTEXT_PROJECTION.md).* The **second** of
+    D-2026-08-11-5's two security objects, and a **hard gate on PR4** (D-2026-08-13-3). One narrow,
+    code-owned, versioned profile — `project_context_external_v1` — that is deny-by-default and
+    decides eligibility on the **decomposed semantic reference** rather than on `source_kind`,
+    because `global:preferences` and `project:cofferdam:status` are both `memory`. Allowed:
+    bounded project `status`, `plan` and `decisions`, plus four allowlisted Working Context fields
+    projected from PR3's structured `fields` rather than from its rendered text. Denied by
+    default: **all four Global Mind roles, including the `communication_style` and `preferences`
+    that are in every local pack on this host**; the current user message; `design`; every other
+    project. Content is sanitized as well as metadata — PR3 proved canonical Markdown legitimately
+    contains slot paths and vault roots — with recognised paths replaced and declared, and
+    credential-shaped material omitting the whole part rather than being rewritten. Its **own**
+    16 KiB budget, not the pack's 64 KiB. **No transport, no surface, no model, no retrieval, no
+    persistence**: projection prepares an object and never sends it.
   - **PR4 — surfaces.** The PWA workspace panel, and `get_project_context` / `syncWorkspace` for
     the Custom GPT. The first OpenAPI edit since Gate B; note the `$ref` import pitfall PR2 found.
-- **The two context objects are separate types** (D-2026-08-11-5). The local pack may be rich;
-  anything leaving the host is a `CloudContextProjection` built by an explicit egress policy —
-  global personal memory, unrelated-project memory, vault paths and project roots excluded by
-  default, credentials structurally absent.
+    **Gated on PR3.5 (D-2026-08-13-3):** no surface here may return a `LocalContextPack`, or
+    anything derived from one, except a `CloudContextProjection` built by the egress policy. A
+    surface additionally owns what projection deliberately does not — authentication,
+    authorization, the destination contract, and the user-consequence semantics that go with them.
+- **The two context objects are separate types** (D-2026-08-11-5), and they are **separate
+  milestones** (D-2026-08-13-3): PR3 owns the local pack, PR3.5 owns the projection. The local
+  pack may be rich; anything leaving the host is a `CloudContextProjection` built by an explicit
+  egress policy — global personal memory, unrelated-project memory, vault paths and project roots
+  excluded by default, credentials structurally absent.
 - **Role mapping, not filename dogma.** For Cofferdam itself, `STATUS.md`, `ROADMAP.md`,
   `DECISIONS.md` and `DESIGN.md` play the roles; **no `PLAN.md` is added** to satisfy a convention
   (D-2026-08-11-3). Long files are handled by section selection, which the builder needs anyway.

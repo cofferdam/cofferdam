@@ -1745,6 +1745,78 @@ keyword heuristic** invented to guess when `user` or `cross_project` is relevant
 describes, where an approximation gets believed because it is labelled "relevant", applies exactly
 here. Widening the default set is a change to this decision, with a test.
 
+## D-2026-08-13-3 — `CloudContextProjection` is M2J PR3.5, and it is the gate on PR4 (EFE DECISION, ACTIVE)
+
+**Decision.** Egress projection gets its **own milestone**, and no surface that crosses the host
+boundary ships before it.
+
+| Milestone | Owns |
+|---|---|
+| **M2J PR3** | `LocalContextPack` — rich local context. **Complete**, PR #41. |
+| **M2J PR3.5** | `CloudContextProjection` and the egress policy. **This decision.** |
+| **M2J PR4** | Workspace and project-context *surfaces* — the PWA panel, `get_project_context`, `syncWorkspace`. **Gated on PR3.5.** |
+
+**The invariant PR4 is held to:**
+
+> No external surface may return a `LocalContextPack`, or anything derived from one, except a
+> `CloudContextProjection` produced by a named egress policy.
+
+**Why this is recorded rather than assumed.** The deployment audit after PR3 found the record
+saying three incompatible things at once:
+[D-2026-08-11-5](#d-2026-08-11-5--local-context-and-external-context-are-two-security-objects-efe-decision-active)
+required the second object, `STATUS.md` attributed it to PR3 in two places, PR3's own record
+correctly said it was not built, and **no milestone owned it**. PR4 was scoped as "surfaces" with
+nothing standing between it and a route returning local context. That is precisely the failure
+mode D-2026-08-11-5 exists to prevent — a field added for the planner reaching the Custom GPT the
+same day — arriving through a documentation gap rather than through a code change. A boundary that
+lives only in a docstring is one somebody implements around without noticing.
+
+**PR3 is not retroactively credited with projection.** It did not build one, said so, and was
+right to. The correction is that a milestone now owns the work, not that the history changes.
+
+**What PR3.5 is.** One narrow, code-owned, versioned profile — `project_context_external_v1` —
+that is **deny-by-default**. Eligibility is decided on the decomposed semantic reference rather
+than on `source_kind`, because `global:preferences` and `project:cofferdam:status` are both
+`memory` and a policy keyed on the kind would publish personal memory the first time somebody
+wrote the obvious condition.
+
+- **Allowed:** bounded project `status`, `plan` and `decisions`, plus four allowlisted Working
+  Context fields — objective, expected next step, and the plan-checkpoint and pending-decision
+  references a person recorded by hand.
+- **Denied by default:** all four Global Mind roles **including `communication_style` and
+  `preferences`**, which are in every local pack on the production host; the current user message;
+  `design`; every other project; the evaluation slot; and every scheme the profile cannot
+  classify.
+- **Content as well as metadata.** PR3's validation proved canonical Markdown legitimately
+  contains `slots/a`, vault roots and operational paths — a semantic `source_ref` says nothing
+  about the text beneath it. Recognised local paths are replaced and declared; credential-shaped
+  material omits the **whole part** rather than being rewritten, because a clever lossy edit of a
+  possible secret is a guess that is permanent when wrong.
+- **Its own budget.** 16 KiB of UTF-8, not the local pack's 64 KiB. One number governing both
+  "how much may the planner see" and "how much may leave the machine" is a number a later tuning
+  change widens by accident.
+
+**Pattern matching is not the boundary, and this decision does not claim it is.** No scanner can
+prove arbitrary text contains no secret. The protection is the layering — a narrow source
+allowlist, Global Mind excluded by default, a structured field allowlist, the semantic reference
+grammar, known-host-value redaction, conservative secret detection, fail-closed omission and a
+byte bound — of which only two steps are recognition and the rest are construction. The residual
+limits are listed on the object itself and asserted as tests.
+
+**Eligibility is not transport.** A `CloudContextProjection` performs no network activity and
+holding one is not permission to send it. A later surface still needs its own authentication,
+authorization, destination contract and user-consequence semantics. "Cloud" names what the object
+is shaped for, not where it goes.
+
+**This authorizes no surface, no provider and no retrieval.** PR3.5 adds no HTTP route, no Actions
+bridge operation, no OpenAPI change and no model. A future M2N retrieval candidate admitted into a
+pack is re-evaluated by this policy independently — admission to a pack has never implied
+admission to a projection, and there is deliberately no candidate branch that could make it.
+A future workspace policy explicitly allowing selected Global Mind extracts remains permitted by
+[D-2026-08-11-5](#d-2026-08-11-5--local-context-and-external-context-are-two-security-objects-efe-decision-active)
+and is **not built here**; today's default stays exclusion, and widening it is a change to this
+decision, with a test.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when
