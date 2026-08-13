@@ -152,6 +152,20 @@ The exception is deliberate: a **known host literal** the caller supplied is
 redacted everywhere, *including* inside a URL. The URL exemption is about generic
 shapes, not about a value somebody explicitly said must never be emitted.
 
+### Separators are runs, not single characters
+
+M2J PR3.5.1. POSIX collapses a run of slashes, so `/home//someone/x` and
+`/home/someone/x` name the same file. Until PR3.5.1 the patterns accepted exactly
+one slash between components, and the known host literals were a plain substring
+test — which cannot see a separator the operator did not type. Both accept a run
+now, and `//api/tasks` is still a route rather than a location, because what makes
+a path here is the anchor at the front and never the number of slashes in the
+middle.
+
+`https://` is untouched by this: the scheme separator is matched by the URL rule
+before the path patterns run, and a run of separators is never rewritten in the
+text — only the whole path it belongs to is replaced.
+
 ## The sanitizer is not the boundary
 
 **Pattern matching cannot prove that arbitrary text contains no secret, and
@@ -181,11 +195,38 @@ than becoming stale caveats:
 
 - a credential in an unrecognised shape, or a passphrase in prose, is not
   detected;
+- a credential **variable name is matched in upper case only**, as environment
+  variables are written. `api_key=…` in lowercase prose is not detected. Lowering
+  the case would widen a rule whose consequence is dropping a whole eligible
+  part, so this is recorded rather than fixed by reflex;
 - a secret split across a **line break** is not reassembled, because reassembling
   lines would change what a Markdown document means;
 - a relative path with no recognised root is not treated as a location;
 - Windows-style paths are not recognised — this product's hosts are Linux;
 - prose that *describes* where something lives is content, and is not redacted.
+
+### Fixed in M2J PR3.5.1
+
+Both were found by the PR3.5 **post-deployment** validation, before any surface
+could transmit a projection, and neither was ever externally reachable: nothing
+in this build imports the projection package. They are recorded here rather than
+quietly corrected because this page's residual-limitations list is only worth
+reading if what left it is visible too.
+
+- **Bare credential assignments were not detected.** The variable-name pattern
+  opened with a mandatory character, so `COFFERDAM_ACTIONS_TOKEN=` matched and a
+  bare `TOKEN=`, `API_KEY=`, `SECRET=`, `PASSWORD=`, `AUTH=` or `PRIVATE_KEY=`
+  did not — the prefix is the part that varies between hosts, and requiring it
+  inverted which half carried the meaning. The prefix is optional now. The value
+  test is unchanged, so documentation placeholders are still kept.
+- **A doubled slash bypassed every path rule.** `/home//x`, `/root//x` and
+  `slots//a` survived, and a known host literal with an internal doubled
+  separator defeated literal redaction as well. Separators are runs now.
+
+Neither fix changes the outcome for material that *was* recognised: a
+credential-shaped part is still omitted **whole**, with an explicit
+`sensitive_content_omitted`, and a recognised path is still replaced in place
+with `path_redacted` recorded on the part.
 
 ## The budget is its own number
 

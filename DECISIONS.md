@@ -1754,7 +1754,7 @@ boundary ships before it.
 |---|---|
 | **M2J PR3** | `LocalContextPack` — rich local context. **Complete**, PR #41. |
 | **M2J PR3.5** | `CloudContextProjection` and the egress policy. **This decision.** |
-| **M2J PR4** | Workspace and project-context *surfaces* — the PWA panel, `get_project_context`, `syncWorkspace`. **Gated on PR3.5.** |
+| **M2J PR4** | Workspace and project-context *surfaces* — the PWA panel and a read-only `get_project_context`. **Gated on PR3.5.** `syncWorkspace` is M2M's, per [D-2026-08-13-4](#d-2026-08-13-4--m2j-pr4-is-the-read-surface-syncworkspace-belongs-to-m2m-efe-decision-active). |
 
 **The invariant PR4 is held to:**
 
@@ -1816,6 +1816,46 @@ A future workspace policy explicitly allowing selected Global Mind extracts rema
 [D-2026-08-11-5](#d-2026-08-11-5--local-context-and-external-context-are-two-security-objects-efe-decision-active)
 and is **not built here**; today's default stays exclusion, and widening it is a change to this
 decision, with a test.
+
+## D-2026-08-13-4 — M2J PR4 is the read surface; `syncWorkspace` belongs to M2M (EFE DECISION, ACTIVE)
+
+**Decision.** `get_project_context` is **M2J PR4**. `syncWorkspace` is **M2M — Remote operations
+completion**. PR4 ships a read surface and no mutation of any kind.
+
+| Operation | Milestone | Why |
+|---|---|---|
+| `get_project_context` | **M2J PR4** | A read that crosses the host boundary — exactly what [D-2026-08-13-3](#d-2026-08-13-3--cloudcontextprojection-is-m2j-pr35-and-it-is-the-gate-on-pr4-efe-decision-active)'s egress policy governs. |
+| `syncWorkspace` | **M2M** | A mutation. Nothing in the egress policy authorizes it. |
+
+**What PR4 owns:** the PWA workspace/context panel; a read-only `get_project_context`;
+serialization of a `CloudContextProjection`; authentication; authorization; the destination
+contract; and the user-visible read semantics.
+
+**What PR4 must not contain:** `syncWorkspace`, workspace mutation, project mutation, memory
+mutation, or any other remote state change.
+
+**Why this is recorded.** The record double-booked it. `ROADMAP.md` listed `syncWorkspace` under
+both M2J PR4 and M2M, and
+[D-2026-08-13-3](#d-2026-08-13-3--cloudcontextprojection-is-m2j-pr35-and-it-is-the-gate-on-pr4-efe-decision-active)'s
+own table repeated the PR4 half. Two milestones owning one Action is how an Action ships twice with
+different semantics, or ships in the milestone whose review was scoped for the other question.
+
+**Why the split falls here rather than by convenience.** PR3.5 answers exactly one question — *may
+this leave the host?* A read surface is that question plus authentication and a destination. A
+mutation is a different set: authority to change state, idempotency, conflict resolution when the
+phone and the desktop disagree, and the consequential-action semantics that
+[D-2026-08-11-8](#d-2026-08-11-8--health-truth-is-evidence-led-and-consequential-work-is-never-auto-retried-efe-decision-active)
+attaches to work that has effects. Projection grants none of that and was never meant to.
+
+Shipping both in PR4 would put two security boundaries behind one review, and the weaker argument
+— "the projection already vetted this" — would be available for the half it does not cover. The
+egress policy is not a mutation authority, and a milestone boundary is the cheapest place to keep
+that true.
+
+**This does not weaken the PR4 gate.** The invariant from D-2026-08-13-3 stands unchanged: no
+external surface may return a `LocalContextPack`, or anything derived from one, except a
+`CloudContextProjection` produced by a named egress policy. Narrowing PR4's scope narrows what has
+to clear that gate; it does not lower it.
 
 ## OPEN QUESTIONS
 

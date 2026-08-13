@@ -733,12 +733,59 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2J PR3.5.1 — projection sanitizer hardening
+
+On `feat/m2j-pr351-projection-sanitizer-hardening`, from the merged `c24be24f`. **Not deployed and
+not merged.** Two recognition-layer defects found by PR3.5's post-deployment validation. Sanitizer
+and documentation only: no schema change, no policy-id change, no source-allowlist, Global Mind,
+Working Context, budget, candidate-model, type-boundary, persistence or logging change, no route
+and no OpenAPI edit.
+
+**Neither defect was ever externally reachable.** Nothing under `cofferdam/` imports the
+projection package, so PR3.5 shipped the egress boundary with no surface able to call it. That is
+why these are recorded as defects fixed before exposure rather than as an incident.
+
+- **Bare credential assignments were not detected.** `_ENV_ASSIGNMENT` opened with a mandatory
+  character, so `COFFERDAM_ACTIONS_TOKEN=` matched while a bare `TOKEN=`, `API_KEY=`, `APIKEY=`,
+  `SECRET=`, `PASSWORD=`, `AUTH=` or `PRIVATE_KEY=` did not. The prefix varies between hosts and
+  the keyword carries the meaning, so requiring the prefix inverted which half mattered. The
+  shipped adversarial suite passed because its one positive case used a prefixed name. The prefix
+  is optional now; the value test is untouched, so `API_KEY=xxxxx` and `TOKEN=<your-token>` are
+  still documentation.
+- **A doubled slash bypassed every path rule.** POSIX collapses a run of separators, so
+  `/home//x` names what `/home/x` names, and the patterns accepted exactly one slash. The known
+  host literals were worse: a substring test cannot see a separator the operator did not type, so
+  a caller that named a root still emitted it with a doubled separator inside. Separators are runs
+  now, in both the generic patterns and the literals.
+
+**The fix is bounded, and its own cost was measured.** Accepting a run reintroduced the quadratic
+backtracking PR3.5 already paid 84 seconds for once — a long slash run cost 0.85 s per known root
+— so the runs are anchored at both ends (`(?<!/)/+(?!/)`), which is the portable spelling of an
+atomic group on Python 3.9. Sanitization is linear again and the regression is asserted by tests
+that compare growth rather than a wall-clock threshold alone.
+
+**Honesty preserved, not widened.** Whole-part fail-closed omission is unchanged, and no
+limitation was quietly dropped. One was *added*: credential variable names are matched in upper
+case only, so `api_key=` in lowercase prose is not detected. That was always true and was hidden
+behind the larger gap; lowering the case would widen a rule whose consequence is dropping a whole
+eligible part, so it is recorded rather than fixed by reflex.
+
+**Also in this PR:** D-2026-08-13-4 resolves the `syncWorkspace` double-booking — the record had
+it under both M2J PR4 and M2M. `get_project_context` is PR4's read surface; `syncWorkspace` is
+M2M's, because it mutates and the egress policy authorizes no mutation. PR4's hard gate is
+unchanged.
+
 ### M2J PR3.5 — `CloudContextProjection` and the egress boundary
 
-On `feat/m2j-cloud-context-projection`, from the merged `31ab1149`. **Implemented and validated
-locally against synthetic data; not deployed and not merged.** Documented in
+Merged as `c24be24f` (PR #42) and **deployed**: workstation and Actions bridge both run it from
+slot B, with slot A at `31ab1149` retained as the rollback. Documented in
 [`docs/CLOUD_CONTEXT_PROJECTION.md`](docs/CLOUD_CONTEXT_PROJECTION.md) and decided in
-D-2026-08-13-3.
+D-2026-08-13-3. The record below was written while it was on
+`feat/m2j-cloud-context-projection`, from the merged `31ab1149`.
+
+**Post-deployment validation found two recognition-layer defects**, fixed by PR3.5.1 above. The
+type boundary, Global Mind exclusion, Working Context allowlist, budget accounting and
+zero-side-effect properties all validated clean against the deployed code.
 
 **The second of D-2026-08-11-5's two security objects now exists, and PR4 is gated on it.** PR3
 built the rich local pack. This PR builds the bounded object that a later authorized surface may
@@ -909,7 +956,7 @@ Route surfaces are compared against `f279fc2` and are byte-for-byte identical, a
 document is unchanged.
 
 **Not in this PR:** `CloudContextProjection` and any egress (still D-2026-08-11-5's separate
-object); the PWA workspace panel and `get_project_context` / `syncWorkspace` (PR4); evidence and
+object); the PWA workspace panel and `get_project_context` (PR4); `syncWorkspace` (M2M); evidence and
 evaluation (M2K); the planner, any model runtime, tokenizer or prompt construction (M2L); the
 dashboard (M2M); embeddings, vectors, links and backlinks traversal (M2N). No persistence, no
 cache, no new configuration file, no browser work, no new adapter, and no change to the mind
@@ -1005,7 +1052,7 @@ proposals on a host that has never proposed anything answers from nothing and le
 Deleting `state/mind/` forgets the pending proposals and touches no Markdown.
 
 **Not in this PR:** the Context Builder and `LocalContextPack` (PR3); `CloudContextProjection`
-and the egress policy (PR3.5); the PWA panel and `syncWorkspace` (PR4); evidence and evaluation (M2K); the planner and any model
+and the egress policy (PR3.5); the PWA panel and `get_project_context` (PR4); `syncWorkspace` (M2M); evidence and evaluation (M2K); the planner and any model
 runtime (M2L); the dashboard (M2M). No vectors, no retrieval, no summarization, no token budgets,
 no browser work, no new adapter, and no change to `delegated_adapter` or Task Core.
 
@@ -1050,7 +1097,7 @@ auto-registers one for an existing project.
 **The Actions bridge reaches none of it.** These routes use `require_token`, which has never heard
 of the bridge credential, so a bridge request is a 401 because nothing can recognise it rather than
 because a check refuses it. A test enables the bridge caller, presents the real credential to all
-six routes, and uses a task route as the control. `syncWorkspace` is an M2J PR4 decision and no
+six routes, and uses a task route as the control. `syncWorkspace` is M2M's (D-2026-08-13-4) and no
 external surface reads the workspace today.
 
 **Backward compatible by absence.** No `workspaces.json` means no workspaces, every existing task,
@@ -1066,7 +1113,7 @@ regression tests.
 
 **Not in this PR:** the mind, the vault and memory proposals (PR2); the Context Builder and
 `LocalContextPack` (PR3); `CloudContextProjection` and the egress policy (PR3.5); the PWA
-workspace panel and `syncWorkspace` (PR4); evidence and evaluation (M2K); the planner and any model runtime (M2L); the dashboard
+workspace panel and `get_project_context` (PR4); `syncWorkspace` (M2M); evidence and evaluation (M2K); the planner and any model runtime (M2L); the dashboard
 (M2M). No document-role or profile fields were added, because nothing reads them yet. *(PR2 added
 the `documents` role map once it had a reader; the profile fields are still absent.)*
 

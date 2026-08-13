@@ -276,12 +276,21 @@ downstream reads from.
     credential-shaped material omitting the whole part rather than being rewritten. Its **own**
     16 KiB budget, not the pack's 64 KiB. **No transport, no surface, no model, no retrieval, no
     persistence**: projection prepares an object and never sends it.
-  - **PR4 — surfaces.** The PWA workspace panel, and `get_project_context` / `syncWorkspace` for
-    the Custom GPT. The first OpenAPI edit since Gate B; note the `$ref` import pitfall PR2 found.
-    **Gated on PR3.5 (D-2026-08-13-3):** no surface here may return a `LocalContextPack`, or
-    anything derived from one, except a `CloudContextProjection` built by the egress policy. A
-    surface additionally owns what projection deliberately does not — authentication,
-    authorization, the destination contract, and the user-consequence semantics that go with them.
+  - **PR3.5.1 — sanitizer hardening.** *Follow-up to PR3.5.* Two recognition-layer defects found
+    by PR3.5's post-deployment validation, neither ever externally reachable because nothing in
+    that build imports the projection package: bare `TOKEN=` / `API_KEY=` / `SECRET=` assignments
+    were not detected where prefixed ones were, and a doubled slash bypassed every path rule
+    including the known host literals. Sanitizer and documentation only — no schema, policy id,
+    allowlist, budget or surface change.
+  - **PR4 — the read surface.** The PWA workspace/context panel and a **read-only**
+    `get_project_context` for the Custom GPT. The first OpenAPI edit since Gate B; note the `$ref`
+    import pitfall PR2 found. **Gated on PR3.5 (D-2026-08-13-3):** no surface here may return a
+    `LocalContextPack`, or anything derived from one, except a `CloudContextProjection` built by
+    the egress policy. A surface additionally owns what projection deliberately does not —
+    authentication, authorization, the destination contract, and the user-consequence semantics
+    that go with them. **`syncWorkspace` is not here** (D-2026-08-13-4): it mutates, the egress
+    policy authorizes no mutation, and M2M owns it. PR4 contains no workspace, project or memory
+    mutation of any kind.
 - **The two context objects are separate types** (D-2026-08-11-5), and they are **separate
   milestones** (D-2026-08-13-3): PR3 owns the local pack, PR3.5 owns the projection. The local
   pack may be rich; anything leaving the host is a `CloudContextProjection` built by an explicit
@@ -384,8 +393,9 @@ One model, one role, advisory throughout (D-2026-08-11-2).
   workers, workspace, attention) carrying names, ids and states only — no prompts, no paths, no
   secrets, every claim stamped with `observed_at` and its method; typed `/ws` events for health and
   working-context transitions; the workspace dashboard panel in the existing PWA; deterministic
-  diagnosis synthesis over the M2K reason codes; a `syncWorkspace` Action; and retry UX wired to
-  idempotent replays.
+  diagnosis synthesis over the M2K reason codes; the `syncWorkspace` Action — **M2M owns it
+  outright** (D-2026-08-13-4), because it mutates and M2J PR3.5's egress policy authorizes no
+  mutation; and retry UX wired to idempotent replays.
 - **Diagnosis states its confidence** — `observed`, `likely`, `unknown` — and when evidence is
   insufficient the rendered sentence says Cofferdam could not determine the cause
   (D-2026-08-11-8). Consequential operations are never retried automatically.
