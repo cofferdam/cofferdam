@@ -62,6 +62,7 @@ from .kinds import (
     OMIT_BUDGET_EXHAUSTED,
     OMIT_EXPLICIT_SECTION_MISSING,
     OMIT_GRANT_ABSENT,
+    OMIT_NO_CURRENT_MESSAGE,
     OMIT_NOT_IN_THIS_BUILD,
     OMIT_NO_ACTIVE_WORKSPACE,
     OMIT_SOURCE_ABSENT,
@@ -102,6 +103,15 @@ from .sections import Section, find_section, reference_slug, split_sections
 #: rather than trimmed when it is exceeded — the rule the workspace objective
 #: and the proposal reason already follow.
 MAX_MESSAGE_BYTES = 256 * 1024
+
+#: "There is no message", distinct from every value a caller could pass.
+#:
+#: `None` would have been the obvious spelling and is wrong: `build(None)` must
+#: still be `CurrentMessageInvalid`, because a caller reaching the message path
+#: with nothing in hand is a bug, not a request for a message-free pack. A
+#: private sentinel is unforgeable from outside this module, so the two cases
+#: cannot be confused by an argument.
+_NO_MESSAGE = object()
 
 #: The Working Context lines, in the order they are rendered, paired with the
 #: label a reader sees. Absent values produce **no line at all**: a rendering
@@ -149,6 +159,39 @@ class ContextBuilder:
 
     # -- the one public method ------------------------------------------------
 
+    def build_without_message(
+        self,
+        *,
+        budget_bytes: Optional[int] = None,
+        candidates: Sequence[RetrievedCandidate] = (),
+    ) -> LocalContextPack:
+        """A pack for a request that has **no user message at all** (M2J PR4).
+
+        `get_project_context` is asked "what is this project's state", not "help
+        me with this sentence". There is no message, and the honest way to say so
+        is to build a pack without one — not to pass a placeholder.
+
+        A synthetic marker was the obvious shortcut and is refused on principle:
+        it would sit in the pack as `source_kind=user_instruction`,
+        `source_ref=user:current_message`, which is a part whose kind and
+        reference disagree with the truth. This package refuses exactly that
+        shape from a producer (`source_kind_mismatch`), and a rule the builder
+        breaks quietly is worse than no rule.
+
+        **This narrows the pack; it cannot widen one.** No source is added, no
+        role becomes readable, no bound is relaxed and nothing here takes a
+        caller-supplied value — the method has no parameter that selects
+        anything. The result is the ordinary pack minus its highest-priority
+        part, with an omission row saying which part is missing and why. Every
+        existing caller of :meth:`build` is untouched.
+
+        The absent message is recorded rather than implied, the same way position
+        6 records an evaluation source that does not exist yet.
+        """
+        return self._assemble(
+            _NO_MESSAGE, budget_bytes=budget_bytes, candidates=candidates
+        )
+
     def build(
         self,
         current_message: object,
@@ -170,24 +213,54 @@ class ContextBuilder:
         Step 3 has no path where a source is silently skipped. Every source in
         the policy is visited, and every visit ends in one of the two lists.
         """
+        return self._assemble(
+            current_message, budget_bytes=budget_bytes, candidates=candidates
+        )
+
+    def _assemble(
+        self,
+        current_message: object,
+        *,
+        budget_bytes: Optional[int],
+        candidates: Sequence[RetrievedCandidate],
+    ) -> LocalContextPack:
+        """The one assembly path. :data:`_NO_MESSAGE` means no message to carry.
+
+        :data:`_NO_MESSAGE` is the only value that skips the message, and it is
+        reachable only from :meth:`build_without_message` — :meth:`build` passes
+        whatever it was given, so a caller that supplies ``None`` there still
+        gets `CurrentMessageInvalid` from :func:`_valid_message`.
+        """
         total = _valid_budget(self._total if budget_bytes is None else budget_bytes)
-        message = _valid_message(current_message)
         observed = self._clock()
 
-        used = encoded_length(message)
-        if used > total:
-            raise CurrentMessageOversize(used, total)
-
-        parts: List[ContextPart] = [
-            ContextPart(
-                source_kind=KIND_USER_INSTRUCTION,
-                source_ref=user_ref(),
-                observed_at=observed,
-                selection=SELECTION_WHOLE,
-                text=message,
-            )
-        ]
+        parts: List[ContextPart] = []
         omissions: List[ContextOmission] = []
+        used = 0
+
+        if current_message is _NO_MESSAGE:
+            omissions.append(
+                ContextOmission(
+                    source_ref=user_ref(),
+                    source_kind=KIND_USER_INSTRUCTION,
+                    reason=OMIT_NO_CURRENT_MESSAGE,
+                    detail="this build carries no user message; none was supplied",
+                )
+            )
+        else:
+            message = _valid_message(current_message)
+            used = encoded_length(message)
+            if used > total:
+                raise CurrentMessageOversize(used, total)
+            parts.append(
+                ContextPart(
+                    source_kind=KIND_USER_INSTRUCTION,
+                    source_ref=user_ref(),
+                    observed_at=observed,
+                    selection=SELECTION_WHOLE,
+                    text=message,
+                )
+            )
 
         snapshot = self._workspaces.current()
         workspace = snapshot.get("workspace") or {}

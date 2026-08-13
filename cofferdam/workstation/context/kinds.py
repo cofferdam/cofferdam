@@ -148,6 +148,15 @@ OMIT_BUDGET_EXHAUSTED = "budget_exhausted"
 #: does not exist yet**. Recorded rather than skipped so that "there is no
 #: evaluation here" is a statement rather than an absence somebody has to
 #: interpret. Nothing is fabricated to fill it.
+#: There was no user message in this request at all (M2J PR4).
+#:
+#: Distinct from every other reason here: the others are about a source that
+#: could not be read. This one is about a request shape — `get_project_context`
+#: asks what a project's state is, not for help with a sentence — and it exists
+#: so that a pack without a message says so instead of looking like one whose
+#: message went missing.
+OMIT_NO_CURRENT_MESSAGE = "no_current_message"
+
 OMIT_NOT_IN_THIS_BUILD = "source_not_in_this_build"
 
 OMISSION_REASONS: Tuple[str, ...] = (
@@ -235,6 +244,7 @@ __all__ = [
     "OMIT_BUDGET_EXHAUSTED",
     "OMIT_EXPLICIT_SECTION_MISSING",
     "OMIT_GRANT_ABSENT",
+    "OMIT_NO_CURRENT_MESSAGE",
     "OMIT_NOT_IN_THIS_BUILD",
     "OMIT_NO_ACTIVE_WORKSPACE",
     "OMIT_SOURCE_ABSENT",
