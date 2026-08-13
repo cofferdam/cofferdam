@@ -733,6 +733,43 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2J PR4 — read-only project-context surfaces
+
+On `feat/m2j-pr4-project-context-read`, from the merged `5afaa8e`. **Not deployed and not merged.**
+The first milestone that may expose project context outside this host, and it consumes the PR3.5
+boundary rather than reopening it.
+
+**Two routes, one object.** `GET /api/projects/{project_id}/context` on the daemon and
+`getProjectContext` on the Actions bridge both return a serialized `CloudContextProjection`.
+`serialize_project_context` refuses anything else **by type** — a `LocalContextPack` duck-types past
+a looser check, because it also has `to_dict`, `version` and `parts`.
+
+**`project_id` is not workspace selection.** It resolves to the one enabled workspace naming that
+project, and that workspace must be the active one; otherwise `workspace_not_active`. Zero matches,
+several matches, a disabled workspace and a disabled project are four more distinct refusals. There
+is no "pick the first one" anywhere in the path.
+
+**The pack is built with no user message** (D-2026-08-13-5) rather than with a fake one.
+
+**Bridge scope.** A third dependency, `require_context_caller`, admits the device token or the
+bridge credential on this one GET. It is deliberately *not* a reuse of `require_task_caller`:
+sharing one would mean a later task route silently gaining context authority, or a later context
+change silently reaching the task surface. The bridge still cannot read Mind, mutate Working
+Context, activate a workspace, create a task or touch the filesystem — asserted by tests that
+present the real credential to seven routes and get seven 401s.
+
+**Bounded transport.** 128 KiB serialized ceiling, refused rather than trimmed (`response_too_large`),
+on top of the unchanged 16 KiB content budget.
+
+**Read-only, and PR4 owns no mutation.** No `syncWorkspace`, no objective editing, no workspace
+switching, no proposal, no task. Ten consecutive reads leave Working Context, the objective, the
+task list and the filesystem byte-identical.
+
+**PWA.** One panel, two labelled columns — local host-only state beside the cloud-safe projection —
+so the boundary is visible rather than implied. It shows the policy id, budget usage, projected
+parts behind a disclosure, omission counts by reason, and the projection's own carried limitations.
+It makes no "secret-free" claim.
+
 ### M2J PR3.5.1 — projection sanitizer hardening
 
 On `feat/m2j-pr351-projection-sanitizer-hardening`, from the merged `c24be24f`. **Not deployed and

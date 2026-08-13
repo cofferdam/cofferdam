@@ -1337,6 +1337,7 @@
     // And the tasks panel, which holds the most personal content in the
     // product: what somebody asked the workstation to do, and what it answered.
     if (global.CofferdamTasks) { global.CofferdamTasks.stop(); }
+    if (global.CofferdamContext) { global.CofferdamContext.stop(); }
     // And Remote Control, which holds a capability URL for the length of one
     // navigation and must not keep polling for a session on a forgotten token.
     if (global.CofferdamRemote) { global.CofferdamRemote.stop(); }
@@ -1412,6 +1413,22 @@
       if (global.CofferdamTasks) {
         global.CofferdamTasks.mount({ api: api, escapeHtml: escapeHtml, el: el })
           .catch(function () { /* tasks.js renders its own failure state */ });
+      }
+      // Project context (M2J PR4). Read-only, and isolated like every panel
+      // here: a host with no active workspace, or a project whose workspace is
+      // not the active one, is a state context.js renders itself. It must never
+      // take the control panel down with it.
+      if (global.CofferdamContext) {
+        global.CofferdamContext.mount({ api: api, escapeHtml: escapeHtml, el: el });
+        api("/api/workspace/current")
+          .then(function (snapshot) {
+            global.CofferdamContext.setWorkspace(snapshot && snapshot.workspace
+              ? Object.assign({}, snapshot.workspace,
+                  { working_context: snapshot.working_context })
+              : null);
+            return global.CofferdamContext.refresh();
+          })
+          .catch(function () { /* context.js renders its own failure state */ });
       }
       // Remote Control (M2H Lane A). Same isolation: a workstation with no
       // Remote Control unit installed, or a registry where no project has the

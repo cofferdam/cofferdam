@@ -1857,6 +1857,35 @@ external surface may return a `LocalContextPack`, or anything derived from one, 
 `CloudContextProjection` produced by a named egress policy. Narrowing PR4's scope narrows what has
 to clear that gate; it does not lower it.
 
+## D-2026-08-13-5 — A pack may be built without a message, and never with a fake one (EFE DECISION, ACTIVE)
+
+**Decision.** `ContextBuilder` gains a second entry point, `build_without_message()`, which
+assembles the ordinary pack **minus** its highest-priority part and records an omission saying so.
+`build()` is unchanged, and `build(None)` still refuses.
+
+**The alternative that was refused.** `get_project_context` has no user message — the Custom GPT
+already has the conversation, and the PWA panel is not asking anything. The obvious shortcut was to
+pass a synthetic marker so the existing signature was satisfied. That would have placed non-user
+text in the pack as `source_kind=user_instruction`, `source_ref=user:current_message` — a part whose
+kind and reference disagree with the truth, which is **precisely** the shape
+[D-2026-08-13-3](#d-2026-08-13-3--cloudcontextprojection-is-m2j-pr35-and-it-is-the-gate-on-pr4-efe-decision-active)'s
+projector refuses from a producer as `source_kind_mismatch`. A rule the builder breaks quietly is
+worse than no rule, and provenance that is true except when it is inconvenient is not provenance.
+
+**Why this is a narrowing and not a widening.** No source is added, no role becomes readable, no
+bound is relaxed, and the method takes no argument that selects anything — it has no parameters
+beyond the budget and candidate seams `build()` already had. The result is a strict subset of what
+`build()` could produce. A caller cannot use it to reach material `build()` could not.
+
+**`None` is not the spelling.** A private module sentinel marks "there is no message", so
+`build(None)` remains `CurrentMessageInvalid`. A caller arriving at the message path with nothing in
+hand is a bug, not a request for a message-free pack, and one value cannot mean both.
+
+**What still holds.** `user:current_message` remains denied by `project_context_external_v1`
+regardless — the pack simply no longer has one to deny. The omission row uses its own reason,
+`no_current_message`, rather than borrowing `source_not_in_this_build`, because "this request had no
+message" and "this build has no evaluator" are different facts.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

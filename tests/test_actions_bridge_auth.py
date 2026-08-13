@@ -179,6 +179,8 @@ class BridgeAuthTests(unittest.TestCase):
             {
                 "/v1/health",
                 "/v1/projects",
+                # M2J PR4 — the read surface. One GET, no mutation.
+                "/v1/projects/{project_id}/context",
                 "/v1/tasks",
                 "/v1/tasks/{task_id}",
                 "/v1/tasks/{task_id}/answer",
@@ -187,7 +189,7 @@ class BridgeAuthTests(unittest.TestCase):
                 "/v1/tasks/{task_id}/finish",
             },
         )
-        self.assertEqual(len(OPERATION_IDS), 9)
+        self.assertEqual(len(OPERATION_IDS), 10)
 
     def test_there_is_no_generic_proxy_path(self) -> None:
         """Not refused — absent. Each of these is a 404 with no handler."""

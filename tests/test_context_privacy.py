@@ -74,10 +74,37 @@ class Egress(ContextHarness):
         from cofferdam.workstation.context import ContextBuilder
 
         public = [name for name in dir(ContextBuilder) if not name.startswith("_")]
-        self.assertEqual(public, ["build"])
+        # M2J PR4 added `build_without_message` — a second way to ask for a pack,
+        # not a second kind of thing to get. It is named for how it differs from
+        # `build` rather than for the caller that wanted it, which is also what
+        # keeps it clear of the substring guard below: a builder method with
+        # "project" in its name is exactly what this test exists to catch.
+        self.assertEqual(public, ["build", "build_without_message"])
         for name in public:
             for forbidden in ("send", "submit", "post", "upload", "project", "prompt"):
                 self.assertNotIn(forbidden, name.lower())
+
+    def test_the_message_free_build_still_refuses_a_missing_message_on_build(self):
+        """`build(None)` is a bug, not a request for a message-free pack."""
+        from cofferdam.workstation.context import CurrentMessageInvalid
+
+        self.activate()
+        for value in (None, "", "   ", 42):
+            with self.assertRaises(CurrentMessageInvalid):
+                self.builder.build(value)
+
+    def test_the_message_free_build_carries_no_user_part_and_says_so(self):
+        from cofferdam.workstation.context import OMIT_NO_CURRENT_MESSAGE
+
+        self.activate()
+        pack = self.builder.build_without_message()
+        self.assertEqual(
+            [part for part in pack.parts if part.source_kind == "user_instruction"], []
+        )
+        reasons = {omission.reason for omission in pack.omissions}
+        self.assertIn(OMIT_NO_CURRENT_MESSAGE, reasons)
+        blob = json.dumps(pack.to_dict())
+        self.assertNotIn("user:current_message\", \"observed_at", blob)
 
     def test_the_pack_has_no_prompt_or_message_array_shape(self):
         self.activate()

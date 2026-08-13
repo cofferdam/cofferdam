@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 import time
 from typing import Any, Dict, Optional, Set
 
@@ -137,6 +138,13 @@ OP_ANSWER = "submitChoiceAnswer"
 OP_FOLLOWUP = "sendFollowup"
 OP_CANCEL = "cancelTask"
 OP_FINISH = "finishTask"
+#: M2J PR4. The capability is `get_project_context` in prose and in the Custom
+#: GPT instructions; the operationId follows this file's camelCase convention.
+OP_PROJECT_CONTEXT = "getProjectContext"
+
+#: A project id as the registry publishes one. No slash, no dot-dot, no percent
+#: — a traversal attempt is refused here rather than escaped and forwarded.
+_PROJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 OPERATION_IDS = (
     OP_HEALTH,
@@ -148,6 +156,7 @@ OPERATION_IDS = (
     OP_FOLLOWUP,
     OP_CANCEL,
     OP_FINISH,
+    OP_PROJECT_CONTEXT,
 )
 
 #: The operations that change something.
@@ -572,6 +581,32 @@ def create_bridge_app(
             )
         return value
 
+    def _project_id(value: Any) -> str:
+        """A project id, or a 404. Refused rather than escaped.
+
+        404 rather than 422 for the reason `_task_id` gives: a malformed id and
+        an id for a project that is not exposed are the same answer to a caller
+        who should not be able to tell which it sent. The character class is
+        deliberately narrower than anything a path needs — no slash, no dot-dot,
+        no percent — so a traversal attempt fails here rather than being
+        percent-encoded into a legal-looking segment and forwarded.
+        """
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value) > 64
+            or not _PROJECT_ID.match(value)
+        ):
+            raise BridgeError(
+                code=CODE_NOT_FOUND,
+                message=(
+                    "No such project. Call listProjects to get a current "
+                    "project_id rather than reconstructing one."
+                ),
+                status_code=status_for(CODE_NOT_FOUND),
+            )
+        return value
+
     # -- the idempotent mutation wrapper -------------------------------------
 
     def _claim(operation: str, scope: str, request_key: str, payload: Dict[str, Any]):
@@ -808,6 +843,44 @@ def create_bridge_app(
         return _ok(recent_tasks_view(payload, limit=bounded))
 
     # -- 4. sync_task ---------------------------------------------------------
+
+    @app.get(
+        "/v1/projects/{project_id}/context",
+        dependencies=[Depends(require_bridge_key)],
+    )
+    async def get_project_context(request: Request, project_id: str):
+        """Bounded, cloud-safe project context for one project (M2J PR4).
+
+        The bridge is a transport here and nothing more. It does not build a
+        `LocalContextPack`, import Cofferdam Mind, open a project file, resolve a
+        root, or own any part of the egress policy — the workstation does all of
+        that behind `project_context_external_v1` and hands back a serialized
+        `CloudContextProjection`, which this forwards unchanged.
+
+        **Read-only.** No task is created, nothing is claimed, no idempotency key
+        is required, and repeating the call changes nothing on the host.
+        """
+        _mark(request, OP_PROJECT_CONTEXT)
+        checked = _project_id(project_id)
+        payload = await run_in_threadpool(
+            internal_client.get_project_context, checked
+        )
+        payload = payload if isinstance(payload, dict) else {}
+
+        # Rebuilt field by field rather than forwarded. The internal client
+        # attaches `_status` for the bridge's own use, and a route that returns
+        # the upstream dict wholesale publishes whatever the daemon or the client
+        # happens to add to it later. Naming the four fields means a new internal
+        # key cannot reach a caller by accident.
+        context = payload.get("context")
+        return _ok(
+            {
+                "version": payload.get("version"),
+                "project_id": payload.get("project_id"),
+                "workspace_id": payload.get("workspace_id"),
+                "context": context if isinstance(context, dict) else {},
+            }
+        )
 
     @app.get("/v1/tasks/{task_id}", dependencies=[Depends(require_bridge_key)])
     async def sync_task(request: Request, task_id: str):
