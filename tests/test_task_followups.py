@@ -1011,8 +1011,16 @@ class SeparationTests(FollowupTestCase):
 
 
 class MigrationTests(TaskTestCase):
-    def test_the_schema_version_is_three(self) -> None:
-        self.assertEqual(store_module.SCHEMA_VERSION, 3)
+    def test_the_schema_version_is_at_least_three(self) -> None:
+        """Turns arrived in version 3 and every later version is additive.
+
+        Asserted as a floor rather than an equality: M2K PR1 took the schema to
+        4 by adding two tables, and pinning the exact number here would make
+        every future additive migration look like a follow-ups regression.
+        What this file actually cares about is that a database carrying turns is
+        readable, which the tests below check directly.
+        """
+        self.assertGreaterEqual(store_module.SCHEMA_VERSION, 3)
 
     def test_a_version_two_database_gains_the_turn_table_and_keeps_its_rows(
         self,
@@ -1062,7 +1070,11 @@ class MigrationTests(TaskTestCase):
             ).fetchone()[0]
         finally:
             connection.close()
-        self.assertEqual(int(value), 3)
+        # The version moved to whatever this build's current schema is — 3 when
+        # this test was written, 4 since M2K PR1 added the claim tables. The
+        # property under test is that opening an old database advances it and
+        # keeps the rows, not which number it advanced to.
+        self.assertEqual(int(value), store_module.SCHEMA_VERSION)
 
     def test_a_task_predating_turns_still_reports_its_terminal_outcome(self) -> None:
         """No turn row is an ordinary answer, not a missing record.

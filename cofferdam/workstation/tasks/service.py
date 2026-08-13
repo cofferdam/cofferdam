@@ -1197,6 +1197,53 @@ class TaskService:
             correlation_id=row.correlation_id,
         )
 
+    def _record_change_claims(self, row: "TaskRow", outcome: Any) -> None:
+        """Persist an outcome's change claims, resolving project authority here.
+
+        The root comes from the **task's** project through the host-owned
+        registry and is re-verified with :func:`verify_root` at this moment —
+        not from the adapter, and not from a value cached when the task started.
+        A project whose root was edited, removed or replaced by a link since the
+        task began must fail the claim's containment check rather than be
+        trusted because it was valid earlier.
+
+        Failure is swallowed for the reason :meth:`_open_turn` gives: a claim is
+        *evidence about* a task, and a store that cannot write one must not also
+        lose the task it belongs to. What is lost is a row, and a reader sees
+        fewer claims — never a wrong one.
+        """
+        submissions = tuple(getattr(outcome, "change_claims", ()) or ())
+        if not submissions:
+            return
+        try:
+            project = self._projects.get(row.project_id)
+        except TaskError:
+            # The project the task named is gone or disabled. Containment cannot
+            # be established against a root that no longer has authority, so
+            # nothing is recorded rather than recorded against a guess.
+            return
+        try:
+            root = verify_root(project.root)
+        except TaskError:
+            return
+
+        turn = None
+        try:
+            open_turn = self._store.current_turn(row.task_id)
+            turn = open_turn.turn_number if open_turn is not None else None
+        except TaskError:  # pragma: no cover - defensive
+            turn = None
+
+        try:
+            self._store.record_change_claims(
+                row.task_id,
+                submissions,
+                project_root=root,
+                turn_number=turn,
+            )
+        except TaskError:  # pragma: no cover - defensive
+            return
+
     def _clarification_to_open(
         self, row: TaskRow, outcome
     ) -> Optional[PendingClarification]:
@@ -1331,6 +1378,18 @@ class TaskService:
                     for reference in observations[:MAX_EVIDENCE_ITEMS]
                 ),
             )
+
+        # Change claims, if the adapter reported any (M2K PR1). Recorded after
+        # the observation event above and deliberately *not* merged with it: an
+        # observation is what Cofferdam saw, a claim is what the worker said, and
+        # the whole milestone rests on those staying two records.
+        #
+        # Nothing here compares the two. A claim naming a path that the git
+        # observation also names is not marked verified, is not cross-referenced
+        # and is not counted as agreement — that comparison is M2K PR2's, and
+        # doing it at record time would let a claim become believed as a side
+        # effect of arriving next to an observation.
+        self._record_change_claims(row, outcome)
 
         requested = outcome.requested_state
         asked = self._clarification_to_open(row, outcome)

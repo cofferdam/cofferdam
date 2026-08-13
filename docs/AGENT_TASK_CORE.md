@@ -320,6 +320,42 @@ exists.
 | Schema version | recorded in `schema_meta`; a database written by a **newer** build is refused rather than migrated backwards |
 | Secrets | none, ever — no tokens, no credentials, no adapter authentication state |
 
+### Change claims and artifacts (M2K PR1, schema v4)
+
+Two tables carry the **claim** side of evidence, which Task Core did not have. They are additive:
+created by the same `CREATE TABLE IF NOT EXISTS` script every start already runs, with no existing
+column moved, retyped or constrained, so a version-3 database becomes a version-4 one by being
+opened and a task written before them simply has no claims.
+
+| Table | What it holds | Provenance |
+| --- | --- | --- |
+| `task_change_claims` | what a worker **said** it changed: a closed operation (`created`, `modified`, `deleted`, `renamed`), a project-relative path, the turn it was claimed in | `adapter_reported`, always |
+| `task_artifacts` | what Cofferdam **saw** when it opened that path: digest, byte size, bounded preview, or a reason it saw nothing | `os_observed`, always |
+
+**Why two tables and not more columns on one.** D-2026-08-11-6 says every field carries its source
+kind. A single row holding both a claimed path and a Cofferdam-computed SHA-256 would need one
+`source` value covering two different kinds of statement, and whichever it held would misdescribe
+the other field. So `source` is not a stored column at all: it is a constant on each record type,
+and no code path can write a claim that says it was observed.
+
+**Why not `task_events.evidence_json`.** That column is a capped list of bounded *pointers* for
+display, and it stays exactly what it was. A claim needs an identity an artifact row can reference,
+a turn it belongs to, and a closed operation an evaluator can compare — none of which a JSON blob
+on an event can carry without becoming a second schema nobody validates.
+
+**Record time is when everything is decided.** The project root is resolved from the task's project
+through the host-owned registry and re-verified at the moment of recording; the path is checked
+lexically, then denied outright if it matches the code-owned secret-path list, then opened through
+the descriptor-relative walk `mind/documents.py` owns — so a symlink at any component is refused by
+the kernel rather than by a comparison afterwards. Denied content is never read, so it never enters
+the database and cannot be served later by a surface that does not exist yet. The claim is still
+recorded: that a worker claimed a credential file and Cofferdam refused to look is a fact worth
+keeping.
+
+**No comparison lives here.** Nothing matches a claim against an observation, and no field records a
+verdict, a confidence or a risk level. That is the next milestone's work, and doing it at record
+time would let a claim become believed as a side effect of being written down.
+
 **Backup and corruption.** The database holds task content and no secrets, so it
 can be copied with the rest of `$COFFERDAM_HOME`. If it is corrupted, SQLite
 refuses to open it and the task routes answer `task_store_unavailable`
