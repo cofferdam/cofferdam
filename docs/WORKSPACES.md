@@ -214,8 +214,9 @@ and no file appears.
 ## What is not in this milestone
 
 No mind, vault, `USER.md`, project-memory reading or memory proposals — those are **PR2**, which
-is now built; see [`docs/MIND.md`](MIND.md). No Context Builder,
-`LocalContextPack` or `CloudContextProjection` (PR3). No PWA panel and no `syncWorkspace` (PR4). No
+is now built; see [`docs/MIND.md`](MIND.md). No Context Builder or
+`LocalContextPack` (PR3). No `CloudContextProjection` and no egress policy (PR3.5). No PWA panel
+and no `syncWorkspace` (PR4). No
 evidence bundles or evaluation (M2K). No planner, model runtime or Ollama (M2L). No dashboard
 (M2M). No workspace creation over the API, and no automatic workspace for an existing project —
 D-2026-08-11-1 says suggested and confirmed, never silently auto-created, and PR1's honest form of

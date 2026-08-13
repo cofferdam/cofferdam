@@ -41,10 +41,15 @@ context; turning context into a request belongs to the planner (M2L), which does
 not exist.
 
 **Not a `CloudContextProjection`.** D-2026-08-11-5 makes the pack that *leaves*
-the host a separate type built by an explicit egress policy. That type is not in
-this build, and this PR adds no path toward one — no provider client, no bridge
+the host a separate type built by an explicit egress policy. That type was not in
+the PR3 build, and PR3 adds no path toward one — no provider client, no bridge
 Action, no worker context, no serializer to a wire format. The local pack is
 allowed to be rich precisely because nothing can send it.
+
+**M2J PR3.5 built it** (D-2026-08-13-3), and the separation is unchanged: the
+projection is a different type, produced only by an explicit policy step, and
+nothing on this page grants egress to anything. See
+[`docs/CLOUD_CONTEXT_PROJECTION.md`](CLOUD_CONTEXT_PROJECTION.md).
 
 **Not retrieval.** Selection is either a reference somebody recorded or a bounded
 structural slice, and every part is labelled with which. D-2026-08-12-4 makes
@@ -237,14 +242,15 @@ that these are separate questions with separate answers:
 |---|---|---|
 | **Read authority** | may Cofferdam open this at all? | the host-owned grant and the role map |
 | **Context inclusion** | should this be in *this* pack? | context policy — this page |
-| **Egress permission** | may this leave the host? | `CloudContextProjection`, D-2026-08-11-5 |
+| **Egress permission** | may this leave the host? | [`CloudContextProjection`](CLOUD_CONTEXT_PROJECTION.md), D-2026-08-11-5 |
 
 > **Mind read authority ≠ automatic context inclusion.**
 > **`LocalContextPack` inclusion ≠ `CloudContextProjection` permission.**
 
 Cloud egress is an entirely separate policy and nothing on this page touches it.
 A part being in a local pack says nothing whatsoever about whether it may leave
-the machine.
+the machine — and the egress policy proves it, by denying `communication_style`
+and `preferences` even though this page includes both.
 
 ### The default eligible roles
 
@@ -346,7 +352,8 @@ pack = builder.build("what should I do next?")
 
 ## What is not in this milestone
 
-- `CloudContextProjection`, and any egress of any kind.
+- `CloudContextProjection`, and any egress of any kind. That is **PR3.5**, which
+  is now built on its own branch and is a hard gate on PR4 (D-2026-08-13-3).
 - Any provider, model runtime, tokenizer or local model.
 - Embeddings, vectors, semantic retrieval, links or backlinks traversal (M2N).
 - Evidence, evaluation and the `EvidenceBundle` (M2K).
