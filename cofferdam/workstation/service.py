@@ -344,7 +344,23 @@ from .tasks.models import (
     ORIGIN_PWA,
     TASK_API_VERSION,
 )
+from .context import ContextBuilder
 from .mind import MindService, MindStore
+from .projectcontext import (
+    REASON_CONTEXT_UNAVAILABLE as READ_CONTEXT_UNAVAILABLE,
+    REASON_INVALID_PROJECT_ID as READ_INVALID_PROJECT_ID,
+    REASON_PROJECTION_FAILED as READ_PROJECTION_FAILED,
+    REASON_PROJECT_DISABLED as READ_PROJECT_DISABLED,
+    REASON_PROJECT_NOT_FOUND as READ_PROJECT_NOT_FOUND,
+    REASON_RESPONSE_TOO_LARGE as READ_RESPONSE_TOO_LARGE,
+    REASON_WORKSPACE_AMBIGUOUS as READ_WORKSPACE_AMBIGUOUS,
+    REASON_WORKSPACE_DISABLED as READ_WORKSPACE_DISABLED,
+    REASON_WORKSPACE_NOT_ACTIVE as READ_WORKSPACE_NOT_ACTIVE,
+    REASON_WORKSPACE_NOT_CONFIGURED as READ_WORKSPACE_NOT_CONFIGURED,
+    ProjectContextService,
+    ProjectContextUnavailable,
+    serialize_project_context,
+)
 from .mind.errors import (
     CODE_APPLY_FAILED,
     CODE_RESOLUTION_UNSUPPORTED,
@@ -596,6 +612,24 @@ TASK_CONTENT_HEADERS = {"Cache-Control": "no-store"}
 #: `curl` on the tailnet. One credential, one word, unchanged since M1.
 CALLER_PWA = "pwa"
 #: The M2I.5 Custom GPT Actions bridge, holding its own 0600 credential.
+#: HTTP status per project-context refusal. Closed map, no default leak.
+#:
+#: 404 for "there is no such thing", 409 for "there is, and the host is not in a
+#: state to answer", 422 for a malformed id, 500 only for the two internal
+#: failures. A refusal never carries a path — see `projectcontext.py`.
+_CONTEXT_STATUS = {
+    READ_INVALID_PROJECT_ID: 422,
+    READ_PROJECT_NOT_FOUND: 404,
+    READ_PROJECT_DISABLED: 409,
+    READ_WORKSPACE_NOT_CONFIGURED: 404,
+    READ_WORKSPACE_AMBIGUOUS: 409,
+    READ_WORKSPACE_DISABLED: 409,
+    READ_WORKSPACE_NOT_ACTIVE: 409,
+    READ_CONTEXT_UNAVAILABLE: 500,
+    READ_PROJECTION_FAILED: 500,
+    READ_RESPONSE_TOO_LARGE: 500,
+}
+
 CALLER_ACTIONS_BRIDGE = "actions_bridge"
 
 #: Caller to the ``origin`` recorded on a task it creates. Both entries are
@@ -862,6 +896,17 @@ def create_app(
     if mind is None:
         mind = MindService(config, MindStore(config), workspaces=workspaces)
 
+    # M2J PR4. The Context Builder finally has a caller — and it is this one,
+    # behind the egress policy, rather than anything that could return a pack.
+    # Constructed unconditionally and inert on a host with no workspace: the read
+    # refuses with `workspace_not_active` rather than erroring.
+    project_context_service = ProjectContextService(
+        config=config,
+        workspaces=workspaces,
+        projects=tasks.projects,
+        builder=ContextBuilder(workspaces=workspaces, mind=mind),
+    )
+
     # Classify any apply that was claimed and never finished, before the first
     # request is served. **Nothing is resumed**: recovery reads the durable row
     # and the document's own hash and records which of three things is true —
@@ -987,6 +1032,38 @@ def create_app(
         never see it. It is derived here from the credential and is not
         touchable from a header, a query string or a body — there is no field
         anywhere in this API for a caller to name itself.
+        """
+        candidate = _presented(request)
+        if _token_matches(candidate):
+            request.state.caller = CALLER_PWA
+            return
+        if _bridge_token_matches(candidate):
+            request.state.caller = CALLER_ACTIONS_BRIDGE
+            return
+        raise ApiError(
+            code=CODE_UNAUTHORIZED,
+            message="a valid device token is required",
+            status_code=401,
+        )
+
+    async def require_context_caller(request: Request) -> None:
+        """Either internal credential, on the **one** project-context read.
+
+        Its own dependency rather than a reuse of ``require_task_caller`` (M2J
+        PR4). The two admit the same pair of credentials and that is exactly why
+        they must stay separate: sharing one would mean a later route added to
+        the task surface silently became reachable with context authority, and a
+        later widening of context authority silently reached the task surface.
+        One dependency per bounded surface is what keeps "what can the bridge
+        do?" answerable by reading a list of routes.
+
+        What this grants the bridge credential, in full: one GET, for one
+        project id, returning a `CloudContextProjection` that the host built.
+        It grants **no** raw Mind read — `/api/mind*` still uses
+        ``require_token`` and has never heard of this credential — no Working
+        Context write, no workspace activation, no objective, no proposal, no
+        task, and no filesystem authority of any kind. There is no field in this
+        request for a path, a role, a policy or a redaction rule.
         """
         candidate = _presented(request)
         if _token_matches(candidate):
@@ -2641,6 +2718,46 @@ def create_app(
                 status_code=_TASK_STATUS.get(rejection.code, 422),
                 detail=rejection.detail,
             )
+
+    @app.get(
+        "/api/projects/{project_id}/context",
+        dependencies=[Depends(require_context_caller)],
+    )
+    async def project_context(project_id: str) -> JSONResponse:
+        """Bounded, cloud-eligible project context. **The only egress read.**
+
+        M2J PR4, and the first route in this product whose response is shaped to
+        leave the host. What it returns is a serialized `CloudContextProjection`
+        produced by the named policy `project_context_external_v1` — never a
+        `LocalContextPack`, which the serializer refuses by type.
+
+        The caller names one project and nothing else. There is no field here for
+        a path, a root, a Mind role, a `source_ref`, a policy id, an allowlist or
+        a redaction rule, because a caller able to name what it receives would be
+        deciding its own permissions.
+
+        **Read-only, and idempotent.** No task, no event, no Working Context
+        revision, no proposal, no write of any kind. Repeating it is free and
+        changes nothing, which is why it carries no idempotency key.
+
+        `no-store` for the same reason `/api/workspace/current` does: the body
+        carries the operator's own words about their own project.
+        """
+        try:
+            resolved = await run_in_threadpool(
+                project_context_service.project_context, project_id
+            )
+            payload = await run_in_threadpool(serialize_project_context, resolved)
+        except ProjectContextUnavailable as unavailable:
+            # The reason is a closed code; the message is code-owned text. The
+            # original exception never reaches here as a string, because an
+            # upstream message is where a path escapes a refusal.
+            raise ApiError(
+                code=unavailable.reason,
+                message=unavailable.message,
+                status_code=_CONTEXT_STATUS.get(unavailable.reason, 409),
+            )
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/workspaces", dependencies=[Depends(require_token)])
     async def list_workspaces() -> Dict[str, Any]:

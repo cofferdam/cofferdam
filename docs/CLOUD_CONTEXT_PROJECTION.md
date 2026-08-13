@@ -303,6 +303,36 @@ A surface that transmits one still owns everything projection deliberately does
 not: **authentication, authorization, a named destination contract, and the
 user-consequence semantics** that go with a request that has effects.
 
+## The surface that consumes this (M2J PR4)
+
+`GET /api/projects/{project_id}/context` on the workstation, and
+`getProjectContext` on the Actions bridge. Both return a **serialized
+`CloudContextProjection`** and nothing else; `serialize_project_context` refuses
+any other type, including a `LocalContextPack`, which duck-types past a looser
+check because it also has `to_dict`, `version` and `parts`.
+
+- **`project_id` reads the active workspace only.** It resolves to the one
+  *enabled* workspace naming that project, and that workspace must be the active
+  one — otherwise `workspace_not_active`. The builder is active-workspace-scoped
+  by PR3's design, and letting a caller name any workspace would hand it the
+  choice of whose memory is read.
+- **The pack is built without a user message** (D-2026-08-13-5), so there is no
+  `user:current_message` part to exclude rather than a fake one to deny.
+- **`HostRedactionEnvironment` is host-owned**: operational home, the
+  registry-resolved project root, the granted vault root, both A/B slot roots.
+  `.none()` is never called on the request path, and a test asserts that on the
+  parsed tree rather than by scanning text.
+- **The serialized body is capped at 128 KiB** and **refused, never trimmed** —
+  `response_too_large`. That is a transport bound on top of this page's 16 KiB
+  content budget, because 16 KiB of content can reach 96 KiB once every character
+  escapes to `\uXXXX`. Slicing JSON to fit produces something that is not JSON,
+  and dropping parts there would be a second egress policy underneath the named
+  one.
+- **Read-only.** No task, no event, no Working Context revision, no proposal, no
+  write. Repeating the call is free, so it carries no idempotency key.
+
+`syncWorkspace` is **not** here and is not PR4's — see D-2026-08-13-4.
+
 ## The invariant that gates PR4
 
 > **No external surface may return a `LocalContextPack`, or anything derived from

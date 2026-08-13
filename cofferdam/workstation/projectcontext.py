@@ -80,6 +80,7 @@ REASON_WORKSPACE_NOT_ACTIVE = "workspace_not_active"
 REASON_CONTEXT_UNAVAILABLE = "context_unavailable"
 REASON_PROJECTION_FAILED = "projection_failed"
 REASON_INVALID_PROJECT_ID = "invalid_project_id"
+REASON_RESPONSE_TOO_LARGE = "response_too_large"
 
 READ_REASONS: Tuple[str, ...] = (
     REASON_INVALID_PROJECT_ID,
@@ -91,6 +92,7 @@ READ_REASONS: Tuple[str, ...] = (
     REASON_WORKSPACE_NOT_ACTIVE,
     REASON_CONTEXT_UNAVAILABLE,
     REASON_PROJECTION_FAILED,
+    REASON_RESPONSE_TOO_LARGE,
 )
 
 
@@ -381,12 +383,25 @@ def serialize_project_context(resolved: object) -> Dict[str, Any]:
         )
 
     body = projection.to_dict()
-    return {
+    payload = {
         "version": PROJECT_CONTEXT_API_VERSION,
         "project_id": resolved.project_id,
         "workspace_id": resolved.workspace_id,
         "context": body,
     }
+
+    # Measured on the exact bytes that would be sent, after escaping, and
+    # **refused** rather than trimmed. Slicing a JSON document to fit a byte
+    # count produces something that is not JSON, and dropping parts here would
+    # be a second egress policy sitting underneath the named one — the projector
+    # already decided what may leave, and transport does not get to revise it.
+    size = serialized_size(payload)
+    if size > MAX_SERIALIZED_RESPONSE_BYTES:
+        raise ProjectContextUnavailable(
+            REASON_RESPONSE_TOO_LARGE,
+            "the projected context does not fit the response contract",
+        )
+    return payload
 
 
 def serialized_size(payload: Dict[str, Any]) -> int:
@@ -401,6 +416,7 @@ __all__ = [
     "MAX_PROJECT_ID_CHARS",
     "MAX_SERIALIZED_RESPONSE_BYTES",
     "PROJECT_CONTEXT_API_VERSION",
+    "REASON_RESPONSE_TOO_LARGE",
     "serialize_project_context",
     "serialized_size",
     "READ_REASONS",

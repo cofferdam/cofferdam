@@ -84,6 +84,22 @@
       <div data-remote-body></div>
     </section>
 
+    <section class="panel" id="contextPanel">
+      <div class="panel-head">
+        <h2>Project context</h2>
+        <div class="row tight">
+          <button id="contextRefresh" class="ghost">Refresh</button>
+        </div>
+      </div>
+      <p class="muted">
+        What this workspace holds locally, beside <strong>what an authorised external surface
+        would receive</strong> if it asked. They are different objects: the projection is reduced
+        by a named egress policy on this host. Building one does <strong>not</strong> send it
+        anywhere &mdash; nothing here transmits.
+      </p>
+      <div id="contextBody"><p class="muted">Loading&hellip;</p></div>
+    </section>
+
     <section class="panel" id="tasksPanel">
       <div class="panel-head">
         <h2>Tasks</h2>
@@ -262,6 +278,7 @@
 <script src="/audio.js"></script>
 <script src="/spotify.js"></script>
 <script src="/youtube.js"></script>
+<script src="/context.js"></script>
 <script src="/tasks.js"></script>
 <script src="/remote.js"></script>
 <script src="/app.js"></script>

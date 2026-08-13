@@ -80,6 +80,55 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
 
+  /v1/projects/{project_id}/context:
+    get:
+      operationId: getProjectContext
+      summary: Read the current cloud-safe project context for one project.
+      description: >-
+        Bounded project context: objective, expected next step and extracts of
+        status, plan and decisions, reduced by the host's egress policy. NOT raw
+        memory — personal notes are excluded and paths are redacted. Read-only.
+        Call it when you need current project state.
+      x-openai-isConsequential: false
+      parameters:
+        # Inlined rather than $ref-ed into components.parameters. The real GPT
+        # Actions editor parses a parameter given as {"$ref": ...} as a
+        # parameter with no name and SKIPS THE WHOLE OPERATION:
+        #   "parameter {'$ref': ...} is missing or has a non-string name;
+        #    operation skipped"
+        # That silently removed five of the nine Actions. Repeated in full on
+        # each operation because a shared definition is exactly what the editor
+        # cannot follow; tests/test_actions_exposure_deploy.py fails if a
+        # parameter-level $ref comes back.
+        - name: project_id
+          in: path
+          required: true
+          description: >-
+            A project_id from listProjects. Never a path, a folder name or a
+            workspace name. Only the project whose workspace is currently active
+            can be read; anything else is refused.
+          schema:
+            type: string
+            maxLength: 64
+            pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+      responses:
+        "200":
+          description: The bounded, cloud-safe projection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectContext"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No such project, or it has no configured workspace.
+        "409":
+          description: >-
+            The project exists but its context cannot be read right now — its
+            workspace is not the active one, is disabled, or is ambiguous.
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
   /v1/tasks:
     get:
       operationId: listRecentTasks
@@ -507,6 +556,115 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Project"
+
+    ProjectContext:
+      type: object
+      additionalProperties: false
+      required: [version, project_id, workspace_id, context]
+      properties:
+        version:
+          type: integer
+        project_id:
+          type: string
+        workspace_id:
+          type: string
+        context:
+          $ref: "#/components/schemas/CloudContextProjection"
+
+    CloudContextProjection:
+      type: object
+      additionalProperties: false
+      required: [version, policy_id, built_at, parts, omissions, budget, limitations]
+      description: >-
+        The reduced object the egress policy produced. Never a LocalContextPack —
+        the host has no route that returns one.
+      properties:
+        version:
+          type: integer
+        policy_id:
+          type: string
+          description: The named egress policy that produced this, e.g. project_context_external_v1.
+        built_at:
+          type: string
+        workspace_id:
+          type: string
+          nullable: true
+        project_id:
+          type: string
+          nullable: true
+        parts:
+          type: array
+          items:
+            $ref: "#/components/schemas/CloudContextPart"
+        omissions:
+          type: array
+          description: What was left out and why. Nothing is dropped silently.
+          items:
+            $ref: "#/components/schemas/CloudContextOmission"
+        budget:
+          $ref: "#/components/schemas/CloudContextBudget"
+        limitations:
+          type: array
+          description: >-
+            What this object is and is not, including the sanitizer's documented
+            residual limits. Read them before treating the text as sanitized.
+          items:
+            type: string
+
+    CloudContextPart:
+      type: object
+      additionalProperties: false
+      required: [source_kind, source_ref, observed_at, selection, text, content_bytes, truncated, redactions]
+      properties:
+        source_kind:
+          type: string
+        source_ref:
+          type: string
+          description: A semantic reference such as project:demo:status. Never a path.
+        observed_at:
+          type: string
+        selection:
+          type: string
+        text:
+          type: string
+        content_bytes:
+          type: integer
+        truncated:
+          type: boolean
+        redactions:
+          type: array
+          items:
+            type: string
+
+    CloudContextOmission:
+      type: object
+      additionalProperties: false
+      required: [source_ref, reason]
+      properties:
+        source_ref:
+          type: string
+        source_kind:
+          type: string
+          nullable: true
+        reason:
+          type: string
+        detail:
+          type: string
+          nullable: true
+
+    CloudContextBudget:
+      type: object
+      additionalProperties: false
+      required: [unit, total, consumed, remaining]
+      properties:
+        unit:
+          type: string
+        total:
+          type: integer
+        consumed:
+          type: integer
+        remaining:
+          type: integer
 
     CreateTaskRequest:
       type: object

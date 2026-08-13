@@ -75,6 +75,9 @@ ROUTE_TASK_ANSWER = "/api/tasks/{task_id}/clarifications/{question_id}/answer"
 ROUTE_TASK_FOLLOWUPS = "/api/tasks/{task_id}/followups"
 ROUTE_TASK_CANCEL = "/api/tasks/{task_id}/cancel"
 ROUTE_TASK_FINISH = "/api/tasks/{task_id}/finish"
+#: M2J PR4. The one read whose response is shaped to leave the host. The bridge
+#: knows the path and nothing about what comes back through it.
+ROUTE_PROJECT_CONTEXT = "/api/projects/{project_id}/context"
 
 #: Every upstream route this bridge may ever reach, as templates. A test asserts
 #: that no other ``/api`` string appears in this package.
@@ -88,6 +91,7 @@ ALLOWED_UPSTREAM_ROUTES: Tuple[str, ...] = (
     ROUTE_TASK_FOLLOWUPS,
     ROUTE_TASK_CANCEL,
     ROUTE_TASK_FINISH,
+    ROUTE_PROJECT_CONTEXT,
 )
 
 # -- identifier patterns ------------------------------------------------------
@@ -305,6 +309,23 @@ class InternalTaskClient:
 
     def list_projects(self) -> Dict[str, Any]:
         return self._call("GET", ROUTE_PROJECTS)
+
+    def get_project_context(self, project_id: str) -> Dict[str, Any]:
+        """One GET. The bridge builds no context and inspects none (M2J PR4).
+
+        Everything that makes this safe happens on the other side of the call:
+        the workstation resolves the project to its active workspace, builds the
+        `LocalContextPack`, applies `project_context_external_v1` and serializes
+        the `CloudContextProjection`. This method forwards a validated id and
+        returns whatever bounded payload came back.
+
+        The id is **refused rather than escaped** upstream in the route, for the
+        reason `_task_id` gives: percent-encoding a hostile id turns a rejection
+        into a request for something else.
+        """
+        return self._call(
+            "GET", ROUTE_PROJECT_CONTEXT.format(project_id=project_id)
+        )
 
     def list_tasks(self, *, limit: int) -> Dict[str, Any]:
         # The only query string in the file, and its one value is an integer

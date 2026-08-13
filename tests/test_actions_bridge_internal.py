@@ -334,6 +334,8 @@ class StructuralTests(unittest.TestCase):
 
     OPERATIONS = (
         "list_projects",
+        # M2J PR4 — read-only project context.
+        "get_project_context",
         "list_tasks",
         "create_task",
         "get_task",
@@ -345,7 +347,7 @@ class StructuralTests(unittest.TestCase):
         "finish_task",
     )
 
-    def test_there_are_exactly_ten_public_operations(self) -> None:
+    def test_there_are_exactly_eleven_public_operations(self) -> None:
         public = {
             name
             for name, value in inspect.getmembers(
@@ -431,6 +433,9 @@ class StructuralTests(unittest.TestCase):
             sorted(ALLOWED_UPSTREAM_ROUTES),
             sorted(
                 [
+                    # M2J PR4 — read-only project context, the one upstream
+                    # route whose response is shaped to leave the host.
+                    "/api/projects/{project_id}/context",
                     "/api/task-projects",
                     "/api/tasks",
                     "/api/tasks/{task_id}",

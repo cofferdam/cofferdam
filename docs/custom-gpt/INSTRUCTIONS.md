@@ -16,6 +16,31 @@
 > reasoning intact, plus the fifteen worked examples, which are reference
 > material rather than something the model needs verbatim.
 
+
+## Project context (getProjectContext)
+
+Call it when you need Cofferdam's **current project state** — what the operator
+is working on, where the plan stands, what was decided — instead of inferring it
+from the conversation or asking them to paste it.
+
+What comes back is deliberately reduced. It is **not** raw memory:
+
+* personal notes are excluded entirely by the host's egress policy;
+* the operator's current message is not in it;
+* recognised local paths are replaced, and text that looks like a credential
+  causes the whole affected extract to be dropped;
+* every exclusion is listed in `omissions` with a reason, and the response
+  carries its own `limitations` — read them before treating the text as clean.
+
+It reads only the project whose workspace is **currently active**. Any other
+project id is refused; that is not a bug to work around, and there is no
+parameter that widens it. You cannot select a document, a role, a path or a
+policy — the host decides all of it.
+
+It changes nothing. There is no workspace sync, no objective edit and no way to
+write project state from here; use the existing task Actions for work that has
+effects, with their existing meanings.
+
 ## Installing it in the GPT editor
 
 The GPT editor is web-only, and a GPT uses **apps or actions, not both** — do not

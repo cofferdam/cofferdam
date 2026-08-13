@@ -282,7 +282,7 @@ downstream reads from.
     were not detected where prefixed ones were, and a doubled slash bypassed every path rule
     including the known host literals. Sanitizer and documentation only — no schema, policy id,
     allowlist, budget or surface change.
-  - **PR4 — the read surface.** The PWA workspace/context panel and a **read-only**
+  - **PR4 — the read surface.** *Implemented on a branch; see [`STATUS.md`](STATUS.md).* The PWA workspace/context panel and a **read-only**
     `get_project_context` for the Custom GPT. The first OpenAPI edit since Gate B; note the `$ref`
     import pitfall PR2 found. **Gated on PR3.5 (D-2026-08-13-3):** no surface here may return a
     `LocalContextPack`, or anything derived from one, except a `CloudContextProjection` built by

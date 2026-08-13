@@ -780,3 +780,23 @@ button.danger { color: var(--err); }
 .rc-info summary { color: var(--muted); font-size: 13px; cursor: pointer; min-height: 44px;
   display: flex; align-items: center; }
 .rc-info p { color: var(--muted); font-size: 13px; margin: 6px 0 0; }
+
+/* Project context panel (M2J PR4). Two columns that must never read as one:
+   the left is what this host holds, the right is what could leave it. */
+.ctx-cols { display: flex; flex-wrap: wrap; gap: 1rem; }
+.ctx-col { flex: 1 1 18rem; min-width: 0; }
+.ctx-col h3 { margin: 0 0 .25rem; font-size: 1rem; }
+.ctx-col .tag { font-size: .7rem; text-transform: uppercase; letter-spacing: .04em;
+  padding: .1rem .4rem; border-radius: .3rem; background: #2a2f3a; color: #9fb0c7; }
+.ctx-col .tag.warn { background: #3a2f1f; color: #d9b06a; }
+.ctx-list { margin: .5rem 0; }
+.ctx-list dt { font-size: .75rem; color: #8b97a8; margin-top: .4rem; }
+.ctx-list dd { margin: 0; overflow-wrap: anywhere; }
+.ctx-parts, .ctx-omit { list-style: none; padding: 0; margin: .5rem 0; }
+.ctx-part { margin-bottom: .4rem; overflow-wrap: anywhere; }
+.ctx-toggle { margin-right: .4rem; }
+.ctx-text { white-space: pre-wrap; overflow-x: auto; max-height: 18rem;
+  background: #11151c; padding: .5rem; border-radius: .3rem; font-size: .8rem; }
+.ctx-sub { margin: .75rem 0 .25rem; font-size: .85rem; }
+.ctx-limits { margin-top: .75rem; font-size: .85rem; }
+.ctx-limits li { margin: .2rem 0; }

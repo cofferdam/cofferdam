@@ -3,9 +3,11 @@
 The questions here are the ones only a client can ask:
 
 * is every route authenticated, including every read;
-* does the **bridge credential** reach any of them — it must not, and the reason
-  it must not is that ``syncWorkspace`` is an M2J PR4 decision that has not been
-  made, so today the honest state is that no external surface reads this at all;
+* does the **bridge credential** reach any of them — it must not. M2J PR4 gave
+  the bridge exactly one context read, ``GET /api/projects/{id}/context``, which
+  returns a `CloudContextProjection` and lives behind its own dependency. None of
+  the routes in *this* file moved: ``syncWorkspace`` is M2M's (D-2026-08-13-4),
+  and no external surface may read or write the workspace object itself;
 * is the accepted vocabulary genuinely closed — a body carrying ``root``,
   ``adapter_id``, ``model``, ``provider`` or ``source`` must be **refused**,
   not filtered;
@@ -131,9 +133,10 @@ class BridgeBoundary(WorkspaceApiTestCase):
     nothing here can recognise it — not because a check turns it away. That is
     the same argument D-2026-08-09-2 makes for the Remote Control routes.
 
-    It matters now because ``syncWorkspace`` is recorded as an M2J **PR4**
-    Action. Until that is designed and reviewed, the honest state is that no
-    external surface reads the workspace at all.
+    It matters now because M2J PR4 shipped an external context read. That read is
+    a *different* route with a *different* dependency, returning a projection the
+    host built — it did not widen these. ``syncWorkspace`` remains M2M's
+    (D-2026-08-13-4), so no external surface reads or writes the workspace object.
     """
 
     def setUp(self) -> None:
