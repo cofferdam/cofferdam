@@ -731,9 +731,14 @@ GET  /api/task-projects                configured projects, names only
 
 GET  /api/tasks/{id}/clarifications                     questions being waited on
 POST /api/tasks/{id}/clarifications/{qid}/answer        answer one question
+
+GET  /api/tasks/{id}/turns/{n}/evidence                 one turn's derived evidence
 ```
 
-The last two are **M2I PR2**. They carry information, never permission: the
+The evidence route is **M2K PR2** and is described below. It is the one task
+route the Actions bridge credential cannot reach.
+
+The two clarification routes are **M2I PR2**. They carry information, never permission: the
 answer body accepts exactly `answer` and `option_ids`, and there is no route in
 this API — disabled, stubbed or otherwise — through which a tool approval could
 be granted. See
@@ -928,13 +933,77 @@ without changing task semantics.
 
 ---
 
+## Turn evidence (M2K PR2)
+
+`GET /api/tasks/{task_id}/turns/{turn_number}/evidence` returns one turn's
+**derived** evidence bundle: what the worker claimed, what Cofferdam observed,
+and the relationship between them.
+
+**Turn-qualified, because turn ownership is the point.** Schema v5 records the
+exact event-sequence range each turn owns — `task_turn_bounds`, written inside
+the turn-open and turn-close helpers in the same transaction as the turn row.
+Before v5 there was no such record, and it could not be reconstructed:
+**timestamps are not an authoritative shared boundary** between a turn and an
+event sequence, because two events can share a millisecond and `started_at` is
+written by a different call than the one that allocates the sequence. A task-level
+evidence route would have to merge turns or pick one, which is exactly the
+confusion v5 exists to end.
+
+**Derived, not stored.** There is no bundle table. Assembly reads claims,
+ingestion summaries, append-only event evidence and the bounds — and runs no Git,
+opens no file and calls no provider. A bundle therefore describes what was
+*recorded*, not what the repository looks like now, and reading one changes
+nothing: no event, turn, claim, artifact, ingestion row or bound is created, and
+the task's `updated_at`, `lifecycle_revision` and `event_cursor` are untouched.
+
+**What agreement means.** The machine observation available today is
+`git status --porcelain`, reduced to *this project-relative path appears in the
+changed set*. That proves the path changed and nothing about **what** was done to
+it — the porcelain status letters are not in the durable record. So the
+vocabulary is:
+
+* `path_agreed` — a claim and an observation name the same path. `path_agreement`
+  is true; `operation_agreement` is `unknown`. It is **not** "modification
+  verified", and it is deliberately never a bare `agreed`.
+* `claim_only` — a stored claim with no eligible observation in this turn.
+  Unmatched and unverified; **not** false, dishonest or contradicted. A worker
+  that changed a file and committed it leaves a clean tree with nothing to match.
+* `observed_only` — an observation no claim names. **Not** evidence of
+  concealment: the claim set may be incomplete, which is why the completeness
+  state is published in the same payload.
+
+**No conflict is emitted**, and that is a finding rather than a gap: no supported
+observation carries semantics that could prove a claim incompatible. Absence is
+not conflict.
+
+**Turns that predate v5** report `turn_attribution: legacy_unknown`, keep their
+own claims, and receive **no machine observations at all** — nothing inferred
+from timestamps, event types or the nearest sequence.
+
+**Identity without copying.** `assembler_version` and a domain-tagged,
+length-prefixed SHA-256 `input_fingerprint` identify the inputs a bundle was
+built from, so a later record can refer to an evidence snapshot as
+`(task_id, turn_number, assembler_version, input_fingerprint)`. Project-relative
+semantic paths are inputs; absolute host paths, provider and session identifiers,
+read time, live Git state and artifact previews are not. `generated_at` sits on
+the response envelope as presentation metadata, never inside the bundle.
+
+**Device token only.** This is the one task route the Actions bridge credential
+cannot reach — it is guarded by `require_token`, which has never heard of that
+credential. `GET` only, no root or path selector, no policy selector, no artifact
+body. **No verdict of any kind**: no pass, fail, score, confidence or risk level,
+and no field for one.
+
+---
+
 ## Limitations of this milestone
 
 Stated in the API payload as well as here, because a client should never have to
 infer them:
 
 * Cofferdam reports what an adapter tells it; adapter-reported evidence is not
-  observation.
+  observation. Since M2K PR2 the two can be shown side by side per turn — but
+  **path agreement is not operation agreement, and neither is a verdict**.
 * An interrupted task is never resumed automatically — restarting the service
   ends it.
 * Task Core runs no shell, no process and no model. What a task does is
