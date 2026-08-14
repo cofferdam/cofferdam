@@ -56,7 +56,7 @@ from cofferdam.workstation.tasks.models import (
 from cofferdam.workstation.tasks.store import TaskStore, _TurnClose
 
 
-def observation(path, kind=None, previous=None):
+def observation(path, kind=None, previous=None, status=None):
     """An eligible machine observation, PR3-shaped when ``kind`` is given."""
     return EvidenceReference(
         evidence_type=EVIDENCE_FILE,
@@ -66,6 +66,7 @@ def observation(path, kind=None, previous=None):
         result="changed",
         change_kind=kind,
         previous_identifier=previous,
+        change_status=status,
         observed_at="2026-08-14T00:00:00Z",
     )
 

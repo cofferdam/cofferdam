@@ -22,6 +22,9 @@ release.
   this and has done nothing wrong. There is still no pass, no fail, no score and no verdict anywhere
   in it.
 
+  **New folders are listed file by file.** A newly created folder used to show up as just the
+  folder, which could never line up with a claim about one file inside it. Every file is listed now.
+
   **Files with awkward names stopped disappearing.** A file called `has space.txt`, or one with an
   arrow or an accent in its name, used to produce *no evidence at all* — Git quotes those names and
   Cofferdam skipped them. They come through now.

@@ -2292,7 +2292,7 @@ function run() {
           reference: "evt7.0", event_sequence: 7, evidence_index: 0,
           path: "src/foo.py", source: "git_observed", evidence_type: "file",
           operation: "git status", result: "changed", verified: true,
-          change_kind: "modified", previous_path: null
+          change_kind: "modified", previous_path: null, change_status: "MM"
         },
         {
           reference: "evt7.1", event_sequence: 7, evidence_index: 1,
@@ -2381,7 +2381,7 @@ function run() {
           reference: "evt7.0", event_sequence: 7, evidence_index: 0,
           path: "src/new.py", source: "git_observed", evidence_type: "file",
           operation: "git status", result: "changed", verified: true,
-          change_kind: "renamed", previous_path: "src/old.py"
+          change_kind: "renamed", previous_path: "src/old.py", change_status: "RM"
         }
       ],
       relationships: [

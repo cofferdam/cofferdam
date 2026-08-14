@@ -613,6 +613,11 @@ def _bounded_evidence(evidence: Sequence[EvidenceReference]) -> Optional[str]:
                     if reference.previous_identifier
                     else {}
                 ),
+                **(
+                    {"change_status": bounded_line(reference.change_status, 8)}
+                    if reference.change_status
+                    else {}
+                ),
             }
         )
     return json.dumps(items, ensure_ascii=False)
@@ -641,6 +646,7 @@ def _evidence_from_json(raw: Optional[str]) -> Tuple[EvidenceReference, ...]:
             # backward-compatible without a schema change.
             change_kind=item.get("change_kind"),
             previous_identifier=item.get("previous_identifier"),
+            change_status=item.get("change_status"),
         )
         for item in parsed
         if isinstance(item, dict)

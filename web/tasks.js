@@ -1079,10 +1079,16 @@
             var what = item.change_kind
               ? (CHANGE_WORDS[item.change_kind] || item.change_kind)
               : "Machine observed: this path changed";
+            /* A two-letter status can prove two things — RM is renamed AND
+               modified — so the raw status is shown beside the primary word
+               rather than letting the word stand for the whole fact. */
+            var raw = item.change_status
+              ? ' <span class="muted">[' + esc(item.change_status) + "]</span>"
+              : "";
             var rename = item.change_kind === "renamed" && item.previous_path
               ? " (" + esc(item.previous_path) + " → " + esc(item.path) + ")"
               : "";
-            return "<li>" + esc(item.path) + rename +
+            return "<li>" + esc(item.path) + rename + raw +
               ' <span class="muted">' + esc(what) +
               " — Cofferdam ran git status itself</span></li>";
           }).join("") + "</ul>"

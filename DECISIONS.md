@@ -2082,6 +2082,59 @@ differ" with "Both records are kept as they were", styled as something to look a
 something that went wrong, and the forbidden-vocabulary scan covers it. **The evaluator is still not
 in this milestone.**
 
+## D-2026-08-14-7 — A composite Git status proves two facts, and both decide agreement (EFE DECISION, ACTIVE)
+
+**Decision.** The exact machine status is persisted alongside the change kind, and operation
+agreement is computed from the **set** of facts that status proves rather than from a single
+collapsed label.
+
+**Because `XY` is two columns.** `X` is the index against HEAD; `Y` is the working tree against the
+index. `RM` therefore means *renamed **and** then modified*, `AM` means *added **and** then
+modified*, `MD` means *modified **and** then deleted*. Each is two true statements about one path.
+
+**The failure this prevents is specific.** Collapse `RM` to `renamed`, then compare a worker's
+truthful `modified` claim against that one word, and the claim looks unsupported — or worse,
+contradicted. The fact that would have reconciled it was thrown away by the collapse, not absent
+from the evidence. A conflict manufactured that way is exactly the kind of false statement the
+milestone exists to prevent, and it would land on the surface that a person reads.
+
+**The rule.** A claim matching **any** proven fact agrees. A claim is contradicted only when it is
+incompatible with **every** proven fact. Anything else is `unknown`. One reconciling fact is enough
+to stop a contradiction — the conservative direction, and the one that cannot be wrong.
+
+**`change_kind` survives as a label, not as the decision.** It is the primary word a person reads,
+and composites whose two facts have no single honest word (`MD`, `AD`, `RD`) are labelled `unknown`
+while still proving two facts. Keeping the label and the decision separate is what lets the display
+stay simple without the comparison becoming simplistic.
+
+**A rename is never agreed by a status alone.** `R ` and `RM` prove a rename happened; they do not
+prove it is *this* rename, because the same destination from a different source is a different
+event. `operation_agreement` returns `unknown` for every rename claim, so only the comparison that
+uses both paths can agree one. Structural, not conventional.
+
+**Still no schema change.** `change_status` is optional, bounded to two characters, written only
+when present, and read with `.get()`. Rows without it fall back to their single label, which is all
+they ever knew.
+
+## D-2026-08-14-8 — Machine observation is file-level, because claims are (EFE DECISION, ACTIVE)
+
+**Decision.** The Git probe passes `--untracked-files=all` in literal argv.
+
+**Because the two sides must be comparable.** A `ChangeClaim` names a file. Git's default reports a
+wholly new directory as one record, `?? newdir/`, and a directory record can never pair with a claim
+about `newdir/a.py`. The observation set was therefore coarser than the thing it is compared
+against — and the mismatch would not have read as a granularity difference, it would have read as
+"the worker claimed a file Cofferdam never saw change".
+
+**In argv, not configuration.** `status.showUntrackedFiles` could otherwise turn it off from a user
+or repository config file. Evidence coverage is not a preference, and a probe whose completeness
+depends on a setting is a probe whose completeness cannot be reasoned about.
+
+**Completeness accounts for the larger set.** Enumerating files rather than directories makes the
+observation set bigger, so it reaches the caps sooner. Truncation, refused paths and malformed
+records all feed one published `machine_observations_complete`, so a set that lost known file-level
+evidence is never reported as whole.
+
 ## D-2026-08-14-6 — Cofferdam has no pre-work revision, and will not pretend otherwise (EFE DECISION, ACTIVE)
 
 **Decision.** PR3 does **not** add `git diff --name-status <revision>`. Machine observation remains

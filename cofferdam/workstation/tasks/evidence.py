@@ -102,6 +102,7 @@ from .claims import (
 )
 from .models import (
     CHANGE_CREATED,
+    STATUS_FACTS,
     CHANGE_DELETED,
     CHANGE_KINDS,
     CHANGE_MODIFIED,
@@ -244,55 +245,105 @@ OPERATION_AGREEMENTS: Tuple[str, ...] = (
 
 # -- the operation compatibility table ----------------------------------------
 #
-# One table, consulted by one helper. The alternative — `if` statements over
-# claim operations and change kinds spread through the assembler — is where a
+# One table and one helper. The alternative — `if` statements over claim
+# operations and change kinds spread through the assembler — is where a
 # wrong-but-confident answer hides, and this is the comparison the whole
 # milestone exists to make honestly.
 #
-# Rows are the **claim** operation (what the worker said). Columns are the
-# **machine** change kind (what Git reported). Absent pairs are `unknown`, which
-# is the direction that cannot make a false statement.
+# What is compared, and why it is a SET
+# -------------------------------------
 #
-# Why `renamed` is absent from this table entirely: a rename is not a fact about
-# one path, it is a fact about two, and one cell cannot express "the source and
-# destination both match". :func:`_rename_agreement` answers it, using both.
+# Git's two-character `XY` is two columns: `X` is the index against HEAD, `Y` is
+# the working tree against the index. So one status routinely proves **two**
+# facts — `RM` is *renamed and then modified*, `AM` is *added and then
+# modified*, `MD` is *modified and then deleted*.
 #
-# Why `created` vs `modified` is `unknown` rather than `false`: they are not
-# incompatible. `git status` reports the file's state against HEAD, and a worker
-# that created a file and then edited it will truthfully say "created" while Git
-# reports `AM` — which this build classifies as `created` — or, if the file
-# existed at HEAD, "modified". The two words describe the same work from
-# different vantage points often enough that calling them a contradiction would
-# manufacture conflicts out of ordinary sequences.
+# Reducing that to one label and then comparing the label is what produces a
+# false conflict: a worker who truthfully reports "modified" after a rename is
+# contradicted by an observation that *also* proves a modification, purely
+# because the label said "renamed". So agreement is decided against the whole
+# fact set:
 #
-# Why `created` vs `deleted` **is** `false`: those cannot both describe one
-# path's final state against one HEAD. The worker says the file is now there;
-# Git says it is now gone.
-_OPERATION_TABLE: Dict[Tuple[str, str], str] = {
-    (CLAIM_CREATED, CHANGE_CREATED): OPERATION_AGREED,
-    (CLAIM_CREATED, CHANGE_DELETED): OPERATION_DIFFERS,
-    (CLAIM_MODIFIED, CHANGE_MODIFIED): OPERATION_AGREED,
-    (CLAIM_MODIFIED, CHANGE_DELETED): OPERATION_DIFFERS,
-    (CLAIM_DELETED, CHANGE_DELETED): OPERATION_AGREED,
-    (CLAIM_DELETED, CHANGE_CREATED): OPERATION_DIFFERS,
-    (CLAIM_DELETED, CHANGE_MODIFIED): OPERATION_DIFFERS,
-}
+#   * the claim matches **any** proven fact          -> true
+#   * the claim is incompatible with **every** fact  -> false
+#   * anything else                                  -> unknown
+#
+# One reconciling fact is enough to stop a contradiction. That is the safety
+# property this shape exists for.
+#
+# Pairwise incompatibility below is only about what cannot both be true of one
+# path against one HEAD. `created` versus `modified` is deliberately **not** in
+# it: a worker that creates a file and then edits it truthfully says "created"
+# while Git reports whichever the state supports, and calling that a
+# contradiction would manufacture conflicts out of ordinary work.
+#
+# Why `renamed` appears in no pair: a rename is a fact about two paths, and
+# :func:`_rename_agreement` answers it using both. Nothing here can contradict
+# a rename claim, which is the conservative direction.
+_INCOMPATIBLE: frozenset = frozenset(
+    {
+        (CLAIM_CREATED, CHANGE_DELETED),
+        (CLAIM_MODIFIED, CHANGE_DELETED),
+        (CLAIM_DELETED, CHANGE_CREATED),
+        (CLAIM_DELETED, CHANGE_MODIFIED),
+    }
+)
 
 
-def operation_agreement(claim_operation: object, change_kind: object) -> str:
-    """Whether one claim operation and one machine change kind agree.
+def status_facts(status: object) -> frozenset:
+    """Every machine fact one raw status proves. Empty when it proves none."""
+    if not isinstance(status, str) or len(status) != 2:
+        return frozenset()
+    return STATUS_FACTS.get(status, frozenset())
 
-    Three answers and no fourth. ``unknown`` covers every pair the table does not
-    name, which includes every legacy observation — those carry no change kind at
-    all, and ``None`` is not in the table.
+
+def _facts_for(change_kind: object, status: object) -> frozenset:
+    """Everything the machine proved about one path.
+
+    The exact status is authoritative when present, because it carries both
+    columns. A row written without one — anything from before that field
+    existed — falls back to its single label, which is all it ever knew.
     """
-    if not isinstance(claim_operation, str) or not isinstance(change_kind, str):
+    facts = status_facts(status)
+    if facts:
+        return facts
+    if isinstance(change_kind, str) and change_kind in CHANGE_KINDS:
+        if change_kind == CHANGE_UNKNOWN:
+            return frozenset()
+        return frozenset({change_kind})
+    return frozenset()
+
+
+def operation_agreement(
+    claim_operation: object, change_kind: object, status: object = None
+) -> str:
+    """Whether one claim operation and one machine observation agree.
+
+    Three answers and no fourth. ``unknown`` covers every case the evidence does
+    not settle, which includes every observation recorded before machine
+    semantics existed — those carry neither a kind nor a status, so nothing is
+    proven and nothing is concluded.
+    """
+    if not isinstance(claim_operation, str):
         return OPERATION_UNKNOWN
-    if change_kind == CHANGE_UNKNOWN:
-        # Git reported a change it could not characterise. That is not evidence
-        # for or against anything the worker said.
+    if claim_operation == CLAIM_RENAMED:
+        # A rename is a fact about **two** paths, and this function is given
+        # one. Even a machine status that proves `renamed` does not establish
+        # that it is *this* rename — same destination, different source is a
+        # different event. :func:`_rename_agreement` is the only thing that may
+        # answer it, and it uses both paths. Returning `unknown` here rather
+        # than agreeing on the word keeps that structural: a caller that reached
+        # this function with a rename claim cannot get an unqualified agreement
+        # out of it.
         return OPERATION_UNKNOWN
-    return _OPERATION_TABLE.get((claim_operation, change_kind), OPERATION_UNKNOWN)
+    facts = _facts_for(change_kind, status)
+    if not facts:
+        return OPERATION_UNKNOWN
+    if claim_operation in facts:
+        return OPERATION_AGREED
+    if all((claim_operation, fact) in _INCOMPATIBLE for fact in facts):
+        return OPERATION_DIFFERS
+    return OPERATION_UNKNOWN
 
 # -- limitations --------------------------------------------------------------
 #
@@ -496,6 +547,20 @@ def observation_change_kind(reference: object) -> Optional[str]:
     return kind
 
 
+def observation_status(reference: object) -> Optional[str]:
+    """The raw machine status on an eligible observation, or ``None``.
+
+    Bounded to what a status can be, so a stored value that is not one cannot
+    reach the fact table and cannot become a payload.
+    """
+    if not isinstance(reference, EvidenceReference):
+        return None
+    status = reference.change_status
+    if not isinstance(status, str) or len(status) != 2:
+        return None
+    return status
+
+
 def observation_previous_path(reference: object) -> Optional[str]:
     """The rename source on an eligible observation, or ``None``.
 
@@ -585,6 +650,8 @@ class MachineObservation:
     change_kind: Optional[str] = None
     #: The source path of a rename. ``path`` is always the destination.
     previous_path: Optional[str] = None
+    #: The exact machine status, carrying both facts a composite proves.
+    change_status: Optional[str] = None
 
     @property
     def reference(self) -> str:
@@ -603,6 +670,7 @@ class MachineObservation:
             "result": self.result,
             "change_kind": self.change_kind,
             "previous_path": self.previous_path,
+            "change_status": self.change_status,
             # Said out loud rather than derived, the same way
             # `EvidenceReference.to_dict` says it. `git_observed` is a verified
             # source — Cofferdam ran Git — and that is a statement about *this
@@ -805,6 +873,7 @@ def _eligible_observations(
                         result=reference.result,
                         change_kind=observation_change_kind(reference),
                         previous_path=observation_previous_path(reference),
+                        change_status=observation_status(reference),
                     )
                 )
                 continue
@@ -945,7 +1014,9 @@ def _group_agreement(
         return rename
 
     verdicts = [
-        operation_agreement(claim.operation, observation.change_kind)
+        operation_agreement(
+            claim.operation, observation.change_kind, status=observation.change_status
+        )
         for claim in claims
         for observation in observations
         # A rename claim's *source* path is compared to nothing here: the claim
@@ -1037,8 +1108,18 @@ def _relationships(
                 in (RELATIONSHIP_PATH_AGREED, RELATIONSHIP_CLAIM_CONFLICT),
                 operation_agreement=agreement,
                 # Deduplicated and sorted, like the claim operations.
+                # Every fact the machine proved at this path, not just the
+                # primary labels — a composite `RM` proves a modification too,
+                # and a reader deciding whether a claim was corroborated needs
+                # to see it.
                 observed_kinds=tuple(
-                    sorted({o.change_kind for o in slot["obs_rows"] if o.change_kind})
+                    sorted(
+                        {
+                            fact
+                            for o in slot["obs_rows"]
+                            for fact in _facts_for(o.change_kind, o.change_status)
+                        }
+                    )
                 ),
                 claim_count=len(claim_ids),
                 observation_count=len(refs),
@@ -1181,6 +1262,10 @@ def input_fingerprint(
                 # belongs here for the reason the claim's path does.
                 observation.change_kind,
                 observation.previous_path,
+                # The exact status is an assembly-relevant immutable input: it is
+                # what agreement is decided from for a composite state, so `RM`
+                # and a bare `renamed` must not fingerprint alike.
+                observation.change_status,
             ]
         )
     # Whether the machine set was whole is an input to what the bundle says
@@ -1348,6 +1433,8 @@ __all__ = [
     "COVERAGE_PARTIAL",
     "is_coverage_observation",
     "observation_change_kind",
+    "observation_status",
+    "status_facts",
     "observation_previous_path",
     "operation_agreement",
     "PathRelationship",

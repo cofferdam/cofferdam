@@ -342,6 +342,39 @@ CHANGE_KINDS: Tuple[str, ...] = (
     CHANGE_UNKNOWN,
 )
 
+#: What each raw machine status **proves**, as a set rather than a label.
+#:
+#: Git's two-character ``XY`` is two columns — the index against HEAD, and the
+#: working tree against the index — so one status routinely carries **two true
+#: facts**: ``RM`` is *renamed and then modified*, ``AM`` is *added and then
+#: modified*, ``MD`` is *modified and then deleted*.
+#:
+#: Here rather than in the adapter for the layer reason the whole vocabulary is
+#: here: Task Core's assembler decides agreement from these sets and may not
+#: import from an agent-specific package. The adapter maps Git's status onto
+#: them; Task Core reasons over them.
+#:
+#: An empty set means the machine reported a change and proved nothing
+#: publishable about it — unmerged states, type changes, copies. Nothing can be
+#: concluded either way, which is exactly right.
+STATUS_FACTS: Dict[str, frozenset] = {
+    "??": frozenset({CHANGE_CREATED}),
+    "A ": frozenset({CHANGE_CREATED}),
+    " A": frozenset({CHANGE_CREATED}),
+    "AM": frozenset({CHANGE_CREATED, CHANGE_MODIFIED}),
+    "AD": frozenset({CHANGE_CREATED, CHANGE_DELETED}),
+    "M ": frozenset({CHANGE_MODIFIED}),
+    " M": frozenset({CHANGE_MODIFIED}),
+    "MM": frozenset({CHANGE_MODIFIED}),
+    "MD": frozenset({CHANGE_MODIFIED, CHANGE_DELETED}),
+    "D ": frozenset({CHANGE_DELETED}),
+    " D": frozenset({CHANGE_DELETED}),
+    "R ": frozenset({CHANGE_RENAMED}),
+    " R": frozenset({CHANGE_RENAMED}),
+    "RM": frozenset({CHANGE_RENAMED, CHANGE_MODIFIED}),
+    "RD": frozenset({CHANGE_RENAMED, CHANGE_DELETED}),
+}
+
 EVIDENCE_PROCESS = "process"
 EVIDENCE_FILE = "file"
 EVIDENCE_COMMIT = "commit"
@@ -524,6 +557,22 @@ class EvidenceReference:
     #: therefore not replaced.
     previous_identifier: Optional[str] = None
 
+    #: The exact machine status the observer read, verbatim and bounded — for
+    #: Git, the two-character ``XY``.
+    #:
+    #: Kept because ``change_kind`` is **one label and a status can prove two
+    #: facts**: ``X`` is the index against HEAD and ``Y`` the working tree
+    #: against the index, so ``RM`` means *renamed and then modified*. Storing
+    #: only the label would discard the second fact, and a later reader treating
+    #: that absence as evidence would turn a truthful "modified" claim into a
+    #: contradiction.
+    #:
+    #: It is also the evidence behind the label: a reader who disagrees with the
+    #: mapping can see what the machine actually said. Two characters, so it
+    #: cannot become a payload, and ``None`` on every row written before it
+    #: existed.
+    change_status: Optional[str] = None
+
     @property
     def verified(self) -> bool:
         return self.source in VERIFIED_EVIDENCE_SOURCES
@@ -542,6 +591,7 @@ class EvidenceReference:
             "observed_at": self.observed_at,
             "change_kind": self.change_kind,
             "previous_identifier": self.previous_identifier,
+            "change_status": self.change_status,
         }
 
 
@@ -736,6 +786,7 @@ __all__ = [
     "CHANGE_MODIFIED",
     "CHANGE_RENAMED",
     "CHANGE_UNKNOWN",
+    "STATUS_FACTS",
     "EVIDENCE_GIT_OBSERVED",
     "EVIDENCE_OS_OBSERVED",
     "EVIDENCE_PROCESS",

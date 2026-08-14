@@ -107,8 +107,14 @@ class RealRepositoryFixture(unittest.TestCase):
 
 class TheCommandIsMachineReadable(RealRepositoryFixture):
     def test_the_probe_asks_for_the_nul_terminated_machine_format(self):
-        """Not human output. `-z` is what makes framing unambiguous."""
-        self.assertEqual(GIT_STATUS, ("git", "status", "--porcelain=v1", "-z"))
+        """Not human output. `-z` is what makes framing unambiguous.
+
+        `--untracked-files=all` is asserted in `test_git_composite_status.py`,
+        where the file-level enumeration it exists for is exercised.
+        """
+        self.assertEqual(
+            GIT_STATUS[:4], ("git", "status", "--porcelain=v1", "-z")
+        )
 
     def test_the_z_format_emits_raw_unquoted_paths(self):
         """The human form quotes these; `-z` does not, so they survive."""

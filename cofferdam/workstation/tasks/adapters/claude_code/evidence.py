@@ -93,6 +93,7 @@ from ...models import (
     CHANGE_MODIFIED,
     CHANGE_RENAMED,
     CHANGE_UNKNOWN,
+    STATUS_FACTS,
     EVIDENCE_ARTIFACT,
     EVIDENCE_COMMIT,
     EVIDENCE_FILE,
@@ -114,12 +115,25 @@ from ...models import (
 GIT_IS_REPO: Tuple[str, ...] = ("git", "rev-parse", "--is-inside-work-tree")
 GIT_BRANCH: Tuple[str, ...] = ("git", "rev-parse", "--abbrev-ref", "HEAD")
 GIT_HEAD: Tuple[str, ...] = ("git", "rev-parse", "HEAD")
-#: ``--porcelain=v1 -z``: Git's documented machine format. The version is pinned
-#: explicitly rather than left to the ``--porcelain`` default so that a future
-#: Git changing what "porcelain" means cannot change what this parser receives.
-#: ``-z`` makes records NUL-terminated and paths raw — see the module docstring
-#: for the three specific losses that fixed.
-GIT_STATUS: Tuple[str, ...] = ("git", "status", "--porcelain=v1", "-z")
+#: ``--porcelain=v1 -z --untracked-files=all``: Git's documented machine format,
+#: enumerating every untracked file.
+#:
+#: The version is pinned explicitly rather than left to the ``--porcelain``
+#: default so that a future Git changing what "porcelain" means cannot change
+#: what this parser receives. ``-z`` makes records NUL-terminated and paths raw —
+#: see the module docstring for the three losses that fixed.
+#:
+#: ``--untracked-files=all`` is the fourth. Git's default collapses a wholly new
+#: directory into a **single** record, ``?? newdir/``, and Cofferdam's claim model
+#: is file-level: a claim names ``newdir/a.py``, which a directory record can
+#: never pair with. The observation set was therefore coarser than the thing it
+#: is compared against, and the mismatch would have read as "the worker claimed a
+#: file Cofferdam never saw change". It is in **literal argv** rather than left to
+#: ``status.showUntrackedFiles``, so no user or repository configuration can turn
+#: it off — evidence coverage is not a preference.
+GIT_STATUS: Tuple[str, ...] = (
+    "git", "status", "--porcelain=v1", "-z", "--untracked-files=all",
+)
 
 ALLOWED_PROBES: Tuple[Tuple[str, ...], ...] = (
     GIT_IS_REPO,
@@ -206,6 +220,19 @@ _STATUS_TABLE: Dict[str, str] = {
 }
 
 
+def status_facts(status: object) -> frozenset:
+    """Every machine fact one ``XY`` proves. Empty when it proves none.
+
+    The table itself lives in Task Core's ``models.py`` — the assembler decides
+    agreement from it and may not import from this package, so this module maps
+    Git's statuses onto a vocabulary Task Core owns rather than defining a second
+    copy that could drift.
+    """
+    if not isinstance(status, str) or len(status) != 2:
+        return frozenset()
+    return STATUS_FACTS.get(status, frozenset())
+
+
 def classify_status(status: object) -> str:
     """One ``XY`` status to one machine change kind. Table lookup, never a guess.
 
@@ -214,6 +241,13 @@ def classify_status(status: object) -> str:
     characters at all — is :data:`CHANGE_UNKNOWN`. That is the whole safety
     property: a new Git status cannot become a *wrong* operation here, only an
     unestablished one.
+
+    **This is one label, and a composite status has more than one fact.** It is
+    the primary word — what a person reads on a screen — and it is deliberately
+    *not* what agreement is decided from. That is :func:`status_facts`, which
+    keeps both halves of ``RM``, ``AM`` and ``MD``. A composite whose two facts
+    have no single honest word (``MD``, ``AD``, ``RD``) is labelled
+    ``unknown`` here while still proving two facts there.
     """
     if not isinstance(status, str) or len(status) != 2:
         return CHANGE_UNKNOWN
@@ -622,6 +656,9 @@ def git_evidence(observation: GitObservation) -> Tuple[EvidenceReference, ...]:
                 result="changed",
                 change_kind=change.kind,
                 previous_identifier=change.previous_path,
+                # The exact XY, so the assembler can reason over both facts a
+                # composite status proves rather than over one collapsed label.
+                change_status=change.status,
                 observed_at=stamp,
             )
         )
@@ -666,6 +703,7 @@ __all__ = [
     "MAX_OBSERVED_PATH_CHARS",
     "MAX_OBSERVED_SEGMENT_CHARS",
     "classify_status",
+    "status_facts",
     "parse_status_z",
     "parse_status_z_counted",
     "GIT_BRANCH",

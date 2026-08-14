@@ -776,7 +776,7 @@ the right-hand path, dropping the source. And `_safe_relative` refused any path 
 quote — which, in human porcelain, is **every path containing a space, a tab, an arrow or a
 non-ASCII byte**, so a file called `has space.txt` produced no evidence at all.
 
-**The probe is now `git status --porcelain=v1 -z`.** Git's documented machine format: records are
+**The probe is now `git status --porcelain=v1 -z --untracked-files=all`.** Git's documented machine format: records are
 NUL-terminated, so a newline, tab or literal `->` inside a filename is just bytes, and paths are
 emitted raw rather than quoted. The version is pinned explicitly so a future Git changing what
 "porcelain" means cannot change what the parser receives. Output is read as **bytes** and each field
@@ -869,11 +869,46 @@ no durable earlier revision to diff against, and inventing one would be exactly 
 before/after boundary the brief warned about. A test asserts the honest behaviour — the claim stays
 `claim_only`, never a conflict.
 
-**One real Git quirk, pinned because it surprises.** Thirty new files inside a previously-unknown
-directory are reported by Git as a **single** record, `?? bulk/`. Cofferdam refuses that path (a
-trailing separator leaves an empty final segment, and PR1's claim gate would refuse it too) and
-counts the refusal, so the observation is honestly partial rather than appearing to say the thirty
-files did not change.
+**Untracked files are enumerated individually.** Git's default reports a wholly new directory as a
+**single** record, `?? newdir/` — and Cofferdam's claim model is file-level, so a claim naming
+`newdir/a.py` could never pair with it. The observation set would have been silently coarser than
+the thing it is compared against, and the mismatch would have read as "the worker claimed a file
+Cofferdam never saw change". `--untracked-files=all` is in **literal argv** rather than left to
+`status.showUntrackedFiles`, so no user or repository configuration can turn it off: evidence
+coverage is not a preference. Nested directories are enumerated to the leaf, and awkward filenames
+under them survive.
+
+**Composite `XY` states carry two facts, and both are kept.** `X` is the index against HEAD and `Y`
+the working tree against the index, so one status routinely proves **two** things: `RM` is *renamed
+and then modified*, `AM` is *added and then modified*, `MD` is *modified and then deleted*.
+Collapsing each to one preferred word discards a fact that may be exactly the one reconciling a
+worker's claim — and reading that absence as evidence would turn an honest "modified" report after a
+rename into a **false conflict**.
+
+So the exact `XY` is persisted as `EvidenceReference.change_status` — optional, bounded to two
+characters, still **no schema change** — and agreement is decided against the whole fact set:
+
+* the claim matches **any** proven fact → `true`
+* the claim is incompatible with **every** fact → `false`
+* anything else → `unknown`
+
+One reconciling fact is enough to stop a contradiction. `RM` + a `modified` claim **agrees**;
+`RM` + a `deleted` claim is `unknown` (deleted contradicts modified but not renamed, so not *all*);
+`MD` + either `modified` or `deleted` agrees; `MD` + `created` is `unknown`. The simple states still
+decide as before: a plain `D` contradicts a `modified` claim, and `created` vs `modified` remains
+`unknown`. `change_kind` survives as the primary label a person reads; it is deliberately **not**
+what agreement is computed from.
+
+**A rename is never agreed by a status alone.** Even `R ` and `RM`, which prove a rename happened,
+do not prove it is *this* rename — same destination from a different source is a different event.
+`operation_agreement` returns `unknown` for every rename claim, and only the comparison that uses
+both paths may agree one. That is structural rather than a convention.
+
+**The index is not written merely to observe.** `git status` may refresh cached stat information as
+an optimisation — a write performed to look. `GIT_OPTIONAL_LOCKS=0` was already in the probe
+environment and already passed to the subprocess; PR3 adds no change and instead **proves** it, by
+asserting the index file is byte-identical across repeated observations and that no `index.lock`
+appears.
 
 **Path safety is unchanged in strength and cheaper.** `_safe_relative` is now purely lexical — the
 pre-PR3 version called `.resolve()` and compared against the root, which touches the filesystem to

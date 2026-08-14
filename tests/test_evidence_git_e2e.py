@@ -246,23 +246,21 @@ class GitEndToEnd(unittest.TestCase):
         self.assertEqual(group.relationship, RELATIONSHIP_PATH_AGREED)
         self.assertEqual(group.observed_kinds, ())
 
-    def test_git_collapses_a_wholly_new_directory_into_one_record(self):
-        """Real Git behaviour, pinned because it surprises.
+    def test_a_wholly_new_directory_is_enumerated_file_by_file(self):
+        """This used to collapse to one `?? bulk/` record. It no longer does.
 
-        Thirty new files inside one previously-unknown directory are reported as
-        a **single** record — ``?? bulk/`` — not thirty. Cofferdam then refuses
-        that path, because a trailing separator leaves an empty final segment and
-        the claim gate would refuse it too. The refusal is counted, so the
-        observation is honestly marked partial rather than appearing to say the
-        thirty files did not change.
+        `--untracked-files=all` makes the observation file-level, which is the
+        granularity a `ChangeClaim` is written at — a directory record could
+        never pair with a claim about `bulk/f00.txt`.
         """
-        for index in range(30):
+        for index in range(3):
             self.write("bulk/f%02d.txt" % index)
         observation, _ = self.observe_and_record()
-        self.assertEqual(observation.changes, ())
-        self.assertEqual(observation.refused_count, 1)
-        self.assertFalse(observation.complete)
-        self.assertFalse(self.bundle().machine_observations_complete)
+        paths = {c.path for c in observation.changes}
+        self.assertEqual(paths, {"bulk/f00.txt", "bulk/f01.txt", "bulk/f02.txt"})
+        self.assertNotIn("bulk/", paths)
+        self.assertEqual(observation.refused_count, 0)
+        self.assertTrue(observation.complete)
 
     def test_a_truncated_observation_is_visible(self):
         """16. More changed paths than the budget, and the bundle says so.

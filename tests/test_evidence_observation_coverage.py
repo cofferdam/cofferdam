@@ -278,6 +278,29 @@ class FingerprintBindsMachineFacts(CoverageFixture):
             first, _rebuild(self, CHANGE_RENAMED, previous="old.py", path="new.py")
         )
 
+    def test_the_raw_machine_status_is_an_input(self):
+        """`R ` and `RM` share a label and prove different facts.
+
+        Both are `change_kind="renamed"`, but `RM` also proves a modification —
+        which is what agreement is decided from. Two bundles that disagree about
+        that must not fingerprint alike.
+        """
+        self.observe(
+            observation("new.py", CHANGE_RENAMED, previous="old.py", status="R "),
+            coverage(),
+        )
+        self.close()
+        first = self._neutralised()
+        second = _rebuild(
+            self, CHANGE_RENAMED, previous="old.py", path="new.py", status="RM"
+        )
+        self.assertNotEqual(first, second)
+        # Control: the same status gives the same value.
+        self.assertEqual(
+            first,
+            _rebuild(self, CHANGE_RENAMED, previous="old.py", path="new.py", status="R "),
+        )
+
     def test_the_completeness_state_is_an_input(self):
         self.observe(observation("a.py", CHANGE_MODIFIED), coverage(COVERAGE_COMPLETE))
         self.close()
@@ -335,7 +358,7 @@ class FingerprintBindsMachineFacts(CoverageFixture):
         self.assertIn(CHANGE_RENAMED, recorded)
 
 
-def _rebuild(case, kind, previous=None, path="a.py", cover=COVERAGE_COMPLETE):
+def _rebuild(case, kind, previous=None, path="a.py", cover=COVERAGE_COMPLETE, status=None):
     """A fresh store with one differing machine fact, otherwise identical."""
     import tempfile as _tempfile
 
@@ -357,7 +380,7 @@ def _rebuild(case, kind, previous=None, path="a.py", cover=COVERAGE_COMPLETE):
                          actor="system", source="cofferdam")
     store.open_turn(row.task_id, provider="validation", source="internal_test",
                     started_at="2026-08-14T00:00:00Z")
-    refs = [observation(path, kind, previous=previous)]
+    refs = [observation(path, kind, previous=previous, status=status)]
     if cover is not None:
         refs.append(coverage(cover))
     store.append_event(row.task_id, "progress", actor="system", source="cofferdam",

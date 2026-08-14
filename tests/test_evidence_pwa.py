@@ -291,6 +291,12 @@ class MachineOperationLanguage(unittest.TestCase):
         self.assertIn("only some of the changes Git", html)
         self.assertIn("may simply not have been looked at", html)
 
+    def test_a_composite_status_is_shown_beside_the_primary_word(self):
+        """`RM` proves renamed AND modified; the word alone would hide half."""
+        html = panel("evidence-rename-observed")["html"]
+        self.assertIn("[RM]", html)
+        self.assertIn("Machine observed: renamed", html)
+
     def test_the_panel_reports_assembler_v2(self):
         html = panel("evidence-shows-all-three-relationships")["html"]
         self.assertIn("Assembler v2", html)

@@ -375,10 +375,14 @@ downstream reads from.
   - **PR3 — richer machine-owned Git observations + assembler v2.** *Implemented on a branch and
     not deployed; see [`STATUS.md`](STATUS.md).* The **observation** side, which was the real
     ceiling on PR2: Cofferdam already asked Git for the operation and threw it away. The probe
-    becomes `git status --porcelain=v1 -z` — Git's documented machine format, NUL-framed, raw
-    paths — and a flat `changed_paths` becomes structured `GitChange` records carrying a closed
+    becomes `git status --porcelain=v1 -z --untracked-files=all` — Git's documented machine
+    format, NUL-framed, raw paths, and **file-level** rather than collapsing a new directory into
+    one record — and a flat `changed_paths` becomes structured `GitChange` records carrying a closed
     machine kind (`created`/`modified`/`deleted`/`renamed`/`unknown`), the raw `XY`, and **both**
-    sides of a rename. `EvidenceReference` gains two optional fields and **needs no schema bump**:
+    sides of a rename. Because `XY` is two columns, a composite status proves **two** facts
+    (`RM` = renamed *and* modified), so agreement is decided against the whole fact set — a claim
+    matching any proven fact agrees, and only a claim incompatible with *every* fact is
+    contradicted. That is what stops a collapsed label manufacturing a false conflict. `EvidenceReference` gains two optional fields and **needs no schema bump**:
     old rows read back with `None`, which means *the operation was never established*. Assembler
     **v2** answers `operation_agreement` as `true`/`false`/`unknown` from one closed table, which
     makes the **first deterministic `claim_conflict`** possible — two positive machine facts that
