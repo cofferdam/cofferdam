@@ -240,7 +240,7 @@ class PayloadTests(EvidenceApiTestCase):
     def test_the_bundle_publishes_its_versions_and_attribution(self):
         bundle = self.payload()["evidence"]
         self.assertEqual(bundle["version"], 1)
-        self.assertEqual(bundle["assembler_version"], 1)
+        self.assertEqual(bundle["assembler_version"], 2)
         self.assertIn(bundle["turn_attribution"], ("exact", "legacy_unknown"))
 
     def test_the_bundle_carries_no_artifact_body(self):

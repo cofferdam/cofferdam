@@ -310,6 +310,71 @@ VERIFIED_EVIDENCE_SOURCES = frozenset(
     {EVIDENCE_COFFERDAM_ACTION, EVIDENCE_OS_OBSERVED, EVIDENCE_GIT_OBSERVED}
 )
 
+# -- what a machine observer said happened to a path ---------------------------
+#
+# Provider-neutral, and here rather than in the Claude Code adapter for a reason
+# the layer tests enforce: Task Core may not import from an agent-specific
+# package. These words describe what *any* machine observer reported — a second
+# adapter observing a different VCS would produce the same vocabulary — so Task
+# Core owns them and the adapter imports them from here.
+#
+# Deliberately a different set from the claim operations in `claims.py`, even
+# though four words coincide. A claim operation is what a worker said it did;
+# these are what a machine reported. One shared constant would make them one
+# concept in the code and two in reality.
+
+CHANGE_CREATED = "created"
+CHANGE_MODIFIED = "modified"
+CHANGE_DELETED = "deleted"
+CHANGE_RENAMED = "renamed"
+
+#: A machine reported a change and what kind is not establishable from what it
+#: said. A first-class member, not a failure: an unmerged path, a type change or
+#: a copy is a real observation that none of the four words describes truthfully,
+#: and `unknown` is the answer that cannot be wrong.
+CHANGE_UNKNOWN = "unknown"
+
+CHANGE_KINDS: Tuple[str, ...] = (
+    CHANGE_CREATED,
+    CHANGE_MODIFIED,
+    CHANGE_DELETED,
+    CHANGE_RENAMED,
+    CHANGE_UNKNOWN,
+)
+
+#: What each raw machine status **proves**, as a set rather than a label.
+#:
+#: Git's two-character ``XY`` is two columns — the index against HEAD, and the
+#: working tree against the index — so one status routinely carries **two true
+#: facts**: ``RM`` is *renamed and then modified*, ``AM`` is *added and then
+#: modified*, ``MD`` is *modified and then deleted*.
+#:
+#: Here rather than in the adapter for the layer reason the whole vocabulary is
+#: here: Task Core's assembler decides agreement from these sets and may not
+#: import from an agent-specific package. The adapter maps Git's status onto
+#: them; Task Core reasons over them.
+#:
+#: An empty set means the machine reported a change and proved nothing
+#: publishable about it — unmerged states, type changes, copies. Nothing can be
+#: concluded either way, which is exactly right.
+STATUS_FACTS: Dict[str, frozenset] = {
+    "??": frozenset({CHANGE_CREATED}),
+    "A ": frozenset({CHANGE_CREATED}),
+    " A": frozenset({CHANGE_CREATED}),
+    "AM": frozenset({CHANGE_CREATED, CHANGE_MODIFIED}),
+    "AD": frozenset({CHANGE_CREATED, CHANGE_DELETED}),
+    "M ": frozenset({CHANGE_MODIFIED}),
+    " M": frozenset({CHANGE_MODIFIED}),
+    "MM": frozenset({CHANGE_MODIFIED}),
+    "MD": frozenset({CHANGE_MODIFIED, CHANGE_DELETED}),
+    "D ": frozenset({CHANGE_DELETED}),
+    " D": frozenset({CHANGE_DELETED}),
+    "R ": frozenset({CHANGE_RENAMED}),
+    " R": frozenset({CHANGE_RENAMED}),
+    "RM": frozenset({CHANGE_RENAMED, CHANGE_MODIFIED}),
+    "RD": frozenset({CHANGE_RENAMED, CHANGE_DELETED}),
+}
+
 EVIDENCE_PROCESS = "process"
 EVIDENCE_FILE = "file"
 EVIDENCE_COMMIT = "commit"
@@ -471,6 +536,43 @@ class EvidenceReference:
     result: Optional[str] = None
     observed_at: Optional[str] = None
 
+    #: What a **machine** observed happening to ``identifier`` (M2K PR3).
+    #:
+    #: Optional, and its absence is meaningful rather than empty: an evidence
+    #: row written before PR3 has no ``change_kind``, and the honest reading of
+    #: that is "the operation was not established", never "nothing happened".
+    #: The assembler treats ``None`` exactly that way.
+    #:
+    #: Deliberately **not** ``operation``. That field already means "the probe
+    #: that produced this row" — it holds ``git status`` and ``rev-parse HEAD``
+    #: — and overloading it would make one field answer two questions, with the
+    #: older answer silently lost. Deliberately not packed into ``result``
+    #: either: ``result="A -> B"`` would be a parser waiting to be written, over
+    #: a separator that is a legal filename character.
+    change_kind: Optional[str] = None
+
+    #: The path a rename replaced — the source, which no longer exists.
+    #: ``identifier`` is always the destination. Set only for a rename; ``None``
+    #: everywhere else, including for a copy, whose source still exists and was
+    #: therefore not replaced.
+    previous_identifier: Optional[str] = None
+
+    #: The exact machine status the observer read, verbatim and bounded — for
+    #: Git, the two-character ``XY``.
+    #:
+    #: Kept because ``change_kind`` is **one label and a status can prove two
+    #: facts**: ``X`` is the index against HEAD and ``Y`` the working tree
+    #: against the index, so ``RM`` means *renamed and then modified*. Storing
+    #: only the label would discard the second fact, and a later reader treating
+    #: that absence as evidence would turn a truthful "modified" claim into a
+    #: contradiction.
+    #:
+    #: It is also the evidence behind the label: a reader who disagrees with the
+    #: mapping can see what the machine actually said. Two characters, so it
+    #: cannot become a payload, and ``None`` on every row written before it
+    #: existed.
+    change_status: Optional[str] = None
+
     @property
     def verified(self) -> bool:
         return self.source in VERIFIED_EVIDENCE_SOURCES
@@ -487,6 +589,9 @@ class EvidenceReference:
             "operation": self.operation,
             "result": self.result,
             "observed_at": self.observed_at,
+            "change_kind": self.change_kind,
+            "previous_identifier": self.previous_identifier,
+            "change_status": self.change_status,
         }
 
 
@@ -675,6 +780,13 @@ __all__ = [
     "EVIDENCE_COFFERDAM_ACTION",
     "EVIDENCE_COMMIT",
     "EVIDENCE_FILE",
+    "CHANGE_CREATED",
+    "CHANGE_DELETED",
+    "CHANGE_KINDS",
+    "CHANGE_MODIFIED",
+    "CHANGE_RENAMED",
+    "CHANGE_UNKNOWN",
+    "STATUS_FACTS",
     "EVIDENCE_GIT_OBSERVED",
     "EVIDENCE_OS_OBSERVED",
     "EVIDENCE_PROCESS",

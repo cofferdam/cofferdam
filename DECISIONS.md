@@ -2008,6 +2008,161 @@ other, leaving the fingerprint identifying nothing — and would then invite som
 timestamp to the fingerprint "for completeness". Response-generation metadata sits on the HTTP
 envelope, labelled as presentation.
 
+## D-2026-08-14-4 — Machine observations carry the operation, and `unknown` is an answer (EFE DECISION, ACTIVE)
+
+**Decision.** The Git probe becomes `git status --porcelain=v1 -z`, observations carry a closed
+machine change kind and both sides of a rename, and every state Git can report that does not map
+cleanly onto one of those words is published as `unknown` rather than approximated.
+
+**This was a loss, not a missing feature.** Cofferdam already ran `git status --porcelain` and the
+parser sliced past the two `XY` status characters with `line[3:]`. The operation was fetched and
+discarded, which is why PR2 could only ever emit `operation_agreement: unknown`. Two further losses
+sat beside it: rename records were split on `" -> "` and only the right-hand path kept, and
+`_safe_relative` refused any path starting with a quote — which in human porcelain is *every* path
+containing a space, a tab, an arrow or a non-ASCII byte. A file called `has space.txt` produced no
+evidence at all.
+
+**Why the machine format, and why the version is pinned.** `-z` makes records NUL-terminated and
+paths raw, so a newline, tab or literal `->` inside a filename is just bytes and no separator can be
+forged. `--porcelain=v1` is stated explicitly so a future Git changing the meaning of the bare
+`--porcelain` cannot change what the parser receives. Output is read as bytes and each field decoded
+strictly on its own: `errors="replace"` would turn a non-UTF-8 filename into a *different* filename,
+and Cofferdam would publish a path that does not exist.
+
+**The `-z` rename order is the reverse of the human one.** Human porcelain reads `R  old -> new`;
+the machine form puts the **destination** in the record and the **source** in the following field.
+A parser written from the human output inverts every rename silently, with both paths still looking
+plausible. It is pinned by a test that runs the installed Git, not by a comment.
+
+**`unknown` is a first-class member of the vocabulary.** Unmerged states (`UU`, `AA`, `DD`, `AU`,
+`UA`, `DU`, `UD`) are mid-conflict and nobody has decided what happened yet. `T` is a type change
+that none of the four words describes. `C` is a copy whose source still exists, so calling it a
+rename would assert a deletion that did not happen. `MD` is a staged modify and a worktree delete —
+two true facts that disagree. The mapping is a table with no branches, so a status this build has
+never seen becomes `unknown` rather than a wrong guess.
+
+**No schema change.** `change_kind` and `previous_identifier` are optional fields written only when
+present, so a row carrying no machine semantics serialises to exactly the pre-PR3 key set, and the
+deserializer already used `.get()`. Old rows read back as `None`, meaning *the operation was never
+established* — never *nothing happened*. Schema stays at v5, and the rollback pair the PR2
+deployment established is untouched. Bumping the schema for optional dataclass fields would have
+compounded rollback complexity for nothing.
+
+## D-2026-08-14-5 — A conflict is two positive machine facts, and it is not a verdict (EFE DECISION, ACTIVE)
+
+**Decision.** `claim_conflict` is emitted only when a stored claim and a machine observation name
+the same path and describe **explicitly incompatible** operations. It means the two records
+disagree, and nothing else.
+
+**The bar is deliberately high.** Absence is not conflict. A pre-PR3 observation, which carries no
+operation, is not conflict. An unmerged or type-changed path is not conflict. A truncated
+observation set is not conflict. Each of those is a reason the machine *did not say*, and a
+conflict requires that it *did*.
+
+**`created` versus `modified` is `unknown`, not `false`.** A worker that creates a file and then
+edits it truthfully says "created", while Git reports whichever the state against HEAD supports.
+The two words describe the same work from different vantage points often enough that treating them
+as a contradiction would manufacture conflicts out of ordinary sequences. `created` versus `deleted`
+**is** incompatible: both cannot describe one path's final state against one HEAD.
+
+**A rename is answered by both paths or not at all.** One table cell cannot express "the source and
+destination both match", so renames have their own comparison. Both match: agreed. Same destination
+from a different source: incompatible — two rename records cannot both describe one event. A rename
+observation with no recorded source: unknown, because half a rename proves nothing about the other
+half.
+
+**`path_agreement` stays true for a conflict.** Both records do name the same file; the disagreement
+is entirely about the operation. Collapsing the two questions into one field would lose exactly the
+distinction that makes a conflict readable.
+
+**It is not a verdict, and the surfaces must not let it become one.** It does not mean the task
+failed, the acceptance criteria failed, or the worker was dishonest — a worker that modified a file
+and then deleted it produced a conflict and did nothing wrong. The PWA renders it as "Records
+differ" with "Both records are kept as they were", styled as something to look at rather than
+something that went wrong, and the forbidden-vocabulary scan covers it. **The evaluator is still not
+in this milestone.**
+
+## D-2026-08-14-7 — A composite Git status proves two facts, and both decide agreement (EFE DECISION, ACTIVE)
+
+**Decision.** The exact machine status is persisted alongside the change kind, and operation
+agreement is computed from the **set** of facts that status proves rather than from a single
+collapsed label.
+
+**Because `XY` is two columns.** `X` is the index against HEAD; `Y` is the working tree against the
+index. `RM` therefore means *renamed **and** then modified*, `AM` means *added **and** then
+modified*, `MD` means *modified **and** then deleted*. Each is two true statements about one path.
+
+**The failure this prevents is specific.** Collapse `RM` to `renamed`, then compare a worker's
+truthful `modified` claim against that one word, and the claim looks unsupported — or worse,
+contradicted. The fact that would have reconciled it was thrown away by the collapse, not absent
+from the evidence. A conflict manufactured that way is exactly the kind of false statement the
+milestone exists to prevent, and it would land on the surface that a person reads.
+
+**The rule.** A claim matching **any** proven fact agrees. A claim is contradicted only when it is
+incompatible with **every** proven fact. Anything else is `unknown`. One reconciling fact is enough
+to stop a contradiction — the conservative direction, and the one that cannot be wrong.
+
+**`change_kind` survives as a label, not as the decision.** It is the primary word a person reads,
+and composites whose two facts have no single honest word (`MD`, `AD`, `RD`) are labelled `unknown`
+while still proving two facts. Keeping the label and the decision separate is what lets the display
+stay simple without the comparison becoming simplistic.
+
+**A rename is never agreed by a status alone.** `R ` and `RM` prove a rename happened; they do not
+prove it is *this* rename, because the same destination from a different source is a different
+event. `operation_agreement` returns `unknown` for every rename claim, so only the comparison that
+uses both paths can agree one. Structural, not conventional.
+
+**Still no schema change.** `change_status` is optional, bounded to two characters, written only
+when present, and read with `.get()`. Rows without it fall back to their single label, which is all
+they ever knew.
+
+## D-2026-08-14-8 — Machine observation is file-level, because claims are (EFE DECISION, ACTIVE)
+
+**Decision.** The Git probe passes `--untracked-files=all` in literal argv.
+
+**Because the two sides must be comparable.** A `ChangeClaim` names a file. Git's default reports a
+wholly new directory as one record, `?? newdir/`, and a directory record can never pair with a claim
+about `newdir/a.py`. The observation set was therefore coarser than the thing it is compared
+against — and the mismatch would not have read as a granularity difference, it would have read as
+"the worker claimed a file Cofferdam never saw change".
+
+**In argv, not configuration.** `status.showUntrackedFiles` could otherwise turn it off from a user
+or repository config file. Evidence coverage is not a preference, and a probe whose completeness
+depends on a setting is a probe whose completeness cannot be reasoned about.
+
+**Completeness accounts for the larger set.** Enumerating files rather than directories makes the
+observation set bigger, so it reaches the caps sooner. Truncation, refused paths and malformed
+records all feed one published `machine_observations_complete`, so a set that lost known file-level
+evidence is never reported as whole.
+
+## D-2026-08-14-6 — Cofferdam has no pre-work revision, and will not pretend otherwise (EFE DECISION, ACTIVE)
+
+**Decision.** PR3 does **not** add `git diff --name-status <revision>`. Machine observation remains
+what `git status` reports: the index and working tree against the **current** HEAD.
+
+**Because there is no boundary to diff against.** The continuity audit looked for one and found
+none. `ClaudeRun` captures no revision when a task starts. `observe_git` runs once, after a result
+arrives. `observation.head` is the commit as it stands *at observation time*, recorded as a pointer
+for a reader and never compared to anything. Adding a revision diff would have required choosing a
+revision, and the only one available is the same HEAD the status already compares against — which
+would have been a before/after boundary in name only.
+
+**The consequence is specific and is published rather than hidden: if a worker commits its work,
+`git status` reports a clean tree and Cofferdam observes nothing.** The claim then stays
+`claim_only`, which is honest — unmatched, unverified — and is asserted by a test that commits the
+work and checks the bundle does not turn the absence into a conflict.
+
+**What closing it would take** is a durable pre-work revision, captured when a task or turn starts
+and stored where the turn bounds are. That is a decision about what Cofferdam records at task start,
+with its own persistence question, and it belongs in its own PR rather than smuggled in behind a
+parser improvement.
+
+**Observation completeness is published for the same reason.** When Git reports more changes than
+Cofferdam records — through the evidence budget, or because a path failed the safety gate — the
+bundle says so, so that an `observed_only` absence is read as "possibly not looked at" rather than
+"looked at and not there". Refused paths are counted; the paths themselves are not stored, for the
+reason PR1 stores no rejected payload.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

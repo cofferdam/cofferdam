@@ -928,13 +928,32 @@ class Evidence(unittest.TestCase):
         """53. A path that escapes is not evidence about this project."""
         self.assertIsNone(evidence._safe_relative("/etc/passwd", self.root))
         self.assertIsNone(evidence._safe_relative("../../secrets.txt", self.root))
-        self.assertIsNone(evidence._safe_relative('"quoted\\npath"', self.root))
+        # A quoted path no longer arises: `-z` emits raw bytes. What must still
+        # be refused is a control character, which is what the quoting used to
+        # hide — and which PR1's claim gate refuses too, so both sides agree.
+        self.assertIsNone(evidence._safe_relative("quoted\npath"))
         self.assertEqual(evidence._safe_relative("src/app.py", self.root), "src/app.py")
 
-    def test_rename_entries_report_the_new_path(self):
+    def test_an_arrow_in_a_filename_is_no_longer_a_separator(self):
+        """M2K PR3 reversed this deliberately.
+
+        The pre-PR3 parser read human porcelain and split ``old.py -> new.py``
+        on the arrow. Under ``--porcelain=v1 -z`` a rename is two NUL-separated
+        fields, so the arrow is never a separator — and a file genuinely *called*
+        ``old.py -> new.py`` must survive intact rather than being silently
+        turned into a claim about ``new.py``.
+
+        Renames still report the destination; they just do it structurally. See
+        ``tests/test_git_observations.py``, which pins both sides against real
+        Git output.
+        """
         self.assertEqual(
-            evidence._safe_relative("old.py -> new.py", self.root), "new.py"
+            evidence._safe_relative("old.py -> new.py"), "old.py -> new.py"
         )
+        changes = evidence.parse_status_z(b"R  new.py\x00old.py\x00")
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0].path, "new.py")
+        self.assertEqual(changes[0].previous_path, "old.py")
 
     def test_git_evidence_is_always_labelled_git_observed(self):
         """55. The source is not a parameter; nothing can be promoted into it."""
@@ -942,7 +961,11 @@ class Evidence(unittest.TestCase):
             is_repository=True,
             branch="main",
             head="a" * 40,
-            changed_paths=("one.py", "two.py"),
+            changes=(
+                evidence.GitChange(path="one.py", kind="modified", status="M "),
+                evidence.GitChange(path="two.py", kind="created", status="??"),
+            ),
+            reported_count=2,
             clean=False,
         )
         references = evidence.git_evidence(observation)

@@ -2252,7 +2252,7 @@ function run() {
   function evidenceBundle(overrides) {
     return Object.assign({
       version: 1,
-      assembler_version: 1,
+      assembler_version: 2,
       input_fingerprint: "a".repeat(64),
       task_id: "task_e",
       turn_number: 1,
@@ -2261,6 +2261,7 @@ function run() {
       closed_through_event_sequence: 9,
       turn_open: false,
       repository_reported_clean: false,
+      machine_observations_complete: true,
       ingestion: {
         state: "incomplete",
         submitted: 3,
@@ -2290,12 +2291,14 @@ function run() {
         {
           reference: "evt7.0", event_sequence: 7, evidence_index: 0,
           path: "src/foo.py", source: "git_observed", evidence_type: "file",
-          operation: "git status", result: "changed", verified: true
+          operation: "git status", result: "changed", verified: true,
+          change_kind: "modified", previous_path: null, change_status: "MM"
         },
         {
           reference: "evt7.1", event_sequence: 7, evidence_index: 1,
           path: "src/unclaimed.py", source: "git_observed", evidence_type: "file",
-          operation: "git status", result: "changed", verified: true
+          operation: "git status", result: "changed", verified: true,
+          change_kind: "created", previous_path: null
         }
       ],
       relationships: [
@@ -2310,7 +2313,7 @@ function run() {
           path: "src/foo.py", relationship: "path_agreed",
           claim_ids: ["chg_one"], claim_operations: ["modified"],
           observation_refs: ["evt7.0"], path_agreement: true,
-          operation_agreement: "unknown", claim_count: 1,
+          operation_agreement: "true", observed_kinds: ["modified"], claim_count: 1,
           observation_count: 1, sources_truncated: false
         },
         {
@@ -2346,6 +2349,59 @@ function run() {
 
   if (scenario === "evidence-shows-all-three-relationships") {
     return evidenceScenario(evidenceBundle());
+  }
+
+  if (scenario === "evidence-operation-differs") {
+    return evidenceScenario(evidenceBundle({
+      relationships: [
+        {
+          path: "src/foo.py", relationship: "claim_conflict",
+          claim_ids: ["chg_one"], claim_operations: ["modified"],
+          observation_refs: ["evt7.0"], path_agreement: true,
+          operation_agreement: "false", observed_kinds: ["deleted"],
+          claim_count: 1, observation_count: 1, sources_truncated: false
+        }
+      ],
+      observations: [
+        {
+          reference: "evt7.0", event_sequence: 7, evidence_index: 0,
+          path: "src/foo.py", source: "git_observed", evidence_type: "file",
+          operation: "git status", result: "changed", verified: true,
+          change_kind: "deleted", previous_path: null
+        }
+      ],
+      limitations: []
+    }));
+  }
+
+  if (scenario === "evidence-rename-observed") {
+    return evidenceScenario(evidenceBundle({
+      observations: [
+        {
+          reference: "evt7.0", event_sequence: 7, evidence_index: 0,
+          path: "src/new.py", source: "git_observed", evidence_type: "file",
+          operation: "git status", result: "changed", verified: true,
+          change_kind: "renamed", previous_path: "src/old.py", change_status: "RM"
+        }
+      ],
+      relationships: [
+        {
+          path: "src/new.py", relationship: "path_agreed",
+          claim_ids: ["chg_one"], claim_operations: ["renamed"],
+          observation_refs: ["evt7.0"], path_agreement: true,
+          operation_agreement: "true", observed_kinds: ["renamed"],
+          claim_count: 1, observation_count: 1, sources_truncated: false
+        }
+      ],
+      limitations: []
+    }));
+  }
+
+  if (scenario === "evidence-machine-incomplete") {
+    return evidenceScenario(evidenceBundle({
+      machine_observations_complete: false,
+      limitations: ["machine_observations_incomplete"]
+    }));
   }
 
   if (scenario === "evidence-legacy-turn") {
