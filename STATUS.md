@@ -778,6 +778,17 @@ is not marked verified, not cross-referenced, not counted as agreement. That is 
 at record time would let a claim become believed as a side effect of arriving next to an
 observation. There is no verdict, no confidence, no risk level and no column for one.
 
+**The deny policy covers conventions, on both sides of a rename.** Credential directories
+(`.ssh`, `.gnupg`, `.aws`, `.docker`, `.kube`, `.cofferdam`, `secrets`), known credential
+basenames, `.env` variants and credential extensions (`.pem`, `.key`, `.p12`, `.pfx`, `.jks`,
+`.keystore`, `.p8`, `.tfstate`, `.env`), with one backup extension stripped once so
+`private.pem.bak` is denied and `notes.md.bak` is not. It recognises conventions rather than
+scanning content, so `docs/environment.md`, `src/tokenizer.py`, `docs/secrets-design.md` and
+`config/database.example.yml` stay readable — a scan of all 418 tracked repository files denies
+none of them. **A rename is checked on both source and destination**, so a sensitive destination
+cannot become a way to store bytes through a harmless-looking source; either side denied withholds
+the artifact while keeping the claim.
+
 **Claim ingestion is bounded, and the loss is durable.** Both limits and every deterministic
 validation refusal are counted into `task_claim_ingestion` — submitted, accepted, rejected, a
 truncation flag and counts by closed reason code — written in the same transaction as the claims

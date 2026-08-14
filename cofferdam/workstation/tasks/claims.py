@@ -252,7 +252,8 @@ ARTIFACT_REASONS: Tuple[str, ...] = (
 # widen it by editing a file; it is not a parameter, so a caller cannot pass one;
 # and the adapter never sees it.
 
-#: Exact file names, matched case-insensitively against any single segment.
+#: Exact basenames, matched case-insensitively. Conventions, not guesses: every
+#: entry is a filename a well-known tool writes credentials into.
 _DENIED_NAMES = frozenset(
     {
         ".env",
@@ -272,24 +273,100 @@ _DENIED_NAMES = frozenset(
         ".git-credentials",
         ".npmrc",
         ".pypirc",
+        # HashiCorp Vault writes the login token here, verbatim.
+        ".vault-token",
+        # Rails conventions. The `.example`/`.sample` variants people commit are
+        # *not* these names and stay allowed — see the tests.
+        "database.yml",
+        "secrets.yml",
+        "secrets.yaml",
+        # A file somebody named this is a file somebody put a secret in.
+        "secret.txt",
+        "secrets.txt",
     }
 )
 
-#: Suffixes that are private-key or credential material whatever they are called.
-_DENIED_SUFFIXES = ("*.pem", "*.key", "*.p12", "*.pfx", "*.jks", "*.keystore")
+#: Extensions that are credential material whatever the file is called.
+#:
+#: `.tfstate` is here because Terraform state routinely contains plaintext
+#: provider and database secrets, and `.p8` because it is a PKCS#8 private-key
+#: container — which is what Apple's `AuthKey_*.p8` is, matched by its extension
+#: rather than by a filename pattern that varies per account.
+#:
+#: `.env` as an *extension* (`local.env`, `prod.env`) is the same convention as
+#: `.env` as a name.
+_DENIED_SUFFIXES = frozenset(
+    {
+        ".pem",
+        ".key",
+        ".p12",
+        ".pfx",
+        ".jks",
+        ".keystore",
+        ".p8",
+        ".tfstate",
+        ".env",
+    }
+)
 
-#: Directory names whose whole subtree is refused, matched case-insensitively.
-_DENIED_DIRECTORIES = frozenset({".ssh", ".gnupg", ".aws", ".cofferdam", "secrets"})
+#: Directory names whose whole subtree is refused, matched case-insensitively
+#: against **every** component.
+#:
+#: `.docker` holds `config.json` with registry auth; `.kube` holds a kubeconfig
+#: carrying cluster certificates and tokens, and a cache that carries tokens
+#: too. Both are dot-directories that tools own — a project's own Docker or
+#: Kubernetes files live in `docker/` and `kube/` without the dot, and those
+#: stay allowed.
+_DENIED_DIRECTORIES = frozenset(
+    {".ssh", ".gnupg", ".aws", ".cofferdam", ".docker", ".kube", "secrets"}
+)
 
-#: Name prefixes that mark a credential file regardless of extension.
-_DENIED_PREFIXES = (".env.",)
+#: `.env` followed by a separator: `.env.local`, `.env-local`, `.env_production`.
+#:
+#: The separator is the whole point. Matching a bare `.env` prefix would deny
+#: `.environment` and `.envoy`, which are words rather than environment files.
+_ENV_PREFIX = ".env"
+_ENV_SEPARATORS = (".", "-", "_")
+
+#: Stripped once before the name and extension checks run again, so one rule
+#: covers `.netrc.bak`, `.pgpass.old`, `private.pem.bak` and
+#: `terraform.tfstate.backup` rather than four.
+#:
+#: Single strip, deliberately: it is predictable, and `notes.md.bak` still
+#: reduces to `notes.md`, which is not denied.
+_BACKUP_SUFFIXES = (".bak", ".backup", ".old", ".orig", ".save")
+
+
+def _denied_basename(lowered: str) -> bool:
+    """The name rules, applied to one already-lowercased basename."""
+    if lowered in _DENIED_NAMES or lowered in _DENIED_DIRECTORIES:
+        return True
+    if lowered.startswith(_ENV_PREFIX):
+        rest = lowered[len(_ENV_PREFIX) :]
+        if rest[:1] in _ENV_SEPARATORS:
+            return True
+    if "." in lowered:
+        if "." + lowered.rsplit(".", 1)[-1] in _DENIED_SUFFIXES:
+            return True
+    return False
 
 
 def is_denied_path(relative: str) -> bool:
     """Whether this project-relative path is code-denied for content capture.
 
     Operates on the **claimed relative path**, before anything is opened, so a
-    denied path never reaches a read at all.
+    denied path never reaches a read at all — which is what D-2026-08-09-3 means
+    by record time: content that never entered the store cannot be served later
+    by a surface nobody has written yet.
+
+    Conventions, not detection. This is not a scanner and does not look at
+    content; it recognises the places well-known tools keep credentials. A file
+    is denied when any directory component is a credential directory, or when
+    its basename — or its basename with one backup extension removed — is a
+    known credential name, a `.env` variant, or a credential extension.
+
+    It takes no configuration and no caller argument. An adapter cannot widen or
+    narrow it, and neither can a request.
     """
     segments = [segment for segment in str(relative).split("/") if segment]
     if not segments:
@@ -297,14 +374,20 @@ def is_denied_path(relative: str) -> bool:
     for segment in segments[:-1]:
         if segment.lower() in _DENIED_DIRECTORIES:
             return True
-    name = segments[-1]
-    lowered = name.lower()
-    if lowered in _DENIED_NAMES or lowered in _DENIED_DIRECTORIES:
+
+    lowered = segments[-1].lower()
+    if _denied_basename(lowered):
         return True
-    if any(lowered.startswith(prefix) for prefix in _DENIED_PREFIXES):
-        return True
-    suffix = "." + lowered.rsplit(".", 1)[-1] if "." in lowered else ""
-    return any(pattern[1:] == suffix for pattern in _DENIED_SUFFIXES)
+
+    # `private.pem.bak` is a private key with four characters after it. Strip one
+    # backup extension and ask again; `notes.md.bak` becomes `notes.md` and is
+    # still allowed, which is the boundary this rule is written to keep.
+    for backup in _BACKUP_SUFFIXES:
+        if lowered.endswith(backup):
+            return _denied_basename(lowered[: -len(backup)])
+    if lowered.endswith("~"):
+        return _denied_basename(lowered[:-1])
+    return False
 
 
 # -- path validation ----------------------------------------------------------

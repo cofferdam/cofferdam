@@ -353,6 +353,25 @@ the database and cannot be served later by a surface that does not exist yet. Th
 recorded: that a worker claimed a credential file and Cofferdam refused to look is a fact worth
 keeping.
 
+**The deny policy recognises conventions; it does not scan content.** A path is denied when any
+directory component is a credential directory (`.ssh`, `.gnupg`, `.aws`, `.docker`, `.kube`,
+`.cofferdam`, `secrets`), or when its basename is a known credential name, a `.env` variant
+(`.env`, `.env.local`, `.env-local`, `local.env`), or a credential extension (`.pem`, `.key`,
+`.p12`, `.pfx`, `.jks`, `.keystore`, `.p8`, `.tfstate`, `.env`). One backup extension —
+`.bak`, `.backup`, `.old`, `.orig`, `.save`, `~` — is stripped once and the name is asked again, so
+`private.pem.bak` is denied while `notes.md.bak` is not.
+
+It is deliberately not a detector. Files whose *names* contain a keyword — `docs/environment.md`,
+`src/tokenizer.py`, `docs/secrets-design.md`, `config/database.example.yml` — are ordinary project
+files and stay readable. The policy takes no argument and reads no configuration: an adapter cannot
+widen it, and neither can a caller.
+
+**A rename is checked on both sides.** `safe.txt -> .env` names a sensitive destination, and reading
+the source because the source looked harmless would launder the destination's identity through it —
+the file about to become `.env` is the file whose bytes those are. Either side denied means no
+digest and no preview; the claim row survives with `path_denied_sensitive`, because a withheld
+artifact is not a rejected claim.
+
 **Claim ingestion is bounded, and the bound is visible.** Both limits — per outcome and per task —
 and every deterministic validation refusal are **counted**, never silently applied. The counts land
 in `task_claim_ingestion` in the same transaction as the claims they describe, so a crash cannot

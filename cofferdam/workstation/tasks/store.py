@@ -1792,7 +1792,13 @@ class TaskStore:
                 artifact_id: Optional[str] = None
                 reason = REASON_OK
 
-                if is_denied_path(path):
+                # **Both** sides of a rename are checked, not just the one the
+                # bytes would be read from. A rename `safe.txt -> .env` names a
+                # sensitive destination, and reading the source because the
+                # source looked harmless would let the destination's identity be
+                # laundered through it — the file about to become `.env` is the
+                # file whose bytes those are.
+                if is_denied_path(path) or (to_path and is_denied_path(to_path)):
                     # Record time, not read time (D-2026-08-09-3). Content that
                     # never enters the store cannot be served later by a surface
                     # nobody has written yet.
