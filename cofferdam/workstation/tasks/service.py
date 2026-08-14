@@ -1028,6 +1028,30 @@ class TaskService:
 
         raise ResultNotReady(row.state)
 
+    # -- evidence (M2K PR2) --------------------------------------------------
+
+    def evidence_bundle(self, task_id: object, turn_number: object):
+        """One turn's derived evidence bundle, or ``None`` for no such turn.
+
+        **Turn-qualified on purpose.** A task-level evidence endpoint would have
+        to either merge turns — which is precisely the turn-scoped/task-scoped
+        confusion schema v5 exists to end — or pick one for the caller, which is
+        a decision the caller should be making. PR2 exists to guarantee exact
+        turn ownership, so the route says which turn.
+
+        A read, in the strongest sense available: no ``refresh_task``, no
+        adapter call, no state change, no Git, no filesystem. Assembly consults
+        stored rows and nothing else, so polling this cannot drive an adapter,
+        cannot grow the event log, and cannot change what it reports.
+        """
+        row = self.get_task(task_id)
+        return self._store.evidence_bundle(row.task_id, turn_number)
+
+    def turn_numbers(self, task_id: object) -> List[int]:
+        """Which turns this task has, for a client that needs to ask for one."""
+        row = self.get_task(task_id)
+        return [turn.turn_number for turn in self._store.turns(row.task_id)]
+
     # -- clarifications ------------------------------------------------------
 
     def pending_clarifications(self, task_id: object) -> List[PendingClarification]:

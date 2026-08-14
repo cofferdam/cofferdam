@@ -725,6 +725,33 @@ button.danger { color: var(--err); }
 }
 .task-evidence.verified { border-style: solid; color: inherit; }
 
+/* The evidence panel (M2K PR2). Read-only throughout: there is no control in
+   here, and there is nothing to style as one.
+
+   The headings do the work that the words alone cannot. "Worker claims" and
+   "Machine observations" are separate sections rather than one merged list,
+   because the whole point is that they are different kinds of statement — and a
+   layout that interleaved them would put a claim and an observation on adjacent
+   rows looking equally authoritative. */
+.task-evidence-detail { min-width: 0; }
+.task-evidence-detail h5 {
+  margin: 10px 0 2px; font-size: 12px; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--muted);
+}
+.task-evidence-list {
+  list-style: none; margin: 0; padding: 0; display: grid; gap: 4px;
+  min-width: 0; font-size: 13px;
+}
+.task-evidence-list li { overflow-wrap: anywhere; min-width: 0; }
+.task-evidence-groups {
+  list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; min-width: 0;
+}
+.task-evidence-group {
+  display: grid; gap: 2px; padding: 8px; border-radius: 8px;
+  background: #0a1119; border: 1px solid var(--line); font-size: 13px; min-width: 0;
+}
+.task-evidence-path { font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
+
 @media (max-width: 480px) {
   /* On a phone the slider takes its own line and the mute button sits beside
      the readout, so neither is ever a thumb-width target squeezed to nothing. */

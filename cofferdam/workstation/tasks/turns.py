@@ -243,6 +243,84 @@ class TaskTurn:
         }
 
 
+@dataclass(frozen=True)
+class TurnBound:
+    """The exact event-sequence range one turn owns (M2K PR2, schema v5).
+
+    Why this is not derivable from :class:`TaskTurn`
+    ------------------------------------------------
+
+    A turn carries ``started_at`` and ``completed_at``, and an event carries
+    ``created_at`` and ``sequence``. It is tempting to attribute an event to a
+    turn by comparing the timestamps, and it is wrong in three separate ways.
+    Two events can share a millisecond. A clock can move backwards, or be
+    corrected, between the write that opened the turn and the write that
+    appended the event. And ``started_at`` is produced by a different call than
+    the one that allocates the sequence, so even a perfect clock would leave a
+    window in which "later timestamp" and "later sequence" disagree.
+
+    So the boundary is not inferred at read time. It is **written** at the two
+    moments Cofferdam already holds the authoritative cursor — inside
+    ``_open_turn_locked`` and ``_close_turn_locked``, in the same SQLite
+    transaction as the turn lifecycle operation itself.
+
+    The range
+    ---------
+
+    Half-open below, closed above::
+
+        opened_after_event_sequence < sequence <= closed_through_event_sequence
+
+    ``opened_after`` is *exclusive* because it is the cursor as it stood before
+    the turn began: the event with that sequence had already happened, so it
+    belongs to whatever came before. ``closed_through`` is *inclusive* because
+    the transition event that ends a turn is appended before the turn is closed,
+    which makes it the last thing the turn did.
+
+    A turn that is still open has ``closed_through_event_sequence`` of ``None``
+    and owns everything above its lower bound — an unbounded set that grows, and
+    is supposed to.
+
+    ``opened_after == closed_through`` is a **valid** turn that owns no events.
+    It is not a broken record and it is not an error; it is a turn during which
+    nothing was appended.
+    """
+
+    task_id: str
+    turn_number: int
+    opened_after_event_sequence: int
+    closed_through_event_sequence: Optional[int] = None
+
+    @property
+    def open(self) -> bool:
+        return self.closed_through_event_sequence is None
+
+    @property
+    def event_count(self) -> Optional[int]:
+        """How many sequences this turn owns, or ``None`` while it is open."""
+        if self.closed_through_event_sequence is None:
+            return None
+        return self.closed_through_event_sequence - self.opened_after_event_sequence
+
+    def owns(self, sequence: Any) -> bool:
+        """Whether one event sequence falls inside this turn. **No clock.**"""
+        if not isinstance(sequence, int) or isinstance(sequence, bool):
+            return False
+        if sequence <= self.opened_after_event_sequence:
+            return False
+        if self.closed_through_event_sequence is None:
+            return True
+        return sequence <= self.closed_through_event_sequence
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "turn_number": self.turn_number,
+            "opened_after_event_sequence": self.opened_after_event_sequence,
+            "closed_through_event_sequence": self.closed_through_event_sequence,
+        }
+
+
 def open_turn(
     *,
     task_id: str,
@@ -505,6 +583,7 @@ __all__ = [
     "TURN_OUTCOMES",
     "TaskResult",
     "TaskTurn",
+    "TurnBound",
     "TurnInvalid",
     "close_turn",
     "open_turn",

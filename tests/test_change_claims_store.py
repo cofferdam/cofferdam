@@ -83,8 +83,17 @@ class StoreFixture(unittest.TestCase):
 
 
 class SchemaTests(StoreFixture):
-    def test_the_schema_version_is_four(self):
-        self.assertEqual(SCHEMA_VERSION, 4)
+    def test_the_schema_version_is_at_least_four(self):
+        """PR1's tables arrived at v4 and are additive, so later versions keep them.
+
+        Pinned as ``>=`` rather than ``== 4`` on purpose. This file tests the
+        **claim** tables, and those did not change when M2K PR2 moved the
+        version to 5 for `task_turn_bounds`; asserting equality here would make
+        every future additive version a failure in a file that has nothing to
+        say about it. The exact current value is pinned as a literal in
+        `test_task_core.py`, once, where a bump is a deliberate edit.
+        """
+        self.assertGreaterEqual(SCHEMA_VERSION, 4)
 
     def test_all_new_tables_exist(self):
         with sqlite3.connect(str(self.home / "state" / "tasks" / "tasks.sqlite3")) as db:
@@ -107,12 +116,12 @@ class SchemaTests(StoreFixture):
             },
         )
 
-    def test_the_recorded_version_is_four(self):
+    def test_the_recorded_version_matches_the_build(self):
         with sqlite3.connect(str(self.home / "state" / "tasks" / "tasks.sqlite3")) as db:
             value = db.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()[0]
-        self.assertEqual(int(value), 4)
+        self.assertEqual(int(value), SCHEMA_VERSION)
 
     def test_the_pre_existing_tables_are_untouched(self):
         """Additive means the v3 tables still have exactly their v3 columns."""
@@ -231,7 +240,7 @@ class MigrationTests(unittest.TestCase):
         db.close()
         return evidence
 
-    def test_a_v3_database_opens_and_becomes_v4(self):
+    def test_a_v3_database_opens_and_gains_the_claim_tables(self):
         self._build_v3()
         store = _open_store(self.home)
         try:
@@ -243,7 +252,7 @@ class MigrationTests(unittest.TestCase):
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()[0]
             names = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        self.assertEqual(int(value), 4)
+        self.assertEqual(int(value), SCHEMA_VERSION)
         self.assertIn("task_change_claims", names)
         self.assertIn("task_artifacts", names)
 
@@ -318,7 +327,7 @@ class MigrationTests(unittest.TestCase):
             ).fetchone()[0]
             claims = db.execute("SELECT COUNT(*) FROM task_change_claims").fetchone()[0]
             events = db.execute("SELECT COUNT(*) FROM task_events").fetchone()[0]
-        self.assertEqual(int(value), 4)
+        self.assertEqual(int(value), SCHEMA_VERSION)
         self.assertEqual(claims, 0)
         self.assertEqual(events, 1)
 

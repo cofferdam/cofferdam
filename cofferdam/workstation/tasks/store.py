@@ -93,7 +93,13 @@ from .models import (
     bounded_line,
     bounded_text,
 )
-from .turns import FOLLOWUP_SOURCES, MAX_TURNS_PER_TASK, TURN_OUTCOMES, TaskTurn
+from .turns import (
+    FOLLOWUP_SOURCES,
+    MAX_TURNS_PER_TASK,
+    TURN_OUTCOMES,
+    TaskTurn,
+    TurnBound,
+)
 
 #: Bumped whenever the schema below changes shape. A database written by a newer
 #: build than the one reading it is refused rather than migrated backwards: a
@@ -122,7 +128,24 @@ from .turns import FOLLOWUP_SOURCES, MAX_TURNS_PER_TASK, TURN_OUTCOMES, TaskTurn
 #: a v3 task read on a v4 build produces byte-identical evidence. A task that
 #: predates the claim tables simply has no claims, which is the ordinary answer
 #: for a task nobody made a claim about rather than a missing record.
-SCHEMA_VERSION = 4
+#:
+#: Version 5 adds ``task_turn_bounds`` (M2K PR2) and nothing else. It exists
+#: because exact turn attribution **cannot be reconstructed from v4 durable
+#: data**: a claim carries a turn number, an event carries a sequence, and
+#: ``task_turns`` carries neither end of the sequence range it owns. The only
+#: v4 bridge between them is a pair of timestamps, and a timestamp is not an
+#: authoritative shared boundary — two events can share a millisecond, and the
+#: call that writes ``started_at`` is not the call that allocates the sequence.
+#:
+#: Additive in exactly the same way as every version before it: one new table,
+#: no column of an existing table moved, changed type or gained a constraint,
+#: and **no row rewritten or inferred**. Turns that predate this version get no
+#: bounds — not approximate ones, not ones derived from ``started_at``, not ones
+#: derived from the nearest event. They report ``legacy_unknown`` and an
+#: evidence bundle says so, which is the honest answer and the only one
+#: available. A backfill would produce rows that read as recorded fact and are
+#: guesses, and the whole milestone is about that distinction.
+SCHEMA_VERSION = 5
 
 #: Where the database lives, under COFFERDAM_HOME. Its own directory so the file
 #: and its WAL/shm siblings stay together and can be permissioned as a unit.
@@ -402,6 +425,57 @@ CREATE TABLE IF NOT EXISTS task_claim_ingestion (
 
 CREATE INDEX IF NOT EXISTS claim_ingestion_by_task
     ON task_claim_ingestion (task_id, sequence);
+
+-- The exact event sequences one turn owns (M2K PR2, schema v5).
+--
+-- Its own table rather than two columns on `task_turns`, and the reason is the
+-- migration rather than tidiness. Columns added to `task_turns` would exist for
+-- every historical row, holding NULL — and a NULL in a column that usually
+-- holds a boundary reads as "no events" to somebody scanning, when what it
+-- means is "this turn predates the boundary being recorded at all". A separate
+-- table makes that difference structural: a legacy turn has **no row here**,
+-- which cannot be mistaken for a turn that owned nothing.
+--
+-- Written inside `_open_turn_locked` and `_close_turn_locked`, in the same
+-- transaction as the turn lifecycle operation. That is the whole guarantee.
+-- Written afterwards, from a second connection, or by a caller who had just
+-- read the cursor, it would be a boundary that might not match the turn it
+-- describes — and a boundary that is only usually right is worse than none,
+-- because evidence assembled from it would look exact.
+--
+-- `opened_after_event_sequence` is `tasks.event_cursor` as it stood when the
+-- turn opened, and is **exclusive**: the event with that sequence had already
+-- happened. `closed_through_event_sequence` is the cursor when the turn closed
+-- and is **inclusive**, because the transition event that ends a turn is
+-- appended before the turn is closed and is therefore the last thing the turn
+-- did. NULL means the turn is still open and owns everything above its floor.
+--
+-- The composite foreign key is a real one: `task_turns` has
+-- `PRIMARY KEY (task_id, turn_number)`, so SQLite can enforce that a bound
+-- names a turn that exists. Task ownership travels through it — `task_turns`
+-- cascades from `tasks`, so deleting a task still removes these rows — which is
+-- why there is no second foreign key on `task_id` alone.
+--
+-- What is deliberately **not** here: no provider or session id, no path, no
+-- claim, no observation body, no assembled bundle, and no verdict. This table
+-- answers one question — which events belong to which turn — and an evidence
+-- bundle is derived from it rather than stored beside it.
+CREATE TABLE IF NOT EXISTS task_turn_bounds (
+    task_id                       TEXT    NOT NULL,
+    turn_number                   INTEGER NOT NULL,
+    opened_after_event_sequence   INTEGER NOT NULL,
+    closed_through_event_sequence INTEGER,
+    PRIMARY KEY (task_id, turn_number),
+    FOREIGN KEY (task_id, turn_number)
+        REFERENCES task_turns (task_id, turn_number) ON DELETE CASCADE,
+    -- Sequences start at one and the cursor starts at zero, so a turn opened
+    -- before any event has a floor of zero and nothing below it is legal.
+    CHECK (opened_after_event_sequence >= 0),
+    -- A turn cannot close before it opened. `=` is allowed on purpose: that is
+    -- a turn during which nothing was appended, which is valid.
+    CHECK (closed_through_event_sequence IS NULL
+           OR closed_through_event_sequence >= opened_after_event_sequence)
+);
 """
 
 
@@ -700,6 +774,16 @@ class _TurnClose:
     result: Optional[str] = None
     failure_code: Optional[str] = None
     failure_summary: Optional[str] = None
+
+
+def _row_to_bound(row: sqlite3.Row) -> TurnBound:
+    closed = row["closed_through_event_sequence"]
+    return TurnBound(
+        task_id=row["task_id"],
+        turn_number=int(row["turn_number"]),
+        opened_after_event_sequence=int(row["opened_after_event_sequence"]),
+        closed_through_event_sequence=None if closed is None else int(closed),
+    )
 
 
 def _row_to_turn(row: sqlite3.Row) -> TaskTurn:
@@ -1495,6 +1579,14 @@ class TaskStore:
         A plain ``INSERT``, never ``INSERT OR REPLACE``. That choice is the
         "a later turn cannot overwrite an earlier one" rule, written where it
         is enforced.
+
+        Since schema v5 this also writes the turn's **lower event bound**, from
+        ``tasks.event_cursor`` read here rather than passed in. Passed in, it
+        would be a value some caller read a moment ago, and a moment ago is
+        exactly long enough for another event to have landed. Read here, inside
+        the transaction that inserts the turn, it is the cursor the turn
+        genuinely began after — and the two rows commit or roll back together,
+        so a v5 turn without a bound is not a state this method can produce.
         """
         existing = connection.execute(
             "SELECT COALESCE(MAX(turn_number), 0) AS highest,"
@@ -1516,7 +1608,11 @@ class TaskStore:
                 (task_id, draft.followup_request_id),
             ).fetchone()
             if already is not None:
+                # Neither a turn nor a bound. A retry that is recognised as one
+                # must not leave a second boundary behind, or the first turn
+                # would appear to have been reopened at a later cursor.
                 return
+        turn_number = highest + 1
         connection.execute(
             """
             INSERT INTO task_turns
@@ -1528,7 +1624,7 @@ class TaskStore:
             """,
             (
                 task_id,
-                highest + 1,
+                turn_number,
                 draft.provider,
                 draft.provider_session_id,
                 draft.source,
@@ -1536,23 +1632,72 @@ class TaskStore:
                 draft.started_at,
             ),
         )
+        self._open_bound_locked(connection, task_id, turn_number)
+
+    def _current_cursor_locked(
+        self, connection: sqlite3.Connection, task_id: str
+    ) -> int:
+        """``tasks.event_cursor`` right now, inside the caller's transaction.
+
+        The single authority for both bounds. Deliberately not
+        ``MAX(sequence) FROM task_events``: those agree today, and the cursor is
+        the value :meth:`_append_event_locked` allocates from, so it is the one
+        that stays right if a repeated event is ever suppressed without writing
+        a row — which is precisely what that method already does.
+        """
+        row = connection.execute(
+            "SELECT event_cursor FROM tasks WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        if row is None:  # pragma: no cover - callers check the task first
+            raise TaskUnknown()
+        return int(row["event_cursor"])
+
+    def _open_bound_locked(
+        self, connection: sqlite3.Connection, task_id: str, turn_number: int
+    ) -> None:
+        """Record where a turn began. Caller holds the transaction (schema v5)."""
+        connection.execute(
+            "INSERT INTO task_turn_bounds (task_id, turn_number,"
+            " opened_after_event_sequence, closed_through_event_sequence)"
+            " VALUES (?, ?, ?, NULL)",
+            (task_id, turn_number, self._current_cursor_locked(connection, task_id)),
+        )
 
     def _close_turn_locked(
         self, connection: sqlite3.Connection, task_id: str, closing: "_TurnClose"
     ) -> None:
         """Finish the task's open turn, if it has one. Caller holds the transaction.
 
-        ``WHERE completed_at IS NULL`` is the whole method. A turn that already
+        "The open turn, if it has one" is the whole method. A turn that already
         finished is not written again — not by a duplicate provider event, not
         by a late result arriving after a cancellation, and not by a second
-        settle of the same log. The update simply matches no rows, and the
-        earlier outcome stands.
+        settle of the same log. Nothing matches, and the earlier outcome stands.
 
         ``provider_session_id`` is filled in only when the row does not have one
         yet, for the reason :func:`~.turns.close_turn` gives: an id learned late
         is worth recording, and an id that *changed* means the stream is no
         longer this turn's session — a mismatch to report, never to adopt.
+
+        Since schema v5 the turn is **selected before it is updated**, where the
+        v4 version selected it inside the ``UPDATE``. The behaviour is identical
+        — same predicate, same rows — and the reason for the change is that the
+        upper bound has to be written against the same turn number, and deriving
+        it twice from two statements is a way for the two to disagree.
+
+        A turn opened before v5 has no bound row, so the second update matches
+        nothing and it stays unbounded. That is correct rather than a gap: its
+        lower bound was never recorded, and inventing an upper bound for a range
+        with no floor would produce a boundary that looks exact and is not.
         """
+        target = connection.execute(
+            "SELECT MAX(turn_number) AS turn_number FROM task_turns"
+            " WHERE task_id = ? AND completed_at IS NULL",
+            (task_id,),
+        ).fetchone()
+        turn_number = None if target is None else target["turn_number"]
+        if turn_number is None:
+            return
+        turn_number = int(turn_number)
         connection.execute(
             """
             UPDATE task_turns
@@ -1564,11 +1709,8 @@ class TaskStore:
                    provider_turn_sequence = ?,
                    provider_session_id = COALESCE(provider_session_id, ?)
              WHERE task_id = ?
+               AND turn_number = ?
                AND completed_at IS NULL
-               AND turn_number = (
-                   SELECT MAX(turn_number) FROM task_turns
-                    WHERE task_id = ? AND completed_at IS NULL
-               )
             """,
             (
                 closing.completed_at,
@@ -1579,7 +1721,20 @@ class TaskStore:
                 max(0, int(closing.provider_turn_sequence or 0)),
                 closing.provider_session_id,
                 task_id,
+                turn_number,
+            ),
+        )
+        # `closed_through_event_sequence IS NULL` mirrors the guard above: a
+        # bound that already has an upper end is not moved, whatever arrives
+        # later claiming to close the same turn.
+        connection.execute(
+            "UPDATE task_turn_bounds SET closed_through_event_sequence = ?"
+            " WHERE task_id = ? AND turn_number = ?"
+            "   AND closed_through_event_sequence IS NULL",
+            (
+                self._current_cursor_locked(connection, task_id),
                 task_id,
+                turn_number,
             ),
         )
 
@@ -1678,6 +1833,87 @@ class TaskStore:
                 (task_id, STATE_COMPLETED),
             ).fetchone()
         return _row_to_turn(row) if row is not None else None
+
+    def turn_bounds(self, task_id: str) -> Tuple["TurnBound", ...]:
+        """Every recorded boundary for one task, oldest turn first.
+
+        A turn that is missing from this list is a turn from before schema v5.
+        It is **not** a turn that owned no events — that one is present, with
+        ``opened_after == closed_through``. Keeping those two distinguishable is
+        the reason this is a separate table rather than two nullable columns.
+        """
+        with self._read() as connection:
+            rows = connection.execute(
+                "SELECT * FROM task_turn_bounds WHERE task_id = ?"
+                " ORDER BY turn_number ASC LIMIT ?",
+                (task_id, MAX_TURNS_PER_TASK),
+            ).fetchall()
+        return tuple(_row_to_bound(row) for row in rows)
+
+    def turn_bound(self, task_id: str, turn_number: object) -> Optional["TurnBound"]:
+        """One turn's boundary, or ``None`` for a legacy turn or no such turn.
+
+        ``None`` is deliberately the same answer for both. A caller that needs
+        to tell "this turn predates v5" from "there is no such turn" asks
+        :meth:`turns` as well, and every caller that does not needs the same
+        behaviour from both: no exact attribution is available, so say so.
+        """
+        if not isinstance(turn_number, int) or isinstance(turn_number, bool):
+            return None
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM task_turn_bounds WHERE task_id = ? AND turn_number = ?",
+                (task_id, turn_number),
+            ).fetchone()
+        return _row_to_bound(row) if row is not None else None
+
+    def events_in_bound(
+        self, task_id: str, bound: "TurnBound", *, limit: int = MAX_EVENT_PAGE
+    ) -> List[TaskEvent]:
+        """The events one turn owns, oldest first, bounded.
+
+        The range is expressed in the query rather than filtered afterwards, so
+        a turn's events cannot be reached by asking with another turn's bound
+        and discarding the mismatches — and so the bound cannot quietly become
+        advisory the day somebody adds a code path that forgets the filter.
+        """
+        bounded = max(1, min(int(limit), MAX_EVENT_PAGE))
+        with self._read() as connection:
+            if bound.closed_through_event_sequence is None:
+                rows = connection.execute(
+                    "SELECT * FROM task_events WHERE task_id = ? AND sequence > ?"
+                    " ORDER BY sequence ASC LIMIT ?",
+                    (task_id, bound.opened_after_event_sequence, bounded),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM task_events WHERE task_id = ?"
+                    " AND sequence > ? AND sequence <= ?"
+                    " ORDER BY sequence ASC LIMIT ?",
+                    (
+                        task_id,
+                        bound.opened_after_event_sequence,
+                        bound.closed_through_event_sequence,
+                        bounded,
+                    ),
+                ).fetchall()
+        return [
+            TaskEvent(
+                task_id=row["task_id"],
+                sequence=row["sequence"],
+                event_type=row["event_type"],
+                created_at=row["created_at"],
+                actor=row["actor"],
+                source=row["source"],
+                lifecycle_revision=row["lifecycle_revision"],
+                correlation_id=row["correlation_id"],
+                state=row["state"],
+                text=row["text"],
+                detail=row["detail"],
+                evidence=_evidence_from_json(row["evidence_json"]),
+            )
+            for row in rows
+        ]
 
     # -- change claims and artifacts (M2K PR1) -------------------------------
 
@@ -2043,6 +2279,47 @@ class TaskStore:
                 observed_at=row["observed_at"],
             )
             for row in rows
+        )
+
+    def evidence_bundle(self, task_id: str, turn_number: object):
+        """One turn's derived evidence bundle. **Read-only, and it stays that way.**
+
+        Every statement in the result comes from a row that was already there.
+        This method opens no file, runs no command, calls no provider and writes
+        nothing — not a row, not a cursor, not a timestamp. Calling it a hundred
+        times leaves the database byte-identical, which is asserted rather than
+        promised.
+
+        Returns ``None`` when the task has no such turn. A turn that exists but
+        predates schema v5 returns a real bundle whose ``turn_attribution`` is
+        ``legacy_unknown`` — a smaller answer, honestly labelled, rather than an
+        absence a caller would have to interpret.
+        """
+        from .evidence import assemble
+
+        if not isinstance(turn_number, int) or isinstance(turn_number, bool):
+            return None
+        turn = None
+        for candidate in self.turns(task_id):
+            if candidate.turn_number == turn_number:
+                turn = candidate
+                break
+        if turn is None:
+            return None
+
+        bound = self.turn_bound(task_id, turn_number)
+        events = (
+            self.events_in_bound(task_id, bound, limit=MAX_EVENT_PAGE)
+            if bound is not None
+            else ()
+        )
+        return assemble(
+            task_id=task_id,
+            turn=turn,
+            bound=bound,
+            events=events,
+            claims=self.change_claims(task_id),
+            ingestion_rows=self.claim_ingestion(task_id),
         )
 
     def turn_for_followup(

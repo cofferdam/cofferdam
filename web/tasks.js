@@ -88,6 +88,8 @@
   var detailEvents = [];        /* its event history, oldest first */
   var detailQuestions = [];     /* the questions it is waiting on, if any */
   var detailResult = null;      /* the latest completed turn, when asked for */
+  var detailEvidence = null;    /* one turn's evidence bundle, when asked for */
+  var evidenceTurn = null;      /* which turn `detailEvidence` describes */
   var chosenOptions = {};       /* question_id -> the option ids ticked */
   var adapters = null;
   var projects = null;
@@ -818,7 +820,51 @@
         (busy("result") ? "Checking…" : "Latest result") + "</button>"
       );
     }
+    /* Evidence, on demand and for one turn at a time.
+
+       On demand rather than on every poll for the reason the result button is:
+       it is a third request per tick to show something nobody has asked to see.
+       One turn at a time because the route is turn-qualified, and it is
+       turn-qualified because "which turn does this evidence belong to" is the
+       question M2K PR2 exists to answer exactly. A button that quietly merged
+       turns would undo that on the way to the screen.
+
+       There is no mutation control anywhere in this section — nothing to
+       approve, dismiss, re-run, mark verified or override. This surface reports
+       what was recorded; it does not act on it. */
+    if (turnsSoFar(task)) {
+      buttons.push(
+        '<button id="taskShowEvidence" class="ghost"' + (locked() ? " disabled" : "") + ">" +
+        (busy("evidence")
+          ? "Reading…"
+          : "Evidence — turn " + String(nextEvidenceTurn(task))) +
+        "</button>"
+      );
+    }
     return buttons.length ? '<div class="task-actions">' + buttons.join("") + "</div>" : "";
+  }
+
+  /* How many turns this task is known to have had.
+
+     Taken from the result payload when somebody has asked for it, and otherwise
+     assumed to be one — a task that has started has a turn. Deliberately not
+     derived from the event history: an event does not say which turn it belongs
+     to, and inferring one on the client would be the exact task-scoped-versus-
+     turn-scoped guess the server now refuses to make. */
+  function turnsSoFar(task) {
+    if (detailResult && detailResult.task_id === task.task_id) {
+      return detailResult.turn_count || 1;
+    }
+    return task.state === "created" ? 0 : 1;
+  }
+
+  /* Which turn the button will ask for: the one after whatever is on screen,
+     wrapping back to the first. One button, every turn reachable, and the
+     number is always visible so nobody has to guess which one they are reading. */
+  function nextEvidenceTurn(task) {
+    var total = turnsSoFar(task);
+    if (!evidenceTurn || evidenceTurn >= total) { return 1; }
+    return evidenceTurn + 1;
   }
 
   function interruptionNote(task) {
@@ -863,6 +909,167 @@
       (detailResult.failure_summary
         ? '<p class="media-note err">' + esc(detailResult.failure_summary) + "</p>"
         : "") +
+      "</div>";
+  }
+
+  /* ------------------------------------------------------------- evidence */
+
+  /* The words this panel is allowed to use, and the ones it is not.
+
+     What the bundle proves is narrow, and the language has to be exactly as
+     narrow. A `git status` observation proves that a path changed. It does not
+     prove the file was created, modified, deleted or renamed — the status
+     letters are not in the durable record — so "Path agreed" is the whole of
+     what may be said, and "Operation not established" is said out loud beside
+     it rather than left for a reader to wonder about.
+
+     There is deliberately no PASS, FAIL, SUCCESS, TRUSTED, LYING, no
+     confidence, no score and no risk level anywhere in this section. Not
+     because those would be unkind, but because none of them is a thing the
+     evidence supports, and a phone screen is exactly where an unsupported word
+     becomes a decision. */
+  var RELATIONSHIP_WORDS = {
+    path_agreed: {
+      label: "Path agreed",
+      tone: "ok",
+      hint: "The worker and Cofferdam name the same file. What was done to it is not established."
+    },
+    claim_only: {
+      label: "Claim only",
+      tone: "",
+      hint: "The worker reported this. Cofferdam has no machine observation of it in this turn."
+    },
+    observed_only: {
+      label: "Observed only",
+      tone: "",
+      hint: "Cofferdam saw this path change. No claim in this turn names it."
+    }
+  };
+
+  var ATTRIBUTION_WORDS = {
+    exact: "This turn's events are known exactly.",
+    legacy_unknown:
+      "Legacy turn attribution unavailable — this turn ran before Cofferdam " +
+      "recorded turn boundaries, so no machine observation can be attributed " +
+      "to it. Its claims are shown; the absence of observations here is not " +
+      "evidence about the work."
+  };
+
+  var COMPLETENESS_WORDS = {
+    complete: "Every reported claim was stored.",
+    incomplete: "Claim set incomplete — some of what the worker reported was not stored.",
+    legacy_unknown: "Claim set completeness unavailable for a legacy turn.",
+    ingestion_missing:
+      "No claim report was recorded for this turn. That is not the same as " +
+      "an empty one: completeness is unknown."
+  };
+
+  var LIMITATION_WORDS = {
+    legacy_turn_attribution_unavailable: "Legacy turn attribution unavailable.",
+    claim_ingestion_record_missing: "No claim ingestion record for this turn.",
+    claim_set_incomplete: "Claim set incomplete.",
+    unsupported_observation_shape:
+      "Cofferdam recorded an observation this build cannot interpret as a path change.",
+    claims_truncated: "More claims than this view shows.",
+    observations_truncated: "More observations than this view shows.",
+    relationship_paths_truncated: "More paths than this view shows.",
+    relationship_sources_truncated: "Some paths have more sources than are listed.",
+    events_truncated: "More events in this turn than were scanned."
+  };
+
+  function evidenceRelationships(bundle) {
+    var groups = bundle.relationships || [];
+    if (!groups.length) {
+      return '<p class="muted">Nothing was claimed or observed for this turn.</p>';
+    }
+    return '<ul class="task-evidence-groups">' + groups.map(function (group) {
+      var words = RELATIONSHIP_WORDS[group.relationship] || {
+        label: group.relationship, tone: "", hint: ""
+      };
+      var counts = [];
+      if (group.claim_count) {
+        counts.push(group.claim_count + (group.claim_count === 1 ? " claim" : " claims"));
+      }
+      if (group.observation_count) {
+        counts.push(
+          group.observation_count +
+          (group.observation_count === 1 ? " observation" : " observations")
+        );
+      }
+      if (group.sources_truncated) { counts.push("more not listed"); }
+      return '<li class="task-evidence-group">' +
+        '<span class="task-evidence-path">' + esc(group.path) + "</span>" +
+        badge(words.label, words.tone) +
+        (counts.length
+          ? '<span class="muted">' + esc(counts.join(" · ")) + "</span>"
+          : "") +
+        '<span class="muted hint">' + esc(words.hint) + "</span>" +
+        /* Said for every group, including the agreeing ones. Especially the
+           agreeing ones: "Path agreed" is the row somebody is most likely to
+           read as "verified". */
+        '<span class="muted hint">Operation not established.</span>' +
+        "</li>";
+    }).join("") + "</ul>";
+  }
+
+  function evidenceBlock(task) {
+    if (!detailEvidence || detailEvidence.task_id !== task.task_id) { return ""; }
+    var bundle = detailEvidence;
+    var claims = bundle.claims || [];
+    var observations = bundle.observations || [];
+    var ingestion = bundle.ingestion || {};
+    var limits = bundle.limitations || [];
+
+    return '<div class="task-block task-evidence-detail"><h4>Evidence — turn ' +
+      esc(String(bundle.turn_number)) + "</h4>" +
+
+      '<p class="muted hint">' +
+      esc(ATTRIBUTION_WORDS[bundle.turn_attribution] || bundle.turn_attribution) +
+      "</p>" +
+
+      "<h5>Worker claims</h5>" +
+      (claims.length
+        ? '<ul class="task-evidence-list">' + claims.map(function (claim) {
+            return "<li>" + esc(claim.operation) + " " + esc(claim.path) +
+              (claim.to_path ? " → " + esc(claim.to_path) : "") +
+              ' <span class="muted">(reported by the adapter, not verified)</span></li>';
+          }).join("") + "</ul>"
+        : '<p class="muted">No claims recorded for this turn.</p>') +
+
+      "<h5>Machine observations</h5>" +
+      (observations.length
+        ? '<ul class="task-evidence-list">' + observations.map(function (item) {
+            return "<li>" + esc(item.path) +
+              ' <span class="muted">(Cofferdam ran git status and saw this path change)</span></li>';
+          }).join("") + "</ul>"
+        : bundle.repository_reported_clean
+          ? '<p class="muted">Cofferdam looked and the working tree was clean.</p>'
+          : '<p class="muted">No machine observations for this turn.</p>') +
+
+      "<h5>Relationships and gaps</h5>" +
+      evidenceRelationships(bundle) +
+
+      "<h5>Claim ingestion</h5>" +
+      '<p class="muted">' +
+      esc(COMPLETENESS_WORDS[ingestion.state] || ingestion.state || "unknown") +
+      "</p>" +
+      (typeof ingestion.submitted === "number" && ingestion.submitted
+        ? '<p class="muted hint">' + esc(
+            ingestion.accepted + " of " + ingestion.submitted + " stored" +
+            (ingestion.truncated ? ", report truncated" : "")
+          ) + "</p>"
+        : "") +
+
+      (limits.length
+        ? "<h5>Limitations</h5><ul class=\"task-evidence-list\">" +
+          limits.map(function (code) {
+            return "<li>" + esc(LIMITATION_WORDS[code] || code) + "</li>";
+          }).join("") + "</ul>"
+        : "") +
+
+      '<p class="muted hint">Assembled from stored records only — no repository ' +
+      "was read to produce this. Assembler v" + esc(String(bundle.assembler_version)) +
+      ".</p>" +
       "</div>";
   }
 
@@ -912,6 +1119,7 @@
           esc(task.final_result) + "</pre></div>"
         : "") +
       resultBlock(task) +
+      evidenceBlock(task) +
       detailActions(task) +
       /* The raw stream, behind a disclosure. Available for when the summary is
          not enough, and never the first thing anybody has to read. */
@@ -1400,6 +1608,8 @@
       detail = payload.task || null;
       settleTerminalDrafts(detail);
       detailEvents = [];
+      detailEvidence = null;
+      evidenceTurn = null;
       appliedGeneration = generation;
       render();
       if (openTaskId) { loadDetail(openTaskId); }
@@ -1622,6 +1832,60 @@
       });
   }
 
+  /* Ask the evidence route what one turn claimed, what Cofferdam observed, and
+     how the two relate.
+
+     A read in the strongest sense the product has: the server assembles it from
+     stored rows, runs no Git, opens no file and calls no provider, so pressing
+     this cannot change what it reports. It is the reason this is a button and
+     not a confirmation dialog.
+
+     The fields copied into panel state are chosen rather than spread. Anything
+     not named here cannot reach a render, which is the same discipline
+     `showResult` applies to `provider_session_id`. */
+  function showEvidence() {
+    if (!openTaskId || !detail) { return Promise.resolve(null); }
+    if (!beginPending("evidence")) { return Promise.resolve(null); }
+    var taskId = openTaskId;
+    var turn = nextEvidenceTurn(detail);
+    return deps.api(
+      "/api/tasks/" + encodeURIComponent(taskId) + "/turns/" +
+      encodeURIComponent(String(turn)) + "/evidence"
+    ).then(function (response) {
+      endPending();
+      if (!response.ok) {
+        actionError = failureOf(response);
+        render();
+        return null;
+      }
+      var bundle = (response.payload && response.payload.evidence) || {};
+      detailEvidence = {
+        task_id: bundle.task_id,
+        turn_number: bundle.turn_number,
+        turn_attribution: bundle.turn_attribution,
+        assembler_version: bundle.assembler_version,
+        input_fingerprint: bundle.input_fingerprint,
+        repository_reported_clean: bundle.repository_reported_clean,
+        ingestion: bundle.ingestion || {},
+        claims: bundle.claims || [],
+        observations: bundle.observations || [],
+        relationships: bundle.relationships || [],
+        limitations: bundle.limitations || []
+      };
+      evidenceTurn = bundle.turn_number;
+      render();
+      return detailEvidence;
+    }).catch(function (error) {
+      endPending();
+      if (error && error.message === "unauthorized") { return null; }
+      actionError = {
+        message: "Cofferdam could not reach the workstation.", detail: null
+      };
+      render();
+      return null;
+    });
+  }
+
   function finishTask() {
     if (!openTaskId) { return Promise.resolve(null); }
     if (!beginPending("finish")) { return Promise.resolve(null); }
@@ -1744,6 +2008,10 @@
           openTaskId = open.getAttribute("data-task-open");
           detail = null;
           detailEvents = [];
+          /* Evidence belongs to one turn of one task. Carrying it across would
+             put the previous task's claims under this task's heading. */
+          detailEvidence = null;
+          evidenceTurn = null;
           render();
           loadDetail(openTaskId);
           return;
@@ -1763,6 +2031,8 @@
             openTaskId = null;
             detail = null;
             detailEvents = [];
+            detailEvidence = null;
+            evidenceTurn = null;
             render();
             load();
             return;
@@ -1772,6 +2042,7 @@
           case "taskCancel": cancelTask(); return;
           case "taskCopyResult": copyResult(); return;
           case "taskShowResult": showResult(); return;
+          case "taskShowEvidence": showEvidence(); return;
           default: return;
         }
       });
@@ -1874,6 +2145,8 @@
     detailEvents = [];
     detailQuestions = [];
     detailResult = null;
+    detailEvidence = null;
+    evidenceTurn = null;
     chosenOptions = {};
     adapters = null;
     projects = null;
@@ -1904,6 +2177,8 @@
     stop: stop,
     openTask: function (taskId) {
       openTaskId = taskId;
+      detailEvidence = null;
+      evidenceTurn = null;
       return loadDetail(taskId);
     }
   };
