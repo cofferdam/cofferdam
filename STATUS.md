@@ -890,6 +890,11 @@ schema-v4 runtime opening a v5 database refuses it, which is correct. So after a
 deployment, rolling back needs a prior compatible runtime **and** a pre-v5 database backup
 restored. Backwards schema compatibility is deliberately not attempted here.
 
+## M2K records — the evidence foundation (written while each was on its branch)
+
+M2K is **in progress**: PR1 is merged and deployed, PR2 is on a branch. See *In progress*
+above for PR2.
+
 ### M2K PR1 — adapter-reported change claims and the artifact foundation
 
 **Merged as `de0e7de` (#46) and deployed**: workstation and Actions bridge both run it from slot A.
