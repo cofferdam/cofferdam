@@ -353,8 +353,9 @@ downstream reads from.
     `AdapterOutcome.change_claims` with no command field, no root and no id authority
     (D-2026-08-11-7); only the code-owned validation adapter reports one, because neither Claude
     adapter has a structured claim source and prose is never parsed into claims.
-  - **PR2 — the derived `EvidenceBundle` + exact turn/event provenance bounds.** *Implemented on a
-    branch and not deployed; see [`STATUS.md`](STATUS.md).* The **comparison** side, and it is
+  - **PR2 — the derived `EvidenceBundle` + exact turn/event provenance bounds.** *Merged as
+    `52811dc` (#47) and deployed, with the live database migrated to schema v5; see
+    [`STATUS.md`](STATUS.md).* The **comparison** side, and it is
     model-free. `EvidenceBundle` is **derived on read, never persisted** — no table, no serialized
     column — from claims, ingestion summaries, append-only event evidence and the new bounds, with
     **no Git execution, no filesystem read and no provider call**, so a bundle describes what was
@@ -371,6 +372,23 @@ downstream reads from.
     inputs, absolute host paths are not**. One private turn-qualified route on the **device token
     only** — the Actions bridge is refused, `artifacts_supported` stays `false`, and the bridge
     gains no operation. **No evaluator, no verdict, no risk level, no check runner, no model.**
+  - **PR3 — richer machine-owned Git observations + assembler v2.** *Implemented on a branch and
+    not deployed; see [`STATUS.md`](STATUS.md).* The **observation** side, which was the real
+    ceiling on PR2: Cofferdam already asked Git for the operation and threw it away. The probe
+    becomes `git status --porcelain=v1 -z` — Git's documented machine format, NUL-framed, raw
+    paths — and a flat `changed_paths` becomes structured `GitChange` records carrying a closed
+    machine kind (`created`/`modified`/`deleted`/`renamed`/`unknown`), the raw `XY`, and **both**
+    sides of a rename. `EvidenceReference` gains two optional fields and **needs no schema bump**:
+    old rows read back with `None`, which means *the operation was never established*. Assembler
+    **v2** answers `operation_agreement` as `true`/`false`/`unknown` from one closed table, which
+    makes the **first deterministic `claim_conflict`** possible — two positive machine facts that
+    cannot both describe one path. Absence, legacy evidence, unmerged states and truncated
+    observation sets are all still **not** conflict, and a conflict is **not a verdict**. Machine
+    observation truncation becomes a durable, published fact. **The committed-work limit is
+    recorded rather than papered over:** `git status` compares against the *current* HEAD, Cofferdam
+    stores no pre-work revision, so a worker that commits leaves a clean tree and is not observed —
+    PR3 deliberately does **not** add a revision diff it has no honest boundary for. Still **no
+    evaluator, no verdict, no risk level, no check runner, no model.**
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**

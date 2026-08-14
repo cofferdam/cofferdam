@@ -932,7 +932,18 @@
     path_agreed: {
       label: "Path agreed",
       tone: "ok",
-      hint: "The worker and Cofferdam name the same file. What was done to it is not established."
+      hint: "The worker and Cofferdam name the same file."
+    },
+    /* A disagreement between two records, and deliberately worded as one.
+
+       It is NOT a failure, an accusation or a verdict: a worker that modified a
+       file and then deleted it produced this and did nothing wrong. The tone is
+       "warn" rather than "err" for that reason — this is something to look at,
+       not something that went wrong. */
+    claim_conflict: {
+      label: "Records differ",
+      tone: "warn",
+      hint: "The worker and Cofferdam describe different operations on this file. Both records are kept as they were."
     },
     claim_only: {
       label: "Claim only",
@@ -955,6 +966,23 @@
       "evidence about the work."
   };
 
+  /* What the machine said it did to a path (M2K PR3). Neutral verbs, and the
+     word "observed" in front of every one of them, so a reader is never left to
+     wonder whether this is what somebody claimed or what Cofferdam saw. */
+  var CHANGE_WORDS = {
+    created: "Machine observed: created",
+    modified: "Machine observed: modified",
+    deleted: "Machine observed: deleted",
+    renamed: "Machine observed: renamed",
+    unknown: "Machine observed a change of an unrecognised kind"
+  };
+
+  var OPERATION_WORDS = {
+    "true": "Operation agreed",
+    "false": "Operation differs",
+    unknown: "Operation not established"
+  };
+
   var COMPLETENESS_WORDS = {
     complete: "Every reported claim was stored.",
     incomplete: "Claim set incomplete — some of what the worker reported was not stored.",
@@ -970,6 +998,8 @@
     claim_set_incomplete: "Claim set incomplete.",
     unsupported_observation_shape:
       "Cofferdam recorded an observation this build cannot interpret as a path change.",
+    machine_observations_incomplete:
+      "Cofferdam recorded only some of the changes Git reported.",
     claims_truncated: "More claims than this view shows.",
     observations_truncated: "More observations than this view shows.",
     relationship_paths_truncated: "More paths than this view shows.",
@@ -986,6 +1016,9 @@
       var words = RELATIONSHIP_WORDS[group.relationship] || {
         label: group.relationship, tone: "", hint: ""
       };
+      var kinds = (group.observed_kinds || []).map(function (k) {
+        return CHANGE_WORDS[k] || k;
+      }).join(", ");
       var counts = [];
       if (group.claim_count) {
         counts.push(group.claim_count + (group.claim_count === 1 ? " claim" : " claims"));
@@ -1006,8 +1039,12 @@
         '<span class="muted hint">' + esc(words.hint) + "</span>" +
         /* Said for every group, including the agreeing ones. Especially the
            agreeing ones: "Path agreed" is the row somebody is most likely to
-           read as "verified". */
-        '<span class="muted hint">Operation not established.</span>' +
+           read as "verified". Since M2K PR3 this can also say the operation
+           agreed or differed, where the machine evidence supports it. */
+        '<span class="muted hint">' +
+        esc(OPERATION_WORDS[group.operation_agreement] || OPERATION_WORDS.unknown) +
+        (kinds ? " · " + esc(kinds) : "") +
+        ".</span>" +
         "</li>";
     }).join("") + "</ul>";
   }
@@ -1039,8 +1076,15 @@
       "<h5>Machine observations</h5>" +
       (observations.length
         ? '<ul class="task-evidence-list">' + observations.map(function (item) {
-            return "<li>" + esc(item.path) +
-              ' <span class="muted">(Cofferdam ran git status and saw this path change)</span></li>';
+            var what = item.change_kind
+              ? (CHANGE_WORDS[item.change_kind] || item.change_kind)
+              : "Machine observed: this path changed";
+            var rename = item.change_kind === "renamed" && item.previous_path
+              ? " (" + esc(item.previous_path) + " → " + esc(item.path) + ")"
+              : "";
+            return "<li>" + esc(item.path) + rename +
+              ' <span class="muted">' + esc(what) +
+              " — Cofferdam ran git status itself</span></li>";
           }).join("") + "</ul>"
         : bundle.repository_reported_clean
           ? '<p class="muted">Cofferdam looked and the working tree was clean.</p>'
@@ -1048,6 +1092,12 @@
 
       "<h5>Relationships and gaps</h5>" +
       evidenceRelationships(bundle) +
+
+      (bundle.machine_observations_complete === false
+        ? '<p class="muted hint">Cofferdam recorded only some of the changes Git ' +
+          "reported for this turn, so a file with no observation here may simply " +
+          "not have been looked at.</p>"
+        : "") +
 
       "<h5>Claim ingestion</h5>" +
       '<p class="muted">' +
@@ -1866,6 +1916,7 @@
         assembler_version: bundle.assembler_version,
         input_fingerprint: bundle.input_fingerprint,
         repository_reported_clean: bundle.repository_reported_clean,
+        machine_observations_complete: bundle.machine_observations_complete,
         ingestion: bundle.ingestion || {},
         claims: bundle.claims || [],
         observations: bundle.observations || [],

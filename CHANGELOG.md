@@ -8,6 +8,30 @@ release.
 
 ### Added
 
+- **M2K PR3 — Cofferdam can now say *what* changed, not just *that* something did.** The evidence
+  panel used to tell you that the worker and Cofferdam both named `src/foo.py`, and then have to
+  admit it could not say whether the file was created, edited, deleted or renamed. It can now,
+  because it was already asking Git that question and throwing the answer away.
+
+  **What you see.** *Machine observed: created / modified / deleted / renamed*, and for a rename
+  both names, in order. Against the worker's own claim it says **Operation agreed**, **Operation
+  differs**, or — honestly, and often — **Operation not established**.
+
+  **"Operation differs" is not an accusation.** It means the two records describe different things,
+  and both are kept exactly as they were. An agent that edits a file and then deletes it produces
+  this and has done nothing wrong. There is still no pass, no fail, no score and no verdict anywhere
+  in it.
+
+  **Files with awkward names stopped disappearing.** A file called `has space.txt`, or one with an
+  arrow or an accent in its name, used to produce *no evidence at all* — Git quotes those names and
+  Cofferdam skipped them. They come through now.
+
+  **And it tells you when it did not see everything.** If Git reported more changes than Cofferdam
+  recorded, the panel says so, so a file with no observation is not mistaken for a file that did not
+  change. One limit worth knowing: Cofferdam looks at what is *uncommitted*, so if an agent commits
+  its own work, there is nothing left for it to see — and the panel says the claim was unmatched
+  rather than pretending nothing happened.
+
 - **M2K PR2 — see what the worker said it changed, and what Cofferdam actually saw.** An agent
   finishes a turn and tells you it edited three files. Until now that sentence was all you had:
   Cofferdam recorded what the agent *claimed* and, separately, what it *observed* by running

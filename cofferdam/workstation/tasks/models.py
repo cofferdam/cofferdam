@@ -310,6 +310,38 @@ VERIFIED_EVIDENCE_SOURCES = frozenset(
     {EVIDENCE_COFFERDAM_ACTION, EVIDENCE_OS_OBSERVED, EVIDENCE_GIT_OBSERVED}
 )
 
+# -- what a machine observer said happened to a path ---------------------------
+#
+# Provider-neutral, and here rather than in the Claude Code adapter for a reason
+# the layer tests enforce: Task Core may not import from an agent-specific
+# package. These words describe what *any* machine observer reported — a second
+# adapter observing a different VCS would produce the same vocabulary — so Task
+# Core owns them and the adapter imports them from here.
+#
+# Deliberately a different set from the claim operations in `claims.py`, even
+# though four words coincide. A claim operation is what a worker said it did;
+# these are what a machine reported. One shared constant would make them one
+# concept in the code and two in reality.
+
+CHANGE_CREATED = "created"
+CHANGE_MODIFIED = "modified"
+CHANGE_DELETED = "deleted"
+CHANGE_RENAMED = "renamed"
+
+#: A machine reported a change and what kind is not establishable from what it
+#: said. A first-class member, not a failure: an unmerged path, a type change or
+#: a copy is a real observation that none of the four words describes truthfully,
+#: and `unknown` is the answer that cannot be wrong.
+CHANGE_UNKNOWN = "unknown"
+
+CHANGE_KINDS: Tuple[str, ...] = (
+    CHANGE_CREATED,
+    CHANGE_MODIFIED,
+    CHANGE_DELETED,
+    CHANGE_RENAMED,
+    CHANGE_UNKNOWN,
+)
+
 EVIDENCE_PROCESS = "process"
 EVIDENCE_FILE = "file"
 EVIDENCE_COMMIT = "commit"
@@ -471,6 +503,27 @@ class EvidenceReference:
     result: Optional[str] = None
     observed_at: Optional[str] = None
 
+    #: What a **machine** observed happening to ``identifier`` (M2K PR3).
+    #:
+    #: Optional, and its absence is meaningful rather than empty: an evidence
+    #: row written before PR3 has no ``change_kind``, and the honest reading of
+    #: that is "the operation was not established", never "nothing happened".
+    #: The assembler treats ``None`` exactly that way.
+    #:
+    #: Deliberately **not** ``operation``. That field already means "the probe
+    #: that produced this row" — it holds ``git status`` and ``rev-parse HEAD``
+    #: — and overloading it would make one field answer two questions, with the
+    #: older answer silently lost. Deliberately not packed into ``result``
+    #: either: ``result="A -> B"`` would be a parser waiting to be written, over
+    #: a separator that is a legal filename character.
+    change_kind: Optional[str] = None
+
+    #: The path a rename replaced — the source, which no longer exists.
+    #: ``identifier`` is always the destination. Set only for a rename; ``None``
+    #: everywhere else, including for a copy, whose source still exists and was
+    #: therefore not replaced.
+    previous_identifier: Optional[str] = None
+
     @property
     def verified(self) -> bool:
         return self.source in VERIFIED_EVIDENCE_SOURCES
@@ -487,6 +540,8 @@ class EvidenceReference:
             "operation": self.operation,
             "result": self.result,
             "observed_at": self.observed_at,
+            "change_kind": self.change_kind,
+            "previous_identifier": self.previous_identifier,
         }
 
 
@@ -675,6 +730,12 @@ __all__ = [
     "EVIDENCE_COFFERDAM_ACTION",
     "EVIDENCE_COMMIT",
     "EVIDENCE_FILE",
+    "CHANGE_CREATED",
+    "CHANGE_DELETED",
+    "CHANGE_KINDS",
+    "CHANGE_MODIFIED",
+    "CHANGE_RENAMED",
+    "CHANGE_UNKNOWN",
     "EVIDENCE_GIT_OBSERVED",
     "EVIDENCE_OS_OBSERVED",
     "EVIDENCE_PROCESS",

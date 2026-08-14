@@ -180,7 +180,10 @@ class EvidenceEndToEnd(unittest.TestCase):
 
         # 13, 14. completeness and assembler version are present.
         self.assertEqual(bundle.ingestion.state, "complete")
-        self.assertEqual(bundle.assembler_version, 1)
+        # 2 since M2K PR3: the machine observation semantics changed, so the
+        # rules that produced this bundle are a different version even though
+        # the bundle *shape* is compatible.
+        self.assertEqual(bundle.assembler_version, 2)
 
         # 15. the fingerprint survives a reopen.
         fingerprint = bundle.input_fingerprint

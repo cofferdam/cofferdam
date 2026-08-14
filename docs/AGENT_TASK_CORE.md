@@ -956,15 +956,23 @@ opens no file and calls no provider. A bundle therefore describes what was
 nothing: no event, turn, claim, artifact, ingestion row or bound is created, and
 the task's `updated_at`, `lifecycle_revision` and `event_cursor` are untouched.
 
-**What agreement means.** The machine observation available today is
-`git status --porcelain`, reduced to *this project-relative path appears in the
-changed set*. That proves the path changed and nothing about **what** was done to
-it — the porcelain status letters are not in the durable record. So the
+**What agreement means.** Since M2K PR3 the machine observation is
+`git status --porcelain=v1 -z`, and the porcelain status **is** preserved: an
+observation carries a closed machine change kind — `created`, `modified`,
+`deleted`, `renamed` or `unknown` — and, for a rename, both paths. So the
 vocabulary is:
 
 * `path_agreed` — a claim and an observation name the same path. `path_agreement`
-  is true; `operation_agreement` is `unknown`. It is **not** "modification
-  verified", and it is deliberately never a bare `agreed`.
+  is true. Since PR3 `operation_agreement` may be `true`, `false` or `unknown`;
+  it is `unknown` for every observation recorded before PR3, and for unmerged
+  paths, type changes and copies, which Git reports without establishing an
+  operation. It is deliberately never a bare `agreed`.
+* `claim_conflict` — the same path, and **explicitly incompatible** operations:
+  the worker says created, the machine says deleted. `path_agreement` stays
+  **true** (both records name the file); the disagreement is entirely about the
+  operation. It is **not a verdict** — not a task failure, not an acceptance
+  failure, not dishonesty. A worker that modified a file and then deleted it
+  produced a conflict and did nothing wrong.
 * `claim_only` — a stored claim with no eligible observation in this turn.
   Unmatched and unverified; **not** false, dishonest or contradicted. A worker
   that changed a file and committed it leaves a clean tree with nothing to match.
@@ -972,9 +980,24 @@ vocabulary is:
   concealment: the claim set may be incomplete, which is why the completeness
   state is published in the same payload.
 
-**No conflict is emitted**, and that is a finding rather than a gap: no supported
-observation carries semantics that could prove a claim incompatible. Absence is
-not conflict.
+**Conflict requires a positive machine fact.** Absence is not conflict, and
+neither is a pre-PR3 observation, an unmerged or type-changed path, or a
+truncated observation set. Only two records that cannot both describe one path
+produce one.
+
+**Machine observation completeness is published.** `machine_observations_complete`
+says whether Git reported more changes than Cofferdam recorded — through the
+emitter's evidence budget, or because a path failed the safety gate. When it is
+false, the absence of an observation at a path is **not** evidence that nothing
+happened there.
+
+**What `git status` cannot see.** It compares the index and working tree against
+the **current HEAD**. Cofferdam stores no pre-task or pre-turn revision, so this
+is not a before/after comparison — and **a worker that commits its work leaves a
+clean tree and is not observed**. The claim then stays `claim_only`. Closing that
+gap needs a durable pre-work revision, which is a separate decision about what
+Cofferdam records when a task starts; PR3 deliberately does not fabricate a
+boundary it does not have.
 
 **Turns that predate v5** report `turn_attribution: legacy_unknown`, keep their
 own claims, and receive **no machine observations at all** — nothing inferred

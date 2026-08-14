@@ -594,6 +594,25 @@ def _bounded_evidence(evidence: Sequence[EvidenceReference]) -> Optional[str]:
                 "operation": bounded_line(reference.operation, 60),
                 "result": bounded_line(reference.result, 60),
                 "observed_at": bounded_line(reference.observed_at, 40),
+                # M2K PR3. Written only when present, so a row that carries no
+                # machine change semantics stays byte-identical to what a
+                # pre-PR3 build would have written — which is what keeps the
+                # historical evidence in this column comparable to new rows.
+                **(
+                    {"change_kind": bounded_line(reference.change_kind, 20)}
+                    if reference.change_kind
+                    else {}
+                ),
+                **(
+                    {
+                        "previous_identifier": bounded_line(
+                            reference.previous_identifier,
+                            MAX_EVIDENCE_IDENTIFIER_CHARS,
+                        )
+                    }
+                    if reference.previous_identifier
+                    else {}
+                ),
             }
         )
     return json.dumps(items, ensure_ascii=False)
@@ -616,6 +635,12 @@ def _evidence_from_json(raw: Optional[str]) -> Tuple[EvidenceReference, ...]:
             operation=item.get("operation"),
             result=item.get("result"),
             observed_at=item.get("observed_at"),
+            # Absent in every row written before M2K PR3, and `None` is exactly
+            # the right reading: the operation was never established. `.get`
+            # rather than `[...]` is what makes the column forward- and
+            # backward-compatible without a schema change.
+            change_kind=item.get("change_kind"),
+            previous_identifier=item.get("previous_identifier"),
         )
         for item in parsed
         if isinstance(item, dict)

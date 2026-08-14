@@ -92,12 +92,22 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .claims import (
+    CLAIM_CREATED,
+    CLAIM_DELETED,
+    CLAIM_MODIFIED,
     CLAIM_RENAMED,
     ChangeClaim,
     ClaimIngestion,
     normalize_claim_path,
 )
 from .models import (
+    CHANGE_CREATED,
+    CHANGE_DELETED,
+    CHANGE_KINDS,
+    CHANGE_MODIFIED,
+    CHANGE_RENAMED,
+    CHANGE_UNKNOWN,
+    EVIDENCE_ARTIFACT,
     EVIDENCE_FILE,
     EVIDENCE_GIT_OBSERVED,
     EvidenceReference,
@@ -120,7 +130,7 @@ BUNDLE_VERSION = 1
 #: ``input_fingerprint`` asks "was this produced by the same rules". Two bundles
 #: with the same inputs and different assembler versions may legitimately differ,
 #: and a caller that could not see that would treat an improvement as corruption.
-ASSEMBLER_VERSION = 1
+ASSEMBLER_VERSION = 2
 
 # -- turn attribution ---------------------------------------------------------
 
@@ -186,10 +196,29 @@ RELATIONSHIP_CLAIM_ONLY = "claim_only"
 #: together with the claim-set completeness beside it.
 RELATIONSHIP_OBSERVED_ONLY = "observed_only"
 
+#: A claim and a machine observation name the same path and describe
+#: **explicitly incompatible** operations (M2K PR3).
+#:
+#: The bar is deliberately high, and it is the reason PR2 emitted none of these:
+#: a conflict requires the machine to have *said* something, not to have stayed
+#: silent. A claim with no observation is `claim_only`. A claim matched against a
+#: pre-PR3 observation, which carries no operation at all, is `path_agreed` with
+#: `operation_agreement: unknown`. A claim matched against an unmerged or
+#: type-changed path is the same. Only two positive machine facts that cannot
+#: both describe one file produce this.
+#:
+#: **It is not a verdict.** It does not mean the task failed, the acceptance
+#: criteria failed, or the worker was dishonest. It means two records disagree,
+#: which is a thing a person should look at and nothing this code may conclude
+#: from. A worker that deleted a file it had earlier said it modified produced a
+#: conflict and did nothing wrong.
+RELATIONSHIP_CLAIM_CONFLICT = "claim_conflict"
+
 RELATIONSHIPS: Tuple[str, ...] = (
     RELATIONSHIP_PATH_AGREED,
     RELATIONSHIP_CLAIM_ONLY,
     RELATIONSHIP_OBSERVED_ONLY,
+    RELATIONSHIP_CLAIM_CONFLICT,
 )
 
 #: What the evidence says about the *operation*, as opposed to the path.
@@ -200,6 +229,70 @@ RELATIONSHIPS: Tuple[str, ...] = (
 #: field rather than omitted so that a reader is told the question was asked and
 #: could not be answered, instead of being left to assume it was not asked.
 OPERATION_UNKNOWN = "unknown"
+
+#: The claim's operation and the machine's change kind describe the same thing.
+OPERATION_AGREED = "true"
+
+#: They describe things that cannot both be true of one path.
+OPERATION_DIFFERS = "false"
+
+OPERATION_AGREEMENTS: Tuple[str, ...] = (
+    OPERATION_AGREED,
+    OPERATION_DIFFERS,
+    OPERATION_UNKNOWN,
+)
+
+# -- the operation compatibility table ----------------------------------------
+#
+# One table, consulted by one helper. The alternative — `if` statements over
+# claim operations and change kinds spread through the assembler — is where a
+# wrong-but-confident answer hides, and this is the comparison the whole
+# milestone exists to make honestly.
+#
+# Rows are the **claim** operation (what the worker said). Columns are the
+# **machine** change kind (what Git reported). Absent pairs are `unknown`, which
+# is the direction that cannot make a false statement.
+#
+# Why `renamed` is absent from this table entirely: a rename is not a fact about
+# one path, it is a fact about two, and one cell cannot express "the source and
+# destination both match". :func:`_rename_agreement` answers it, using both.
+#
+# Why `created` vs `modified` is `unknown` rather than `false`: they are not
+# incompatible. `git status` reports the file's state against HEAD, and a worker
+# that created a file and then edited it will truthfully say "created" while Git
+# reports `AM` — which this build classifies as `created` — or, if the file
+# existed at HEAD, "modified". The two words describe the same work from
+# different vantage points often enough that calling them a contradiction would
+# manufacture conflicts out of ordinary sequences.
+#
+# Why `created` vs `deleted` **is** `false`: those cannot both describe one
+# path's final state against one HEAD. The worker says the file is now there;
+# Git says it is now gone.
+_OPERATION_TABLE: Dict[Tuple[str, str], str] = {
+    (CLAIM_CREATED, CHANGE_CREATED): OPERATION_AGREED,
+    (CLAIM_CREATED, CHANGE_DELETED): OPERATION_DIFFERS,
+    (CLAIM_MODIFIED, CHANGE_MODIFIED): OPERATION_AGREED,
+    (CLAIM_MODIFIED, CHANGE_DELETED): OPERATION_DIFFERS,
+    (CLAIM_DELETED, CHANGE_DELETED): OPERATION_AGREED,
+    (CLAIM_DELETED, CHANGE_CREATED): OPERATION_DIFFERS,
+    (CLAIM_DELETED, CHANGE_MODIFIED): OPERATION_DIFFERS,
+}
+
+
+def operation_agreement(claim_operation: object, change_kind: object) -> str:
+    """Whether one claim operation and one machine change kind agree.
+
+    Three answers and no fourth. ``unknown`` covers every pair the table does not
+    name, which includes every legacy observation — those carry no change kind at
+    all, and ``None`` is not in the table.
+    """
+    if not isinstance(claim_operation, str) or not isinstance(change_kind, str):
+        return OPERATION_UNKNOWN
+    if change_kind == CHANGE_UNKNOWN:
+        # Git reported a change it could not characterise. That is not evidence
+        # for or against anything the worker said.
+        return OPERATION_UNKNOWN
+    return _OPERATION_TABLE.get((claim_operation, change_kind), OPERATION_UNKNOWN)
 
 # -- limitations --------------------------------------------------------------
 #
@@ -219,6 +312,12 @@ LIMIT_CLAIM_SET_INCOMPLETE = "claim_set_incomplete"
 #: A ``git_observed`` reference this build cannot interpret as a path change.
 LIMIT_UNSUPPORTED_OBSERVATION = "unsupported_observation_shape"
 
+#: Git reported more changed paths than the emitter recorded, or the emitter
+#: refused some of them (M2K PR3). The machine observation set for this turn is
+#: **not** known to be whole, so the absence of an observation at a path is not
+#: evidence that nothing happened there.
+LIMIT_OBSERVATIONS_INCOMPLETE = "machine_observations_incomplete"
+
 #: More claims, observations or paths than the bundle publishes. The fact is
 #: kept even though the items are not, because a truncated list that does not
 #: say it is truncated reads as a complete one.
@@ -230,6 +329,7 @@ LIMIT_SOURCES_TRUNCATED = "relationship_sources_truncated"
 
 LIMITATIONS: Tuple[str, ...] = (
     LIMIT_LEGACY_TURN,
+    LIMIT_OBSERVATIONS_INCOMPLETE,
     LIMIT_INGESTION_MISSING,
     LIMIT_CLAIM_SET_INCOMPLETE,
     LIMIT_UNSUPPORTED_OBSERVATION,
@@ -380,6 +480,38 @@ def observation_path(reference: object) -> Optional[str]:
         return None
 
 
+def observation_change_kind(reference: object) -> Optional[str]:
+    """The machine change kind on an eligible observation, or ``None``.
+
+    ``None`` for every observation written before M2K PR3, and for any value a
+    later build might invent that this one does not know. Both are the same
+    honest answer — the operation is not established — and neither is allowed to
+    become a guess.
+    """
+    if not isinstance(reference, EvidenceReference):
+        return None
+    kind = reference.change_kind
+    if not isinstance(kind, str) or kind not in CHANGE_KINDS:
+        return None
+    return kind
+
+
+def observation_previous_path(reference: object) -> Optional[str]:
+    """The rename source on an eligible observation, or ``None``.
+
+    Put through the same lexical gate as every other path, so a stored value
+    that is not a plain project-relative name never reaches a comparison.
+    """
+    if not isinstance(reference, EvidenceReference):
+        return None
+    if not reference.previous_identifier:
+        return None
+    try:
+        return normalize_claim_path(reference.previous_identifier)
+    except Exception:
+        return None
+
+
 def is_git_head_observation(reference: object) -> bool:
     """Whether this is the commit/HEAD observation rather than a path change.
 
@@ -391,6 +523,24 @@ def is_git_head_observation(reference: object) -> bool:
         isinstance(reference, EvidenceReference)
         and reference.source == EVIDENCE_GIT_OBSERVED
         and reference.operation == "rev-parse HEAD"
+    )
+
+
+#: The emitter's coverage statements (M2K PR3). One of these accompanies every
+#: Git observation, so "the set was truncated" is a recorded fact rather than
+#: something a reader has to infer from a count that looks suspiciously round.
+COVERAGE_COMPLETE = "observed all changes"
+COVERAGE_PARTIAL = "observed some changes"
+
+
+def is_coverage_observation(reference: object) -> bool:
+    """Whether this is the emitter's observation-completeness statement."""
+    return (
+        isinstance(reference, EvidenceReference)
+        and reference.source == EVIDENCE_GIT_OBSERVED
+        and reference.evidence_type == EVIDENCE_ARTIFACT
+        and reference.operation == "git status"
+        and reference.result in (COVERAGE_COMPLETE, COVERAGE_PARTIAL)
     )
 
 
@@ -429,6 +579,12 @@ class MachineObservation:
     evidence_type: str = EVIDENCE_FILE
     operation: Optional[str] = None
     result: Optional[str] = None
+    #: What Git said happened here (M2K PR3), or ``None`` for an observation
+    #: recorded before PR3. ``None`` means the operation was never established —
+    #: it does not mean nothing happened, and the matrix treats it that way.
+    change_kind: Optional[str] = None
+    #: The source path of a rename. ``path`` is always the destination.
+    previous_path: Optional[str] = None
 
     @property
     def reference(self) -> str:
@@ -445,6 +601,8 @@ class MachineObservation:
             "evidence_type": self.evidence_type,
             "operation": self.operation,
             "result": self.result,
+            "change_kind": self.change_kind,
+            "previous_path": self.previous_path,
             # Said out loud rather than derived, the same way
             # `EvidenceReference.to_dict` says it. `git_observed` is a verified
             # source — Cofferdam ran Git — and that is a statement about *this
@@ -472,6 +630,10 @@ class PathRelationship:
     observation_refs: Tuple[str, ...] = ()
     path_agreement: bool = False
     operation_agreement: str = OPERATION_UNKNOWN
+    #: The machine change kinds observed at this path (M2K PR3), deduplicated
+    #: and sorted. Empty when every observation here predates PR3 — which is the
+    #: visible reason `operation_agreement` is `unknown` for legacy evidence.
+    observed_kinds: Tuple[str, ...] = ()
     claim_count: int = 0
     observation_count: int = 0
     sources_truncated: bool = False
@@ -484,9 +646,12 @@ class PathRelationship:
             "claim_operations": list(self.claim_operations),
             "observation_refs": list(self.observation_refs),
             "path_agreement": self.path_agreement,
-            # Always `unknown` in this build. Published anyway — see
-            # `OPERATION_UNKNOWN`.
+            # `true`, `false` or `unknown` since M2K PR3. Published as its own
+            # field, separate from `path_agreement`, because the two questions
+            # have different answers and always did — PR2 simply could not
+            # answer the second one.
             "operation_agreement": self.operation_agreement,
+            "observed_kinds": list(self.observed_kinds),
             "claim_count": self.claim_count,
             "observation_count": self.observation_count,
             "sources_truncated": self.sources_truncated,
@@ -558,6 +723,9 @@ class EvidenceBundle:
     closed_through_event_sequence: Optional[int] = None
     turn_open: bool = False
     repository_reported_clean: bool = False
+    #: Whether the machine observation set for this turn is known to be whole
+    #: (M2K PR3). False when Git reported more than was recorded.
+    machine_observations_complete: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -580,6 +748,7 @@ class EvidenceBundle:
             "relationships": [item.to_dict() for item in self.relationships],
             "limitations": list(self.limitations),
             "repository_reported_clean": self.repository_reported_clean,
+            "machine_observations_complete": self.machine_observations_complete,
         }
 
 
@@ -610,17 +779,19 @@ def _claim_paths(claim: ChangeClaim) -> Tuple[str, ...]:
 
 def _eligible_observations(
     events: Sequence[TaskEvent],
-) -> Tuple[Tuple[MachineObservation, ...], bool, bool]:
+) -> Tuple[Tuple[MachineObservation, ...], bool, bool, bool]:
     """Every eligible path observation in the window, in event order.
 
     Returns the observations, whether any unsupported ``git_observed`` shape was
-    seen, and whether a clean-tree statement was seen. Ordering is by event
+    seen, whether a clean-tree statement was seen, and whether the emitter said
+    its own observation set was **partial**. Ordering is by event
     sequence and then by position inside that event's evidence list — both
     durable, neither a timestamp.
     """
     observations: List[MachineObservation] = []
     unsupported = False
     clean = False
+    partial = False
     for event in sorted(events, key=lambda item: item.sequence):
         for index, reference in enumerate(event.evidence or ()):
             path = observation_path(reference)
@@ -632,6 +803,8 @@ def _eligible_observations(
                         path=path,
                         operation=reference.operation,
                         result=reference.result,
+                        change_kind=observation_change_kind(reference),
+                        previous_path=observation_previous_path(reference),
                     )
                 )
                 continue
@@ -645,12 +818,19 @@ def _eligible_observations(
             if is_clean_tree_observation(reference):
                 clean = True
                 continue
+            if is_coverage_observation(reference):
+                # The emitter's own statement about how complete this
+                # observation was. Not a path, not a limitation in itself — the
+                # caller reads it to decide whether the machine set is whole.
+                if reference.result == COVERAGE_PARTIAL:
+                    partial = True
+                continue
             if is_git_head_observation(reference):
                 # Known, understood, and deliberately not a path. Not a
                 # limitation either — nothing was lost by not matching it.
                 continue
             unsupported = True
-    return tuple(observations), unsupported, clean
+    return tuple(observations), unsupported, clean, partial
 
 
 def _aggregate_ingestion(
@@ -700,6 +880,87 @@ def _aggregate_ingestion(
     )
 
 
+def _rename_agreement(
+    claims: Sequence[ChangeClaim], observations: Sequence[MachineObservation], path: str
+) -> Optional[str]:
+    """Operation agreement for a rename, which is a fact about **two** paths.
+
+    One table cell cannot answer this, because a rename claim of ``A -> B`` and a
+    machine rename are only the same event if *both* sides match. So this is
+    asked of the pair, at the destination path, where both records name the same
+    file.
+
+    * Both sides match — the machine renamed exactly what the claim said it
+      renamed: ``true``.
+    * The machine renamed this destination from a **different** source: ``false``.
+      Two rename records that disagree about where the file came from cannot both
+      describe one event.
+    * The machine saw a rename but recorded no source (a pre-PR3 observation, or
+      one whose source failed the path gate): ``unknown``. Half a rename proves
+      nothing about the other half.
+
+    Returns ``None`` when this pair is not a rename comparison at all, so the
+    caller falls through to the ordinary table.
+    """
+    rename_claims = [c for c in claims if c.operation == CLAIM_RENAMED]
+    rename_observations = [o for o in observations if o.change_kind == CHANGE_RENAMED]
+    if not rename_claims or not rename_observations:
+        return None
+    # Only the destination carries the pairing; a rename's source appears as its
+    # own group and is never where agreement is decided.
+    if not any(c.to_path == path for c in rename_claims):
+        return None
+
+    claimed_sources = {c.path for c in rename_claims if c.to_path == path}
+    observed_sources = {o.previous_path for o in rename_observations if o.path == path}
+    if not observed_sources or None in observed_sources:
+        return OPERATION_UNKNOWN
+    if claimed_sources & observed_sources:
+        return OPERATION_AGREED
+    return OPERATION_DIFFERS
+
+
+def _group_agreement(
+    claims: Sequence[ChangeClaim], observations: Sequence[MachineObservation], path: str
+) -> str:
+    """The operation agreement for one path group.
+
+    Resolved across every claim and every observation at this path rather than
+    pairwise, because a path group can legitimately hold several of each. The
+    resolution is deliberately **conservative**: one pair that agrees does not
+    overrule one that contradicts, and anything unestablished leaves the group
+    unestablished.
+
+    Order of precedence:
+
+    1. If any pair is explicitly incompatible, the group is ``false``. A
+       contradiction is the fact a reader most needs, and burying it under a
+       simultaneous agreement would hide it.
+    2. Otherwise, if every pair that could be judged agreed, the group is
+       ``true``.
+    3. Otherwise ``unknown``.
+    """
+    rename = _rename_agreement(claims, observations, path)
+    if rename is not None:
+        return rename
+
+    verdicts = [
+        operation_agreement(claim.operation, observation.change_kind)
+        for claim in claims
+        for observation in observations
+        # A rename claim's *source* path is compared to nothing here: the claim
+        # says the file left, and a machine record at that path is its own fact.
+        if claim.operation != CLAIM_RENAMED
+    ]
+    if not verdicts:
+        return OPERATION_UNKNOWN
+    if OPERATION_DIFFERS in verdicts:
+        return OPERATION_DIFFERS
+    if all(verdict == OPERATION_AGREED for verdict in verdicts):
+        return OPERATION_AGREED
+    return OPERATION_UNKNOWN
+
+
 def _relationships(
     claims: Sequence[ChangeClaim], observations: Sequence[MachineObservation]
 ) -> Tuple[Tuple[PathRelationship, ...], bool, bool]:
@@ -712,15 +973,21 @@ def _relationships(
     by_path: Dict[str, Dict[str, List[Any]]] = {}
 
     def _slot(path: str) -> Dict[str, List[Any]]:
-        return by_path.setdefault(path, {"claims": [], "operations": [], "observations": []})
+        return by_path.setdefault(
+            path,
+            {"claims": [], "operations": [], "observations": [], "claim_rows": [], "obs_rows": []},
+        )
 
     for claim in claims:
         for path in _claim_paths(claim):
             slot = _slot(path)
             slot["claims"].append(claim.claim_id)
             slot["operations"].append(claim.operation)
+            slot["claim_rows"].append(claim)
     for observation in observations:
-        _slot(observation.path)["observations"].append(observation.reference)
+        slot = _slot(observation.path)
+        slot["observations"].append(observation.reference)
+        slot["obs_rows"].append(observation)
 
     paths_truncated = len(by_path) > MAX_BUNDLE_PATHS
     sources_truncated_anywhere = False
@@ -730,12 +997,27 @@ def _relationships(
         claim_ids = slot["claims"]
         operations = slot["operations"]
         refs = slot["observations"]
+
+        agreement = (
+            _group_agreement(slot["claim_rows"], slot["obs_rows"], path)
+            if claim_ids and refs
+            else OPERATION_UNKNOWN
+        )
+
         if claim_ids and refs:
-            relationship = RELATIONSHIP_PATH_AGREED
+            # The path is agreed either way — both records name this file. What
+            # the operation evidence says decides whether the relationship is a
+            # plain agreement or a recorded disagreement.
+            relationship = (
+                RELATIONSHIP_CLAIM_CONFLICT
+                if agreement == OPERATION_DIFFERS
+                else RELATIONSHIP_PATH_AGREED
+            )
         elif claim_ids:
             relationship = RELATIONSHIP_CLAIM_ONLY
         else:
             relationship = RELATIONSHIP_OBSERVED_ONLY
+
         truncated = len(claim_ids) > MAX_GROUP_SOURCES or len(refs) > MAX_GROUP_SOURCES
         sources_truncated_anywhere = sources_truncated_anywhere or truncated
         built.append(
@@ -748,10 +1030,16 @@ def _relationships(
                 # already in `claim_count`.
                 claim_operations=tuple(sorted(set(operations))),
                 observation_refs=tuple(refs[:MAX_GROUP_SOURCES]),
-                path_agreement=relationship == RELATIONSHIP_PATH_AGREED,
-                # Never anything else in this build, whatever matched. Today's
-                # observation proves a path changed and says nothing about how.
-                operation_agreement=OPERATION_UNKNOWN,
+                # Both `path_agreed` and `claim_conflict` mean the two records
+                # name the same file, so path agreement is true for both. The
+                # difference between them is entirely about the operation.
+                path_agreement=relationship
+                in (RELATIONSHIP_PATH_AGREED, RELATIONSHIP_CLAIM_CONFLICT),
+                operation_agreement=agreement,
+                # Deduplicated and sorted, like the claim operations.
+                observed_kinds=tuple(
+                    sorted({o.change_kind for o in slot["obs_rows"] if o.change_kind})
+                ),
                 claim_count=len(claim_ids),
                 observation_count=len(refs),
                 sources_truncated=truncated,
@@ -770,6 +1058,7 @@ def input_fingerprint(
     claims: Sequence[ChangeClaim],
     observations: Sequence[MachineObservation],
     ingestion: IngestionSummary,
+    machine_complete: bool = True,
 ) -> str:
     """A stable hash of exactly the immutable inputs assembly used.
 
@@ -885,8 +1174,19 @@ def input_fingerprint(
                 observation.path,
                 observation.operation,
                 observation.result,
+                # M2K PR3. The machine semantics are assembly-relevant immutable
+                # inputs: the same path observed as `deleted` rather than
+                # `modified` is a different fact and must not fingerprint alike.
+                # `previous_path` is a project-relative semantic path, so it
+                # belongs here for the reason the claim's path does.
+                observation.change_kind,
+                observation.previous_path,
             ]
         )
+    # Whether the machine set was whole is an input to what the bundle says
+    # about absence, so it binds too.
+    digest.field("machine_complete")
+    digest.field(bool(machine_complete))
     return digest.hexdigest()
 
 
@@ -931,12 +1231,13 @@ def assemble(
         observations: Tuple[MachineObservation, ...] = ()
         unsupported = False
         clean = False
+        partial = False
         limitations.append(LIMIT_LEGACY_TURN)
     else:
         window = list(events)[:MAX_BUNDLE_EVENTS]
         if len(events) > MAX_BUNDLE_EVENTS:
             limitations.append(LIMIT_EVENTS_TRUNCATED)
-        observations, unsupported, clean = _eligible_observations(window)
+        observations, unsupported, clean, partial = _eligible_observations(window)
         if len(observations) > MAX_BUNDLE_OBSERVATIONS:
             limitations.append(LIMIT_OBSERVATIONS_TRUNCATED)
             observations = observations[:MAX_BUNDLE_OBSERVATIONS]
@@ -953,6 +1254,12 @@ def assemble(
         limitations.append(LIMIT_CLAIMS_TRUNCATED)
     if unsupported:
         limitations.append(LIMIT_UNSUPPORTED_OBSERVATION)
+    if partial:
+        # Git reported more than Cofferdam recorded. Carried so that an
+        # `observed_only` absence is read as "possibly not looked at" rather
+        # than "looked at and not there" — the distinction PR2 made for claims
+        # and PR3 owes to observations.
+        limitations.append(LIMIT_OBSERVATIONS_INCOMPLETE)
 
     relationships, paths_truncated, sources_truncated = _relationships(
         turn_claims, observations
@@ -970,6 +1277,7 @@ def assemble(
         claims=turn_claims,
         observations=observations,
         ingestion=ingestion,
+        machine_complete=not partial,
     )
 
     return EvidenceBundle(
@@ -994,6 +1302,7 @@ def assemble(
         ),
         turn_open=bool(bound is not None and bound.open),
         repository_reported_clean=clean,
+        machine_observations_complete=not partial,
     )
 
 
@@ -1016,6 +1325,7 @@ __all__ = [
     "LIMIT_EVENTS_TRUNCATED",
     "LIMIT_INGESTION_MISSING",
     "LIMIT_LEGACY_TURN",
+    "LIMIT_OBSERVATIONS_INCOMPLETE",
     "LIMIT_OBSERVATIONS_TRUNCATED",
     "LIMIT_PATHS_TRUNCATED",
     "LIMIT_SOURCES_TRUNCATED",
@@ -1029,7 +1339,17 @@ __all__ = [
     "MAX_BUNDLE_PATHS",
     "MAX_GROUP_SOURCES",
     "MachineObservation",
+    "OPERATION_AGREED",
+    "OPERATION_AGREEMENTS",
+    "OPERATION_DIFFERS",
     "OPERATION_UNKNOWN",
+    "RELATIONSHIP_CLAIM_CONFLICT",
+    "COVERAGE_COMPLETE",
+    "COVERAGE_PARTIAL",
+    "is_coverage_observation",
+    "observation_change_kind",
+    "observation_previous_path",
+    "operation_agreement",
     "PathRelationship",
     "RELATIONSHIPS",
     "RELATIONSHIP_CLAIM_ONLY",

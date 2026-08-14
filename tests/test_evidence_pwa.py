@@ -94,9 +94,30 @@ class RelationshipVocabulary(unittest.TestCase):
         self.assertIn("Claim only", self.html)
         self.assertIn("Observed only", self.html)
 
-    def test_operation_is_explicitly_not_established(self):
-        """Said for every group, including the agreeing one."""
-        self.assertEqual(self.html.count("Operation not established."), 3)
+    def test_every_group_carries_an_explicit_operation_statement(self):
+        """One of the three answers, printed for every group without exception.
+
+        Before M2K PR3 this asserted the literal "Operation not established" on
+        all three, because that was the only answer the evidence could support.
+        PR3 gives the machine side real semantics, so a group may now say the
+        operation agreed or differed — but the property that matters is
+        unchanged and is what is asserted here: **the question is never left
+        unanswered on screen.** A group with no operation line would invite a
+        reader to supply their own answer.
+        """
+        # The list item, not the `task-evidence-groups` container, whose class
+        # name contains the same substring.
+        groups = self.html.count('<li class="task-evidence-group">')
+        stated = sum(
+            self.html.count(phrase)
+            for phrase in (
+                "Operation agreed",
+                "Operation differs",
+                "Operation not established",
+            )
+        )
+        self.assertEqual(groups, 3)
+        self.assertEqual(stated, groups)
 
     def test_path_agreed_is_never_shortened_to_agreed(self):
         self.assertNotIn(">Agreed<", self.html)
@@ -229,6 +250,60 @@ class NoMutationControls(unittest.TestCase):
         window = code[max(0, index - 400) : index + 200]
         self.assertNotIn("method:", window)
         self.assertNotIn("body:", window)
+
+
+class MachineOperationLanguage(unittest.TestCase):
+    """M2K PR3: the panel can now say what was observed, in neutral verbs."""
+
+    def test_an_agreeing_operation_says_so(self):
+        html = panel("evidence-shows-all-three-relationships")["html"]
+        self.assertIn("Operation agreed", html)
+        self.assertIn("Machine observed: modified", html)
+
+    def test_a_differing_operation_is_a_records_disagreement_not_a_failure(self):
+        html = panel("evidence-operation-differs")["html"]
+        self.assertIn("Operation differs", html)
+        self.assertIn("Records differ", html)
+        self.assertIn("Machine observed: deleted", html)
+        # The wording that keeps it evidence rather than judgement.
+        self.assertIn("Both records are kept as they were", html)
+        for forbidden in ("FAIL", "failed", "wrong", "lied", "violation", "error"):
+            self.assertNotIn(forbidden, html, forbidden)
+
+    def test_a_conflict_is_not_styled_as_an_error(self):
+        """`warn` — something to look at. `err` would read as a failure."""
+        html = panel("evidence-operation-differs")["html"]
+        start = html.index("task-evidence-detail")
+        end = html.index("task-actions", start)
+        section = html[start:end]
+        self.assertIn("badge warn", section)
+        self.assertNotIn("badge err", section)
+
+    def test_a_rename_shows_both_paths_in_order(self):
+        html = panel("evidence-rename-observed")["html"]
+        self.assertIn("src/old.py", html)
+        self.assertIn("src/new.py", html)
+        self.assertIn("Machine observed: renamed", html)
+        self.assertLess(html.index("src/old.py"), html.index("→"))
+
+    def test_an_incomplete_machine_set_says_a_gap_may_not_be_a_gap(self):
+        html = panel("evidence-machine-incomplete")["html"]
+        self.assertIn("only some of the changes Git", html)
+        self.assertIn("may simply not have been looked at", html)
+
+    def test_the_panel_reports_assembler_v2(self):
+        html = panel("evidence-shows-all-three-relationships")["html"]
+        self.assertIn("Assembler v2", html)
+
+    def test_no_rendered_pr3_screen_carries_judgement_language(self):
+        for scenario in (
+            "evidence-operation-differs",
+            "evidence-rename-observed",
+            "evidence-machine-incomplete",
+        ):
+            html = panel(scenario)["html"]
+            for word in ForbiddenVocabulary.FORBIDDEN:
+                self.assertNotIn(word, html, scenario + ": " + word)
 
 
 class NoLeakedInternals(unittest.TestCase):

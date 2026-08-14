@@ -49,10 +49,12 @@ slot B; slot A is retained unchanged at `5afaa8e` (PR3.5.1) as the rollback.
   task. **`syncWorkspace` remains M2M's** (D-2026-08-13-4).
 
 **M2K has begun.** PR1 — the adapter-reported change-claim and task-owned artifact foundation —
-is **merged (#46, `de0e7de`) and deployed**: workstation and Actions bridge both run it from slot A.
-PR2 — the derived `EvidenceBundle` and exact turn/event provenance bounds — is **implemented on a
-branch and not deployed**; see *In progress* below. Nothing after PR2 is started: **no evaluator,
-no verdicts, no risk levels, no check runner, no planner**, and PR2 adds none of them.
+is **merged (#46, `de0e7de`)**. PR2 — the derived `EvidenceBundle` and exact turn/event provenance
+bounds — is **merged (#47, `52811dc`) and deployed**: workstation and Actions bridge both run it
+from slot B, with the live task database migrated to **schema v5**. PR3 — richer machine-owned Git
+observations and assembler v2 — is **implemented on a branch and not deployed**; see *In progress*
+below. Nothing after PR3 is started: **no evaluator, no verdicts, no risk levels, no check runner,
+no planner**, and PR3 adds none of them.
 
 **M2H is complete and merged**, closing the M1 post-reboot gate;
 M2F Agent Task Core and M2G the Claude Code adapter merged; the isolated Custom GPT Actions mobile
@@ -761,9 +763,144 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2K PR3 — richer machine-owned Git observations
+
+On `feat/m2k-pr3-git-observations`, from the merged `52811dc`. **Not deployed and not merged.**
+PR2 could only ever report `operation_agreement: unknown`, and the reason was not the assembler —
+it was that Cofferdam was **already asking Git for more than it kept**.
+
+**What the audit found in the deployed code.** `observe_git` ran `git status --porcelain`, and the
+parser then did three lossy things. It sliced past the two `XY` status characters with `line[3:]`,
+discarding the operation Git had just reported. It split rename records on `" -> "` and kept only
+the right-hand path, dropping the source. And `_safe_relative` refused any path beginning with a
+quote — which, in human porcelain, is **every path containing a space, a tab, an arrow or a
+non-ASCII byte**, so a file called `has space.txt` produced no evidence at all.
+
+**The probe is now `git status --porcelain=v1 -z`.** Git's documented machine format: records are
+NUL-terminated, so a newline, tab or literal `->` inside a filename is just bytes, and paths are
+emitted raw rather than quoted. The version is pinned explicitly so a future Git changing what
+"porcelain" means cannot change what the parser receives. Output is read as **bytes** and each field
+decoded strictly on its own — `errors="replace"` would turn a non-UTF-8 filename into a *different*
+filename and publish a path that does not exist.
+
+**The `-z` rename order is the reverse of the human one, and that is load-bearing.**
+
+    human : R  tomove.txt -> moved.txt          old first, then new
+    -z    : "R  moved.txt" NUL "tomove.txt"     NEW first, then old
+
+A parser written by reading the human output inverts every rename silently, with both paths still
+looking plausible. The order is pinned by a test that runs the installed Git rather than by a
+comment.
+
+**`GitObservation.changed_paths: Tuple[str, ...]` became `changes: Tuple[GitChange, ...]`**, each
+carrying a project-relative `path`, a closed machine `kind`, the raw two-character `status`, and —
+for a rename only — `previous_path`. `changed_paths` survives as a derived property so callers that
+only want the path set still work.
+
+**The machine vocabulary is closed and Task-Core-owned**: `created`, `modified`, `deleted`,
+`renamed`, `unknown`. It lives in `tasks/models.py` rather than in the adapter, because Task Core's
+assembler needs it and **may not import from an agent-specific package** — a layer rule the existing
+tests enforce, and which caught a first attempt that put it in the adapter.
+
+**`unknown` is a first-class answer, not a failure.** `XY` is a table lookup with no branches:
+`??`/`A`/`AM` → created, `M`/`MM` → modified, `D` → deleted, `R`/`RM` → renamed. Everything else
+stays `unknown`, each for its own reason — `UU`/`AA`/`DD`/`AU`/`UA`/`DU`/`UD` are **unmerged** and
+nobody has decided what happened yet; `T` is a **type change** that none of the four words
+describes; `C` is a **copy**, whose source still exists, so calling it a rename would assert a
+deletion that did not happen; `MD` is a staged modify then a worktree delete, two true facts that
+disagree. A status this build has never seen becomes `unknown` rather than a wrong guess.
+
+**`EvidenceReference` gained two optional fields and needed no schema change.** `change_kind` and
+`previous_identifier`, written only when present, so a row carrying no machine semantics serialises
+to **exactly** the pre-PR3 key set. The deserializer already used `.get()`, so old rows read back
+with `None` — which the assembler treats as "the operation was never established", never as
+"nothing happened". `evidence_json` is a TEXT column; **schema stays at v5**, and the rollback pair
+established by the PR2 deployment is unchanged. `result` deliberately keeps its old word
+`"changed"`, so a client written against the older shape sees a familiar row and ignores the rest.
+
+**The emitter has a real budget now.** The old code emitted `changed_paths[:6]` against a store cap
+of `MAX_EVIDENCE_ITEMS = 8`, and a naive 6 → 8 change would have produced 1 HEAD + 8 paths = 9 rows,
+of which `_bounded_evidence` **silently drops the last** — an observation lost with no record. The
+HEAD row is now counted against the budget, and a **coverage row is emitted every time**, saying
+`observed all changes` or `observed some changes`. It is always present because "no coverage row"
+and "a build that never wrote one" are indistinguishable to a later reader.
+
+**Truncation is now a real count**, not the old `len(lines) > len(paths)` heuristic that reported
+truncation whenever a path was deduplicated or refused. Refused paths are **counted** rather than
+dropped in silence — the path itself is not stored, for the reason PR1 stores no rejected payload.
+A refused path makes the observation partial, and the bundle reports
+`machine_observations_complete: false` with a `machine_observations_incomplete` limitation, so an
+`observed_only` absence is read as "possibly not looked at" rather than "looked at and not there".
+
+**Assembler version 2.** `operation_agreement` is now `true`, `false` or `unknown`, answered by one
+closed table plus one helper for renames. Agreeing pairs: created/created, modified/modified,
+deleted/deleted. Incompatible pairs: created↔deleted, modified↔deleted, deleted↔created,
+deleted↔modified. **created vs modified is deliberately `unknown`, not a conflict** — a worker that
+creates a file and then edits it truthfully says "created" while Git reports whichever the state
+against HEAD supports, and calling that a contradiction would manufacture conflicts out of ordinary
+work. Resolution across a group is conservative: one contradiction outweighs a simultaneous
+agreement, and anything unestablished leaves the group unestablished.
+
+**A rename is answered by both paths or not at all.** One table cell cannot express "the source and
+destination both match", so a dedicated helper compares them: both match → `true`; the machine
+renamed the same destination from a **different** source → `false`; the machine saw a rename but
+recorded no source → `unknown`. Half a rename proves nothing about the other half.
+
+**The first deterministic `claim_conflict` can now exist** — and the bar is exactly the one PR2
+documented: two positive machine facts that cannot both describe one path. Absence is still not
+conflict. A legacy observation is not conflict. An unmerged or type-changed path is not conflict. A
+truncated observation set is not conflict. `path_agreement` stays **true** for a conflict, because
+both records do name the same file; the disagreement is entirely about the operation, which is why
+the two are separate fields.
+
+**A conflict is not a verdict.** It does not mean the task failed, the acceptance criteria failed,
+or the worker was dishonest. A worker that modified a file and then deleted it produced a conflict
+and did nothing wrong. The PWA renders it as **"Records differ"** with the sentence "Both records
+are kept as they were", styled `warn` rather than `err`, and the forbidden-vocabulary scan covers
+the new screens.
+
+**The coverage limit the audit found, stated rather than papered over.** `git status` compares the
+index and working tree against the **current HEAD**. It is not a before/after comparison, because
+Cofferdam has no "before": `ClaudeRun` captures no revision at task start, `observe_git` runs once
+after a result arrives, and `observation.head` is the commit *at observation time*, recorded as a
+pointer and never used as a boundary. **So if a worker commits its work, `git status` reports a
+clean tree and Cofferdam observes nothing.** PR3 does **not** add `git diff --name-status`: there is
+no durable earlier revision to diff against, and inventing one would be exactly the false
+before/after boundary the brief warned about. A test asserts the honest behaviour — the claim stays
+`claim_only`, never a conflict.
+
+**One real Git quirk, pinned because it surprises.** Thirty new files inside a previously-unknown
+directory are reported by Git as a **single** record, `?? bulk/`. Cofferdam refuses that path (a
+trailing separator leaves an empty final segment, and PR1's claim gate would refuse it too) and
+counts the refusal, so the observation is honestly partial rather than appearing to say the thirty
+files did not change.
+
+**Path safety is unchanged in strength and cheaper.** `_safe_relative` is now purely lexical — the
+pre-PR3 version called `.resolve()` and compared against the root, which touches the filesystem to
+classify a *string* and resolves symlinks. Classification comes from Git's machine output; nothing
+opens a file to decide whether a name is a name. Absolute paths, `..`, drive letters, backslashes,
+NUL and control characters are all refused, matching PR1's claim gate so that both sides agree on
+what a path is — a tab is refused on both, so an observation of `tab\tname.txt` could never pair
+with a claim that structurally cannot exist.
+
+**No bridge change.** Ten routes, nine authenticated, no evidence/artifact/claim Action,
+`artifacts_supported` still `false`, `getProjectContext` untouched. **No evaluator, no verdict, no
+risk level, no confidence, no check runner, no provider, no model.**
+
+## M2K records — the evidence foundation (written while each was on its branch)
+
+M2K is **in progress**: PR1 and PR2 are merged and deployed, PR3 is on a branch. See
+*In progress* above for PR3.
 ### M2K PR2 — the derived evidence bundle and exact turn provenance
 
-On `feat/m2k-pr2-evidence-bundle`, from the merged `de0e7de`. **Not deployed and not merged.**
+**Merged as `52811dc` (#47) and deployed**: workstation and Actions bridge both run it from slot B,
+and the live database was migrated from schema v4 to **v5**. The three historical pre-v5 turns
+received **no** inferred bounds and report `legacy_unknown`, exactly as designed. Rollback is a
+**pair** — slot A @ `de0e7de` plus the verified pre-v5 backup under
+`state/service-backups/m2k-pr2-premigration-20260814-195929/` — because the forward-only schema gate
+makes a v4 runtime refuse a v5 database (tested: refused safely, zero mutation). The record below
+was written on `feat/m2k-pr2-evidence-bundle` while it was still a branch — where it says "not
+merged" or "not deployed" it is describing the moment it was written.
 PR1 recorded what a worker said and what Cofferdam saw, and deliberately left them side by side
 with nothing noticing they agreed. This is the noticing — and the schema change that makes it
 possible to do honestly.
@@ -890,14 +1027,11 @@ schema-v4 runtime opening a v5 database refuses it, which is correct. So after a
 deployment, rolling back needs a prior compatible runtime **and** a pre-v5 database backup
 restored. Backwards schema compatibility is deliberately not attempted here.
 
-## M2K records — the evidence foundation (written while each was on its branch)
-
-M2K is **in progress**: PR1 is merged and deployed, PR2 is on a branch. See *In progress*
-above for PR2.
 
 ### M2K PR1 — adapter-reported change claims and the artifact foundation
 
-**Merged as `de0e7de` (#46) and deployed**: workstation and Actions bridge both run it from slot A.
+**Merged as `de0e7de` (#46).** It was deployed from slot A until the PR2 deployment moved both
+services to slot B; slot A is now the rollback runtime.
 The record below was written on `feat/m2k-pr1-change-claims`, from the merged `9fcbc8f`, while it
 was still a branch — where this entry says "not merged" or "not deployed" it is describing the
 moment it was written.
