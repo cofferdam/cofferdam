@@ -2135,7 +2135,7 @@ observation set bigger, so it reaches the caps sooner. Truncation, refused paths
 records all feed one published `machine_observations_complete`, so a set that lost known file-level
 evidence is never reported as whole.
 
-## D-2026-08-14-6 — Cofferdam has no pre-work revision, and will not pretend otherwise (EFE DECISION, ACTIVE)
+## D-2026-08-14-6 — Cofferdam has no pre-work revision, and will not pretend otherwise (EFE DECISION, SUPERSEDED by D-2026-08-15-1)
 
 **Decision.** PR3 does **not** add `git diff --name-status <revision>`. Machine observation remains
 what `git status` reports: the index and working tree against the **current** HEAD.
@@ -2162,6 +2162,73 @@ Cofferdam records — through the evidence budget, or because a path failed the 
 bundle says so, so that an `observed_only` absence is read as "possibly not looked at" rather than
 "looked at and not there". Refused paths are counted; the paths themselves are not stored, for the
 reason PR1 stores no rejected payload.
+
+**Superseded by D-2026-08-15-1**, which adds the boundary this entry said was missing. The
+consequence described above held exactly as written through PR3's deployment, and the closing
+paragraph is the specification M2K PR4 was built to.
+
+## D-2026-08-15-1 — The pre-work Git baseline is host-owned, and durable before the worker starts (EFE DECISION, ACTIVE)
+
+**Decision.** Before every worker turn, Cofferdam reads the project's Git revision and working-tree
+state itself and commits the result. Schema **v6** adds one additive table,
+`task_turn_git_baselines`, keyed `(task_id, turn_number)`. M2K PR4 captures the boundary and
+**consumes none of it** — there is no `git diff baseline..HEAD` in this build, `assembler_version`
+stays 2, and no route or bridge operation is added.
+
+**Machine-owned is the whole point.** The repository root comes from `verify_root` against the
+host's own project registry, re-verified at dispatch. The adapter, the provider, the task prompt and
+the API caller cannot choose the root, the revision, the dirty state, or whether capture succeeded.
+Every Git argv is a module constant, so no caller text can become a Git argument; a worker that could
+name its own starting line would be describing its own homework.
+
+**Ordering is structural, not temporal.** "Pre-work" is not "shortly before". The capture is a
+committed write on the only two paths that open a turn, `TaskService._start` and
+`TaskService.send_followup`, immediately before `adapter.start` and `adapter.send_followup`, under
+the dispatch lock. It does not depend on adapter cooperation, and a test adapter asserts from inside
+its own first instruction — on a separate read-only connection, so uncommitted rows cannot satisfy
+it — that the boundary is already durable.
+
+**The foreign key names `tasks`, not `task_turns`, and that follows from the ordering.** On both
+paths the adapter is invoked *before* the turn row is written, deliberately: an adapter refusal must
+leave no turn behind, and a follow-up must never be recorded as delivered before the session took it.
+The tidy design — write the baseline inside `_open_turn_locked` beside `task_turns` — would therefore
+have landed the boundary *after* the worker started, and would have made the honest outcome
+"captured, then the adapter refused, so the turn never opened" unrepresentable. A composite key was
+considered and rejected for exactly that reason; task ownership still travels through the cascade.
+
+**Nothing is invented.** `present` stores the resolved object id; `unborn` stores no revision and
+specifically not the empty-tree object; `unavailable` and `not_a_repository` store none either. The
+object format is **read** via `--show-object-format` rather than assumed, because Git 2.29 shipped
+SHA-256 repositories and this host runs 2.53 — "forty hex characters" stopped being a rule. The
+stored value is validated as a resolved identity, which refuses `HEAD~5`, a branch name, a path and
+every other revspec by construction: a revspec is a program, a boundary must be an identity.
+
+**A HEAD that moves across the observation is not resolved to a guess.** HEAD is read, status is
+inspected, HEAD is read again; disagreement means neither read describes the moment, so the attempt
+is retried a bounded three times and then recorded as explicitly unstable. Bounded, not "until it
+settles" — a repository being rewritten in a loop must not hold a dispatch open.
+
+**A pre-existing dirty tree is a durable fact, and not an accusation.** A project can be dirty for a
+hundred innocent reasons. Recording it is what lets PR5 say "changes since this revision did not
+necessarily start from a clean tree" instead of implying they did. `clean` may never rest on an
+incomplete status read — a bounded read cannot conclude that nothing changed — and both the value
+type and a schema CHECK refuse that combination.
+
+**Git evidence is not a precondition for somebody's work.** A project that is not a repository, or
+cannot be read, still runs its task; what changes is that the unavailability is durable *before* the
+worker starts, so a later reader finds an explicit unavailable boundary rather than a silence it
+could mistake for a clean tree. A missing row means *no boundary was recorded* and never *the tree
+was clean*, which is also the answer for every turn predating v6 — historical turns are **not
+backfilled** from timestamps, the current HEAD, the reflog or guessed ancestry.
+
+**The limit is published rather than glossed.** A clean host-owned snapshot does not prove only the
+worker changed the repository afterwards; a person with a shell, an editor autosave or another tool
+can modify the same tree concurrently. What a stored boundary supports is machine-observed change
+since a recorded point — a statement about records. It is not proof of causation, and nothing built
+on it may say "the worker did this" in those words.
+
+**Still no evaluator**, no verdict, no confidence, no risk level, no acceptance criteria and no
+check runner.
 
 ## OPEN QUESTIONS
 

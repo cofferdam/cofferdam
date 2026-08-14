@@ -8,6 +8,36 @@ release.
 
 ### Added
 
+- **M2K PR4 — Cofferdam now writes down where a project stood before a worker touched it.**
+  Nothing about this is visible yet, and that is deliberate.
+
+  **The problem it fixes.** A worker that edits files and then *commits* them leaves the project
+  looking untouched. Cofferdam's existing check asks Git "what is different from the latest commit?",
+  and after the worker commits, the latest commit is the worker's own — so the honest answer becomes
+  "nothing", and the work disappears from the evidence view. That has been a known hole since PR3
+  shipped, recorded rather than hidden.
+
+  **What changes.** Before a worker is allowed to start — on a new task and on every follow-up —
+  Cofferdam reads the project's current Git revision and whether the folder already had uncommitted
+  changes, and saves it. Only then does the worker begin. Cofferdam reads this itself; the worker
+  cannot suggest it, the task description cannot influence it, and nothing arriving over the network
+  can choose it.
+
+  **What it does not do yet.** It does not compare anything. Nothing in the app looks different,
+  no new screen or button appears, and the evidence panel is unchanged. Using the saved point to
+  show what a worker committed is the next piece of work, kept separate on purpose: a starting line
+  recorded in the wrong place would make everything measured from it wrong while looking exactly as
+  authoritative.
+
+  **What it will not pretend.** If the project is not a Git repository, or has no commits yet, or
+  Git cannot be read, Cofferdam records *that* — it never invents a starting point, and your task
+  still runs normally. And a recorded starting point cannot prove the worker was the only thing that
+  changed the folder afterwards; you, an editor saving in the background, or another tool can too.
+  What it supports is "this changed since here", not "the worker did this".
+
+  Existing tasks and turns from before this change get no starting point, and none is guessed for
+  them. Still no pass, no fail, no score, no verdict.
+
 - **M2K PR3 — Cofferdam can now say *what* changed, not just *that* something did.** The evidence
   panel used to tell you that the worker and Cofferdam both named `src/foo.py`, and then have to
   admit it could not say whether the file was created, edited, deleted or renamed. It can now,

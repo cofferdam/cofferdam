@@ -97,9 +97,10 @@ class EvidenceEndToEnd(unittest.TestCase):
     # -- the walk ---------------------------------------------------------
 
     def test_the_whole_path(self):
-        # 1. schema v5 opens.
-        self.assertEqual(SCHEMA_VERSION, 5)
-        self.assertEqual(self.store.storage_health()["schema_version"], 5)
+        # 1. the current schema opens. v6 since M2K PR4; the bundle's inputs are
+        #    unchanged by it, which is what the rest of this walk re-proves.
+        self.assertEqual(SCHEMA_VERSION, 6)
+        self.assertEqual(self.store.storage_health()["schema_version"], 6)
 
         # 2. a task is created.
         task_id = self._task()

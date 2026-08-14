@@ -93,6 +93,7 @@ from .models import (
     bounded_line,
     bounded_text,
 )
+from .gitbaseline import MAX_REASON_CHARS, GitBaseline
 from .turns import (
     FOLLOWUP_SOURCES,
     MAX_TURNS_PER_TASK,
@@ -145,7 +146,31 @@ from .turns import (
 #: evidence bundle says so, which is the honest answer and the only one
 #: available. A backfill would produce rows that read as recorded fact and are
 #: guesses, and the whole milestone is about that distinction.
-SCHEMA_VERSION = 5
+#:
+#: Version 6 adds ``task_turn_git_baselines`` (M2K PR4) and nothing else. It
+#: exists because the PR3 deployment demonstrated the last large machine-
+#: observation gap on a live host: a worker may modify files **and commit
+#: them**, after which the working tree is clean and PR3's observation — which is
+#: relative to the *current* HEAD — can no longer see the work. What is missing
+#: is a revision the machine recorded before the worker was allowed to begin.
+#:
+#: Additive in exactly the same way as every version before it: one new table,
+#: no column of an existing table moved, changed type or gained a constraint,
+#: and **no row rewritten or inferred**. Turns that predate this version get no
+#: baseline — not one read from the current HEAD, not one derived from a task or
+#: event timestamp, not one recovered from the reflog, not one guessed from
+#: commit ancestry. :meth:`TaskStore.turn_baseline` answers ``None``, and
+#: ``None`` means *no boundary was recorded* and never *the tree was clean*.
+#:
+#: The one thing that is not like its predecessors is the foreign key, which
+#: names ``tasks`` rather than ``task_turns``. That follows from the guarantee
+#: the row exists to provide — durable before the worker starts — and the table
+#: comment above sets out the argument in full.
+#:
+#: PR4 stores the boundary and consumes nothing. No ``git diff`` runs anywhere
+#: in this build, ``ASSEMBLER_VERSION`` stays at 2, and the evidence bundle's
+#: inputs are unchanged.
+SCHEMA_VERSION = 6
 
 #: Where the database lives, under COFFERDAM_HOME. Its own directory so the file
 #: and its WAL/shm siblings stay together and can be permissioned as a unit.
@@ -475,6 +500,65 @@ CREATE TABLE IF NOT EXISTS task_turn_bounds (
     -- a turn during which nothing was appended, which is valid.
     CHECK (closed_through_event_sequence IS NULL
            OR closed_through_event_sequence >= opened_after_event_sequence)
+);
+
+-- Schema v6. The machine-owned Git boundary that existed **before** a worker
+-- turn was allowed to begin. See `cofferdam.workstation.tasks.gitbaseline` for
+-- why a boundary is needed at all: after a worker commits its own work the
+-- working tree is clean and PR3's observation, which is relative to the current
+-- HEAD, can no longer see what was done.
+--
+-- The foreign key names `tasks`, not `task_turns`, and that is the one design
+-- decision in this table worth reading twice. The guarantee this row exists to
+-- provide is *durable before the worker starts*, and on both dispatch paths
+-- — `TaskService._start` and `TaskService.send_followup` — the adapter is
+-- invoked before the turn row is written. A composite key into `task_turns`
+-- would therefore be unwritable at the only moment it may be written, and it
+-- would make the honest outcome "captured, and then the adapter refused, so the
+-- turn never opened" impossible to represent. Task ownership still travels
+-- through the cascade, so deleting a task still removes these rows.
+--
+-- What is deliberately **not** here: no path, no file content, no diff, no
+-- patch, no blob, no repository root, no provider or session id, no verdict.
+-- A path is somebody's project content and a root is host filesystem layout;
+-- neither belongs in a durable evidence row, and a revision range does not need
+-- either of them. PR4 stores no observation derived from this boundary at all
+-- — that is PR5 — so there is no room here for one to hide.
+CREATE TABLE IF NOT EXISTS task_turn_git_baselines (
+    task_id            TEXT    NOT NULL,
+    turn_number        INTEGER NOT NULL,
+    capture_state      TEXT    NOT NULL,
+    head_state         TEXT    NOT NULL,
+    head_revision      TEXT,
+    object_format      TEXT,
+    working_tree_state TEXT    NOT NULL,
+    status_coverage    TEXT    NOT NULL,
+    reason             TEXT,
+    -- Audit metadata only. Attribution is by turn number, never by clock: the
+    -- v5 bounds exist precisely because timestamps are not an authority.
+    captured_at        TEXT    NOT NULL,
+    PRIMARY KEY (task_id, turn_number),
+    FOREIGN KEY (task_id) REFERENCES tasks (task_id) ON DELETE CASCADE,
+    CHECK (turn_number >= 1),
+    CHECK (capture_state IN ('captured', 'unavailable')),
+    CHECK (head_state IN ('present', 'unborn', 'unavailable', 'not_a_repository')),
+    CHECK (working_tree_state IN ('clean', 'dirty', 'unknown')),
+    CHECK (status_coverage IN ('complete', 'incomplete', 'unavailable')),
+    -- Only a resolved HEAD carries a revision, and it must carry one. `unborn`
+    -- must never be given the empty-tree object and `unavailable` must never be
+    -- given a guess: a boundary Cofferdam invented is worse than none, because
+    -- everything derived from it would look authoritative.
+    CHECK ((head_state = 'present') = (head_revision IS NOT NULL)),
+    CHECK ((head_revision IS NULL) = (object_format IS NULL)),
+    CHECK (object_format IS NULL OR object_format IN ('sha1', 'sha256')),
+    -- A resolved object id, bounded to the widest supported format. The shape
+    -- is enforced in `gitbaseline`; this is the backstop that keeps a hand-run
+    -- UPDATE from putting `HEAD~5` in an evidence column.
+    CHECK (head_revision IS NULL OR length(head_revision) BETWEEN 40 AND 64),
+    CHECK (reason IS NULL OR length(reason) <= 40),
+    -- The one combination that would be a lie: a bounded or refused status read
+    -- cannot conclude that nothing changed.
+    CHECK (NOT (working_tree_state = 'clean' AND status_coverage <> 'complete'))
 );
 """
 
@@ -1809,6 +1893,110 @@ class TaskStore:
         if current is None:  # pragma: no cover - the insert just succeeded
             raise StoreUnavailable("the turn could not be opened")
         return current
+
+    # -- the pre-work Git baseline (schema v6) --------------------------------
+
+    def reserve_turn_baseline(
+        self, task_id: str, baseline: "GitBaseline", *, captured_at: str
+    ) -> int:
+        """Persist the boundary for the turn that is **about to** open.
+
+        Returns the turn number the baseline was written for, which is the
+        number ``_open_turn_locked`` will allocate next. Both read
+        ``MAX(turn_number) + 1``; this one reads it in its own transaction a
+        moment earlier, and the service holds its dispatch lock across both, so
+        the two agree. The primary key is the backstop rather than the mechanism:
+        if the allocation were ever wrong the second write raises, which is a
+        loud failure rather than a boundary quietly attached to the wrong turn.
+
+        **Why this is a separate write and not part of opening the turn.** The
+        guarantee is that the boundary is durable *before the worker starts*, and
+        on both dispatch paths the adapter is invoked before the turn row exists
+        — deliberately, so that an adapter refusal leaves no turn behind and a
+        follow-up is never recorded as delivered before the session took it.
+        Folding this into ``_open_turn_locked`` would therefore move it after the
+        worker, which is the one thing it may not be.
+
+        **Replacement is bounded to the pre-work window.** A dispatch that
+        captured a baseline and then had the adapter refuse leaves a row for a
+        turn that never opened; the next attempt legitimately re-captures. So a
+        row may be replaced *only* while no turn of that number exists. Once the
+        turn is open the boundary is immutable, and this refuses rather than
+        overwrites — a worker's changes must not be re-measured from a line
+        drawn after it started moving.
+        """
+        if not isinstance(baseline, GitBaseline):  # pragma: no cover - defensive
+            raise StoreUnavailable("a baseline must be captured by the host")
+        with self._write() as connection:
+            if connection.execute(
+                "SELECT 1 FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone() is None:
+                raise TaskUnknown()
+            highest = connection.execute(
+                "SELECT COALESCE(MAX(turn_number), 0) FROM task_turns WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()[0]
+            turn_number = int(highest or 0) + 1
+            opened = connection.execute(
+                "SELECT 1 FROM task_turns WHERE task_id = ? AND turn_number = ?",
+                (task_id, turn_number),
+            ).fetchone()
+            if opened is not None:  # pragma: no cover - MAX+1 cannot already exist
+                raise StoreUnavailable("that turn is already open")
+            connection.execute(
+                "DELETE FROM task_turn_git_baselines"
+                " WHERE task_id = ? AND turn_number = ?",
+                (task_id, turn_number),
+            )
+            connection.execute(
+                """
+                INSERT INTO task_turn_git_baselines
+                    (task_id, turn_number, capture_state, head_state, head_revision,
+                     object_format, working_tree_state, status_coverage, reason,
+                     captured_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    turn_number,
+                    baseline.capture_state,
+                    baseline.head_state,
+                    baseline.head_revision,
+                    baseline.object_format,
+                    baseline.working_tree_state,
+                    baseline.status_coverage,
+                    bounded_line(baseline.reason, MAX_REASON_CHARS),
+                    captured_at,
+                ),
+            )
+        return turn_number
+
+    def turn_baseline(self, task_id: str, turn_number: int) -> Optional["GitBaseline"]:
+        """The stored boundary for one turn, or ``None`` if there is not one.
+
+        ``None`` means exactly one thing — no baseline was recorded — and it must
+        never be read as "the repository was clean". Every turn on this host that
+        predates schema v6 answers ``None``, and so does any turn whose dispatch
+        crashed between capture and persistence. A caller that needs to say
+        something about coverage must say *unavailable*, not *clean*.
+        """
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM task_turn_git_baselines"
+                " WHERE task_id = ? AND turn_number = ?",
+                (task_id, int(turn_number)),
+            ).fetchone()
+        if row is None:
+            return None
+        return GitBaseline(
+            capture_state=row["capture_state"],
+            head_state=row["head_state"],
+            head_revision=row["head_revision"],
+            object_format=row["object_format"],
+            working_tree_state=row["working_tree_state"],
+            status_coverage=row["status_coverage"],
+            reason=row["reason"],
+        )
 
     def turns(self, task_id: str) -> List["TaskTurn"]:
         """Every turn this task has had, oldest first. Bounded by the row limit."""

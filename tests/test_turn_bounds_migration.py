@@ -54,16 +54,24 @@ class CleanDatabaseTests(unittest.TestCase):
             pass
         self._temp.cleanup()
 
-    def test_the_schema_version_is_five(self):
-        self.assertEqual(SCHEMA_VERSION, 5)
+    def test_the_schema_version_is_at_least_five(self):
+        """v5 is this module's floor, not the current version.
 
-    def test_the_recorded_version_is_five(self):
+        M2K PR4 took the schema to 6. Pinning `== 5` here would make this file
+        fail every time a *later* milestone adds a table, which says nothing
+        about whether v5's bounds still work — and that is all this module is
+        for. The exact current number is pinned once, in
+        `test_git_baseline_migration.py`, where it is the subject.
+        """
+        self.assertGreaterEqual(SCHEMA_VERSION, 5)
+
+    def test_the_recorded_version_is_the_current_one(self):
         self.store.storage_health()
         with sqlite3.connect(str(self.path)) as db:
             value = db.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()[0]
-        self.assertEqual(int(value), 5)
+        self.assertEqual(int(value), SCHEMA_VERSION)
 
     def test_the_bounds_table_exists(self):
         self.store.storage_health()
@@ -365,14 +373,15 @@ class MigrationTests(unittest.TestCase):
         self.addCleanup(store.close)
         return store
 
-    def test_a_v4_database_opens_and_becomes_v5(self):
+    def test_a_v4_database_opens_and_is_migrated_forward(self):
         self._build_v4()
         self._opened()
         with sqlite3.connect(str(self.path)) as db:
             value = db.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()[0]
-        self.assertEqual(int(value), 5)
+        self.assertGreaterEqual(int(value), 5)
+        self.assertEqual(int(value), SCHEMA_VERSION)
 
     def test_the_migration_creates_the_bounds_table(self):
         self._build_v4()
@@ -455,7 +464,7 @@ class MigrationTests(unittest.TestCase):
             )
             bounds = db.execute("SELECT COUNT(*) FROM task_turn_bounds").fetchone()[0]
             turns = db.execute("SELECT COUNT(*) FROM task_turns").fetchone()[0]
-        self.assertEqual(value, 5)
+        self.assertEqual(value, SCHEMA_VERSION)
         self.assertEqual(bounds, 0)
         self.assertEqual(turns, 3)
 
@@ -469,13 +478,22 @@ class MigrationTests(unittest.TestCase):
             )
             self.assertEqual(list(db.execute("PRAGMA foreign_key_check")), [])
 
-    def test_a_v6_database_is_still_refused(self):
-        """The forward-only gate is unchanged, one version further along."""
+    def test_a_database_from_a_future_build_is_still_refused(self):
+        """The forward-only gate is unchanged, wherever the current version sits.
+
+        Written against `SCHEMA_VERSION + 1` rather than a literal, because the
+        literal was 6 and 6 is now a real version this build writes. A gate
+        tested against a number the code has since reached is a gate that stops
+        being tested at all.
+        """
         from cofferdam.workstation.tasks.errors import StoreUnavailable
 
         self._build_v4()
         with sqlite3.connect(str(self.path)) as db:
-            db.execute("UPDATE schema_meta SET value='6' WHERE key='schema_version'")
+            db.execute(
+                "UPDATE schema_meta SET value=? WHERE key='schema_version'",
+                (str(SCHEMA_VERSION + 1),),
+            )
         store = _open_store(self.home)
         self.addCleanup(store.close)
         with self.assertRaises(StoreUnavailable):
