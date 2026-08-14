@@ -135,6 +135,15 @@ from .models import (
     bounded_line,
     valid_user_text,
 )
+from .gitbaseline import (
+    CAPTURE_UNAVAILABLE,
+    COVERAGE_UNAVAILABLE,
+    HEAD_UNAVAILABLE,
+    REASON_PROBE_FAILED,
+    WORKTREE_UNKNOWN,
+    GitBaseline,
+    capture_baseline,
+)
 from .projects import ProjectRegistry, load_projects, verify_root
 from .store import TaskRow, TaskStore, _TurnClose, _TurnDraft
 from .turns import (
@@ -454,12 +463,22 @@ class TaskService:
                 correlation_id=row.correlation_id,
             )
 
+            # Turn one's pre-work Git boundary, captured and made durable here —
+            # the last Cofferdam-controlled instruction before the worker exists.
+            # See :meth:`_record_pre_work_baseline`.
+            turn_number = self._record_pre_work_baseline(row, root)
+
             context = self._context(row, root, adapter)
+            # Committed before the call, never after: from here on Cofferdam
+            # cannot prove the worker did nothing, so the boundary is frozen.
+            self._mark_dispatch_started(row, turn_number)
             try:
                 outcome = adapter.start(context)
             except AdapterRefusal as refusal:
+                self._mark_dispatch_refused(row, turn_number)
                 return self._fail(row, "task_adapter_refused", refusal.message, refusal.detail)
             except Exception as exc:  # an adapter fault must not take the service down
+                self._mark_dispatch_refused(row, turn_number)
                 return self._fail(
                     row,
                     "task_adapter_error",
@@ -488,6 +507,95 @@ class TaskService:
             # source: nobody sent a follow-up to open it, the prompt did.
             self._open_first_turn(row)
             return self._apply(row, outcome)
+
+    def _record_pre_work_baseline(self, row: TaskRow, root: Path) -> Optional[int]:
+        """Capture and durably record this turn's Git boundary. Before the worker.
+
+        **Ordering is the entire point of this method.** Both dispatch paths call
+        it as their last instruction before the adapter is invoked, while holding
+        ``self._lock``, so the boundary is committed to SQLite before any worker
+        or provider process can observe — let alone modify — the repository. That
+        is a structural guarantee, not a timing one: there is no path from
+        ``start_task`` or ``send_followup`` to an adapter that does not pass
+        through here first, and no adapter is asked to cooperate in any way.
+
+        It is deliberately **not** folded into ``_open_turn_locked`` alongside the
+        turn row. On both paths the adapter is invoked before the turn row is
+        written — so that a refusal leaves no turn behind, and so that a
+        follow-up is never recorded as delivered before the session took it —
+        which means an atomic write with the turn would land *after* the worker
+        started. See :mod:`.gitbaseline` and the v6 table comment in
+        :mod:`.store`.
+
+        **The root comes from host project authority only.** ``root`` is what
+        :func:`~.projects.verify_root` returned for this task's registered
+        project, re-verified at dispatch. Nothing from the adapter, the prompt,
+        the follow-up text or the API caller reaches it, and no Git argument is
+        constructed anywhere: every argv in :mod:`.gitbaseline` is a constant.
+
+        **Failure is swallowed, and a failed capture is still recorded.** Like
+        :meth:`_open_first_turn`, this must not be able to fail a task somebody
+        asked for: ordinary project work does not stop because Git evidence is
+        unavailable. What it does instead is record *why* — a repository that is
+        unreadable, unborn or not a repository at all produces a durable
+        baseline saying exactly that, so a later reader finds an explicit
+        unavailable boundary rather than silence it could mistake for a clean
+        tree. Only a store that cannot be written at all leaves nothing, and
+        :meth:`TaskStore.turn_baseline` answers ``None`` for that case with the
+        same meaning it has for every pre-v6 turn: no boundary was recorded.
+        """
+        try:
+            baseline = capture_baseline(root)
+        except Exception:  # pragma: no cover - capture_baseline does not raise
+            baseline = GitBaseline(
+                capture_state=CAPTURE_UNAVAILABLE,
+                head_state=HEAD_UNAVAILABLE,
+                working_tree_state=WORKTREE_UNKNOWN,
+                status_coverage=COVERAGE_UNAVAILABLE,
+                reason=REASON_PROBE_FAILED,
+            )
+        try:
+            return self._store.reserve_turn_baseline(
+                row.task_id, baseline, captured_at=now_iso()
+            )
+        except TaskError:  # pragma: no cover - defensive
+            return None
+
+    def _mark_dispatch_started(self, row: TaskRow, turn_number: Optional[int]) -> None:
+        """Freeze the boundary, durably, immediately before the adapter is called.
+
+        The ordering here is the crash-safety argument in one line. Once this
+        commits, Cofferdam can no longer prove the worker did nothing — so the
+        boundary stops being replaceable, and a later retry that finds it can
+        only dispatch against it rather than draw a new line behind a worker that
+        may already have moved.
+
+        ``turn_number`` is ``None`` only when the capture itself could not be
+        persisted, in which case there is no boundary to freeze and the dispatch
+        proceeds with no recorded boundary at all — which
+        :meth:`TaskStore.turn_baseline` reports as absent rather than clean.
+        """
+        if turn_number is None:
+            return
+        try:
+            self._store.mark_baseline_dispatch_started(row.task_id, turn_number)
+        except TaskError:  # pragma: no cover - defensive
+            return
+
+    def _mark_dispatch_refused(self, row: TaskRow, turn_number: Optional[int]) -> None:
+        """Record that the adapter answered, and no turn came of it.
+
+        Distinct from a crash, which leaves ``dispatch_started`` standing: this
+        says Cofferdam *learned* the outcome. It does not make the boundary
+        replaceable — see :meth:`TaskStore.mark_baseline_dispatch_refused` for
+        why an adapter's refusal cannot prove the worker was untouched.
+        """
+        if turn_number is None:
+            return
+        try:
+            self._store.mark_baseline_dispatch_refused(row.task_id, turn_number)
+        except TaskError:  # pragma: no cover - defensive
+            return
 
     def _open_first_turn(self, row: TaskRow) -> None:
         """Record that this task's first provider turn has begun.
@@ -644,17 +752,34 @@ class TaskService:
                 self._reject(row, "followup", "a turn is already running")
                 raise FollowupInFlight()
 
+            # This follow-up's own pre-work Git boundary, captured and made
+            # durable before the message reaches the session. Only when a new
+            # turn is actually being opened: a message that resumes a turn
+            # blocked on a question is not new work and must not redraw the line
+            # that turn's changes are already being measured from.
+            turn_number = None
+            if starts_new_turn:
+                turn_number = self._record_pre_work_baseline(row, root)
+
             context = self._context(row, root, adapter, followup=text)
             # The adapter is asked **before** anything is written. A follow-up
             # recorded as delivered that never reached the session would show
             # somebody their message accepted while the agent sat idle — the
             # same false success the clarification path refuses.
+            #
+            # Which is exactly why the boundary has to be frozen first: this
+            # adapter's refusal can arrive *after* `send_turn` has already put
+            # bytes on a live worker's stdin, so a refusal here proves nothing
+            # about what the repository has been through.
+            self._mark_dispatch_started(row, turn_number)
             try:
                 outcome = adapter.send_followup(context, text)
             except AdapterRefusal as refusal:
+                self._mark_dispatch_refused(row, turn_number)
                 self._reject(row, "followup", refusal.message[:120])
                 raise SessionUnavailable(refusal.message[:120])
             except Exception as exc:
+                self._mark_dispatch_refused(row, turn_number)
                 return self._fail(
                     row,
                     "task_adapter_error",

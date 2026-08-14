@@ -320,6 +320,105 @@ exists.
 | Schema version | recorded in `schema_meta`; a database written by a **newer** build is refused rather than migrated backwards |
 | Secrets | none, ever — no tokens, no credentials, no adapter authentication state |
 
+### The pre-work Git baseline (M2K PR4, schema v6)
+
+One additive table, `task_turn_git_baselines`, keyed `(task_id, turn_number)`. It
+holds the Git revision and working-tree state the **host** read **before a worker
+turn was allowed to begin**.
+
+**Why it exists.** M2K PR3's observation is `git status` against the *current*
+HEAD. A worker that edits files and then commits them leaves a clean tree, and
+the current HEAD is the worker's own commit — so the work becomes invisible. The
+missing fact was never a parser; it was a boundary recorded before the work.
+
+**Ordering is structural, not temporal.** The capture is a committed write on the
+only two paths that open a turn — `TaskService._start` and
+`TaskService.send_followup` — immediately before `adapter.start` and
+`adapter.send_followup`, under the dispatch lock. Nothing asks the adapter to
+cooperate, and no path reaches a worker without passing through it first.
+
+**The foreign key names `tasks`, not `task_turns`, and that follows from the
+ordering rather than from convenience.** On both paths the adapter is invoked
+before the turn row is written — deliberately, so that a refusal leaves no turn
+behind and a follow-up is never recorded as delivered before the session took it.
+A composite key into `task_turns` would therefore be unwritable at the only moment
+it may be written, and it would make the honest outcome "captured, then the
+adapter refused, so the turn never opened" impossible to represent. Task ownership
+still travels through the cascade.
+
+| Column | Meaning |
+| --- | --- |
+| `capture_state` | `captured` / `unavailable` — terminal and durable, never a retry marker |
+| `head_state` | `present` / `unborn` / `unavailable` / `not_a_repository` |
+| `head_revision` | the resolved object id, and **only** when `head_state` is `present` |
+| `object_format` | `sha1` / `sha256`, read from the repository rather than assumed |
+| `working_tree_state` | `clean` / `dirty` / `unknown` at the boundary |
+| `status_coverage` | `complete` / `incomplete` / `unavailable` |
+| `reason` | a closed machine code, never raw Git stderr — stderr carries host paths |
+| `dispatch_state` | `captured` / `dispatch_started` / `dispatch_refused` / `turn_opened` |
+| `captured_at` | audit metadata only; attribution is by turn number, never by clock |
+
+**`dispatch_state` is a different dimension from `capture_state`, and it is what
+makes the boundary crash-safe.** `capture_state` says how well the repository
+could be read; `dispatch_state` says how far the worker dispatch got, which is
+what decides whether the boundary may still be replaced.
+
+It has to be durable rather than inferred. The adapter is invoked *before* the
+turn row is written, so "no row in `task_turns`" describes two situations that
+could not be more different: one where the worker was never called, and one where
+the worker ran, **possibly committed**, and Cofferdam died before recording the
+turn. Treating the second as replaceable would let a retry read the worker's own
+commit and store it as the *pre-work* boundary — destroying the real one silently,
+in a way every later observation would inherit.
+
+`dispatch_started` is committed **before** the adapter call, which is what makes
+`captured` mean "the adapter had provably not been reached". That is the only
+replaceable state; everything past it freezes `head_revision`, `object_format`,
+`head_state`, the tree state, the coverage and the capture reason.
+
+`dispatch_refused` records that Cofferdam *learned* the dispatch produced no turn,
+which is different from crashing before learning anything — but it does **not**
+re-open replacement. `AdapterRefusal` is a statement of intent, not a proof about
+side effects: `ClaudeCodeAdapter.send_followup` raises it when `send_turn` fails,
+*after* bytes may already have reached a live worker's stdin, and the core cannot
+tell that apart from an early refusal without reading an adapter's message text.
+
+A retry after a refusal therefore reuses the same reserved turn number and
+dispatches against the **same** boundary. That is the right answer as well as the
+safe one: the earliest boundary for a turn number precedes every attempt at it.
+
+`turn_opened` is written inside the same transaction as the turn row itself, so a
+turn without its boundary bound to it — or a boundary bound to a turn that rolled
+back — is not a state this store can produce.
+
+**Nothing is invented.** `unborn` stores no revision and specifically not the
+empty-tree object. The stored value is validated as a resolved identity — hex of
+exactly the length the repository's object format produces — which refuses
+`HEAD~5`, a branch name, a path and every other revspec by construction. A revspec
+is a program; a boundary must be an identity. The object format is read because
+Git 2.29 shipped SHA-256 repositories, so "forty hex characters" is not a rule.
+
+**A HEAD that moves is not resolved to a guess.** HEAD is read, status is
+inspected, HEAD is read again; disagreement means neither read describes the
+moment, so the attempt is retried a **bounded** three times and then recorded as
+explicitly unstable.
+
+**`clean` may never rest on an `incomplete` status** — a bounded read cannot
+conclude that nothing changed. Both the value type and a schema CHECK refuse it.
+
+**Historical turns get no baseline**, and none is inferred from timestamps, the
+current HEAD, the reflog or commit ancestry. `turn_baseline` answers `None`, which
+means *no boundary was recorded* and never *the tree was clean*.
+
+**PR4 consumes none of it.** No `git diff baseline..HEAD` exists in this build,
+`assembler_version` stays 2, and there is no new route and no bridge operation.
+Deriving committed-work evidence from the boundary is M2K PR5.
+
+**The limit.** A clean host-owned snapshot does not prove only the worker changed
+the repository afterwards — a person, an editor autosave or another tool can
+modify the same tree concurrently. What a stored boundary supports is
+machine-observed change since a recorded point, not proof of causation.
+
 ### Change claims and artifacts (M2K PR1, schema v4)
 
 Two tables carry the **claim** side of evidence, which Task Core did not have. They are additive:

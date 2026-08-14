@@ -50,11 +50,13 @@ slot B; slot A is retained unchanged at `5afaa8e` (PR3.5.1) as the rollback.
 
 **M2K has begun.** PR1 — the adapter-reported change-claim and task-owned artifact foundation —
 is **merged (#46, `de0e7de`)**. PR2 — the derived `EvidenceBundle` and exact turn/event provenance
-bounds — is **merged (#47, `52811dc`) and deployed**: workstation and Actions bridge both run it
-from slot B, with the live task database migrated to **schema v5**. PR3 — richer machine-owned Git
-observations and assembler v2 — is **implemented on a branch and not deployed**; see *In progress*
-below. Nothing after PR3 is started: **no evaluator, no verdicts, no risk levels, no check runner,
-no planner**, and PR3 adds none of them.
+bounds — is **merged (#47, `52811dc`) and deployed**, with the live task database migrated to
+**schema v5**. PR3 — richer machine-owned Git observations and assembler v2 — is **merged (#48,
+`d98c10f`) and deployed**: workstation and Actions bridge both run it from slot A, the live schema
+is unchanged at v5 because PR3 needed none, and `assembler_version` is 2. PR4 — the durable
+per-turn pre-work Git baseline — is **implemented on a branch and not deployed**; see *In progress*
+below. Nothing after PR4 is started: **no evaluator, no verdicts, no risk levels, no check runner,
+no planner**, and neither PR3 nor PR4 adds any of them.
 
 **M2H is complete and merged**, closing the M1 post-reboot gate;
 M2F Agent Task Core and M2G the Claude Code adapter merged; the isolated Custom GPT Actions mobile
@@ -763,9 +765,87 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2K PR4 — the durable per-turn pre-work Git baseline
+
+On `feat/m2k-pr4-git-baseline`, from the merged `d98c10f`. **Implemented on a branch, not merged
+and not deployed.**
+
+PR3's deployment demonstrated the last large machine-observation gap on a live host, and it is not
+a parsing problem: a worker may modify files **and commit them**, after which the working tree is
+clean and PR3's observation — which is relative to the *current* HEAD — cannot see the work. The
+current HEAD is the worker's own commit. What was missing is a revision the machine recorded
+**before the worker was allowed to begin**.
+
+PR4 records exactly that and consumes none of it. There is no `git diff baseline..HEAD` anywhere in
+this build; deriving committed-work evidence from a stored boundary is PR5, deliberately separate,
+because a boundary that is late, wrong, adapter-influenced or silently absent would make every
+observation derived from it wrong in a way that looks authoritative.
+
+**The audit that shaped it.** The pre-work guarantee is an ordering claim, so the first question was
+where the last host-controlled instruction actually is. On both dispatch paths — `TaskService._start`
+and `TaskService.send_followup` — the adapter is invoked **before** the turn row is written, and
+deliberately so: an adapter refusal must leave no turn behind, and a follow-up must never be recorded
+as delivered before the session took it. The consequence is that the tidy design — write the baseline
+inside `_open_turn_locked`, atomically beside `task_turns` — would have persisted the boundary
+*after* the worker started, which is the one thing it may not be. It also would have made the honest
+outcome "captured, then the adapter refused, so the turn never opened" impossible to represent.
+
+So the capture is its own committed write immediately before dispatch, and the table's foreign key
+names `tasks` rather than `task_turns`. Everything else follows the existing discipline.
+
+**Crash semantics, and the correction that shaped the final design.** The first version of this PR
+allowed a boundary to be replaced whenever no turn row existed. That was wrong. The adapter is
+invoked *before* the turn row is written, so "no turn row" also describes a dispatch where the worker
+ran, **possibly committed**, and Cofferdam died before recording the turn — and a retry there would
+have read the worker's own commit and stored it as the *pre-work* boundary, destroying the real one
+silently, in a way every later observation would inherit.
+
+So permission to replace is its own durable fact, `dispatch_state`, on a dimension separate from
+`capture_state`: `captured` / `dispatch_started` / `dispatch_refused` / `turn_opened`.
+`dispatch_started` is committed **before** the adapter call, which is what makes `captured` mean
+"the adapter had provably not been reached" rather than "no turn row was found". Only `captured` is
+replaceable. `dispatch_refused` is recorded — learning the outcome differs from crashing before
+learning it — but it does **not** re-open replacement, because `AdapterRefusal` proves nothing about
+side effects: `ClaudeCodeAdapter.send_followup` raises it when `send_turn` fails, *after* bytes may
+already have reached a live worker's stdin, and the core must not read an adapter's message text to
+guess which refusal it got. A retry after a refusal therefore reuses the same reserved turn number
+and dispatches against the same boundary — the earliest boundary for a turn number precedes every
+attempt at it, which is the property a pre-work line needs. `turn_opened` is written inside the same
+transaction as the turn row.
+
+**Schema v6** adds one table, `task_turn_git_baselines`, keyed `(task_id, turn_number)`. Additive:
+no column of an existing table moved, changed type or gained a constraint, and no row was rewritten
+or inferred. The three historical pre-v5 turns on the production host get **no baseline** — not one
+read from the current HEAD, not one derived from a timestamp, not one recovered from the reflog.
+`turn_baseline` answers `None`, and `None` means *no boundary was recorded*, never *the tree was
+clean*.
+
+**Machine-owned.** The repository root comes from `verify_root` against the host's project registry,
+re-verified at dispatch. The adapter, the provider, the task prompt and the API caller cannot choose
+the root, the revision, the dirty state, or whether capture succeeded. Every Git argv is a module
+constant, so no caller text can become a Git argument, and the stored revision is a resolved object
+id — validated as hex of exactly the length `--show-object-format` reports, which refuses `HEAD~5`,
+a branch name, a path and every other revspec by construction. The object format is read rather than
+assumed: this host runs Git 2.53 and a SHA-256 repository produces 64-hex ids.
+
+**Honest absence.** `unborn` stores no revision and no invented empty-tree object; `not_a_repository`
+and `unavailable` store none either. A HEAD that moves across the observation is retried a bounded
+three times and then recorded as explicitly unstable rather than resolved to an arbitrary side. A
+project that is not a Git repository still runs its task — Git evidence is not a precondition for
+somebody's work — but the unavailability is durable before the worker starts.
+
+**The limit, stated rather than glossed.** A clean host-owned snapshot does not prove only the worker
+changed the repository afterwards; a person, an editor autosave or another tool can modify the same
+tree concurrently. What a stored boundary supports is machine-observed change since a recorded point.
+It is not proof of causation and nothing built on it may claim otherwise.
+
+`assembler_version` stays **2** — the bundle's inputs are unchanged — and there is no new HTTP route,
+no bridge Action, and no evaluator, verdict, confidence, risk or check runner.
+
 ### M2K PR3 — richer machine-owned Git observations
 
-On `feat/m2k-pr3-git-observations`, from the merged `52811dc`. **Not deployed and not merged.**
+On `feat/m2k-pr3-git-observations`, from the merged `52811dc`. **Merged as #48 (`d98c10f`) and
+deployed**; the text below was written while it was still a branch.
 PR2 could only ever report `operation_agreement: unknown`, and the reason was not the assembler —
 it was that Cofferdam was **already asking Git for more than it kept**.
 
@@ -924,8 +1004,8 @@ risk level, no confidence, no check runner, no provider, no model.**
 
 ## M2K records — the evidence foundation (written while each was on its branch)
 
-M2K is **in progress**: PR1 and PR2 are merged and deployed, PR3 is on a branch. See
-*In progress* above for PR3.
+M2K is **in progress**: PR1, PR2 and PR3 are merged and deployed; PR4 is on a branch. See
+*In progress* above for PR4.
 ### M2K PR2 — the derived evidence bundle and exact turn provenance
 
 **Merged as `52811dc` (#47) and deployed**: workstation and Actions bridge both run it from slot B,

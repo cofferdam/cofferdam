@@ -131,6 +131,23 @@ class NoShellExecutionTests(unittest.TestCase):
                 continue
             if path.name == "hostclient.py" and path.parent.name == "claude_agent_sdk":
                 continue
+            if path.name == "gitbaseline.py" and path.parent.name == "tasks":
+                # M2K PR4. The host's own pre-work Git probe, and the first
+                # non-adapter file allowed a process — deliberately, because the
+                # thing it establishes is precisely that the *host* and not the
+                # adapter decides what the repository looked like before a worker
+                # touched it. An adapter-owned baseline would be a worker
+                # describing its own starting line.
+                #
+                # It is narrower than any file above it: four constant argv
+                # tuples checked against a closed set before the call,
+                # `shell=False`, an environment built from four literal keys
+                # rather than inherited, a timeout, an output cap, and no child
+                # that outlives the call. Nothing formats, joins or interpolates
+                # a Git argument, so no prompt, adapter or API caller text can
+                # become one — `tests/test_git_baseline_authority.py` asserts
+                # that from the callable surface.
+                continue
             source = path.read_text(encoding="utf-8")
             if "subprocess." in source:
                 offenders.append(path.name)

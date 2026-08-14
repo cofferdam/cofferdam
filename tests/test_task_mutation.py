@@ -483,7 +483,13 @@ class CancellationGuard(TaskTestCase):
     #: Both are *adapters*. The point of this guard was never "one file": it is
     #: that Task Core's lifecycle, store, models, errors and service cannot reach
     #: a process, and that is still exactly true.
-    PROCESS_AWARE_FILES = ("hostclient.py",)
+    #: ``hostclient.py`` starts and owns the Agent SDK helper child.
+    #: ``gitbaseline.py`` (M2K PR4) is the host's pre-work Git probe: it runs a
+    #: process and owns none — four constant argv tuples, ``shell=False``, a
+    #: closed environment, a timeout and an output cap, all read-only, nothing
+    #: outliving the call. The breadth rules below still apply to it in full,
+    #: and it contains none of that vocabulary.
+    PROCESS_AWARE_FILES = ("hostclient.py", "gitbaseline.py")
 
     def test_no_broad_process_vocabulary_exists_in_task_core(self):
         """Structural: there is nothing here that *could* kill by name.
@@ -623,7 +629,13 @@ class ContentLeakGuard(TaskTestCase):
                 # reason there is no `print(` anywhere in that file: anything
                 # printed would corrupt a frame. `logging` and `logger` stay
                 # forbidden in both, which is the half this test is named for.
-                pipe_owners = ("host.py", "hostclient.py")
+                # `gitbaseline.py` (M2K PR4) joins them for the same reason and
+                # reads even less: it names `stdout` once, to take the bounded
+                # bytes a finished `git rev-parse` or `git status` produced, and
+                # never touches stderr at all — a Git error message carries an
+                # absolute host path, so the probe records a closed reason code
+                # and drops the text entirely.
+                pipe_owners = ("host.py", "hostclient.py", "gitbaseline.py")
                 if (
                     "claude_code" not in path.parts
                     and path.name not in pipe_owners

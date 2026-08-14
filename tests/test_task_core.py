@@ -595,10 +595,11 @@ class TransactionalStorage(TaskTestCase):
         # Pinned as a literal too, so a bump is a deliberate edit here rather
         # than a test that follows whatever the code says. Moved 3 -> 4 by M2K
         # PR1, which added `task_change_claims` and `task_artifacts`, and 4 -> 5
-        # by M2K PR2, which added `task_turn_bounds`; the migrations themselves
-        # are covered by `test_change_claims_store.py` and
-        # `test_turn_bounds_migration.py`.
-        self.assertEqual(store_module.SCHEMA_VERSION, 5)
+        # by M2K PR2, which added `task_turn_bounds`; 5 -> 6 by M2K PR4, which
+        # added `task_turn_git_baselines`. The migrations themselves are covered
+        # by `test_change_claims_store.py`, `test_turn_bounds_migration.py` and
+        # `test_git_baseline_migration.py`.
+        self.assertEqual(store_module.SCHEMA_VERSION, 6)
 
     def test_an_older_database_gains_the_new_tables_and_records_the_version(self):
         """M2I PR2's upgrade, which is additive and therefore a create-if-absent.
@@ -1012,6 +1013,27 @@ class Cancellation(TaskTestCase):
                 self.assertNotIn(
                     "os\n.\nkill\n(", source.replace("\n\n", "\n"), str(path)
                 )
+                continue
+            if path.name == "gitbaseline.py":
+                # M2K PR4. The host-owned pre-work Git probe. It runs a process
+                # and owns none: four constant argv tuples, `shell=False`, a
+                # closed environment, a timeout and an output cap, and every one
+                # of them read-only. It never starts anything that outlives the
+                # call, so there is nothing here to signal, stop or look up —
+                # which is why the whole vocabulary this guard is about stays
+                # forbidden in it, checked immediately below rather than waived.
+                #
+                # The property this scan protects is that a request handler, a
+                # model or the store can never reach a process. That is still
+                # exactly true: the store does not import this module, and the
+                # only caller is `TaskService._record_pre_work_baseline` on the
+                # dispatch path, which is where the host is supposed to be
+                # looking at the project it is about to hand to a worker.
+                for never in (
+                    "os.kill", "signal.", "SIGTERM", "SIGKILL", "terminate()",
+                    "Popen", "start_new_session", "preexec_fn",
+                ):
+                    self.assertNotIn(never, source, str(path) + " uses " + never)
                 continue
             for forbidden in (
                 "os.kill",

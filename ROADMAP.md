@@ -372,8 +372,8 @@ downstream reads from.
     inputs, absolute host paths are not**. One private turn-qualified route on the **device token
     only** — the Actions bridge is refused, `artifacts_supported` stays `false`, and the bridge
     gains no operation. **No evaluator, no verdict, no risk level, no check runner, no model.**
-  - **PR3 — richer machine-owned Git observations + assembler v2.** *Implemented on a branch and
-    not deployed; see [`STATUS.md`](STATUS.md).* The **observation** side, which was the real
+  - **PR3 — richer machine-owned Git observations + assembler v2.** *Merged as #48 (`d98c10f`) and
+    deployed; see [`STATUS.md`](STATUS.md).* The **observation** side, which was the real
     ceiling on PR2: Cofferdam already asked Git for the operation and threw it away. The probe
     becomes `git status --porcelain=v1 -z --untracked-files=all` — Git's documented machine
     format, NUL-framed, raw paths, and **file-level** rather than collapsing a new directory into
@@ -393,6 +393,29 @@ downstream reads from.
     stores no pre-work revision, so a worker that commits leaves a clean tree and is not observed —
     PR3 deliberately does **not** add a revision diff it has no honest boundary for. Still **no
     evaluator, no verdict, no risk level, no check runner, no model.**
+  - **PR4 — the durable per-turn pre-work Git baseline.** *Implemented on a branch and not
+    deployed; see [`STATUS.md`](STATUS.md).* The boundary PR3 recorded the absence of. Before a
+    worker turn is allowed to begin, the **host** reads the project's Git revision and working-tree
+    state and commits it — machine-observed, never adapter-reported, prompt-supplied or
+    caller-selected. Schema **v6** adds one additive table, `task_turn_git_baselines`, keyed
+    `(task_id, turn_number)`; historical turns are **not backfilled** and a missing row means *no
+    boundary was recorded*, never *the tree was clean*. The ordering is the point and it is
+    structural rather than temporal: capture commits before `adapter.start` and before
+    `adapter.send_followup`, on every path, and a test adapter asserts the durable row exists at its
+    own first instruction. Because the adapter is invoked before the turn row is written — so a
+    refusal leaves no turn behind — the foreign key names `tasks`, and "captured, then refused, so
+    the turn never opened" stays representable. `present`/`unborn`/`unavailable`/`not_a_repository`
+    are distinguished, no revision is ever invented, the object format is read rather than assumed
+    (SHA-256 repositories produce 64-hex ids), a HEAD that moves across the observation is retried a
+    bounded three times and then recorded as unstable, and a pre-existing dirty tree is a durable
+    fact so PR5 can say changes did not necessarily start clean. **PR4 consumes none of it:** no
+    `git diff baseline..HEAD`, `assembler_version` stays 2, no route, no bridge Action. Still **no
+    evaluator, no verdict, no risk level, no check runner, no model.**
+  - **PR5 — revision-range observations from the stored boundary.** *Not started.* What PR4's
+    boundary makes answerable: what changed between a recorded pre-work revision and the repository
+    now, including work the worker committed. Must carry PR4's limitations forward — unborn and
+    unavailable boundaries, pre-existing dirt, and the fact that a boundary proves *change since a
+    recorded point*, not causation.
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**
