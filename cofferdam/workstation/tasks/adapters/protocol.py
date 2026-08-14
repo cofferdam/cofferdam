@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Tuple
 
+from ..claims import ClaimSubmission
 from ..delegated import ClarificationRequest
 from ..models import (
     ACTOR_ADAPTER,
@@ -223,6 +224,34 @@ class AdapterOutcome:
     provider_session_id: Optional[str] = None
     #: The provider's own sequence for the event that ended the turn.
     provider_turn_sequence: int = 0
+    #: Structured statements that the worker changed something (M2K PR1).
+    #:
+    #: The claim side of the distinction ``observations`` draws. Where that field
+    #: is "Cofferdam ran something and saw this", these are "the worker says it
+    #: did this" — and they stay claims forever, exactly as an
+    #: ``events[].evidence`` reference does. The core stamps every one
+    #: ``adapter_reported``; there is no source field here to set, so an adapter
+    #: cannot launder a claim into an observation by choosing a nicer word.
+    #:
+    #: A :class:`~..claims.ClaimSubmission` carries an operation from a closed
+    #: vocabulary and a **project-relative** path, and nothing else that matters.
+    #: It has no ``claim_id``, no ``artifact_id``, no ``digest``, no ``verified``
+    #: flag, no project root and — the one worth stating explicitly — **no
+    #: command field of any kind**. D-2026-08-11-7 says executable text comes
+    #: from code-owned checks or host-owned definitions referenced by stable id
+    #: and never from a request; a submission with nowhere to put a command is
+    #: how that stays true under later edits.
+    #:
+    #: The adapter reports a *relative* claim. It never supplies the root: the
+    #: core resolves that from the task's project through the host-owned
+    #: registry, which is what keeps an adapter from naming the authority its own
+    #: claim is checked against.
+    #:
+    #: **These must come from a structured boundary, never from prose.** No
+    #: regex over a final message, no model extraction, no "it probably touched
+    #: these files". An adapter with no structured source of change information
+    #: reports none, and the honest result is a task with zero claims.
+    change_claims: Sequence["ClaimSubmission"] = ()
     #: Whether the adapter still holds a usable session for this task **now**.
     #:
     #: The adapter is the only layer that can answer this, and it answers it

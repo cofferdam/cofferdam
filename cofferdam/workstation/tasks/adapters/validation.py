@@ -64,6 +64,7 @@ from ..models import (
     WAITING_CLARIFICATION,
     EvidenceReference,
 )
+from ..claims import CLAIM_MODIFIED, ClaimSubmission
 from .protocol import (
     AdapterCapabilities,
     AdapterEvent,
@@ -72,6 +73,11 @@ from .protocol import (
     TaskAdapter,
     TaskContext,
 )
+
+#: The one path this adapter ever claims. Fixed and code-owned, like every other
+#: value here — it is not read from the prompt, not derived from the project, and
+#: never a real location on the host.
+VALIDATION_CLAIM_PATH = "validation-artifact-1.md"
 
 ADAPTER_ID = "validation"
 
@@ -246,6 +252,25 @@ class ValidationTaskAdapter(TaskAdapter):
                 events=tuple(events),
                 requested_state=STATE_COMPLETED,
                 final_result=_complete_result(context, followed_up=False),
+                # M2K PR1. A fixed, code-owned change claim, for the same reason
+                # this adapter emits a fixed evidence reference: so the claim
+                # path can be exercised end to end on a real host without a
+                # model, a provider or a process.
+                #
+                # It is a **claim**, and a synthetic one. This adapter writes
+                # nothing to disk, so the file it names ordinarily does not
+                # exist — and that is a useful thing to exercise rather than a
+                # flaw, because "the worker said it changed a file that is not
+                # there" is exactly the disagreement M2K PR2 has to be able to
+                # see. Task Core decides what is true about the path; the
+                # adapter only says what it claims.
+                change_claims=(
+                    ClaimSubmission(
+                        operation=CLAIM_MODIFIED,
+                        path=VALIDATION_CLAIM_PATH,
+                        label="validation scenario",
+                    ),
+                ),
             )
 
         if scenario == SCENARIO_WAIT:

@@ -88,6 +88,18 @@ _TEMP_SUFFIX = ".tmp"
 
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+#: Opening a FIFO ``O_RDONLY`` **blocks in open() until a writer appears**, so a
+#: resolver without this flag hangs forever on a named pipe rather than reaching
+#: the ``S_ISREG`` check that would refuse it. On a regular file — every file a
+#: Mind role has ever pointed at — the flag does nothing at all.
+#:
+#: It was harmless while every path here came from host-owned configuration.
+#: M2K PR1 made the same resolver reachable with an **adapter-claimed** path,
+#: where a named pipe is something a caller can arrange, so the missing flag
+#: became a way to stall the recording path. Fixed here rather than worked
+#: around in the caller, because a second resolver with slightly different
+#: safety is how the two drift apart.
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
 
 def _detect_descriptor_support() -> bool:
@@ -168,7 +180,9 @@ class ResolvedTarget:
     def _open_file(self) -> int:
         try:
             return os.open(
-                self.name, os.O_RDONLY | _O_NOFOLLOW, dir_fd=self.parent_fd
+                self.name,
+                os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK,
+                dir_fd=self.parent_fd,
             )
         except OSError as failure:
             raise _read_failure(failure)

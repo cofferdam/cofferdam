@@ -48,7 +48,9 @@ slot B; slot A is retained unchanged at `5afaa8e` (PR3.5.1) as the rollback.
 - **Read-only.** No mutation of any kind: no workspace switch, no objective edit, no proposal, no
   task. **`syncWorkspace` remains M2M's** (D-2026-08-13-4).
 
-**M2K is next.** Nothing in it is started: no evidence bundle, no evaluator, no planner.
+**M2K has begun.** PR1 — the adapter-reported change-claim and task-owned artifact foundation —
+is implemented on a branch; see *In progress* below. Nothing after it is started: no evidence
+bundle, no evaluator, no verdicts, no check runner, no planner.
 
 **M2H is complete and merged**, closing the M1 post-reboot gate;
 M2F Agent Task Core and M2G the Claude Code adapter merged; the isolated Custom GPT Actions mobile
@@ -755,9 +757,94 @@ real session exactly, with zero mismatches in either direction — see the
 bind logic. Neither does M2B3A, M2B3A.1, M2C, M2D, M2E, M2F, or M2G. **M2H does**, which is why
 the gate closes there.
 
+## In progress (on a branch, not merged)
+
+### M2K PR1 — adapter-reported change claims and the artifact foundation
+
+On `feat/m2k-pr1-change-claims`, from the merged `9fcbc8f`. **Not deployed and not merged.**
+The claim side of evidence, and nothing else: Cofferdam could already record what it *observed*
+(`git_observed`, `os_observed`, `cofferdam_action`) and had no structured way to record what a
+worker *said it did*.
+
+**Two records, not one.** A `ChangeClaim` is a statement — "I modified `src/foo.py`" — and is
+`adapter_reported` by construction: `source` is a constant on the dataclass and there is no field
+on the adapter's submission to set it. An `ArtifactRecord` is what Cofferdam saw when it opened
+that path itself, and every field on it is `os_observed`. They are separate tables because
+D-2026-08-11-6 says every field carries its source kind, and one row holding both a claimed path
+and a Cofferdam-computed SHA-256 would need one provenance for two different kinds of statement.
+
+**Nothing is compared.** A claim naming the same path as a `git_observed` event sits beside it and
+is not marked verified, not cross-referenced, not counted as agreement. That is PR2's, and doing it
+at record time would let a claim become believed as a side effect of arriving next to an
+observation. There is no verdict, no confidence, no risk level and no column for one.
+
+**The deny policy covers conventions, on both sides of a rename.** Credential directories
+(`.ssh`, `.gnupg`, `.aws`, `.docker`, `.kube`, `.cofferdam`, `secrets`), known credential
+basenames, `.env` variants and credential extensions (`.pem`, `.key`, `.p12`, `.pfx`, `.jks`,
+`.keystore`, `.p8`, `.tfstate`, `.env`), with one backup extension stripped once so
+`private.pem.bak` is denied and `notes.md.bak` is not. It recognises conventions rather than
+scanning content, so `docs/environment.md`, `src/tokenizer.py`, `docs/secrets-design.md` and
+`config/database.example.yml` stay readable — a scan of all 418 tracked repository files denies
+none of them. **A rename is checked on both source and destination**, so a sensitive destination
+cannot become a way to store bytes through a harmless-looking source; either side denied withholds
+the artifact while keeping the claim.
+
+**Claim ingestion is bounded, and the loss is durable.** Both limits and every deterministic
+validation refusal are counted into `task_claim_ingestion` — submitted, accepted, rejected, a
+truncation flag and counts by closed reason code — written in the same transaction as the claims
+they describe. **No rejected payload is stored**: there is no column for a refused path, operation
+or label, because a refused path may be an absolute location, a traversal attempt or a credential
+file name. A future `EvidenceBundle` can therefore tell a *complete* claim set from an *incomplete*
+one after a restart, without any of the refused material having been kept. It is bookkeeping, not
+evaluation: no verified, passed, matched, confidence or risk field exists on it. A rejected claim
+and a valid claim whose bytes could not be read stay different facts — the second is still a stored
+claim carrying its artifact reason.
+
+**Schema v4, additive.** Three new tables — `task_change_claims`, `task_artifacts` and
+`task_claim_ingestion` — created by
+the same `CREATE TABLE IF NOT EXISTS` script every start already runs. No existing column moved,
+changed type or gained a constraint; `task_events.evidence_json` is untouched and a v3 task reads
+back byte-identical. A task from before the tables simply has no claims.
+
+**Containment and the deny list happen at record time** (D-2026-08-09-3). The root comes from the
+task's project through the host-owned registry and is re-verified with `verify_root` at the moment
+of recording — never from the adapter, never from a value cached when the task started. Resolution
+reuses the Mind subsystem's descriptor-relative walk, so a symlink at any component is a refusal
+from the kernel rather than a comparison made afterwards. A code-owned secret-path deny list is
+applied **before anything is opened**, so denied content never enters the store and cannot be
+served later by a surface nobody has written yet. The claim itself is still recorded — "the worker
+said it changed `.env` and Cofferdam refused to look" is an auditable fact.
+
+**Digest and size are machine-observed.** A domain-tagged, length-prefixed SHA-256 over exactly the
+bytes Cofferdam read, following `mind/hashing.py`'s discipline with its own tag. There is no
+partial digest: a file above the read cap records `artifact_too_large` and no digest at all, because
+a hash over a prefix is not a hash of the file.
+
+**The preview is the only file content that enters the database** — a bounded prefix of an
+allowlisted text type, decoded strictly, or nothing. Binary bytes are never decoded with
+replacement and called a preview.
+
+**No surface.** No route, no bridge Action, no artifact download or preview endpoint, and
+`artifacts_supported` stays `false` with its current reason — Task Core being able to store records
+is not the same as there being a safe consumer for them.
+
+**Adapter integration is deliberately narrow.** `AdapterOutcome` gains `change_claims`, carrying
+submissions with a closed operation vocabulary and a project-relative path — and no `claim_id`, no
+`artifact_id`, no `digest`, no `verified` flag, no root, and **no command field of any kind**
+(D-2026-08-11-7). Only the validation adapter reports one, because it is code-owned and
+deterministic. The Claude Code adapter observes with Git and has no structured claim source; the
+Agent SDK adapter's normalizer deliberately never reads a tool input, and PR1 does not change that.
+Neither is wired, so real agent tasks record zero claims — which is the honest result rather than
+prose parsed into invented claims.
+
+**One defect fixed in passing.** `mind/documents.py` opened a resolved target `O_RDONLY` without
+`O_NONBLOCK`, which **blocks forever on a named pipe** — harmless while every path came from
+host-owned configuration, and reachable once the same resolver took an adapter-claimed path. Fixed
+at the source rather than worked around in the caller.
+
 ## M2J records — the egress boundary and the read surface (written while each was on its branch)
 
-**Nothing is in progress.** M2J is complete and M2K has not started.
+M2J is complete; see *M2J closeout* above.
 
 ### M2J PR4 — read-only project-context surfaces
 
