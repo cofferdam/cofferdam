@@ -103,6 +103,7 @@ class CleanDatabaseTests(unittest.TestCase):
                 "working_tree_state",
                 "status_coverage",
                 "reason",
+                "dispatch_state",
                 "captured_at",
             },
         )
@@ -132,9 +133,9 @@ class CleanDatabaseTests(unittest.TestCase):
                 db.execute(
                     "INSERT INTO %s (task_id, turn_number, capture_state, head_state,"
                     " head_revision, object_format, working_tree_state, status_coverage,"
-                    " reason, captured_at) VALUES"
+                    " reason, dispatch_state, captured_at) VALUES"
                     " ('task_nope', 1, 'captured', 'present', 'a' , 'sha1', 'clean',"
-                    " 'complete', NULL, '2026-08-15T00:00:00Z')" % BASELINE_TABLE
+                    " 'complete', NULL, 'captured', '2026-08-15T00:00:00Z')" % BASELINE_TABLE
                 )
 
     def test_a_turn_number_below_one_is_refused(self):
@@ -145,9 +146,9 @@ class CleanDatabaseTests(unittest.TestCase):
                 db.execute(
                     "INSERT INTO %s (task_id, turn_number, capture_state, head_state,"
                     " head_revision, object_format, working_tree_state, status_coverage,"
-                    " reason, captured_at) VALUES"
+                    " reason, dispatch_state, captured_at) VALUES"
                     " ('task_x', 0, 'captured', 'present', 'abc', 'sha1', 'clean',"
-                    " 'complete', NULL, '2026-08-15T00:00:00Z')" % BASELINE_TABLE
+                    " 'complete', NULL, 'captured', '2026-08-15T00:00:00Z')" % BASELINE_TABLE
                 )
 
     def test_a_present_head_must_carry_a_revision(self):
@@ -159,9 +160,9 @@ class CleanDatabaseTests(unittest.TestCase):
                 db.execute(
                     "INSERT INTO %s (task_id, turn_number, capture_state, head_state,"
                     " head_revision, object_format, working_tree_state, status_coverage,"
-                    " reason, captured_at) VALUES"
+                    " reason, dispatch_state, captured_at) VALUES"
                     " ('task_x', 1, 'captured', 'present', NULL, 'sha1', 'clean',"
-                    " 'complete', NULL, '2026-08-15T00:00:00Z')" % BASELINE_TABLE
+                    " 'complete', NULL, 'captured', '2026-08-15T00:00:00Z')" % BASELINE_TABLE
                 )
 
     def test_an_absent_head_must_not_carry_a_revision(self):
@@ -174,9 +175,9 @@ class CleanDatabaseTests(unittest.TestCase):
                     db.execute(
                         "INSERT INTO %s (task_id, turn_number, capture_state, head_state,"
                         " head_revision, object_format, working_tree_state,"
-                        " status_coverage, reason, captured_at) VALUES"
+                        " status_coverage, reason, dispatch_state, captured_at) VALUES"
                         " ('task_x', 1, 'unavailable', ?, 'abc123', NULL, 'unknown',"
-                        " 'unavailable', 'unborn_head', '2026-08-15T00:00:00Z')"
+                        " 'unavailable', 'unborn_head', 'captured', '2026-08-15T00:00:00Z')"
                         % BASELINE_TABLE,
                         (state,),
                     )
@@ -190,9 +191,9 @@ class CleanDatabaseTests(unittest.TestCase):
                 db.execute(
                     "INSERT INTO %s (task_id, turn_number, capture_state, head_state,"
                     " head_revision, object_format, working_tree_state, status_coverage,"
-                    " reason, captured_at) VALUES"
+                    " reason, dispatch_state, captured_at) VALUES"
                     " ('task_x', 1, 'captured', 'present', 'abc', 'sha1', 'clean',"
-                    " 'incomplete', NULL, '2026-08-15T00:00:00Z')" % BASELINE_TABLE
+                    " 'incomplete', NULL, 'captured', '2026-08-15T00:00:00Z')" % BASELINE_TABLE
                 )
 
     def test_the_state_vocabularies_are_closed(self):
@@ -218,9 +219,9 @@ class CleanDatabaseTests(unittest.TestCase):
                     db.execute(
                         "INSERT INTO %s (task_id, turn_number, capture_state, head_state,"
                         " head_revision, object_format, working_tree_state,"
-                        " status_coverage, reason, captured_at) VALUES"
+                        " status_coverage, reason, dispatch_state, captured_at) VALUES"
                         " ('task_x', 1, ?, ?, ?, ?, ?, ?, NULL,"
-                        " '2026-08-15T00:00:00Z')" % BASELINE_TABLE,
+                        " 'captured', '2026-08-15T00:00:00Z')" % BASELINE_TABLE,
                         (
                             values["capture_state"],
                             values["head_state"],

@@ -93,7 +93,15 @@ from .models import (
     bounded_line,
     bounded_text,
 )
-from .gitbaseline import MAX_REASON_CHARS, GitBaseline
+from .gitbaseline import (
+    DISPATCH_CAPTURED,
+    DISPATCH_REFUSED,
+    DISPATCH_STARTED,
+    DISPATCH_TURN_OPENED,
+    MAX_REASON_CHARS,
+    REPLACEABLE_DISPATCH_STATES,
+    GitBaseline,
+)
 from .turns import (
     FOLLOWUP_SOURCES,
     MAX_TURNS_PER_TASK,
@@ -534,6 +542,28 @@ CREATE TABLE IF NOT EXISTS task_turn_git_baselines (
     working_tree_state TEXT    NOT NULL,
     status_coverage    TEXT    NOT NULL,
     reason             TEXT,
+    -- How far the worker dispatch got. A **different dimension** from
+    -- `capture_state`, which says only how well the repository could be read.
+    --
+    -- This column is what makes the boundary safe against a crash. The adapter
+    -- is invoked before the turn row is written, so "no row in task_turns"
+    -- covers two situations that could not be more different: one where the
+    -- worker was never called, and one where the worker ran, possibly committed,
+    -- and Cofferdam died before recording the turn. Inferring "replaceable" from
+    -- a missing turn row would let a retry capture the worker's own commit as
+    -- the *pre-work* boundary and destroy the real one — silently, and in a way
+    -- every later observation would inherit.
+    --
+    -- `dispatch_started` is committed BEFORE the adapter call, so a row still
+    -- saying `captured` is a row whose adapter provably had not been reached.
+    -- That is the only replaceable state. `dispatch_refused` is recorded because
+    -- knowing the outcome differs from crashing before learning it, but it does
+    -- NOT re-open replacement: `AdapterRefusal` is a statement of intent, not a
+    -- proof about side effects.
+    --
+    -- No DEFAULT, deliberately. A row that failed to state how far dispatch got
+    -- must not fall back to the one value that permits overwriting it.
+    dispatch_state     TEXT    NOT NULL,
     -- Audit metadata only. Attribution is by turn number, never by clock: the
     -- v5 bounds exist precisely because timestamps are not an authority.
     captured_at        TEXT    NOT NULL,
@@ -541,6 +571,8 @@ CREATE TABLE IF NOT EXISTS task_turn_git_baselines (
     FOREIGN KEY (task_id) REFERENCES tasks (task_id) ON DELETE CASCADE,
     CHECK (turn_number >= 1),
     CHECK (capture_state IN ('captured', 'unavailable')),
+    CHECK (dispatch_state IN
+           ('captured', 'dispatch_started', 'dispatch_refused', 'turn_opened')),
     CHECK (head_state IN ('present', 'unborn', 'unavailable', 'not_a_repository')),
     CHECK (working_tree_state IN ('clean', 'dirty', 'unknown')),
     CHECK (status_coverage IN ('complete', 'incomplete', 'unavailable')),
@@ -1748,6 +1780,10 @@ class TaskStore:
             ),
         )
         self._open_bound_locked(connection, task_id, turn_number)
+        # Same transaction as the turn row: a turn whose boundary is not bound to
+        # it, or a boundary bound to a turn that rolled back, are both states
+        # this method must be unable to produce.
+        self._mark_baseline_turn_opened_locked(connection, task_id, turn_number)
 
     def _current_cursor_locked(
         self, connection: sqlite3.Connection, task_id: str
@@ -1917,13 +1953,24 @@ class TaskStore:
         Folding this into ``_open_turn_locked`` would therefore move it after the
         worker, which is the one thing it may not be.
 
-        **Replacement is bounded to the pre-work window.** A dispatch that
-        captured a baseline and then had the adapter refuse leaves a row for a
-        turn that never opened; the next attempt legitimately re-captures. So a
-        row may be replaced *only* while no turn of that number exists. Once the
-        turn is open the boundary is immutable, and this refuses rather than
-        overwrites — a worker's changes must not be re-measured from a line
-        drawn after it started moving.
+        **Replacement is bounded to the window before the adapter is reached, and
+        that window is proven rather than assumed.** An earlier draft of this
+        method allowed replacement whenever no turn row existed, which was wrong
+        in a way worth spelling out: the adapter is invoked *before* the turn row
+        is written, so "no turn row" also describes a dispatch where the worker
+        ran, possibly committed, and Cofferdam died before recording the turn. A
+        retry there would have captured the worker's own commit as the *pre-work*
+        boundary and destroyed the real one.
+
+        So the rule is ``dispatch_state``, not turn presence. A row may be
+        replaced only while it still says ``captured``, and
+        :meth:`mark_baseline_dispatch_started` commits before the adapter call —
+        which makes ``captured`` mean "the adapter had provably not been
+        reached". Anything further along is immutable and this **keeps** it,
+        returning its turn number so the caller can go on to dispatch against the
+        boundary that already exists. That is the right answer for a retry after
+        a refusal too: the earliest boundary for a turn number precedes every
+        attempt at it, which is exactly the property a pre-work line needs.
         """
         if not isinstance(baseline, GitBaseline):  # pragma: no cover - defensive
             raise StoreUnavailable("a baseline must be captured by the host")
@@ -1943,18 +1990,28 @@ class TaskStore:
             ).fetchone()
             if opened is not None:  # pragma: no cover - MAX+1 cannot already exist
                 raise StoreUnavailable("that turn is already open")
-            connection.execute(
-                "DELETE FROM task_turn_git_baselines"
+            existing = connection.execute(
+                "SELECT dispatch_state FROM task_turn_git_baselines"
                 " WHERE task_id = ? AND turn_number = ?",
                 (task_id, turn_number),
-            )
+            ).fetchone()
+            if existing is not None:
+                if existing["dispatch_state"] not in REPLACEABLE_DISPATCH_STATES:
+                    # Immutable. The stored boundary stands and the caller
+                    # dispatches against it.
+                    return turn_number
+                connection.execute(
+                    "DELETE FROM task_turn_git_baselines"
+                    " WHERE task_id = ? AND turn_number = ?",
+                    (task_id, turn_number),
+                )
             connection.execute(
                 """
                 INSERT INTO task_turn_git_baselines
                     (task_id, turn_number, capture_state, head_state, head_revision,
                      object_format, working_tree_state, status_coverage, reason,
-                     captured_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     dispatch_state, captured_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -1966,10 +2023,76 @@ class TaskStore:
                     baseline.working_tree_state,
                     baseline.status_coverage,
                     bounded_line(baseline.reason, MAX_REASON_CHARS),
+                    DISPATCH_CAPTURED,
                     captured_at,
                 ),
             )
         return turn_number
+
+    def mark_baseline_dispatch_started(self, task_id: str, turn_number: int) -> None:
+        """Record durably that the adapter is about to be invoked.
+
+        **This must commit before the adapter call**, and the whole crash-safety
+        argument rests on that ordering. Afterwards the boundary's machine facts
+        are immutable, because from this moment Cofferdam can no longer prove the
+        worker did nothing — and a boundary that might already be behind a
+        worker's commit must never be re-drawn.
+
+        Idempotent, and re-enterable from ``dispatch_refused``: a follow-up that
+        was refused may be sent again, and the second attempt dispatches against
+        the same reserved turn number and the same untouched boundary. It never
+        moves backwards from ``turn_opened``.
+        """
+        with self._write() as connection:
+            connection.execute(
+                "UPDATE task_turn_git_baselines SET dispatch_state = ?"
+                " WHERE task_id = ? AND turn_number = ? AND dispatch_state IN (?, ?)",
+                (
+                    DISPATCH_STARTED,
+                    task_id,
+                    int(turn_number),
+                    DISPATCH_CAPTURED,
+                    DISPATCH_REFUSED,
+                ),
+            )
+
+    def mark_baseline_dispatch_refused(self, task_id: str, turn_number: int) -> None:
+        """Record that the adapter answered with a refusal or fault, and no turn opened.
+
+        Kept apart from a crash on purpose: "Cofferdam learned the dispatch did
+        not produce a turn" and "Cofferdam never learned anything" are different
+        facts, and only one of them means somebody should look.
+
+        It does **not** make the boundary replaceable again. ``AdapterRefusal``
+        is a statement of intent, not a proof about side effects — the Claude Code
+        adapter raises it when ``send_turn`` fails, *after* bytes may already have
+        reached a running worker's stdin — and the core cannot tell that apart
+        from a refusal raised before anything happened without reading an
+        adapter's message text, which it must never do.
+        """
+        with self._write() as connection:
+            connection.execute(
+                "UPDATE task_turn_git_baselines SET dispatch_state = ?"
+                " WHERE task_id = ? AND turn_number = ? AND dispatch_state = ?",
+                (DISPATCH_REFUSED, task_id, int(turn_number), DISPATCH_STARTED),
+            )
+
+    def _mark_baseline_turn_opened_locked(
+        self, connection: sqlite3.Connection, task_id: str, turn_number: int
+    ) -> None:
+        """Bind the boundary to the turn it belongs to. Caller holds the transaction.
+
+        Written inside the same transaction as the turn row, so a turn without
+        its boundary marked — or a boundary marked for a turn that rolled back —
+        is not a state this store can produce. A dispatch whose capture failed to
+        persist has no row here and the update touches nothing, which is correct:
+        a missing boundary stays missing rather than being invented at turn-open.
+        """
+        connection.execute(
+            "UPDATE task_turn_git_baselines SET dispatch_state = ?"
+            " WHERE task_id = ? AND turn_number = ?",
+            (DISPATCH_TURN_OPENED, task_id, int(turn_number)),
+        )
 
     def turn_baseline(self, task_id: str, turn_number: int) -> Optional["GitBaseline"]:
         """The stored boundary for one turn, or ``None`` if there is not one.
@@ -1997,6 +2120,24 @@ class TaskStore:
             status_coverage=row["status_coverage"],
             reason=row["reason"],
         )
+
+    def turn_baseline_dispatch_state(
+        self, task_id: str, turn_number: int
+    ) -> Optional[str]:
+        """How far this boundary's worker dispatch got, or ``None`` if no boundary.
+
+        Separate from :meth:`turn_baseline` because it is a different dimension:
+        that one answers what the repository looked like, this one answers
+        whether anything has been allowed to touch it since. ``None`` means no
+        boundary was recorded and must never be read as "safe to replace".
+        """
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT dispatch_state FROM task_turn_git_baselines"
+                " WHERE task_id = ? AND turn_number = ?",
+                (task_id, int(turn_number)),
+            ).fetchone()
+        return None if row is None else row["dispatch_state"]
 
     def turns(self, task_id: str) -> List["TaskTurn"]:
         """Every turn this task has had, oldest first. Bounded by the row limit."""

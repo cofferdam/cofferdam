@@ -355,7 +355,41 @@ still travels through the cascade.
 | `working_tree_state` | `clean` / `dirty` / `unknown` at the boundary |
 | `status_coverage` | `complete` / `incomplete` / `unavailable` |
 | `reason` | a closed machine code, never raw Git stderr — stderr carries host paths |
+| `dispatch_state` | `captured` / `dispatch_started` / `dispatch_refused` / `turn_opened` |
 | `captured_at` | audit metadata only; attribution is by turn number, never by clock |
+
+**`dispatch_state` is a different dimension from `capture_state`, and it is what
+makes the boundary crash-safe.** `capture_state` says how well the repository
+could be read; `dispatch_state` says how far the worker dispatch got, which is
+what decides whether the boundary may still be replaced.
+
+It has to be durable rather than inferred. The adapter is invoked *before* the
+turn row is written, so "no row in `task_turns`" describes two situations that
+could not be more different: one where the worker was never called, and one where
+the worker ran, **possibly committed**, and Cofferdam died before recording the
+turn. Treating the second as replaceable would let a retry read the worker's own
+commit and store it as the *pre-work* boundary — destroying the real one silently,
+in a way every later observation would inherit.
+
+`dispatch_started` is committed **before** the adapter call, which is what makes
+`captured` mean "the adapter had provably not been reached". That is the only
+replaceable state; everything past it freezes `head_revision`, `object_format`,
+`head_state`, the tree state, the coverage and the capture reason.
+
+`dispatch_refused` records that Cofferdam *learned* the dispatch produced no turn,
+which is different from crashing before learning anything — but it does **not**
+re-open replacement. `AdapterRefusal` is a statement of intent, not a proof about
+side effects: `ClaudeCodeAdapter.send_followup` raises it when `send_turn` fails,
+*after* bytes may already have reached a live worker's stdin, and the core cannot
+tell that apart from an early refusal without reading an adapter's message text.
+
+A retry after a refusal therefore reuses the same reserved turn number and
+dispatches against the **same** boundary. That is the right answer as well as the
+safe one: the earliest boundary for a turn number precedes every attempt at it.
+
+`turn_opened` is written inside the same transaction as the turn row itself, so a
+turn without its boundary bound to it — or a boundary bound to a turn that rolled
+back — is not a state this store can produce.
 
 **Nothing is invented.** `unborn` stores no revision and specifically not the
 empty-tree object. The stored value is validated as a resolved identity — hex of

@@ -2181,6 +2181,28 @@ the API caller cannot choose the root, the revision, the dirty state, or whether
 Every Git argv is a module constant, so no caller text can become a Git argument; a worker that could
 name its own starting line would be describing its own homework.
 
+**A missing turn row is not permission to redraw the line.** This is the correction that shaped the
+final design, and it is worth stating as its own rule because the first version got it wrong. The
+adapter is invoked *before* the turn row is written, so "no row in `task_turns`" covers both "the
+worker was never called" and "the worker ran, possibly committed, and Cofferdam died before recording
+the turn". A retry in the second case would have captured the worker's own commit as the *pre-work*
+boundary, destroying the real one silently.
+
+So permission to replace is a durable fact of its own — `dispatch_state`, deliberately a different
+dimension from `capture_state`, which says only how well the repository could be read.
+`dispatch_started` commits **before** the adapter call, which is what makes `captured` mean "the
+adapter had provably not been reached". Only `captured` is replaceable; everything past it freezes
+the revision, object format, head state, tree state, coverage and reason.
+
+**A refusal is recorded and still proves nothing.** `dispatch_refused` exists because learning the
+outcome differs from crashing before learning it. It does not re-open replacement:
+`AdapterRefusal` is a statement of intent, and `ClaudeCodeAdapter.send_followup` raises it when
+`send_turn` fails — *after* bytes may already have reached a live worker's stdin. Distinguishing that
+from an early refusal would mean pattern-matching an adapter's message text, which the core must
+never do. A retry after a refusal reuses the same reserved turn number and dispatches against the
+same boundary, which is both the safe answer and the correct one: the earliest boundary for a turn
+number precedes every attempt at it.
+
 **Ordering is structural, not temporal.** "Pre-work" is not "shortly before". The capture is a
 committed write on the only two paths that open a turn, `TaskService._start` and
 `TaskService.send_followup`, immediately before `adapter.start` and `adapter.send_followup`, under

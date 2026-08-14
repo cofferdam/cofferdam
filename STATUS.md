@@ -793,6 +793,26 @@ outcome "captured, then the adapter refused, so the turn never opened" impossibl
 So the capture is its own committed write immediately before dispatch, and the table's foreign key
 names `tasks` rather than `task_turns`. Everything else follows the existing discipline.
 
+**Crash semantics, and the correction that shaped the final design.** The first version of this PR
+allowed a boundary to be replaced whenever no turn row existed. That was wrong. The adapter is
+invoked *before* the turn row is written, so "no turn row" also describes a dispatch where the worker
+ran, **possibly committed**, and Cofferdam died before recording the turn — and a retry there would
+have read the worker's own commit and stored it as the *pre-work* boundary, destroying the real one
+silently, in a way every later observation would inherit.
+
+So permission to replace is its own durable fact, `dispatch_state`, on a dimension separate from
+`capture_state`: `captured` / `dispatch_started` / `dispatch_refused` / `turn_opened`.
+`dispatch_started` is committed **before** the adapter call, which is what makes `captured` mean
+"the adapter had provably not been reached" rather than "no turn row was found". Only `captured` is
+replaceable. `dispatch_refused` is recorded — learning the outcome differs from crashing before
+learning it — but it does **not** re-open replacement, because `AdapterRefusal` proves nothing about
+side effects: `ClaudeCodeAdapter.send_followup` raises it when `send_turn` fails, *after* bytes may
+already have reached a live worker's stdin, and the core must not read an adapter's message text to
+guess which refusal it got. A retry after a refusal therefore reuses the same reserved turn number
+and dispatches against the same boundary — the earliest boundary for a turn number precedes every
+attempt at it, which is the property a pre-work line needs. `turn_opened` is written inside the same
+transaction as the turn row.
+
 **Schema v6** adds one table, `task_turn_git_baselines`, keyed `(task_id, turn_number)`. Additive:
 no column of an existing table moved, changed type or gained a constraint, and no row was rewritten
 or inferred. The three historical pre-v5 turns on the production host get **no baseline** — not one

@@ -92,6 +92,54 @@ CAPTURE_UNAVAILABLE = "unavailable"
 
 CAPTURE_STATES: Tuple[str, ...] = (CAPTURE_CAPTURED, CAPTURE_UNAVAILABLE)
 
+# -- dispatch state ----------------------------------------------------------
+#
+# A **different dimension** from ``capture_state``, and conflating the two is the
+# mistake this vocabulary exists to prevent. ``capture_state`` says how well the
+# repository could be read. ``dispatch_state`` says how far the *worker dispatch*
+# got, which is what decides whether the boundary may still be replaced.
+#
+# The reason it has to be durable, rather than inferred from whether a turn row
+# exists: on both dispatch paths the adapter is invoked before the turn row is
+# written, so "no turn row" covers two situations that could not be more
+# different — one where the worker was never called, and one where the worker
+# ran, possibly committed, and Cofferdam crashed before recording the turn.
+# Treating the second as replaceable would let a retry capture the worker's own
+# commit as the "pre-work" boundary and silently destroy the real one.
+
+#: The boundary is recorded and the adapter has **not** been invoked for this
+#: turn number. The only state in which a baseline may be replaced, and it is
+#: provable rather than assumed: :data:`DISPATCH_STARTED` is committed *before*
+#: the adapter call, so a row still saying ``captured`` is a row whose adapter
+#: had not been reached.
+DISPATCH_CAPTURED = "captured"
+#: The adapter has been invoked at least once against this boundary. Whether the
+#: worker did anything is **unknown** — that is the point. Immutable from here.
+DISPATCH_STARTED = "dispatch_started"
+#: The adapter was invoked and reported a refusal or fault, and no turn opened.
+#:
+#: Recorded because "we learned the outcome" and "we crashed and never learned"
+#: are different facts and a reader deserves to know which. It does **not**
+#: re-open replacement. `AdapterRefusal` is a statement of intent, not a proof
+#: about side effects: the Claude Code adapter raises it when ``send_turn``
+#: fails, *after* bytes may already have reached the running worker's stdin. The
+#: core cannot distinguish that from a refusal raised before anything happened
+#: without pattern-matching an adapter's message text, which it must never do.
+DISPATCH_REFUSED = "dispatch_refused"
+#: A real Cofferdam turn exists for this boundary, written in the same
+#: transaction as the turn row itself.
+DISPATCH_TURN_OPENED = "turn_opened"
+
+DISPATCH_STATES: Tuple[str, ...] = (
+    DISPATCH_CAPTURED,
+    DISPATCH_STARTED,
+    DISPATCH_REFUSED,
+    DISPATCH_TURN_OPENED,
+)
+
+#: The whole replacement rule, in one tuple. Everything else is immutable.
+REPLACEABLE_DISPATCH_STATES: Tuple[str, ...] = (DISPATCH_CAPTURED,)
+
 # -- head state --------------------------------------------------------------
 
 #: HEAD resolved to a commit, and that commit id is stored.
@@ -477,6 +525,12 @@ __all__ = [
     "CAPTURE_CAPTURED",
     "CAPTURE_STATES",
     "CAPTURE_UNAVAILABLE",
+    "DISPATCH_CAPTURED",
+    "DISPATCH_REFUSED",
+    "DISPATCH_STARTED",
+    "DISPATCH_STATES",
+    "DISPATCH_TURN_OPENED",
+    "REPLACEABLE_DISPATCH_STATES",
     "COVERAGE_COMPLETE",
     "COVERAGE_INCOMPLETE",
     "COVERAGE_UNAVAILABLE",

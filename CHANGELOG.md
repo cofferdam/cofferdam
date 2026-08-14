@@ -35,6 +35,12 @@ release.
   changed the folder afterwards; you, an editor saving in the background, or another tool can too.
   What it supports is "this changed since here", not "the worker did this".
 
+  **If Cofferdam is interrupted mid-task, the saved point survives untouched.** A worker that had
+  already started — and may already have committed something — must never have its starting line
+  redrawn behind it, so once Cofferdam has handed control to a worker the saved point is frozen, even
+  if the interruption means Cofferdam never got as far as recording the turn. A retry uses the
+  original point rather than a fresh one.
+
   Existing tasks and turns from before this change get no starting point, and none is guessed for
   them. Still no pass, no fail, no score, no verdict.
 
