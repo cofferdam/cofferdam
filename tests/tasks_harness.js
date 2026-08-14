@@ -547,6 +547,27 @@ function makeApi(behaviour) {
           }
         });
       }
+      if (pathname.indexOf("/evidence") !== -1) {
+        if (behaviour.evidenceRefuse) {
+          return Promise.resolve({
+            ok: false,
+            status: behaviour.evidenceRefuse,
+            payload: { error: {
+              code: "not_found", message: "that task has no such turn", detail: null
+            } }
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          payload: {
+            evidence: behaviour.evidencePayload || {},
+            /* Presentation metadata, on the envelope. The panel must not put it
+               inside the bundle or treat it as part of its identity. */
+            generated_at: "2026-08-14T12:00:00Z"
+          }
+        });
+      }
       if (pathname.indexOf("/result") !== -1) {
         return Promise.resolve({
           ok: true, status: 200, payload: { result: behaviour.resultPayload || {} }
@@ -2218,6 +2239,208 @@ function run() {
       fire("click", button("taskAnswerSend"));
       return drain().then(function () {
         return { keys: Object.keys(storage.data).sort() };
+      });
+    });
+  }
+
+  /* -- evidence (M2K PR2) -------------------------------------------------- */
+
+  /* One bundle carrying all three relationships at once, plus a limitation and
+     an incomplete claim set. One scenario rather than four, because the thing
+     under test is that the three read *differently on the same screen* — which
+     is exactly what a separate fixture per relationship would stop proving. */
+  function evidenceBundle(overrides) {
+    return Object.assign({
+      version: 1,
+      assembler_version: 1,
+      input_fingerprint: "a".repeat(64),
+      task_id: "task_e",
+      turn_number: 1,
+      turn_attribution: "exact",
+      opened_after_event_sequence: 4,
+      closed_through_event_sequence: 9,
+      turn_open: false,
+      repository_reported_clean: false,
+      ingestion: {
+        state: "incomplete",
+        submitted: 3,
+        accepted: 2,
+        rejected: 1,
+        truncated: false,
+        reason_counts: { claim_invalid: 1 },
+        sequences: [0]
+      },
+      claims: [
+        {
+          claim_id: "chg_one", task_id: "task_e", turn_number: 1,
+          operation: "modified", path: "src/foo.py", to_path: null,
+          adapter_label: null, reported_at: "2026-08-14T00:00:00Z",
+          artifact_id: "art_one", reason: "ok",
+          source: "adapter_reported", verified: false
+        },
+        {
+          claim_id: "chg_two", task_id: "task_e", turn_number: 1,
+          operation: "created", path: "src/bar.py", to_path: null,
+          adapter_label: null, reported_at: "2026-08-14T00:00:00Z",
+          artifact_id: "art_two", reason: "ok",
+          source: "adapter_reported", verified: false
+        }
+      ],
+      observations: [
+        {
+          reference: "evt7.0", event_sequence: 7, evidence_index: 0,
+          path: "src/foo.py", source: "git_observed", evidence_type: "file",
+          operation: "git status", result: "changed", verified: true
+        },
+        {
+          reference: "evt7.1", event_sequence: 7, evidence_index: 1,
+          path: "src/unclaimed.py", source: "git_observed", evidence_type: "file",
+          operation: "git status", result: "changed", verified: true
+        }
+      ],
+      relationships: [
+        {
+          path: "src/bar.py", relationship: "claim_only",
+          claim_ids: ["chg_two"], claim_operations: ["created"],
+          observation_refs: [], path_agreement: false,
+          operation_agreement: "unknown", claim_count: 1,
+          observation_count: 0, sources_truncated: false
+        },
+        {
+          path: "src/foo.py", relationship: "path_agreed",
+          claim_ids: ["chg_one"], claim_operations: ["modified"],
+          observation_refs: ["evt7.0"], path_agreement: true,
+          operation_agreement: "unknown", claim_count: 1,
+          observation_count: 1, sources_truncated: false
+        },
+        {
+          path: "src/unclaimed.py", relationship: "observed_only",
+          claim_ids: [], claim_operations: [],
+          observation_refs: ["evt7.1"], path_agreement: false,
+          operation_agreement: "unknown", claim_count: 0,
+          observation_count: 1, sources_truncated: false
+        }
+      ],
+      limitations: ["claim_set_incomplete"]
+    }, overrides || {});
+  }
+
+  function evidenceScenario(bundle, extra) {
+    return mount(Object.assign({
+      initial: listPayload([taskPayload({ task_id: "task_e", state: "completed" })]),
+      detail: taskPayload({
+        task_id: "task_e", state: "completed", result: "Done."
+      }),
+      evidencePayload: bundle,
+      result: () => ({ payload: {} })
+    }, extra || {})).then(function () {
+      fire("click", openButton("task_e"));
+      return drain().then(function () {
+        fire("click", button("taskShowEvidence"));
+        return drain().then(function () {
+          return { html: html(), requests: record.requests.slice() };
+        });
+      });
+    });
+  }
+
+  if (scenario === "evidence-shows-all-three-relationships") {
+    return evidenceScenario(evidenceBundle());
+  }
+
+  if (scenario === "evidence-legacy-turn") {
+    return evidenceScenario(evidenceBundle({
+      turn_attribution: "legacy_unknown",
+      opened_after_event_sequence: null,
+      closed_through_event_sequence: null,
+      observations: [],
+      ingestion: {
+        state: "legacy_unknown", submitted: 0, accepted: 0, rejected: 0,
+        truncated: false, reason_counts: {}, sequences: []
+      },
+      relationships: [
+        {
+          path: "src/foo.py", relationship: "claim_only",
+          claim_ids: ["chg_one"], claim_operations: ["modified"],
+          observation_refs: [], path_agreement: false,
+          operation_agreement: "unknown", claim_count: 1,
+          observation_count: 0, sources_truncated: false
+        }
+      ],
+      limitations: ["legacy_turn_attribution_unavailable"]
+    }));
+  }
+
+  if (scenario === "evidence-missing-ingestion") {
+    return evidenceScenario(evidenceBundle({
+      ingestion: {
+        state: "ingestion_missing", submitted: 0, accepted: 0, rejected: 0,
+        truncated: false, reason_counts: {}, sequences: []
+      },
+      limitations: ["claim_ingestion_record_missing"]
+    }));
+  }
+
+  if (scenario === "evidence-clean-tree") {
+    return evidenceScenario(evidenceBundle({
+      repository_reported_clean: true,
+      observations: [],
+      relationships: [],
+      claims: [],
+      limitations: []
+    }));
+  }
+
+  if (scenario === "evidence-refusal-is-not-success") {
+    return evidenceScenario(evidenceBundle(), { evidenceRefuse: 404 });
+  }
+
+  if (scenario === "evidence-double-tap-sends-one-request") {
+    return mount({
+      initial: listPayload([taskPayload({ task_id: "task_e", state: "completed" })]),
+      detail: taskPayload({ task_id: "task_e", state: "completed", result: "Done." }),
+      evidencePayload: evidenceBundle(),
+      hang: true,
+      result: () => ({ payload: {} })
+    }).then(function () {
+      fire("click", openButton("task_e"));
+      return drain().then(function () {
+        const before = record.requests.filter(
+          (r) => r.path.indexOf("/evidence") !== -1
+        ).length;
+        fire("click", button("taskShowEvidence"));
+        fire("click", button("taskShowEvidence"));
+        fire("click", button("taskShowEvidence"));
+        return drain().then(function () {
+          return {
+            before: before,
+            after: record.requests.filter(
+              (r) => r.path.indexOf("/evidence") !== -1
+            ).length,
+            html: html()
+          };
+        });
+      });
+    });
+  }
+
+  if (scenario === "evidence-is-not-fetched-until-asked") {
+    return mount({
+      initial: listPayload([taskPayload({ task_id: "task_e", state: "completed" })]),
+      detail: taskPayload({ task_id: "task_e", state: "completed", result: "Done." }),
+      evidencePayload: evidenceBundle(),
+      result: () => ({ payload: {} })
+    }).then(function () {
+      fire("click", openButton("task_e"));
+      return drain().then(function () {
+        advance(60000);
+        return drain().then(function () {
+          return {
+            requests: record.requests
+              .filter((r) => r.path.indexOf("/evidence") !== -1).length,
+            html: html()
+          };
+        });
       });
     });
   }

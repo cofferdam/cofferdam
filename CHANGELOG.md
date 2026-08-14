@@ -8,6 +8,42 @@ release.
 
 ### Added
 
+- **M2K PR2 — see what the worker said it changed, and what Cofferdam actually saw.** An agent
+  finishes a turn and tells you it edited three files. Until now that sentence was all you had:
+  Cofferdam recorded what the agent *claimed* and, separately, what it *observed* by running
+  `git status` itself — and nothing put the two side by side. Open a task and press **Evidence**,
+  and it does, one turn at a time.
+
+  **Three things, kept apart on purpose.** *Worker claims* is what the agent said. *Machine
+  observations* is what Cofferdam went and looked at. *Relationships and gaps* is where they meet:
+  **Path agreed** when both name the same file, **Claim only** when the agent reported something
+  Cofferdam has no observation of, **Observed only** when Cofferdam saw a file change that no claim
+  mentions.
+
+  **"Path agreed" means the file, not the edit.** Cofferdam's check today can tell you *that*
+  `src/foo.py` changed. It cannot tell you whether it was created, modified, deleted or renamed — so
+  the panel says **"Operation not established"** on every row, including the agreeing ones. There is
+  no PASS, no FAIL, no score, no confidence and no risk level anywhere in it, because none of those
+  is a thing the evidence supports. "Claim only" is not an accusation either: an agent that changed
+  a file and committed it leaves a clean tree, and there is simply nothing to match against.
+
+  **It tells you when its own record is short.** If some of what the agent reported could not be
+  stored, the panel says *Claim set incomplete* and how much landed. If no report was recorded at
+  all, it says that too rather than pretending the set was complete.
+
+  **It reads records, not your repository.** The panel is assembled entirely from what was written
+  down at the time — it runs no commands, opens no files and calls no model. Open it a year later
+  and it still describes the turn as it happened, not the repository as it is now. Reading it
+  changes nothing: no task is touched, no agent is woken, and nothing is added to a task's history.
+
+  **Turns stay separate.** Evidence from turn two can never be shown against turn one's claims, even
+  for the same file. Turns that ran before Cofferdam started recording turn boundaries say
+  **"Legacy turn attribution unavailable"** and show no observations at all — an absence there is
+  not a finding about the work, and the panel says so rather than letting a blank space imply one.
+
+  It is on your phone and your workstation, behind your device token. The ChatGPT bridge cannot
+  reach it.
+
 - **M2J PR2 — Cofferdam can read your memory, and can be *allowed* to change it.** Memory is
   Markdown you own: your project's own documents, and a dedicated
   [Obsidian](https://obsidian.md)-compatible vault for the personal, cross-project things. Both are

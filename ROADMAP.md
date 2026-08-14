@@ -338,8 +338,9 @@ downstream reads from.
 ### M2K — Evidence and evaluation foundation
 
 - **Sub-phases:**
-  - **PR1 — adapter-reported change claims + the task-owned artifact foundation.** *Implemented on
-    a branch; see [`STATUS.md`](STATUS.md).* The **claim** side of evidence, which the product did
+  - **PR1 — adapter-reported change claims + the task-owned artifact foundation.** *Merged as
+    `de0e7de` (#46) and deployed; see [`STATUS.md`](STATUS.md).* The **claim** side of evidence,
+    which the product did
     not have: `ChangeClaim` (always `adapter_reported`, never verified), `ArtifactRecord` (always
     `os_observed`) and a bounded `ClaimIngestion` summary that makes refused or truncated
     submissions durable **without storing any rejected payload**, so a later bundle can tell a
@@ -352,6 +353,24 @@ downstream reads from.
     `AdapterOutcome.change_claims` with no command field, no root and no id authority
     (D-2026-08-11-7); only the code-owned validation adapter reports one, because neither Claude
     adapter has a structured claim source and prose is never parsed into claims.
+  - **PR2 — the derived `EvidenceBundle` + exact turn/event provenance bounds.** *Implemented on a
+    branch and not deployed; see [`STATUS.md`](STATUS.md).* The **comparison** side, and it is
+    model-free. `EvidenceBundle` is **derived on read, never persisted** — no table, no serialized
+    column — from claims, ingestion summaries, append-only event evidence and the new bounds, with
+    **no Git execution, no filesystem read and no provider call**, so a bundle describes what was
+    recorded rather than what the repository looks like now. An additive **schema v5** adds
+    `task_turn_bounds` alone, because the PR1 audit proved exact turn attribution cannot be
+    reconstructed from v4: **timestamps are not authority, event-sequence bounds are.** Bounds are
+    written inside `_open_turn_locked` / `_close_turn_locked` in the same transaction as the turn
+    lifecycle operation; pre-v5 turns receive **no inferred bounds** and report `legacy_unknown`.
+    The relationship vocabulary is `path_agreed` / `claim_only` / `observed_only` and never a bare
+    `agreed`: today's `git status` evidence proves a **path changed** and nothing about the
+    operation, so `operation_agreement` is `unknown` and **zero `claim_conflict` relationships are
+    emitted** — absence is not conflict. `assembler_version` and a domain-tagged
+    `input_fingerprint` identify the inputs; **project-relative semantic paths are fingerprint
+    inputs, absolute host paths are not**. One private turn-qualified route on the **device token
+    only** — the Actions bridge is refused, `artifacts_supported` stays `false`, and the bridge
+    gains no operation. **No evaluator, no verdict, no risk level, no check runner, no model.**
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**
@@ -373,8 +392,16 @@ downstream reads from.
   review — this is the first surface on which Cofferdam runs a project-scoped command.
 - **Reason codes begin here**, attached to task failures where the adapter boundary can classify a
   real error; the consolidated overview is M2M's (D-2026-08-11-8).
-- **Persistence:** additive Task Core schema v4 (claims, criteria, evaluation records), the same
-  additive-only discipline as v2 and v3.
+- **Persistence:** additive Task Core schema versions, one per sub-phase that needs durable shape,
+  with the same additive-only discipline as v2 and v3. **Schema v4** is PR1's claim/artifact
+  foundation (`task_change_claims`, `task_artifacts`, `task_claim_ingestion`). **Schema v5** is
+  PR2's exact turn/event provenance bounds (`task_turn_bounds`) — needed because turn attribution
+  provably cannot be reconstructed from v4 durable data, since timestamps are not an authoritative
+  shared boundary between a turn and an event sequence. The **`EvidenceBundle` itself is derived,
+  not persisted**: it is assembled on read from stored immutable facts and has no table, so later
+  criteria and evaluation records will refer to an evidence snapshot by
+  `(task_id, turn_number, assembler_version, input_fingerprint)` rather than by copying it. Any
+  later version is its own decision; "all M2K persistence is v4" was true only of PR1.
 - **Validation:** a real task whose claims disagree with Cofferdam's git observations renders a
   flagged conflict; a task with criteria shows verified/unverified truthfully; a network cut
   mid-turn produces `NETWORK_UNREACHABLE`/`PROVIDER_UNREACHABLE` on the task.

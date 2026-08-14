@@ -49,8 +49,10 @@ slot B; slot A is retained unchanged at `5afaa8e` (PR3.5.1) as the rollback.
   task. **`syncWorkspace` remains M2M's** (D-2026-08-13-4).
 
 **M2K has begun.** PR1 — the adapter-reported change-claim and task-owned artifact foundation —
-is implemented on a branch; see *In progress* below. Nothing after it is started: no evidence
-bundle, no evaluator, no verdicts, no check runner, no planner.
+is **merged (#46, `de0e7de`) and deployed**: workstation and Actions bridge both run it from slot A.
+PR2 — the derived `EvidenceBundle` and exact turn/event provenance bounds — is **implemented on a
+branch and not deployed**; see *In progress* below. Nothing after PR2 is started: **no evaluator,
+no verdicts, no risk levels, no check runner, no planner**, and PR2 adds none of them.
 
 **M2H is complete and merged**, closing the M1 post-reboot gate;
 M2F Agent Task Core and M2G the Claude Code adapter merged; the isolated Custom GPT Actions mobile
@@ -759,9 +761,146 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2K PR2 — the derived evidence bundle and exact turn provenance
+
+On `feat/m2k-pr2-evidence-bundle`, from the merged `de0e7de`. **Not deployed and not merged.**
+PR1 recorded what a worker said and what Cofferdam saw, and deliberately left them side by side
+with nothing noticing they agreed. This is the noticing — and the schema change that makes it
+possible to do honestly.
+
+**The `EvidenceBundle` is derived, never persisted.** There is no bundle table, no serialized
+bundle column, and no schema version for one. A bundle is assembled on read from facts that are
+already durable and already immutable: `task_change_claims`, `task_claim_ingestion`, the
+append-only `task_events.evidence_json`, and the new turn bounds. **Assembly re-runs nothing** — no
+Git, no filesystem, no provider — which is what makes the result *historical* rather than
+*current*: a repository edited after a task finished cannot change what the bundle says about that
+task, because none of its inputs live in the repository. A future `EvaluationRecord` refers to a
+snapshot by `(task_id, turn_number, assembler_version, input_fingerprint)` rather than copying it.
+
+**Schema v5 exists for one reason: exact turn attribution cannot be reconstructed from v4.** A
+claim carries an exact `turn_number`, an event carries an exact `sequence`, and `task_turns`
+carried neither end of the sequence range it owns. The only v4 bridge between them was a pair of
+timestamps, and **timestamps are not an authoritative shared boundary** — two events can share a
+millisecond, and the call that writes `started_at` is not the call that allocates the sequence. So
+v5 adds one additive table, `task_turn_bounds`, holding
+`(task_id, turn_number, opened_after_event_sequence, closed_through_event_sequence)` with a real
+composite foreign key to `task_turns(task_id, turn_number)` and CHECK constraints for
+`opened_after >= 0` and `closed_through IS NULL OR closed_through >= opened_after`.
+
+**The bounds are written inside the turn-lifecycle chokepoints, in the same transaction.** There
+are exactly two turn-open call paths and both funnel through `_open_turn_locked`; there is exactly
+one close path and it funnels through `_close_turn_locked`. Both read `tasks.event_cursor`
+themselves rather than accepting one, because a cursor read a moment earlier is a cursor another
+event may already have moved. A closed turn owns
+`opened_after < sequence <= closed_through`; an open turn owns everything above its floor.
+`opened_after == closed_through` is a **valid** turn that owned no events. The transition event is
+appended before the turn closes, so it belongs to the turn it ended, and a follow-up that closes
+turn N and opens turn N+1 in one transaction does both at the same cursor — `(…, X]` and `(X, …]`,
+adjacent and never overlapping.
+
+**Historical turns get no bounds, and no guesses.** Production's three pre-v5 turns receive **zero**
+inferred rows: nothing derived from `started_at`, `completed_at`, event timestamps, event types,
+the nearest sequence or the task's state. They report `turn_attribution = legacy_unknown`, carry
+their own claims (which have a durable turn number), and receive **no machine observations at all**
+— a legacy turn shown task-wide observations would be a turn-scoped claim built from task-scoped
+evidence, which is the exact falsehood this milestone exists to prevent.
+
+**Path agreement is not operation agreement, and neither is a verdict.** Today's machine
+observation is `git status --porcelain` reduced to *this project-relative path appears in the
+changed set*. That proves the path changed; the porcelain status letters are not in the durable
+record, so it proves nothing about *what* was done. A claim of `modified src/foo.py` matched to an
+observation that `src/foo.py` changed yields `relationship = path_agreed`, `path_agreement = true`
+and `operation_agreement = unknown`. The vocabulary is `path_agreed`, `claim_only` and
+`observed_only` — deliberately never a bare `agreed`, because an unqualified word invites a reader
+to supply the qualification and they will supply the strongest one. `claim_only` means unmatched
+and unverified, **not** false or dishonest; `observed_only` is not evidence of concealment and is
+published next to the claim-set completeness that determines how to read it.
+
+**No `claim_conflict` is emitted, and that is a finding rather than an omission.** To call a claim
+and an observation incompatible, the observation would have to carry semantics like "this path does
+not exist" or "this path was created, not modified", and no supported observation carries either.
+Absence is not conflict. PR2 emits zero conflict relationships; the place a future observation type
+would plug in is marked.
+
+**The three `git_observed` shapes are distinguished by name.** The adapter emits a path change
+(`evidence_type=file`, `operation="git status"`, `result="changed"`), a HEAD/commit observation
+(`evidence_type=commit`, `operation="rev-parse HEAD"`, identifier a twelve-character hex commit id)
+and a clean-tree statement (`evidence_type=artifact`, `operation="git status"`, `identifier=None`).
+Only the first participates in path matching. A matcher that accepted any non-empty identifier from
+a `git_observed` reference would compare a **commit id to a claimed filename**, and one that keyed
+on `operation` alone would confuse the path shape with the clean-tree shape, which share it. An
+unrecognised `git_observed` shape becomes a bounded `unsupported_observation_shape` limitation
+rather than being fabricated into a path observation.
+
+**Claim-set completeness has four states, and the fourth is the honest one.** `complete`,
+`incomplete`, `legacy_unknown`, and **`ingestion_missing`**. The last exists because PR1's write
+path genuinely produces it: `TaskService._record_change_claims` returns without writing anything
+when the adapter reported no claims, when the task's project is gone or disabled, and when the
+project root fails re-verification — three different facts leaving the same absence. Calling that
+`complete` would be a claim the record cannot support. Several ingestion rows in one turn are
+aggregated deterministically: counts summed, `truncated` true if any, reason counts merged by
+integer addition, and row identities preserved so the fingerprint binds to *which* rows were
+aggregated rather than only to their totals.
+
+**Relationships are grouped by path, not by pair.** Six duplicate claims and six duplicate
+observations of one path produce **one** group carrying both source lists, not thirty-six rows — a
+combination is not a fact anybody recorded. Every source identity is preserved; the lists are
+capped, and a cap that bites emits `relationship_sources_truncated` rather than silently shortening.
+A rename is represented as **two** semantic targets. Both observed means both `path_agreed` with
+`operation_agreement = unknown` — two paths changing is not proof they changed into each other.
+One observed leaves the other `claim_only`, which is a gap and **not** a conflict.
+
+**`input_fingerprint` is a domain-tagged, length-prefixed SHA-256** over exactly the immutable
+inputs assembly used, following `mind/hashing.py`'s discipline with its own `v1` tag.
+`assembler_version` is separate from the bundle's `version`, because "can I parse this" and "was
+this produced by the same rules" are different questions. **Project-relative semantic paths are
+inputs** — `src/foo.py` becoming `src/bar.py` is a different statement about different work, and a
+fingerprint that ignored it would call two different claim sets identical. **Absolute host paths
+are not**: no project root, no `/home/...`, no slot path, no filesystem authority, and none of them
+is an input to assembly in the first place. Neither are provider or session identifiers, read time,
+live Git state, or artifact preview bodies. An open turn's value legitimately moves when a new
+eligible event lands, because its input set has genuinely grown; a closed turn's does not, and an
+event outside the window never reaches the hash.
+
+**One private route.** `GET /api/tasks/{task_id}/turns/{turn_number}/evidence`, guarded by
+`require_token` — the **device token only**. The Actions bridge reads ten task routes with its own
+credential and this is not an eleventh, and it is refused because `require_token` has never heard of
+that credential rather than because a check rejects it. Turn-qualified, because a task-level
+endpoint would have to merge turns or pick one, and merging turns is precisely what v5 exists to
+stop. `GET` only, no root or path selector, no policy selector, no artifact body, no filesystem
+read, no Git execution, no provider call, bounded serialization. `generated_at` sits on the
+envelope as labelled presentation metadata, never inside the bundle and never in the fingerprint.
+Repeated reads create zero events, turns, claims, artifacts, ingestion rows and bounds, and do not
+touch `updated_at`, `lifecycle_revision` or `event_cursor`.
+
+**The PWA panel is read-only and its vocabulary is narrow on purpose.** Five sections — worker
+claims, machine observations, relationships and gaps, claim ingestion, turn attribution — with
+"Path agreed", "Claim only", "Observed only", "Operation not established", "Claim set incomplete"
+and "Legacy turn attribution unavailable". **No PASS, FAIL, SUCCESS, TRUSTED, LYING, confidence or
+risk level**, asserted against the shipped file with comments stripped. "Operation not established"
+is printed for every group **including the agreeing one**, because "Path agreed" is the row most
+likely to be read as "verified". There is no mutation control in the section: no button, input,
+form, textarea or select.
+
+**The Actions bridge is unchanged.** No new operation, no evidence Action, no artifact Action, no
+claim Action; `artifacts_supported` stays `false`; `getProjectContext` is untouched.
+
+**Schema rollback consequence, recorded rather than solved.** The forward-only gate is unchanged: a
+schema-v4 runtime opening a v5 database refuses it, which is correct. So after an eventual v5
+deployment, rolling back needs a prior compatible runtime **and** a pre-v5 database backup
+restored. Backwards schema compatibility is deliberately not attempted here.
+
+## M2K records — the evidence foundation (written while each was on its branch)
+
+M2K is **in progress**: PR1 is merged and deployed, PR2 is on a branch. See *In progress*
+above for PR2.
+
 ### M2K PR1 — adapter-reported change claims and the artifact foundation
 
-On `feat/m2k-pr1-change-claims`, from the merged `9fcbc8f`. **Not deployed and not merged.**
+**Merged as `de0e7de` (#46) and deployed**: workstation and Actions bridge both run it from slot A.
+The record below was written on `feat/m2k-pr1-change-claims`, from the merged `9fcbc8f`, while it
+was still a branch — where this entry says "not merged" or "not deployed" it is describing the
+moment it was written.
 The claim side of evidence, and nothing else: Cofferdam could already record what it *observed*
 (`git_observed`, `os_observed`, `cofferdam_action`) and had no structured way to record what a
 worker *said it did*.

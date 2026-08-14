@@ -594,9 +594,11 @@ class TransactionalStorage(TaskTestCase):
         self.assertEqual(int(row[0]), store_module.SCHEMA_VERSION)
         # Pinned as a literal too, so a bump is a deliberate edit here rather
         # than a test that follows whatever the code says. Moved 3 -> 4 by M2K
-        # PR1, which added `task_change_claims` and `task_artifacts`; the
-        # migration itself is covered by `test_change_claims_store.py`.
-        self.assertEqual(store_module.SCHEMA_VERSION, 4)
+        # PR1, which added `task_change_claims` and `task_artifacts`, and 4 -> 5
+        # by M2K PR2, which added `task_turn_bounds`; the migrations themselves
+        # are covered by `test_change_claims_store.py` and
+        # `test_turn_bounds_migration.py`.
+        self.assertEqual(store_module.SCHEMA_VERSION, 5)
 
     def test_an_older_database_gains_the_new_tables_and_records_the_version(self):
         """M2I PR2's upgrade, which is additive and therefore a create-if-absent.

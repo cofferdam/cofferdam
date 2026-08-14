@@ -48,6 +48,10 @@ route                                        auth  purpose
                                                    question, which has its own route
 ``GET  /api/tasks/{task_id}/result``         yes   the latest completed turn's
                                                    result, provider-neutral
+``GET  /api/tasks/{id}/turns/{n}/evidence``  yes   one turn's derived evidence
+                                                   bundle — claims, observations,
+                                                   relationships. Device token
+                                                   only; the bridge is refused
 ``POST /api/tasks/{task_id}/cancel``         yes   ask that task's adapter to stop
 ``GET  /api/tasks/{id}/clarifications``      yes   questions the agent is waiting on
 ``POST /api/tasks/{id}/clarifications/{qid}/answer``
@@ -277,6 +281,7 @@ from .errors import (
 from .events import STATUS_REFRESH_SECONDS, TOKEN_SUBPROTOCOL, EventHub
 from .registries import REGISTRY_NAMES, SUPPORTED_VERSION, load_registries
 from .runtime import RESOURCE_KINDS, RuntimeInventoryService
+from .runtime.identity import now_iso
 from .runtime.overlay_store import (
     REJECT_BUSY,
     REJECT_INVALID_DOCUMENT,
@@ -2481,6 +2486,83 @@ def create_app(
         result = await _run_task(tasks.get_result, task_id)
         return JSONResponse(
             content={"result": result.to_dict()},
+            headers=TASK_CONTENT_HEADERS,
+        )
+
+    # -- evidence (M2K PR2) --------------------------------------------------
+    #
+    # One route, and both halves of its shape are deliberate.
+    #
+    # **Turn-qualified.** `/turns/{turn_number}/evidence` rather than a
+    # task-level `/evidence`, because the entire point of schema v5 is that
+    # Cofferdam now knows exactly which events belong to which turn. A
+    # task-level endpoint would have to merge turns or silently pick one, and
+    # either would give back the turn-scoped/task-scoped confusion the milestone
+    # was built to end.
+    #
+    # **`require_token`, not `require_task_caller`.** The Actions bridge reads
+    # ten task routes with its own credential; this is not an eleventh. That is
+    # not a policy applied here — it is that `require_token` has never heard of
+    # the bridge credential, so a bridge request arrives as an ordinary
+    # unauthenticated one and gets 401. Evidence is where Cofferdam's honest
+    # account of what a worker did and what the host observed lives, and
+    # widening the bridge's reach is a decision to take on its own, in its own
+    # PR, with its own review — not one to inherit by reusing a dependency.
+    #
+    # What is absent, and stays absent: no root selector, no path selector, no
+    # policy selector, no artifact body, no filesystem read, no Git execution,
+    # no provider call. There is no field in this request for any of them, which
+    # is a stronger guarantee than validating them away.
+
+    @app.get(
+        "/api/tasks/{task_id}/turns/{turn_number}/evidence",
+        dependencies=[Depends(require_token)],
+    )
+    async def get_turn_evidence(task_id: str, turn_number: int) -> JSONResponse:
+        """One turn's derived evidence bundle. Read-only, and free of verdicts.
+
+        Assembled on read from stored immutable facts — claims, ingestion
+        summaries, the append-only evidence on events, and the schema-v5 turn
+        bounds. Nothing here runs Git, opens a file, or asks a provider
+        anything, so what this returns is what was *recorded*, not what the
+        repository looks like now. Reading it a thousand times leaves the
+        database byte-identical.
+
+        The body distinguishes three things a reader must not conflate: what the
+        worker **claimed**, what Cofferdam **observed**, and the **relationship**
+        between them. A relationship of `path_agreed` means both named the same
+        project-relative path — it does **not** mean the claimed operation was
+        verified, and `operation_agreement` says `unknown` out loud rather than
+        leaving the question unasked.
+
+        `generated_at` sits on the envelope beside the bundle, never inside it.
+        It is presentation metadata for a person reading a response, it is not
+        part of the bundle's identity, and it is not an input to
+        `input_fingerprint` — which is what makes the fingerprint stable across
+        reads.
+
+        `no-store`, like every other task-content route: this describes somebody's
+        private work.
+        """
+        if turn_number < 1:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="a turn number starts at one",
+                status_code=422,
+            )
+        bundle = await _run_task(tasks.evidence_bundle, task_id, turn_number)
+        if bundle is None:
+            raise ApiError(
+                code=CODE_NOT_FOUND,
+                message="that task has no such turn",
+                status_code=404,
+            )
+        return JSONResponse(
+            content={
+                "evidence": bundle.to_dict(),
+                # Outside the bundle, and labelled. See the docstring.
+                "generated_at": now_iso(),
+            },
             headers=TASK_CONTENT_HEADERS,
         )
 

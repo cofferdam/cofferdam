@@ -1886,6 +1886,128 @@ regardless — the pack simply no longer has one to deny. The omission row uses 
 `no_current_message`, rather than borrowing `source_not_in_this_build`, because "this request had no
 message" and "this build has no evaluator" are different facts.
 
+## D-2026-08-14-1 — The evidence bundle is derived; turn bounds are the only thing persisted (EFE DECISION, ACTIVE)
+
+**Decision.** `EvidenceBundle` is assembled **on read** from stored immutable facts and is never
+persisted — no table, no serialized column, no schema version for one. Schema **v5** adds exactly
+one additive table, `task_turn_bounds`, holding the event-sequence range each turn owns.
+
+**Why the bundle is not stored.** Every input it needs is already durable and already immutable:
+`task_change_claims`, `task_claim_ingestion`, the append-only `task_events.evidence_json`, and the
+bounds below. Assembly re-runs nothing — no Git, no filesystem, no provider — so a bundle is a
+*function* of rows that do not change, and storing the output of that function would create a
+second source of truth that can drift from the first and has to be migrated every time the
+assembler improves. A future `EvaluationRecord` that needs to name *this* evidence names it by
+`(task_id, turn_number, assembler_version, input_fingerprint)`: four small values that identify a
+snapshot without copying it.
+
+**Why v5 exists anyway, and why it is only bounds.** The PR1 audit proved something that is easy to
+assume away: **exact turn attribution cannot be reconstructed from v4 durable data.** A
+`ChangeClaim` carries an exact `turn_number`. A `task_events` row carries an exact `sequence`.
+`task_turns` carried neither end of the sequence range it owns, and the only v4 bridge between them
+was a pair of timestamps.
+
+**Timestamps are not an authoritative shared boundary**, in three separate ways. Two events can
+share a millisecond. A clock can move backwards or be corrected between the write that opens a turn
+and the write that appends an event. And `started_at` is produced by a different call than the one
+that allocates the sequence, so even a perfect clock leaves a window where "later timestamp" and
+"later sequence" disagree. Attribution built on any of that would be right most of the time, which
+for evidence is worse than being absent — it would look exact.
+
+So the boundary is **written, not inferred**, at the two moments Cofferdam already holds the
+authoritative cursor: inside `_open_turn_locked` and `_close_turn_locked`, in the same SQLite
+transaction as the turn lifecycle operation. There are exactly two turn-open call paths and one
+close path, and all three funnel through those helpers, which is what makes "a v5 turn without a
+bound" a state the code cannot produce rather than a state a test happens not to find.
+
+**Historical turns are not backfilled.** Production's pre-v5 turns receive **no** inferred rows —
+nothing from `started_at`, `completed_at`, event timestamps, event types, the nearest sequence or
+the task's state. They report `turn_attribution = legacy_unknown` and receive **no machine
+observations at all**. A legacy turn shown task-wide observations would be a turn-scoped claim
+built from task-scoped evidence, which is the exact confusion v5 exists to end. A smaller true
+answer beats a larger invented one.
+
+**Rollback consequence, recorded rather than solved.** The forward-only schema gate is unchanged, so
+a v4 runtime refuses a v5 database — correctly. After an eventual v5 deployment, rolling back
+therefore needs a prior compatible runtime **and** a restored pre-v5 backup. Backwards schema
+compatibility is not attempted.
+
+## D-2026-08-14-2 — Path agreement is not operation agreement, and absence is not conflict (EFE DECISION, ACTIVE)
+
+**Decision.** The relationship vocabulary is `path_agreed`, `claim_only` and `observed_only` — never
+a bare `agreed` — every relationship publishes `operation_agreement` explicitly, and it is
+`unknown` in this build. **Zero `claim_conflict` relationships are emitted.**
+
+**What today's evidence actually proves.** The machine observation is `git status --porcelain`,
+reduced in the durable record to *this project-relative path appears in the changed set*. The
+porcelain status letters are not carried into the stored `EvidenceReference`, so the record
+genuinely does not contain what was done to the file. A claim of `modified src/foo.py` matched
+against an observation that `src/foo.py` changed therefore means the two **name the same file**,
+and nothing more.
+
+**Why the word matters more than it looks.** `agreed`, unqualified, invites the reader to supply
+the qualification — and they will supply the strongest one available, which is "verified". This
+renders on a phone, next to somebody's decision about whether work is done. `path_agreed` plus a
+printed "Operation not established", **including on the agreeing rows**, is the whole of what the
+evidence supports.
+
+**`claim_only` is not an accusation.** It means unmatched and unverified. A worker may have changed
+a file and committed it, in which case `git status` correctly reports a clean tree and there is
+nothing to match. Rendering that as a failure would punish the honest case.
+
+**`observed_only` is not evidence of concealment.** The claim set may simply be incomplete, which is
+what `ClaimIngestion` records — so the completeness state travels in the same payload, and the two
+are read together.
+
+**No conflict, and that is a finding.** To call a claim and an observation *incompatible*, the
+observation would have to carry semantics like "this path does not exist" or "this path was
+created, not modified". No supported observation carries either. Emitting a conflict from the
+absence of a match would manufacture the strongest possible statement out of the weakest possible
+evidence. **Absence is not conflict.** When an observation type arrives that can prove
+incompatibility, that is where conflict is introduced — as its own decision.
+
+**A rename is two semantic targets, and generic evidence confirms neither.** Both paths observed
+means both are `path_agreed` with `operation_agreement = unknown`: two paths changing is not proof
+they changed *into each other*. One observed leaves the other `claim_only`, which is a gap and not a
+conflict — an untracked destination, an ignored path or a partially staged rename all produce it.
+
+## D-2026-08-14-3 — Semantic project-relative paths are fingerprint inputs; absolute host paths never are (EFE DECISION, ACTIVE)
+
+**Decision.** `input_fingerprint` is a domain-tagged, length-prefixed SHA-256 over exactly the
+immutable inputs assembly used. **Project-relative paths are inputs.** Absolute host paths,
+provider and session identifiers, read time, live Git state and artifact preview bodies are not.
+
+**Correcting an earlier shorthand.** The working rule during design was "never paths", and it was
+too broad. A claimed path is a **semantic identifier for the work**: `src/foo.py` becoming
+`src/bar.py` is a different statement about a different file, and a fingerprint that ignored it
+would call two materially different claim sets identical — which defeats the only purpose the value
+has.
+
+**What an absolute path would break, separately.** A project root, a `/home/...` prefix, a
+deployment slot path or a Global Mind path is not an input to assembly at all — assembly never
+resolves anything — so hashing one would bind the value to where the deployment happens to live.
+The fingerprint would then change when a slot flipped, with no input having changed, and the host's
+filesystem layout would be smuggled into a value that gets stored and compared.
+
+**Why length-prefixed rather than joined.** Paths are attacker-influenced text. Joining fields with
+a separator lets `a/b:c` and `a` + `b:c` produce one string, so two different input sets fingerprint
+alike. The prefix makes every field boundary unambiguous, following `mind/hashing.py`'s discipline
+with this module's own versioned tag.
+
+**Why not a JSON dump.** Key order, separator whitespace and number formatting are things a
+serializer is entitled to change between releases, and any of them changing would move every stored
+fingerprint without a single input having changed.
+
+**`assembler_version` is separate from the bundle's `version`.** A client asks "can I parse this";
+a stored fingerprint asks "was this produced by the same rules". Two bundles with identical inputs
+and different assembler versions may legitimately differ, and a caller who could not see that would
+read an improvement as corruption.
+
+**No `built_at` inside the bundle.** A read-time timestamp would make every read differ from every
+other, leaving the fingerprint identifying nothing — and would then invite somebody to add the
+timestamp to the fingerprint "for completeness". Response-generation metadata sits on the HTTP
+envelope, labelled as presentation.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when
