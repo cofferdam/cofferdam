@@ -218,8 +218,11 @@ class CriteriaEndToEnd(TaskTestCase):
     def test_the_walk(self):
         """One task, one follow-up, in order, with every step asserted."""
         # 1. schema v7
-        self.assertEqual(SCHEMA_VERSION, 7)
-        self.assertEqual(self.service.store.storage_health()["schema_version"], 7)
+        # At least, not exactly: each additive bump since this walk was written
+        # leaves it true. M2K PR7 took it to 8. The literal pin for the current
+        # version lives in `test_task_core.py`.
+        self.assertGreaterEqual(SCHEMA_VERSION, 7)
+        self.assertGreaterEqual(self.service.store.storage_health()["schema_version"], 7)
 
         # 2-6. create with criteria; the adapter's first instruction sees both
         # pre-work facts durable over a separate read-only connection, and no

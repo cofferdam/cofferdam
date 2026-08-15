@@ -597,11 +597,13 @@ class TransactionalStorage(TaskTestCase):
         # PR1, which added `task_change_claims` and `task_artifacts`, and 4 -> 5
         # by M2K PR2, which added `task_turn_bounds`; 5 -> 6 by M2K PR4, which
         # added `task_turn_git_baselines`; 6 -> 7 by M2K PR6, which added
-        # `task_turn_criteria` and `task_turn_criterion_items`. The migrations
-        # themselves are covered by `test_change_claims_store.py`,
-        # `test_turn_bounds_migration.py`, `test_git_baseline_migration.py` and
-        # `test_criteria_migration.py`.
-        self.assertEqual(store_module.SCHEMA_VERSION, 7)
+        # `task_turn_criteria` and `task_turn_criterion_items`; 7 -> 8 by M2K
+        # PR7, which added `task_turn_evaluations` and
+        # `task_turn_criterion_results`. The migrations themselves are covered by
+        # `test_change_claims_store.py`, `test_turn_bounds_migration.py`,
+        # `test_git_baseline_migration.py`, `test_criteria_migration.py` and
+        # `test_evaluation_migration.py`.
+        self.assertEqual(store_module.SCHEMA_VERSION, 8)
 
     def test_an_older_database_gains_the_new_tables_and_records_the_version(self):
         """M2I PR2's upgrade, which is additive and therefore a create-if-absent.

@@ -70,6 +70,7 @@ from .criteria import (
     criteria_state,
     validate_criteria,
 )
+from .evaluation import EvaluationRecord, evaluable, evaluate
 from .errors import (
     AdapterFailed,
     AdapterNotPermitted,
@@ -82,6 +83,7 @@ from .errors import (
     ClarificationUnsupported,
     CriteriaInvalid,
     CriteriaUnrecorded,
+    EvaluationConflict,
     FollowupInFlight,
     FollowupInvalid,
     FollowupNotWaiting,
@@ -1400,7 +1402,127 @@ class TaskService:
                 project_id=updated.project_id,
                 correlation_id=updated.correlation_id,
             )
+        # Every turn this restart just closed is now a closed turn with no
+        # evaluation, which is the same state a crash leaves behind — so the one
+        # recovery pass covers both.
+        self.evaluate_closed_turns()
         return settled
+
+    # -- deterministic criterion evaluation (M2K PR7) ------------------------
+
+    def evaluate_closed_turns(self, task_id: Optional[str] = None) -> int:
+        """Evaluate every durably closed turn that has criteria and no record.
+
+        **One function, two callers, and that is the design.** The dispatch paths
+        call it for a single task the moment a turn closes; start-up calls it with
+        no argument. A crash between the close and the evaluation is therefore not
+        a special case needing its own repair logic — it is the ordinary case,
+        arriving late.
+
+        Idempotent by construction rather than by a flag: the query that selects
+        work excludes turns that already have a record for this evaluator version,
+        so a second run finds nothing and writes nothing. Restarting ten times
+        produces one evaluation.
+
+        **Never touches a task's lifecycle.** Everything here is wrapped, and a
+        failure returns quietly, leaving the turn selectable by the next pass. An
+        evaluation is a judgement *about* a task; a task must not fail because a
+        judgement about it could not be written, and a task must not be reported
+        differently because one could.
+
+        **Nothing here runs on a read.** No route calls it, and
+        ``evidence_bundle`` and the criteria readers stay mutation-free, so
+        polling a task can never manufacture a record.
+        """
+        written = 0
+        try:
+            pending = self._store.closed_turns_awaiting_evaluation(task_id)
+        except TaskError:  # pragma: no cover - defensive
+            return 0
+        for owner, turn_number in pending:
+            if self._evaluate_one_turn(owner, turn_number):
+                written += 1
+        return written
+
+    def _evaluate_one_turn(self, task_id: str, turn_number: int) -> bool:
+        """Evaluate exactly one closed turn. Returns whether a record was written.
+
+        The three reads are all of immutable rows — the frozen criteria snapshot,
+        the derived bundle for a window that can no longer move, and the turn
+        itself — so this produces the same answer whenever it runs. The pure
+        evaluator is called between the reads and the write and is handed nothing
+        else.
+        """
+        try:
+            snapshot = self._store.turn_criteria(task_id, turn_number)
+            if not evaluable(snapshot):
+                # `legacy_unknown`. No question was ever asked of this turn, and a
+                # zero-result row would claim otherwise.
+                return False
+            bundle = self._store.evidence_bundle(task_id, turn_number)
+            if bundle is None or bundle.turn_open:  # pragma: no cover - defensive
+                return False
+            results = evaluate(snapshot, bundle)
+            record = self._store.record_evaluation(
+                snapshot=snapshot,
+                bundle=bundle,
+                results=results,
+                recorded_at=now_iso(),
+            )
+        except EvaluationConflict:
+            # Not an ordinary persistence failure, and not something to retry
+            # into: a stored judgement disagrees with a fresh derivation of the
+            # same immutable inputs, which should not be possible. The stored
+            # record is left exactly as it was, the task is untouched, and the
+            # fact is put on the audit trail so somebody can find it — because
+            # the one thing that must not happen is for it to pass unnoticed.
+            self._audit_evaluation_conflict(task_id)
+            return False
+        except TaskError:
+            # Persistence failed. The task and its turn are untouched and still
+            # valid, and this turn stays selectable by the next pass — which is
+            # what makes an evaluation recoverable rather than lost.
+            return False
+        except Exception:  # pragma: no cover - defensive
+            return False
+        return record is not None
+
+    def _audit_evaluation_conflict(self, task_id: str) -> None:
+        """Put an evaluation conflict where an operator will see it.
+
+        No task content travels through the audit hook — the same rule every
+        other call site here follows — so this carries the identifiers and the
+        outcome word and nothing else.
+        """
+        try:
+            row = self._store.get(task_id)
+        except TaskError:  # pragma: no cover - the task vanished mid-pass
+            return
+        self._audit(
+            "task_evaluation",
+            "conflict",
+            task_id=row.task_id,
+            adapter_id=row.adapter_id,
+            project_id=row.project_id,
+            correlation_id=row.correlation_id,
+        )
+
+    def turn_evaluation(
+        self, task_id: object, turn_number: object
+    ) -> Optional[EvaluationRecord]:
+        """One turn's stored evaluation, or ``None``. A read, and only a read.
+
+        ``None`` covers three different situations and deliberately does not
+        distinguish them here, because the criteria state already does: a turn
+        whose criteria are ``legacy_unknown`` will never have one, a turn that
+        closed moments ago may not have one yet, and a turn evaluated only by a
+        future evaluator version has none for *this* version. None of them means
+        "nothing was met".
+
+        Not routed anywhere. PR7 adds no HTTP surface.
+        """
+        row = self.get_task(task_id)
+        return self._store.evaluation(row.task_id, int(turn_number))
 
     # -- results -------------------------------------------------------------
 
@@ -1989,6 +2111,17 @@ class TaskService:
                 project_id=updated.project_id,
                 correlation_id=updated.correlation_id,
             )
+        # M2K PR7, and the position is the whole rule: *after* the transition
+        # above committed, which is where the turn's `completed_at` and its
+        # `closed_through_event_sequence` became durable together. Before this
+        # line the evidence window could still move; after it, it cannot, which
+        # is what makes a judgement attachable to it at all.
+        #
+        # Called unconditionally rather than only when a turn closed: the store's
+        # query already selects exactly the closed, bounded, criteria-bearing,
+        # unevaluated turns, so asking when there is nothing to do costs one
+        # indexed read and removes a branch that could get the condition wrong.
+        self.evaluate_closed_turns(updated.task_id)
         return updated
 
     #: The states whose arrival means "a provider turn just ended". Three of
@@ -2073,6 +2206,11 @@ class TaskService:
             project_id=updated.project_id,
             correlation_id=updated.correlation_id,
         )
+        # A failed task closed its turn in the transition above, so the same
+        # post-close rule applies. A turn that ended badly still had criteria and
+        # still produced evidence, and refusing to evaluate it would make the
+        # record thinnest exactly where somebody most wants to look.
+        self.evaluate_closed_turns(updated.task_id)
         return updated
 
     def _reject(self, row: TaskRow, operation: str, reason: str) -> None:

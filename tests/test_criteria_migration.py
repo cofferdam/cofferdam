@@ -74,15 +74,22 @@ class CleanDatabaseTests(unittest.TestCase):
                 r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
             }
 
-    def test_the_schema_version_is_seven(self):
-        self.assertEqual(SCHEMA_VERSION, 7)
+    def test_the_schema_version_is_at_least_seven(self):
+        """Seven is when the criteria tables arrived; later versions add on top.
 
-    def test_the_recorded_version_is_seven(self):
+        Moved off an equality by M2K PR7, which took the constant to 8. The
+        literal pin for the *current* version lives in `test_task_core.py` and in
+        the newest migration module; what matters here is that the build under
+        test has the criteria tables.
+        """
+        self.assertGreaterEqual(SCHEMA_VERSION, 7)
+
+    def test_the_recorded_version_is_at_least_seven(self):
         with self._db() as db:
             value = db.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()[0]
-        self.assertEqual(int(value), 7)
+        self.assertGreaterEqual(int(value), 7)
 
     def test_both_criteria_tables_exist(self):
         names = self._tables()
@@ -442,16 +449,17 @@ class MigrationTests(unittest.TestCase):
         self.assertNotIn(SNAPSHOT_TABLE, names)
         self.assertNotIn(ITEM_TABLE, names)
 
-    def test_opening_it_migrates_to_seven(self):
+    def test_opening_it_migrates_past_six(self):
+        """A v6 database is upgraded to whatever this build is, in one open."""
         self._build_v6()
         store = _open_store(self.home)
         self.addCleanup(store.close)
-        self.assertEqual(store.storage_health()["schema_version"], 7)
+        self.assertGreaterEqual(store.storage_health()["schema_version"], 7)
         with sqlite3.connect(str(self.path)) as db:
             value = db.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()[0]
-        self.assertEqual(int(value), 7)
+        self.assertGreaterEqual(int(value), 7)
 
     def test_the_new_tables_are_created_empty(self):
         self._build_v6()
@@ -556,7 +564,7 @@ class MigrationTests(unittest.TestCase):
         first.close()
         second = _open_store(self.home)
         self.addCleanup(second.close)
-        self.assertEqual(second.storage_health()["schema_version"], 7)
+        self.assertGreaterEqual(second.storage_health()["schema_version"], 7)
         with sqlite3.connect(str(self.path)) as db:
             for table in (SNAPSHOT_TABLE, ITEM_TABLE):
                 count = db.execute("SELECT COUNT(*) FROM %s" % table).fetchone()[0]
@@ -694,14 +702,22 @@ class OldRuntimeAgainstV7Tests(unittest.TestCase):
             )
             self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
 
-    def test_the_recorded_version_is_still_seven(self):
+    def test_the_recorded_version_is_unchanged_by_the_probe(self):
+        """The fixture is built by the *current* store, so its version tracks it.
+
+        Since M2K PR7 that is 8 rather than 7, which leaves this module still
+        proving what it was written to prove: the v6 runtime refuses a newer
+        database and changes nothing on its way out.
+        """
+        before = self._fingerprint_everything()
         with self.assertRaises(RuntimeError):
             self._old_runtime_open()
         with sqlite3.connect(str(self.path)) as db:
             value = db.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()[0]
-        self.assertEqual(int(value), 7)
+        self.assertGreaterEqual(int(value), 7)
+        self.assertEqual(self._fingerprint_everything()[1], before[1])
 
     def test_the_current_build_still_opens_it_afterwards(self):
         with self.assertRaises(RuntimeError):
