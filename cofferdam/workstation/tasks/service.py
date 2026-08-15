@@ -83,6 +83,7 @@ from .errors import (
     ClarificationUnsupported,
     CriteriaInvalid,
     CriteriaUnrecorded,
+    EvaluationConflict,
     FollowupInFlight,
     FollowupInvalid,
     FollowupNotWaiting,
@@ -1468,6 +1469,15 @@ class TaskService:
                 results=results,
                 recorded_at=now_iso(),
             )
+        except EvaluationConflict:
+            # Not an ordinary persistence failure, and not something to retry
+            # into: a stored judgement disagrees with a fresh derivation of the
+            # same immutable inputs, which should not be possible. The stored
+            # record is left exactly as it was, the task is untouched, and the
+            # fact is put on the audit trail so somebody can find it — because
+            # the one thing that must not happen is for it to pass unnoticed.
+            self._audit_evaluation_conflict(task_id)
+            return False
         except TaskError:
             # Persistence failed. The task and its turn are untouched and still
             # valid, and this turn stays selectable by the next pass — which is
@@ -1476,6 +1486,26 @@ class TaskService:
         except Exception:  # pragma: no cover - defensive
             return False
         return record is not None
+
+    def _audit_evaluation_conflict(self, task_id: str) -> None:
+        """Put an evaluation conflict where an operator will see it.
+
+        No task content travels through the audit hook — the same rule every
+        other call site here follows — so this carries the identifiers and the
+        outcome word and nothing else.
+        """
+        try:
+            row = self._store.get(task_id)
+        except TaskError:  # pragma: no cover - the task vanished mid-pass
+            return
+        self._audit(
+            "task_evaluation",
+            "conflict",
+            task_id=row.task_id,
+            adapter_id=row.adapter_id,
+            project_id=row.project_id,
+            correlation_id=row.correlation_id,
+        )
 
     def turn_evaluation(
         self, task_id: object, turn_number: object

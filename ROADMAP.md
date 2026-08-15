@@ -485,9 +485,10 @@ downstream reads from.
     evaluator does not read claims, ingestion or relationships at all, so a claim cannot satisfy a
     criterion, silence cannot fail one, incomplete claim ingestion downgrades nothing, and
     `claim_conflict` drives no result. Closure is **predicate-specific**: both observation domains
-    must be read completely before absence is a finding, a dirty pre-work boundary blocks a `met` but
-    not a `not_met`, and domains are never collapsed — `created` in the range and `modified` in the
-    tree are both true. A rename needs an explicit machine rename record and is **never** inferred
+    must be read completely before absence is a finding; a pre-work boundary that is not
+    `clean_complete` blocks **both** `met` and `not_met`, because PR4 records only a coarse tree-wide
+    dirty word and a path that was dirty and then restored to HEAD leaves no observation at all; and
+    domains are never collapsed — `created` in the range and `modified` in the tree are both true. A rename needs an explicit machine rename record and is **never** inferred
     from created-plus-deleted. `manual` is always `unverified`; `legacy_unknown` produces **no**
     record; `not_provided` produces a zero-result record the schema forbids from ever reading as a
     pass. Internal only — no route, no request field, no bridge Action — and `assembler_version`

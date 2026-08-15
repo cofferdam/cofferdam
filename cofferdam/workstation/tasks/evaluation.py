@@ -353,21 +353,42 @@ def _closure(bundle: EvidenceBundle) -> _Closure:
     influence at all. Only the dimensions a negative conclusion actually rests on
     are read here.
 
-    **Pre-work boundary quality is deliberately not one of them**, and the
-    asymmetry is worth stating because it reads backwards at first. A dirty
-    boundary means a change seen *afterwards* might predate the turn, so it gates
-    :func:`_worktree_attributable` and :func:`_committed_attributable` — the
-    positive side. It does not gate absence: a tree that was already dirty gives
-    a path nowhere to hide, so a path missing from a completely-read range and a
-    completely-read worktree genuinely has no resulting change at the boundary. A
-    path that *was* dirty and stayed changed is not missing — it appears in the
-    worktree domain and takes the unattributable branch instead.
+    **The pre-work boundary is one of those dimensions**, and it gates the
+    negative exactly as hard as it gates the positive. That is not obvious and it
+    is worth the paragraph, because the intuitive rule — "a dirty tree gives a
+    path nowhere to hide" — is wrong, and wrong in the direction that
+    manufactures false negatives.
+
+    PR4 persists a **coarse** boundary: one word for the whole working tree
+    (``clean_complete``, ``dirty``, ``incomplete``, ``unavailable``) and no record
+    of *which paths* were dirty. So consider ``foo.py`` at HEAD revision ``A``,
+    dirty at ``B`` when the turn began, and restored by the worker to ``A``:
+
+    * the committed range contains no ``foo.py`` — nothing was committed;
+    * the working tree contains no ``foo.py`` — it now matches HEAD.
+
+    The worker plainly produced a resulting effect on ``foo.py`` relative to the
+    tree it was handed, and Cofferdam's stored evidence cannot see it. Absence
+    after a dirty boundary therefore cannot distinguish "the worker never touched
+    this path" from "the path was dirty and the worker put it back", and a
+    ``not_met`` in that state would be an accusation built on a gap in evidence
+    resolution.
+
+    So for the v1 path predicates, a boundary that is not ``clean_complete``
+    blocks **both** conclusions. This is a limitation of what PR4 records, not a
+    statement about the work, and closing it would need path-level pre-work state
+    — new evidence architecture, deliberately not attempted here.
     """
     if bundle.turn_attribution != ATTRIBUTION_EXACT:
         # Without an exact event window there is no defensible set of
         # observations for this turn — a legacy turn's evidence may belong to a
         # neighbouring one. Nothing can be ruled out.
         return _Closure(False, False, REASON_ATTRIBUTION_UNKNOWN)
+
+    if not _pre_work_state_known(bundle):
+        # See the docstring above: without a clean, completely-read pre-work
+        # tree, an absent path may have been reverted rather than untouched.
+        return _Closure(False, False, _unattributable_reason(bundle))
 
     worktree_reason: Optional[str] = None
     worktree = True
@@ -408,6 +429,22 @@ def _closure(bundle: EvidenceBundle) -> _Closure:
     return _Closure(worktree, committed, worktree_reason or committed_reason)
 
 
+def _pre_work_state_known(bundle: EvidenceBundle) -> bool:
+    """Whether the repository state the worker *received* is known well enough.
+
+    The single fact both a positive and a negative causal conclusion rest on, and
+    it is coarse by construction: PR4 records one word for the whole tree, so the
+    only value that supports attributing a transition to this turn — in either
+    direction — is a boundary that was clean and completely read.
+
+    A turn with no committed-range summary has no boundary statement at all and
+    is not known; ``recorded=False`` means nobody looked, never "the tree was
+    clean".
+    """
+    span = bundle.committed_range
+    return span.recorded and span.boundary_quality == RANGE_BOUNDARY_CLEAN
+
+
 def _worktree_was_observed(bundle: EvidenceBundle) -> bool:
     """Whether anything actually looked at the working tree for this turn.
 
@@ -438,8 +475,7 @@ def _worktree_attributable(bundle: EvidenceBundle) -> bool:
     correct rather than strict: for those turns Cofferdam genuinely does not know
     what the tree looked like before.
     """
-    span = bundle.committed_range
-    return span.recorded and span.boundary_quality == RANGE_BOUNDARY_CLEAN
+    return _pre_work_state_known(bundle)
 
 
 def _committed_attributable(bundle: EvidenceBundle) -> bool:

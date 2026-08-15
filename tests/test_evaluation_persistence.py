@@ -357,19 +357,18 @@ class Atomicity(EvaluationStoreCase):
 
 
 class Immutability(EvaluationStoreCase):
-    def test_a_second_record_does_not_overwrite_the_first(self):
+    def test_an_exact_retry_is_idempotent_and_writes_nothing(self):
         first = self.record()
-        again = self.store.record_evaluation(
-            snapshot=self.snapshot(),
-            bundle=bundle(),   # different evidence entirely
-            results=evaluate(self.snapshot(), bundle()),
-            recorded_at="2027-01-01T00:00:00Z",
-        )
-        self.assertIsNone(again, "a second write must not replace an immutable record")
+        again = self.record()
+        self.assertIsNone(again, "a retry writes nothing")
         stored = self.store.evaluation("task_x", 1)
         self.assertEqual(stored.evaluation_id, first.evaluation_id)
         self.assertEqual(stored.evaluation_fingerprint, first.evaluation_fingerprint)
         self.assertEqual(stored.evidence_input_fingerprint, first.evidence_input_fingerprint)
+        self.assertEqual(
+            [(r.ordinal, r.result, r.reason) for r in stored.results],
+            [(r.ordinal, r.result, r.reason) for r in first.results],
+        )
 
     def test_only_one_row_exists_per_turn_and_evaluator_version(self):
         self.record()
@@ -416,6 +415,203 @@ class Immutability(EvaluationStoreCase):
                     " ('evl_dup','task_x',1,1,'present',?,?,3,?,1,?, 'x')",
                     (stored.criteria_snapshot_id, stored.criteria_fingerprint, "f" * 64, "d" * 64),
                 )
+
+
+class ConflictingRetries(EvaluationStoreCase):
+    """An identical retry and a conflicting one are different events.
+
+    The inputs to an evaluation are immutable by construction, so a second
+    derivation of the same turn *is* the same judgement. If it is not, one of the
+    things this milestone spent five PRs making impossible has happened — and
+    both of the easy answers are wrong. Returning the stored record would report
+    a success that did not occur; overwriting it would destroy the evidence that
+    anything is wrong. So it fails closed and changes nothing.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.first = self.record()
+        self.before = self._raw()
+
+    def _raw(self):
+        with sqlite3.connect(str(self.path)) as db:
+            db.row_factory = sqlite3.Row
+            return (
+                [dict(r) for r in db.execute("SELECT * FROM task_turn_evaluations")],
+                [dict(r) for r in db.execute(
+                    "SELECT * FROM task_turn_criterion_results ORDER BY ordinal")],
+            )
+
+    def _conflict(self, **kwargs):
+        from cofferdam.workstation.tasks.errors import EvaluationConflict
+
+        with self.assertRaises(EvaluationConflict) as caught:
+            self.store.record_evaluation(recorded_at="2027-01-01T00:00:00Z", **kwargs)
+        # And nothing moved.
+        self.assertEqual(self._raw(), self.before)
+        return caught.exception
+
+    def _snapshot_with(self, **overrides):
+        snap = self.snapshot()
+        fields = {f: getattr(snap, f) for f in snap.__dataclass_fields__}
+        fields.update(overrides)
+        return type(snap)(**fields)
+
+    def test_a_different_evidence_input_fingerprint_is_refused(self):
+        snap = self.snapshot()
+        moved = bundle(
+            observations=(observation("src/a.py", domain=OBSERVATION_DOMAIN_WORKTREE),),
+            input_fingerprint="e" * 64,
+        )
+        error = self._conflict(
+            snapshot=snap, bundle=moved, results=evaluate(snap, moved)
+        )
+        self.assertIn("evidence_input_fingerprint", error.detail)
+
+    def test_a_different_criteria_fingerprint_is_refused(self):
+        snap = self._snapshot_with(fingerprint="a" * 64)
+        found = bundle(
+            observations=(observation("src/a.py", domain=OBSERVATION_DOMAIN_WORKTREE),)
+        )
+        error = self._conflict(
+            snapshot=snap, bundle=found, results=evaluate(snap, found)
+        )
+        self.assertIn("criteria_fingerprint", error.detail)
+
+    def test_a_different_snapshot_id_is_refused(self):
+        snap = self._snapshot_with(snapshot_id="acs_" + "z" * 26)
+        found = bundle(
+            observations=(observation("src/a.py", domain=OBSERVATION_DOMAIN_WORKTREE),)
+        )
+        error = self._conflict(
+            snapshot=snap, bundle=found, results=evaluate(snap, found)
+        )
+        self.assertIn("criteria_snapshot_id", error.detail)
+
+    def test_a_different_assembler_version_is_refused(self):
+        snap = self.snapshot()
+        found = bundle(
+            observations=(observation("src/a.py", domain=OBSERVATION_DOMAIN_WORKTREE),)
+        )
+        moved = type(found)(
+            **{**{f: getattr(found, f) for f in found.__dataclass_fields__},
+               "assembler_version": 4}
+        )
+        error = self._conflict(
+            snapshot=snap, bundle=moved, results=evaluate(snap, moved)
+        )
+        self.assertIn("assembler_version", error.detail)
+
+    def test_a_changed_result_is_refused(self):
+        snap = self.snapshot()
+        found = bundle(
+            observations=(observation("src/a.py", domain=OBSERVATION_DOMAIN_WORKTREE),)
+        )
+        flipped = list(evaluate(snap, found))
+        flipped[0] = CriterionResult(
+            flipped[0].criterion_id, 1, RESULT_UNVERIFIED, REASON_MANUAL
+        )
+        error = self._conflict(snapshot=snap, bundle=found, results=flipped)
+        # The fingerprint covers the results, so it is the first field to move.
+        self.assertIn("evaluation_fingerprint", error.detail)
+
+    def test_a_changed_reason_is_refused(self):
+        snap = self.snapshot()
+        found = bundle(
+            observations=(observation("src/a.py", domain=OBSERVATION_DOMAIN_WORKTREE),)
+        )
+        reworded = list(evaluate(snap, found))
+        reworded[1] = CriterionResult(
+            reworded[1].criterion_id, 2, RESULT_UNVERIFIED, "unsupported_capability"
+        )
+        error = self._conflict(snapshot=snap, bundle=found, results=reworded)
+        self.assertIn("evaluation_fingerprint", error.detail)
+
+    def test_a_changed_result_row_alone_is_refused(self):
+        """Results differing while the fingerprint is held fixed.
+
+        Reached by monkeypatching the fingerprint so the row comparison is the
+        thing under test rather than the hash. It proves the store compares the
+        rows themselves and does not rely on the digest to notice.
+        """
+        from cofferdam.workstation.tasks import store as store_module
+        from cofferdam.workstation.tasks.errors import EvaluationConflict
+
+        snap = self.snapshot()
+        found = bundle(
+            observations=(observation("src/a.py", domain=OBSERVATION_DOMAIN_WORKTREE),)
+        )
+        frozen = self.first.evaluation_fingerprint
+        flipped = list(evaluate(snap, found))
+        flipped[0] = CriterionResult(
+            flipped[0].criterion_id, 1, RESULT_UNVERIFIED, REASON_MANUAL
+        )
+        import cofferdam.workstation.tasks.evaluation as evaluation_module
+
+        original = evaluation_module.evaluation_fingerprint
+        evaluation_module.evaluation_fingerprint = lambda **kwargs: frozen
+        try:
+            with self.assertRaises(EvaluationConflict) as caught:
+                self.store.record_evaluation(
+                    snapshot=snap, bundle=found, results=flipped, recorded_at="x"
+                )
+        finally:
+            evaluation_module.evaluation_fingerprint = original
+        self.assertIn("criterion_results", caught.exception.detail)
+        self.assertEqual(self._raw(), self.before)
+
+    def test_the_refusal_names_the_dimension_and_never_a_value(self):
+        snap = self._snapshot_with(fingerprint="a" * 64)
+        found = bundle(
+            observations=(observation("src/a.py", domain=OBSERVATION_DOMAIN_WORKTREE),)
+        )
+        error = self._conflict(snapshot=snap, bundle=found, results=evaluate(snap, found))
+        self.assertNotIn("a" * 64, error.detail)
+        self.assertNotIn(self.first.criteria_fingerprint, error.detail)
+
+    def test_an_exact_retry_after_a_restart_is_still_idempotent(self):
+        self.store.close()
+        self.store = TaskStore(self.config)
+        again = self.record()
+        self.assertIsNone(again)
+        stored = self.store.evaluation("task_x", 1)
+        self.assertEqual(stored.evaluation_id, self.first.evaluation_id)
+        self.assertEqual(self._raw(), self.before)
+
+    def test_a_conflicting_retry_after_a_restart_is_still_refused(self):
+        self.store.close()
+        self.store = TaskStore(self.config)
+        snap = self.snapshot()
+        moved = bundle(
+            observations=(observation("src/a.py", domain=OBSERVATION_DOMAIN_WORKTREE),),
+            input_fingerprint="e" * 64,
+        )
+        self._conflict(snapshot=snap, bundle=moved, results=evaluate(snap, moved))
+
+    def test_the_original_record_is_untouched_after_every_refusal(self):
+        snap = self.snapshot()
+        found = bundle(
+            observations=(observation("src/a.py", domain=OBSERVATION_DOMAIN_WORKTREE),)
+        )
+        for kwargs in (
+            {"snapshot": self._snapshot_with(snapshot_id="acs_" + "z" * 26)},
+            {"snapshot": self._snapshot_with(fingerprint="a" * 64)},
+            {"bundle": bundle(input_fingerprint="e" * 64)},
+        ):
+            payload = {"snapshot": snap, "bundle": found}
+            payload.update(kwargs)
+            payload["results"] = evaluate(payload["snapshot"], payload["bundle"])
+            self._conflict(**payload)
+        stored = self.store.evaluation("task_x", 1)
+        self.assertEqual(stored.evaluation_id, self.first.evaluation_id)
+        self.assertEqual(stored.evaluation_fingerprint, self.first.evaluation_fingerprint)
+        self.assertEqual(self._raw(), self.before)
+
+    def test_exactly_one_row_survives_all_of_it(self):
+        with sqlite3.connect(str(self.path)) as db:
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM task_turn_evaluations").fetchone()[0], 1
+            )
 
 
 class Refusals(EvaluationStoreCase):

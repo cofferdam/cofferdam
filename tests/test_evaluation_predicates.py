@@ -76,6 +76,11 @@ from cofferdam.workstation.tasks.evidence import (
     IngestionSummary,
     MachineObservation,
 )
+from cofferdam.workstation.tasks.gitrange import (
+    BOUNDARY_DIRTY,
+    BOUNDARY_INCOMPLETE,
+    BOUNDARY_UNAVAILABLE,
+)
 from cofferdam.workstation.tasks.models import (
     CHANGE_CREATED,
     CHANGE_DELETED,
@@ -255,7 +260,7 @@ class PathChanged(unittest.TestCase):
         """The change is real; that this turn caused it is not established."""
         dirty = CommittedRangeSummary(
             recorded=True,
-            boundary_quality="dirty_or_incomplete",
+            boundary_quality=BOUNDARY_DIRTY,
             ancestry=RANGE_ANCESTRY_LINEAR,
             coverage=RANGE_COVERAGE_COMPLETE,
         )
@@ -267,35 +272,120 @@ class PathChanged(unittest.TestCase):
             decide(self.c, found), (RESULT_UNVERIFIED, REASON_BOUNDARY_NOT_CLEAN)
         )
 
-    def test_a_dirty_boundary_still_permits_not_met_on_genuine_absence(self):
-        """The asymmetry, stated as a test because it is easy to get backwards.
+    def test_a_dirty_boundary_blocks_not_met_too_the_revert_counterexample(self):
+        """The load-bearing negative, and the intuition it corrects.
 
-        Boundary quality gates **positive** attribution: a change seen afterwards
-        might predate the turn, so it cannot be credited to it. It does not gate a
-        **negative**, because a dirty tree beforehand gives the path nowhere to
-        hide. If P is absent from a completely-read range and a
-        completely-read worktree, then P has no resulting change at the boundary —
-        which is exactly what `path_changed` asks about — and that is true no
-        matter what else was dirty when the turn began.
+        "A dirty tree gives a path nowhere to hide" is wrong, because PR4 records
+        a **coarse** boundary — one word for the whole tree, with no record of
+        which paths were dirty. So:
 
-        A path that *was* dirty and stayed changed is not absent: it appears in
-        the worktree domain and takes the unattributable branch above.
+            HEAD            foo.py = A
+            pre-work tree   foo.py = B      (boundary: dirty)
+            worker          foo.py B -> A
+            post-worker     committed range: no foo.py
+                            worktree vs HEAD: no foo.py
+
+        The worker produced a real resulting effect on foo.py relative to the
+        tree it was handed, and the stored evidence cannot see it. Absence after
+        a dirty boundary therefore cannot tell "never touched" from "was dirty
+        and put back", so `not_met` would be an accusation built on a gap in
+        evidence resolution.
         """
         dirty = CommittedRangeSummary(
             recorded=True,
-            boundary_quality="dirty_or_incomplete",
+            boundary_quality=BOUNDARY_DIRTY,
             ancestry=RANGE_ANCESTRY_LINEAR,
             coverage=RANGE_COVERAGE_COMPLETE,
         )
         found = bundle(observations=(), committed_range=dirty)
         self.assertEqual(
-            decide(self.c, found), (RESULT_NOT_MET, REASON_COMPLETE_CHANGE_ABSENT)
+            decide(self.c, found), (RESULT_UNVERIFIED, REASON_BOUNDARY_NOT_CLEAN)
         )
+
+    def test_an_incomplete_boundary_blocks_not_met(self):
+        found = bundle(
+            observations=(),
+            committed_range=CommittedRangeSummary(
+                recorded=True,
+                boundary_quality=BOUNDARY_INCOMPLETE,
+                ancestry=RANGE_ANCESTRY_LINEAR,
+                coverage=RANGE_COVERAGE_COMPLETE,
+            ),
+        )
+        self.assertEqual(
+            decide(self.c, found), (RESULT_UNVERIFIED, REASON_BOUNDARY_NOT_CLEAN)
+        )
+
+    def test_an_unavailable_boundary_blocks_not_met(self):
+        found = bundle(
+            observations=(),
+            committed_range=CommittedRangeSummary(
+                recorded=True,
+                boundary_quality=BOUNDARY_UNAVAILABLE,
+                ancestry=RANGE_ANCESTRY_LINEAR,
+                coverage=RANGE_COVERAGE_COMPLETE,
+            ),
+        )
+        self.assertEqual(
+            decide(self.c, found), (RESULT_UNVERIFIED, REASON_BOUNDARY_NOT_CLEAN)
+        )
+
+    def test_only_a_clean_complete_boundary_permits_either_conclusion(self):
+        """The whole v1 rule, in one table."""
+        for quality, expected in (
+            (RANGE_BOUNDARY_CLEAN, RESULT_NOT_MET),
+            (BOUNDARY_DIRTY, RESULT_UNVERIFIED),
+            (BOUNDARY_INCOMPLETE, RESULT_UNVERIFIED),
+            (BOUNDARY_UNAVAILABLE, RESULT_UNVERIFIED),
+        ):
+            found = bundle(
+                observations=(),
+                committed_range=CommittedRangeSummary(
+                    recorded=True,
+                    boundary_quality=quality,
+                    ancestry=RANGE_ANCESTRY_LINEAR,
+                    coverage=RANGE_COVERAGE_COMPLETE,
+                ),
+            )
+            self.assertEqual(decide(self.c, found)[0], expected, quality)
+            # And the positive side is gated identically.
+            seen = bundle(
+                observations=(observation("src/a.py", domain=OBSERVATION_DOMAIN_WORKTREE),),
+                committed_range=CommittedRangeSummary(
+                    recorded=True,
+                    boundary_quality=quality,
+                    ancestry=RANGE_ANCESTRY_LINEAR,
+                    coverage=RANGE_COVERAGE_COMPLETE,
+                ),
+            )
+            self.assertEqual(
+                decide(self.c, seen)[0],
+                RESULT_MET if quality == RANGE_BOUNDARY_CLEAN else RESULT_UNVERIFIED,
+                quality,
+            )
+
+    def test_a_claim_cannot_repair_a_dirty_boundary(self):
+        claimed = ChangeClaim(
+            claim_id="chg_1", task_id="task_x", turn_number=1, operation="modified",
+            path="src/a.py", to_path=None, adapter_label=None, reported_at="x",
+            artifact_id=None, reason="ok",
+        )
+        found = bundle(
+            observations=(),
+            claims=(claimed,),
+            committed_range=CommittedRangeSummary(
+                recorded=True,
+                boundary_quality=BOUNDARY_DIRTY,
+                ancestry=RANGE_ANCESTRY_LINEAR,
+                coverage=RANGE_COVERAGE_COMPLETE,
+            ),
+        )
+        self.assertEqual(decide(self.c, found)[0], RESULT_UNVERIFIED)
 
     def test_a_dirty_boundary_path_that_is_still_changed_is_unverified(self):
         dirty = CommittedRangeSummary(
             recorded=True,
-            boundary_quality="dirty_or_incomplete",
+            boundary_quality=BOUNDARY_DIRTY,
             ancestry=RANGE_ANCESTRY_LINEAR,
             coverage=RANGE_COVERAGE_COMPLETE,
         )
@@ -452,6 +542,56 @@ class PathOperation(unittest.TestCase):
         self.assertEqual(decide(c, found)[0], RESULT_NOT_MET)
         self.assertNotEqual(decide(c, found)[0], RESULT_MET)
 
+    def test_a_dirty_boundary_blocks_not_met_for_an_operation(self):
+        """Same revert counterexample: the before-state is not path-complete."""
+        c = criterion(predicate="path_operation", path="src/a.py", operation="created")
+        found = bundle(
+            observations=(),
+            committed_range=CommittedRangeSummary(
+                recorded=True,
+                boundary_quality=BOUNDARY_DIRTY,
+                ancestry=RANGE_ANCESTRY_LINEAR,
+                coverage=RANGE_COVERAGE_COMPLETE,
+            ),
+        )
+        self.assertEqual(
+            decide(c, found), (RESULT_UNVERIFIED, REASON_BOUNDARY_NOT_CLEAN)
+        )
+
+    def test_a_different_operation_across_an_ambiguous_before_state_is_unverified(self):
+        """A differing observed operation must not produce not_met over a dirty tree.
+
+        The observed `deleted` cannot be credited to this turn at all, and the
+        required `created` may have happened and been undone. Neither conclusion
+        is available.
+        """
+        c = criterion(predicate="path_operation", path="src/a.py", operation="created")
+        found = bundle(
+            observations=(
+                observation("src/a.py", domain=OBSERVATION_DOMAIN_WORKTREE, kind=CHANGE_DELETED),
+            ),
+            committed_range=CommittedRangeSummary(
+                recorded=True,
+                boundary_quality=BOUNDARY_DIRTY,
+                ancestry=RANGE_ANCESTRY_LINEAR,
+                coverage=RANGE_COVERAGE_COMPLETE,
+            ),
+        )
+        self.assertEqual(decide(c, found)[0], RESULT_UNVERIFIED)
+
+    def test_an_incomplete_boundary_blocks_not_met_for_an_operation(self):
+        c = criterion(predicate="path_operation", path="src/a.py", operation="modified")
+        found = bundle(
+            observations=(),
+            committed_range=CommittedRangeSummary(
+                recorded=True,
+                boundary_quality=BOUNDARY_INCOMPLETE,
+                ancestry=RANGE_ANCESTRY_LINEAR,
+                coverage=RANGE_COVERAGE_COMPLETE,
+            ),
+        )
+        self.assertEqual(decide(c, found)[0], RESULT_UNVERIFIED)
+
     def test_a_claim_that_disagrees_with_the_machine_does_not_produce_not_met(self):
         """`claim_conflict` territory. The machine saw `created`; the claim says
         `deleted`. The criterion asks for `created` and the machine decides it."""
@@ -536,7 +676,7 @@ class Rename(unittest.TestCase):
     def test_a_dirty_boundary_makes_a_rename_unverified(self):
         dirty = CommittedRangeSummary(
             recorded=True,
-            boundary_quality="dirty_or_incomplete",
+            boundary_quality=BOUNDARY_DIRTY,
             ancestry=RANGE_ANCESTRY_LINEAR,
             coverage=RANGE_COVERAGE_COMPLETE,
         )
@@ -552,6 +692,50 @@ class Rename(unittest.TestCase):
             committed_range=dirty,
         )
         self.assertEqual(decide(self.c, found), (RESULT_UNVERIFIED, REASON_BOUNDARY_NOT_CLEAN))
+
+    def test_a_dirty_boundary_blocks_not_met_for_a_rename(self):
+        """Absence of an explicit rename is not a finding over an unknown before-state."""
+        found = bundle(
+            observations=(),
+            committed_range=CommittedRangeSummary(
+                recorded=True,
+                boundary_quality=BOUNDARY_DIRTY,
+                ancestry=RANGE_ANCESTRY_LINEAR,
+                coverage=RANGE_COVERAGE_COMPLETE,
+            ),
+        )
+        self.assertEqual(
+            decide(self.c, found), (RESULT_UNVERIFIED, REASON_BOUNDARY_NOT_CLEAN)
+        )
+
+    def test_created_plus_deleted_over_a_dirty_boundary_is_unverified_not_not_met(self):
+        found = bundle(
+            observations=(
+                observation("src/new.py", domain=OBSERVATION_DOMAIN_COMMITTED_RANGE, kind=CHANGE_CREATED),
+                observation("src/old.py", domain=OBSERVATION_DOMAIN_COMMITTED_RANGE, kind=CHANGE_DELETED, index=1),
+            ),
+            committed_range=CommittedRangeSummary(
+                recorded=True,
+                boundary_quality=BOUNDARY_DIRTY,
+                ancestry=RANGE_ANCESTRY_LINEAR,
+                coverage=RANGE_COVERAGE_COMPLETE,
+            ),
+        )
+        result, _ = decide(self.c, found)
+        self.assertEqual(result, RESULT_UNVERIFIED)
+        self.assertNotEqual(result, RESULT_MET)
+
+    def test_an_incomplete_boundary_blocks_not_met_for_a_rename(self):
+        found = bundle(
+            observations=(),
+            committed_range=CommittedRangeSummary(
+                recorded=True,
+                boundary_quality=BOUNDARY_INCOMPLETE,
+                ancestry=RANGE_ANCESTRY_LINEAR,
+                coverage=RANGE_COVERAGE_COMPLETE,
+            ),
+        )
+        self.assertEqual(decide(self.c, found)[0], RESULT_UNVERIFIED)
 
     def test_a_claimed_rename_is_not_authority(self):
         claimed = ChangeClaim(

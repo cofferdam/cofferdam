@@ -841,8 +841,12 @@ possible global gate and is deliberately not the rule.
 **Closure is predicate-specific and asymmetric.** One attributable observation can prove a change;
 absence proves nothing unless every domain it could have appeared in was read completely. Both
 domains must close, because a committed change is invisible to `git status` and an uncommitted one is
-invisible to the range. A dirty or incomplete pre-work boundary blocks a `met` — causation is not
-established — but does not block a `not_met`, because a dirty tree gives a path nowhere to hide.
+invisible to the range. A dirty, incomplete or unavailable pre-work boundary blocks **both** a `met` and a
+`not_met`. PR4 persists only a coarse boundary word with no path-level detail, so a file that was
+dirty before dispatch and restored to HEAD by the worker leaves no observation anywhere — meaning
+absence cannot distinguish "never touched" from "was dirty and put back". Only a `clean_complete`
+boundary permits either conclusion; everything else is `unverified`, which is a limit of evidence
+resolution rather than a statement about the work.
 
 **Domains are never collapsed.** `created` in the committed range and `modified` in the working tree
 are two true statements about two moments, and both `path_operation(P, created)` and

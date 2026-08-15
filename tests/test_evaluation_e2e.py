@@ -89,6 +89,11 @@ class WorkingAdapter(TaskAdapter):
             self.git("commit", "-q", "-m", "the worker's commit")
         elif self.plan == "dirty":
             (self.root / "src" / "app.py").write_text("uncommitted\n", encoding="utf-8")
+        elif self.plan == "revert":
+            # The counterexample: put the dirty file back exactly as HEAD has it.
+            # A real resulting effect on the tree the worker was handed, which
+            # leaves no post-worker observation of any kind.
+            (self.root / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
 
     def start(self, context: TaskContext) -> AdapterOutcome:
         self._work()
@@ -293,6 +298,61 @@ class EvaluationEndToEnd(TaskTestCase):
         )
         stored = self.service.turn_evaluation(row.task_id, 1)
         self.assertEqual(stored.results[0].result, RESULT_UNVERIFIED)
+
+    def test_the_dirty_revert_counterexample_is_unverified_not_not_met(self):
+        """A real repository, walking the exact sequence the rule exists for.
+
+            HEAD            src/app.py = "x = 1"
+            pre-work tree   src/app.py = "x = 999"   -> PR4 records `dirty`
+            worker          restores it to "x = 1"
+            post-worker     nothing committed, working tree clean
+
+        The worker produced a real effect on the tree it received. PR4 stores only
+        a coarse dirty flag with no path-level detail, so the stored evidence
+        cannot see it — and `not_met` here would be an accusation built on a gap
+        in evidence resolution rather than a finding about the work.
+        """
+        # 2. make the tree genuinely dirty before dispatch
+        (self.project_root / "src" / "app.py").write_text("x = 999\n", encoding="utf-8")
+        self.worker.plan = "revert"
+
+        row = self.create(
+            [{"kind": "evidence", "predicate": "path_changed", "path": "src/app.py"}]
+        )
+
+        # 3. PR4 recorded the boundary as dirty
+        baseline = self.service.store.turn_baseline(row.task_id, 1)
+        self.assertEqual(baseline.working_tree_state, "dirty")
+
+        # 4-5. the worker restored the file; nothing was committed and the tree
+        # now matches HEAD, so there is no observation of src/app.py anywhere
+        bundle = self.service.evidence_bundle(row.task_id, 1)
+        self.assertEqual(bundle.committed_range.boundary_quality, "dirty")
+        self.assertEqual(
+            [o.path for o in bundle.observations if o.path == "src/app.py"], []
+        )
+
+        # 6. and therefore the criterion is unverified, never not_met
+        stored = self.service.turn_evaluation(row.task_id, 1)
+        self.assertEqual(stored.result_count, 1)
+        self.assertEqual(stored.results[0].result, RESULT_UNVERIFIED)
+        self.assertNotEqual(stored.results[0].result, "not_met")
+        self.assertEqual(stored.results[0].reason, "pre_work_boundary_not_clean")
+
+    def test_a_clean_boundary_still_reaches_not_met_for_an_untouched_path(self):
+        """The rule is conservative, not inert: a clean tree still decides."""
+        self.worker.plan = "commit"
+        row = self.create(
+            [{"kind": "evidence", "predicate": "path_changed", "path": "src/never.py"}]
+        )
+        bundle = self.service.evidence_bundle(row.task_id, 1)
+        self.assertEqual(bundle.committed_range.boundary_quality, "clean_complete")
+        stored = self.service.turn_evaluation(row.task_id, 1)
+        # This adapter emits no worktree evidence, so the worktree domain was
+        # never examined and the honest answer stays `unverified` — but for the
+        # worktree reason, not the boundary one, which is the distinction the two
+        # gates exist to keep separate.
+        self.assertEqual(stored.results[0].reason, "worktree_not_observed")
 
     def test_a_crash_after_close_before_evaluation_recovers_once(self):
         row = self.create(

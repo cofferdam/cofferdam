@@ -92,6 +92,8 @@ CODE_CRITERIA_INVALID = "task_criteria_invalid"
 #: Criteria were supplied, could not be made durable, and the dispatch stopped
 #: rather than running a worker against requirements nobody recorded.
 CODE_CRITERIA_UNRECORDED = "task_criteria_unrecorded"
+#: A second evaluation of one turn disagreed with the stored one (M2K PR7).
+CODE_EVALUATION_CONFLICT = "task_evaluation_conflict"
 
 
 class TaskError(Exception):
@@ -472,6 +474,36 @@ class CriteriaUnrecorded(TaskError):
         )
 
 
+class EvaluationConflict(TaskError):
+    """A second evaluation of one turn and version disagreed with the stored one.
+
+    **This is not an ordinary refusal and must not be smoothed over.** The inputs
+    to an evaluation are immutable by construction: a frozen criteria snapshot, a
+    bundle derived from rows inside a closed event window, and a code-owned
+    evaluator version. Deriving the same turn twice must therefore produce the
+    same judgement, and it is not possible for it not to.
+
+    So a mismatch means one of the things this milestone spent five PRs making
+    impossible has happened anyway: a criteria snapshot changed after dispatch, a
+    closed turn's evidence window moved, the assembler produced different inputs
+    from the same rows, or the evaluator disagreed with itself. Every one of those
+    is a defect worth investigating rather than a state to reconcile.
+
+    The two wrong answers are equally wrong. **Returning the stored record** would
+    report success for an operation that did not happen and hide the drift.
+    **Overwriting it** would destroy the evidence that anything was wrong, and
+    replace an immutable judgement somebody may already have read. So this fails
+    closed, writes nothing, and leaves the original exactly as it was.
+    """
+
+    def __init__(self, detail: Optional[str] = None) -> None:
+        super().__init__(
+            CODE_EVALUATION_CONFLICT,
+            "a stored evaluation for this turn disagrees with a new one",
+            detail or "the stored evaluation was left unchanged; this needs investigation",
+        )
+
+
 class StoreUnavailable(TaskError):
     def __init__(self, detail: Optional[str] = None) -> None:
         super().__init__(
@@ -495,6 +527,7 @@ __all__ = [
     "CODE_CLARIFICATION_UNSUPPORTED",
     "CODE_CRITERIA_INVALID",
     "CODE_CRITERIA_UNRECORDED",
+    "CODE_EVALUATION_CONFLICT",
     "CODE_FOLLOWUP_INVALID",
     "CODE_FOLLOWUP_IN_FLIGHT",
     "CODE_FOLLOWUP_NOT_WAITING",
@@ -524,6 +557,7 @@ __all__ = [
     "ClarificationUnsupported",
     "CriteriaInvalid",
     "CriteriaUnrecorded",
+    "EvaluationConflict",
     "FollowupInFlight",
     "FollowupInvalid",
     "FollowupNotWaiting",

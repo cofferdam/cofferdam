@@ -67,7 +67,12 @@ from .clarifications import (
     PendingClarification,
 )
 from .delegated import ANSWER_MODES, ANSWER_MODE_UNKNOWN, ClarificationOption
-from .errors import IdempotencyConflict, StoreUnavailable, TaskUnknown
+from .errors import (
+    EvaluationConflict,
+    IdempotencyConflict,
+    StoreUnavailable,
+    TaskUnknown,
+)
 from .identity import new_correlation_id, new_task_id
 from .lifecycle import IllegalTransition, check_transition
 from .models import (
@@ -2867,11 +2872,29 @@ class TaskStore:
         promising it. A parent claiming three results that can name none of them
         is worse than no record at all: it reads as a judgement that was made.
 
-        **An existing evaluation is kept, not replaced.** Returns the stored one
-        unchanged. The inputs are immutable, so a second derivation of the same
-        turn is the same judgement — and if it somehow were not, silently
-        replacing an immutable record would destroy the evidence that something
-        is wrong. The uniqueness constraint is the backstop underneath.
+        **An existing evaluation is kept, and whether that is idempotent or a
+        fault depends on whether the new judgement agrees with it.** The inputs
+        are immutable by construction, so a second derivation of the same turn
+        *is* the same judgement:
+
+        * every load-bearing identity matches and every result row matches —
+          this is an ordinary retry, and the stored record is returned unchanged;
+        * anything differs — the criteria snapshot id or fingerprint, the
+          assembler version, the evidence input fingerprint, any result, any
+          reason, or the evaluation fingerprint — and it raises
+          :class:`~.errors.EvaluationConflict`, writing nothing.
+
+        The second case is not a state to reconcile. It means something this
+        milestone spent five PRs making impossible has happened: criteria that
+        moved after dispatch, a closed turn's evidence window that shifted, an
+        assembler that produced different inputs from the same rows, or an
+        evaluator that disagreed with itself. Returning the old record would
+        report a success that did not occur and hide the drift; overwriting would
+        destroy the evidence and replace a judgement somebody may have read.
+
+        **The uniqueness constraint is the backstop, not the contract.** It cannot
+        tell an identical retry from a conflicting one, so the comparison is done
+        here, explicitly, before any write is attempted.
 
         Refuses outright, before writing anything:
 
@@ -2927,11 +2950,23 @@ class TaskStore:
             if bound is None or bound["closed_through_event_sequence"] is None:
                 raise StoreUnavailable("that turn's evidence window is not fixed")
             existing = connection.execute(
-                "SELECT evaluation_id FROM task_turn_evaluations"
+                "SELECT * FROM task_turn_evaluations"
                 " WHERE task_id = ? AND turn_number = ? AND evaluator_version = ?",
                 (snapshot.task_id, int(snapshot.turn_number), EVALUATOR_VERSION),
             ).fetchone()
             if existing is not None:
+                stored_results = connection.execute(
+                    "SELECT criterion_id, ordinal, result, reason"
+                    " FROM task_turn_criterion_results"
+                    " WHERE evaluation_id = ? ORDER BY ordinal ASC",
+                    (existing["evaluation_id"],),
+                ).fetchall()
+                difference = _evaluation_difference(
+                    existing, stored_results, snapshot, bundle, items, fingerprint
+                )
+                if difference is not None:
+                    # Fails closed, writes nothing, leaves the original intact.
+                    raise EvaluationConflict(difference)
                 return None
             evaluation_id = new_evaluation_id()
             connection.execute(
@@ -3640,6 +3675,51 @@ class TaskStore:
             "task_count": sum(counts.values()),
             "counts_by_state": counts,
         }
+
+
+
+def _evaluation_difference(
+    existing: sqlite3.Row,
+    stored_results: Sequence[sqlite3.Row],
+    snapshot: Any,
+    bundle: Any,
+    results: Sequence[Any],
+    fingerprint: str,
+) -> Optional[str]:
+    """The first load-bearing field on which a new evaluation disagrees, or ``None``.
+
+    Compared field by field rather than by fingerprint alone, deliberately. The
+    fingerprint covers all of this, so a single equality check would be enough to
+    *detect* a conflict — but it would not say which identity moved, and that is
+    the first thing anybody investigating one needs. The returned code names the
+    dimension and never carries a value.
+    """
+    for label, stored, fresh in (
+        ("criteria_state", existing["criteria_state"], snapshot.state),
+        ("criteria_snapshot_id", existing["criteria_snapshot_id"], snapshot.snapshot_id),
+        ("criteria_fingerprint", existing["criteria_fingerprint"], snapshot.fingerprint),
+        ("assembler_version", existing["assembler_version"], bundle.assembler_version),
+        (
+            "evidence_input_fingerprint",
+            existing["evidence_input_fingerprint"],
+            bundle.input_fingerprint,
+        ),
+        ("result_count", existing["result_count"], len(results)),
+        ("evaluation_fingerprint", existing["evaluation_fingerprint"], fingerprint),
+    ):
+        if stored != fresh:
+            return "stored evaluation differs: " + label
+    stored_rows = [
+        (row["criterion_id"], row["ordinal"], row["result"], row["reason"])
+        for row in stored_results
+    ]
+    fresh_rows = [
+        (item.criterion_id, int(item.ordinal), item.result, item.reason)
+        for item in sorted(results, key=lambda entry: entry.ordinal)
+    ]
+    if stored_rows != fresh_rows:
+        return "stored evaluation differs: criterion_results"
+    return None
 
 
 def _monotonic_wall() -> float:

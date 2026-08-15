@@ -651,9 +651,28 @@ examined: an observation in it, or an explicit clean-tree statement.
 `machine_observations_complete` is **true when nobody looked**, so it is not
 sufficient on its own.
 
-**Boundary quality gates positives, not negatives.** A dirty or incomplete
-pre-work boundary blocks `met` — a change seen afterwards may predate the turn —
-but does not block `not_met`, because a dirty tree gives a path nowhere to hide.
+**Boundary quality gates positives _and_ negatives.** PR4 persists a **coarse**
+boundary — one word for the whole tree, with no record of which paths were dirty
+— so a dirty tree does *not* give a path nowhere to hide. Consider `foo.py` at
+HEAD revision `A`, dirty at `B` when the turn began, restored by the worker to
+`A`: nothing is committed, the tree now matches HEAD, and the resulting effect
+the worker really did produce is invisible. Absence after a dirty boundary
+therefore cannot distinguish "never touched" from "was dirty and put back".
+
+So for the v1 path predicates only a `clean_complete` boundary permits either
+conclusion:
+
+| Pre-work boundary | `met` | `not_met` |
+| --- | --- | --- |
+| `clean_complete` | possible | possible |
+| `dirty` | blocked | blocked |
+| `incomplete` | blocked | blocked |
+| `unavailable` | blocked | blocked |
+
+This is a limitation of **evidence resolution**, not a statement about the work
+and never a task failure. Closing it would need path-level pre-work state — new
+evidence architecture, deliberately not attempted here — and a worker's claims
+cannot repair it.
 
 **Domains are never collapsed.** `created` in the committed range and `modified`
 in the working tree are two true statements about two moments, so
