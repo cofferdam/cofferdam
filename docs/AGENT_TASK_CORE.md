@@ -693,6 +693,78 @@ be totalled up as a pass.
 
 There is no route, no request field and no bridge Action for any of this.
 
+### The assessment surface (M2K PR8, no schema change)
+
+One private, turn-qualified, read-only route publishes what PR6 and PR7 already
+froze:
+
+```
+GET /api/tasks/{task_id}/turns/{turn_number}/assessment
+```
+
+**It computes nothing.** No evaluator runs, no record is created, no criteria are
+touched, no event is appended and no task lifecycle moves. Reading it a thousand
+times leaves the database byte-identical, which is asserted by poisoning the
+writers and by comparing every table before and after.
+
+**One route rather than two**, because criteria and evaluation are one audit
+question and a reader needs both or neither. `TaskStore.turn_assessment_inputs`
+reads turn state, criteria and evaluation under **one hold of the store lock**, so
+a turn closing mid-request cannot produce a response pairing criteria from before
+that commit with an evaluation from after.
+
+**`require_token`, not `require_task_caller`.** The latter accepts the Actions
+bridge credential — that is what makes the bridge's ten task routes work. An
+assessment is Cofferdam's judgement about somebody's work measured against what
+they asked for, so the bridge is refused here exactly as it is on the evidence
+route, and refused because `require_token` has never heard of that credential
+rather than because a check rejects it.
+
+**Three criteria states**, published as closed words:
+
+| State | Meaning |
+| --- | --- |
+| `present` | A snapshot with at least one criterion |
+| `not_provided` | Recorded before dispatch that none were supplied — **not** a pass |
+| `legacy_unknown` | The turn predates criteria persistence; no snapshot is fabricated |
+
+**Four evaluation states**, so `null` never has to be interpreted:
+
+| State | Meaning |
+| --- | --- |
+| `recorded` | An EvaluationRecord exists for this evaluator version |
+| `criteria_legacy_unknown` | There was never a question to answer |
+| `turn_not_closed` | The turn is still running; evaluation is post-close by design |
+| `not_recorded` | A closed criteria-bearing turn has no record — worth noticing, and **not** a pass, a skip, or an `unverified` result |
+
+The word *pending* is deliberately unused: it invites polling and implies a
+record is owed.
+
+**The serializer is a whitelist, structurally.** Every published key is written
+out literally. There is no `asdict`, no `vars`, no `__dict__` and no loop over
+`__dataclass_fields__` anywhere in the module — those publish whatever a
+dataclass gains next — and the view functions refuse the wrong type rather than
+duck-typing, so a dict cannot arrive dressed as a stored record.
+
+**No aggregate.** No overall result, pass, fail, success, score, percentage,
+`all_met`, confidence or risk, in the response, the serializer or the UI. A list
+of per-criterion results is not a verdict on a task.
+
+**Evidence is named, not copied.** `assembler_version` and
+`evidence_input_fingerprint` let a client correlate with the evidence route; the
+bundle itself stays where it lives. `claim_conflict` is absent entirely — it is a
+disagreement between records, not a reason a criterion went unmet, and putting it
+beside a result is how a reader would come to treat it as one.
+
+**In the PWA**, per criterion: what was expected, then `Met` / `Not met` /
+`Could not verify`, then the reason as a short sentence. `unverified` renders in a
+**different badge class and a neutral tone** from `not_met`, because one is a
+finding about the work and the other is a statement about Cofferdam's reach.
+A manual criterion shows its description, `Could not verify`, and no control to
+mark it done. Fingerprints sit in a collapsed *Audit identifiers* section: they
+are deterministic identities, not a trust score. There is no re-run control and no
+check-runner control.
+
 ### Change claims and artifacts (M2K PR1, schema v4)
 
 Two tables carry the **claim** side of evidence, which Task Core did not have. They are additive:
@@ -1407,11 +1479,12 @@ infer them:
   entirely the adapter's.
 * Follow-up and cancellation are offered only where the adapter declares support.
 * Secrets are never task content and have no field here.
-* Since M2K PR6 a turn can carry acceptance criteria, and since M2K PR7 each one
-  gets a deterministic `met`/`not_met`/`unverified` answer. **Nothing aggregates
-  those answers.** There is no task verdict, no pass/fail, no confidence, no risk
-  and no check runner in this build, and a criterion result is never a statement
-  about whether the task succeeded.
+* Since M2K PR6 a turn can carry acceptance criteria, since M2K PR7 each one gets
+  a deterministic `met`/`not_met`/`unverified` answer, and since M2K PR8 both are
+  readable through one private turn-qualified route and a PWA panel. **Nothing
+  aggregates those answers.** There is no task verdict, no pass/fail, no
+  confidence, no risk and no check runner in this build, and a criterion result is
+  never a statement about whether the task succeeded.
 
 Also not implemented: recovery from `recovery_required`, cross-task branching,
 automatic sub-tasks, full-text search, a complete resource audit, push event
