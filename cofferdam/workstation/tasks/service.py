@@ -94,6 +94,7 @@ from .models import (
     EVENT_ACTION_REJECTED,
     EVENT_ADAPTER_STARTING,
     EVENT_CANCELLATION_REQUESTED,
+    EVENT_COMMITTED_RANGE_OBSERVED,
     EVENT_FOLLOWUP_RECEIVED,
     EVENT_MEANINGFUL_OUTPUT,
     EVENT_TASK_CANCELLED,
@@ -111,6 +112,7 @@ from .models import (
     MAX_FOLLOWUP_CHARS,
     MAX_LABEL_CHARS,
     MAX_PROMPT_CHARS,
+    OBSERVATION_DOMAIN_WORKTREE,
     ORIGIN_PWA,
     SOURCE_COFFERDAM,
     SOURCE_RESTART_RECOVERY,
@@ -138,11 +140,19 @@ from .models import (
 from .gitbaseline import (
     CAPTURE_UNAVAILABLE,
     COVERAGE_UNAVAILABLE,
+    DISPATCH_TURN_OPENED,
     HEAD_UNAVAILABLE,
     REASON_PROBE_FAILED,
     WORKTREE_UNKNOWN,
     GitBaseline,
     capture_baseline,
+)
+from .gitrange import (
+    RANGE_OP_BASELINE,
+    RANGE_OP_TARGET,
+    boundary_quality,
+    capture_committed_range,
+    range_evidence,
 )
 from .projects import ProjectRegistry, load_projects, verify_root
 from .store import TaskRow, TaskStore, _TurnClose, _TurnDraft
@@ -505,7 +515,12 @@ class TaskService:
             #
             # Its source is the task's own origin rather than a follow-up
             # source: nobody sent a follow-up to open it, the prompt did.
-            self._open_first_turn(row)
+            opened = self._open_first_turn(row)
+            # M2K PR5. Here, and not one line later: `_apply` is the only code
+            # that can close this turn, so this is the last host-owned moment at
+            # which the turn is *guaranteed* open — which is what makes the
+            # event's sequence fall inside the turn's own bounds.
+            self._record_committed_range(row, root, opened)
             return self._apply(row, outcome)
 
     def _record_pre_work_baseline(self, row: TaskRow, root: Path) -> Optional[int]:
@@ -597,7 +612,7 @@ class TaskService:
         except TaskError:  # pragma: no cover - defensive
             return
 
-    def _open_first_turn(self, row: TaskRow) -> None:
+    def _open_first_turn(self, row: TaskRow) -> Optional[int]:
         """Record that this task's first provider turn has begun.
 
         Failure here is swallowed on purpose, and it is the one place in this
@@ -606,16 +621,123 @@ class TaskService:
         that is now running with a live process behind it. What is lost is a
         row in `task_turns`, and `get_result` treats a missing turn the same way
         it treats a task from before schema version 3: no result yet.
+
+        Returns the number of the turn that opened, or ``None`` if none did. The
+        number comes from the row the store actually wrote rather than from the
+        one the baseline reserved: those agree, and the point of asking the
+        cheaper question is that a range observation is then attributed to a turn
+        that demonstrably exists rather than to one that was expected to.
         """
         try:
-            self._store.open_turn(
+            turn = self._store.open_turn(
                 row.task_id,
                 provider=row.adapter_id,
                 source=source_for_origin(row.origin),
                 started_at=now_iso(),
             )
         except TaskError:  # pragma: no cover - defensive
+            return None
+        return turn.turn_number
+
+    # -- the committed range (M2K PR5) ---------------------------------------
+
+    def _record_committed_range(
+        self, row: TaskRow, root: Path, turn_number: Optional[int]
+    ) -> None:
+        """Observe what this turn committed, while the turn is still open.
+
+        **Where this sits is the whole argument.** Both dispatch paths call it
+        after the adapter has returned and a real turn has been written, and
+        before :meth:`_apply` — the only method that can close a turn — is
+        reached. Both calls are inside ``self._lock``, so nothing can close the
+        turn in between. The event therefore gets an ordinary Task Core sequence
+        while the turn is open, and the v5 bound rule ``opened_after < sequence
+        <= closed_through`` attributes it to this turn and to no other. Capturing
+        after the close and attaching the result backwards would be a fact
+        assigned to a window by a later decision, which is the shape this
+        milestone exists to refuse.
+
+        **Only for a turn that exists.** ``dispatch_state`` must say
+        ``turn_opened``, which the store writes in the same transaction as the
+        turn row. A dispatch that was refused, or one that started and never
+        produced a turn, is left exactly as PR4 recorded it: an explicitly
+        uncertain attempt. PR5 does not invent a turn for either, and does not
+        record a range against one.
+
+        **Both revisions are machine-owned.** The baseline is the revision PR4
+        stored before the worker existed; the target is resolved by
+        :mod:`.gitrange`'s own probe. Nothing from the prompt, the follow-up
+        text, the adapter or the API caller reaches either, and ``root`` is what
+        host project authority returned. ``capture_committed_range`` refuses any
+        baseline that is not already a resolved object id, so a stored value that
+        somehow were not one could not become a revision argument.
+
+        **Failure cannot fail the task**, for the reason
+        :meth:`_record_pre_work_baseline` gives: ordinary project work does not
+        stop because Git evidence was unavailable. Every wall the probe hits is
+        recorded as an explicitly unavailable observation with a bounded reason,
+        which is a fact a reader can act on — unlike silence, which reads like a
+        clean range of nothing.
+        """
+        if turn_number is None:
             return
+        try:
+            state = self._store.turn_baseline_dispatch_state(row.task_id, turn_number)
+            if state != DISPATCH_TURN_OPENED:
+                # No boundary bound to a real turn. Nothing to measure from, and
+                # nothing is invented to stand in for it.
+                return
+            baseline = self._store.turn_baseline(row.task_id, turn_number)
+            if baseline is None:  # pragma: no cover - the state check implies a row
+                return
+            if self._range_already_recorded(row.task_id, turn_number):
+                return
+        except TaskError:  # pragma: no cover - defensive
+            return
+
+        observed = capture_committed_range(root, baseline.head_revision)
+        try:
+            self._store.append_event(
+                row.task_id,
+                EVENT_COMMITTED_RANGE_OBSERVED,
+                actor=ACTOR_SYSTEM,
+                source=SOURCE_COFFERDAM,
+                # No text. This event's content is its evidence, and a sentence
+                # summarising it would be a second rendering of the same facts
+                # that could drift from them — as well as overwriting the task's
+                # `latest_activity` with Cofferdam's bookkeeping.
+                evidence=range_evidence(
+                    observed,
+                    quality=boundary_quality(baseline),
+                    observed_at=now_iso(),
+                ),
+            )
+        except TaskError:  # pragma: no cover - defensive
+            return
+
+    def _range_already_recorded(self, task_id: str, turn_number: int) -> bool:
+        """Whether this turn already carries a committed-range observation.
+
+        Identity is read from the durable record rather than kept in memory, so
+        it survives a restart: a retry that re-enters this path finds the event
+        the previous attempt appended and appends nothing.
+
+        Deliberately **not** keyed on a read-time timestamp, which would make
+        every retry a new identity and defeat the check entirely. The turn and
+        the observation kind are the identity; the revisions are inside the
+        event, and because this build takes exactly one canonical observation per
+        turn there is nothing a second one could say that the first did not.
+        """
+        bound = self._store.turn_bound(task_id, turn_number)
+        if bound is None:  # pragma: no cover - v6 turns always have one
+            return False
+        for event in self._store.events_in_bound(task_id, bound):
+            if event.event_type != EVENT_COMMITTED_RANGE_OBSERVED:
+                continue
+            operations = {reference.operation for reference in event.evidence or ()}
+            if RANGE_OP_BASELINE in operations and RANGE_OP_TARGET in operations:
+                return True
+        return False
 
     # -- follow-up -----------------------------------------------------------
 
@@ -819,6 +941,16 @@ class TaskService:
             except TurnLimitReached:
                 self._reject(row, "followup", "turn limit reached")
                 raise
+            if starts_new_turn:
+                # M2K PR5, at the same point in the lifecycle as the first turn's:
+                # the turn is written, `_apply` has not run, and the lock has not
+                # been released since. A follow-up that *resumed* a turn opened
+                # none, so there is no new range to take — the turn it resumed is
+                # still being measured from its own boundary.
+                opened = self._store.current_turn(row.task_id)
+                self._record_committed_range(
+                    row, root, opened.turn_number if opened is not None else None
+                )
             self._audit(
                 "task_followup",
                 OUTCOME_ACCEPTED,
@@ -1523,6 +1655,28 @@ class TaskService:
                         operation=reference.operation,
                         result=reference.result,
                         observed_at=reference.observed_at or now_iso(),
+                        # M2K PR3's machine semantics, carried rather than
+                        # dropped. **This was a defect**, found while PR5 was
+                        # being written: this reconstruction listed six fields
+                        # and PR3 had added three more, so every observation
+                        # that reached the database through an adapter arrived
+                        # shaped exactly like a pre-PR3 one. The emitter produced
+                        # `change_kind`, the store column could hold it, the
+                        # assembler knew what to do with it, and this loop threw
+                        # it away in between — which made `operation_agreement`
+                        # permanently `unknown` and `claim_conflict` unreachable
+                        # on the only path a real task takes.
+                        change_kind=reference.change_kind,
+                        previous_identifier=reference.previous_identifier,
+                        change_status=reference.change_status,
+                        # **Not** carried: the domain is forced. This channel is
+                        # the worktree observer, and the committed range is
+                        # written by `_record_committed_range` and nothing else.
+                        # An adapter that set `domain="committed_range"` would be
+                        # dressing its own report as a host-owned range
+                        # observation — the same promotion `source` is gated
+                        # against, one field along.
+                        domain=OBSERVATION_DOMAIN_WORKTREE,
                     )
                     for reference in observations[:MAX_EVIDENCE_ITEMS]
                 ),

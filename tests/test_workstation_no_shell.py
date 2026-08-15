@@ -131,22 +131,30 @@ class NoShellExecutionTests(unittest.TestCase):
                 continue
             if path.name == "hostclient.py" and path.parent.name == "claude_agent_sdk":
                 continue
-            if path.name == "gitbaseline.py" and path.parent.name == "tasks":
-                # M2K PR4. The host's own pre-work Git probe, and the first
-                # non-adapter file allowed a process — deliberately, because the
-                # thing it establishes is precisely that the *host* and not the
-                # adapter decides what the repository looked like before a worker
-                # touched it. An adapter-owned baseline would be a worker
-                # describing its own starting line.
+            if (
+                path.name in ("gitbaseline.py", "gitrange.py")
+                and path.parent.name == "tasks"
+            ):
+                # M2K PR4 and PR5. The host's own Git probes — the pre-work
+                # boundary and the committed range measured from it — and the
+                # first non-adapter files allowed a process. Deliberately,
+                # because the thing they establish is precisely that the *host*
+                # and not the adapter decides what the repository looked like
+                # before a worker touched it and what it committed afterwards. An
+                # adapter-owned baseline would be a worker describing its own
+                # starting line, and an adapter-owned range would be a worker
+                # describing its own finish.
                 #
-                # It is narrower than any file above it: four constant argv
+                # Both are narrower than any file above them: constant argv
                 # tuples checked against a closed set before the call,
                 # `shell=False`, an environment built from four literal keys
                 # rather than inherited, a timeout, an output cap, and no child
                 # that outlives the call. Nothing formats, joins or interpolates
-                # a Git argument, so no prompt, adapter or API caller text can
-                # become one — `tests/test_git_baseline_authority.py` asserts
-                # that from the callable surface.
+                # a Git argument, and the only values that reach one are resolved
+                # object ids that a shape check refuses to let be anything else —
+                # `tests/test_git_baseline_authority.py` and
+                # `tests/test_git_range_capture.py` assert that from the callable
+                # surface.
                 continue
             source = path.read_text(encoding="utf-8")
             if "subprocess." in source:

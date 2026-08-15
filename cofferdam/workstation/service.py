@@ -2535,6 +2535,15 @@ def create_app(
         verified, and `operation_agreement` says `unknown` out loud rather than
         leaving the question unasked.
 
+        Since M2K PR5 every observation also carries the **domain** that produced
+        it — `worktree` for the index and working tree against the current HEAD,
+        `committed_range` for what the turn committed since the boundary recorded
+        before it started — and `committed_range` summarises that range's
+        revisions, history relation, coverage and boundary quality. A path may
+        appear in both domains, at two different moments, and neither reading may
+        be collapsed into the other. This route gained no parameter for any of
+        it: the body grew, the request did not.
+
         `generated_at` sits on the envelope beside the bundle, never inside it.
         It is presentation metadata for a person reading a response, it is not
         part of the bundle's identity, and it is not an input to

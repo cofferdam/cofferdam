@@ -201,6 +201,18 @@ EVENT_TASK_FAILED = "task_failed"
 EVENT_TASK_INTERRUPTED = "task_interrupted"
 EVENT_RECOVERY_REQUIRED = "recovery_required"
 EVENT_ACTION_REJECTED = "action_rejected"
+#: Cofferdam read what a turn committed, between the boundary it recorded before
+#: dispatch and the HEAD it observed after the adapter returned (M2K PR5).
+#:
+#: Its **own** event type, and the reason is a budget rather than a taxonomy.
+#: ``task_events.evidence_json`` is capped at :data:`MAX_EVIDENCE_ITEMS`, so
+#: folding a committed-range observation into an existing event would make the
+#: two observation domains compete for eight slots — and the loser would be
+#: dropped by :func:`~.store._bounded_evidence` with no record that anything was
+#: lost. A dedicated event gives the range its own eight and keeps the two
+#: domains separately readable, which is what the assembler needs to avoid
+#: reducing them to one changed-path set.
+EVENT_COMMITTED_RANGE_OBSERVED = "committed_range_observed"
 
 EVENT_TYPES: Tuple[str, ...] = (
     EVENT_TASK_CREATED,
@@ -219,6 +231,7 @@ EVENT_TYPES: Tuple[str, ...] = (
     EVENT_TASK_INTERRUPTED,
     EVENT_RECOVERY_REQUIRED,
     EVENT_ACTION_REJECTED,
+    EVENT_COMMITTED_RANGE_OBSERVED,
 )
 
 #: Event types only **Task Core** may write, because each one is a claim about
@@ -245,6 +258,12 @@ CORE_OWNED_EVENT_TYPES = frozenset(
         EVENT_CANCELLATION_REQUESTED,
         EVENT_FOLLOWUP_RECEIVED,
         EVENT_ACTION_REJECTED,
+        # Host-owned in the strongest sense: it says *Cofferdam ran Git*. An
+        # adapter that emitted this type would be promoting its own report to a
+        # machine observation, which is the one thing the evidence split exists
+        # to prevent. Listed here so `_apply` demotes it to ordinary output
+        # rather than writing it as a range observation.
+        EVENT_COMMITTED_RANGE_OBSERVED,
     }
 )
 
@@ -374,6 +393,34 @@ STATUS_FACTS: Dict[str, frozenset] = {
     "RM": frozenset({CHANGE_RENAMED, CHANGE_MODIFIED}),
     "RD": frozenset({CHANGE_RENAMED, CHANGE_DELETED}),
 }
+
+# -- which question a machine observation answered -----------------------------
+#
+# M2K PR5. Two machine observations can name the same path and both be true,
+# because they are answers to **different questions asked at different moments**:
+#
+#   worktree        the index and working tree, against the current HEAD
+#   committed_range the recorded pre-work boundary, against a stable HEAD
+#
+# A worker that commits `foo.py` and then edits it again produces a
+# `committed_range` modification and a `worktree` modification, and neither is a
+# duplicate of the other. Merging them into one changed-path set would lose the
+# chronology and, worse, would let a later state overwrite an earlier fact — the
+# specific way a truthful claim gets contradicted by evidence that agreed with it
+# a moment earlier.
+#
+# The default is `worktree` rather than `None` for one reason: every observation
+# written before PR5 is a worktree observation, so reading the absence that way
+# is not a guess, it is what those rows are. `committed_range` is only ever
+# written by the host-owned probe.
+
+OBSERVATION_DOMAIN_WORKTREE = "worktree"
+OBSERVATION_DOMAIN_COMMITTED_RANGE = "committed_range"
+
+OBSERVATION_DOMAINS: Tuple[str, ...] = (
+    OBSERVATION_DOMAIN_WORKTREE,
+    OBSERVATION_DOMAIN_COMMITTED_RANGE,
+)
 
 EVIDENCE_PROCESS = "process"
 EVIDENCE_FILE = "file"
@@ -573,6 +620,18 @@ class EvidenceReference:
     #: existed.
     change_status: Optional[str] = None
 
+    #: Which machine observation domain produced this row (M2K PR5), or ``None``
+    #: on every row written before PR5 — which the assembler reads as
+    #: :data:`OBSERVATION_DOMAIN_WORKTREE`, because that is what those rows are.
+    #:
+    #: A field of its own rather than something derived from ``operation``.
+    #: Deriving it would make the domain a property of a probe's spelling: the
+    #: day a second observer runs a differently-named command, every row it wrote
+    #: would silently change domain, and two facts that must never be merged
+    #: would merge. Written explicitly, the domain is what the observer said it
+    #: was.
+    domain: Optional[str] = None
+
     @property
     def verified(self) -> bool:
         return self.source in VERIFIED_EVIDENCE_SOURCES
@@ -592,6 +651,7 @@ class EvidenceReference:
             "change_kind": self.change_kind,
             "previous_identifier": self.previous_identifier,
             "change_status": self.change_status,
+            "domain": self.domain,
         }
 
 
@@ -760,6 +820,7 @@ __all__ = [
     "EVENT_ACTION_REJECTED",
     "EVENT_ADAPTER_STARTING",
     "EVENT_CANCELLATION_REQUESTED",
+    "EVENT_COMMITTED_RANGE_OBSERVED",
     "EVENT_FOLLOWUP_RECEIVED",
     "EVENT_MEANINGFUL_OUTPUT",
     "EVENT_PROGRESS",
@@ -795,6 +856,9 @@ __all__ = [
     "EVIDENCE_TEST_SUMMARY",
     "EVIDENCE_TYPES",
     "EVIDENCE_USER_REPORTED",
+    "OBSERVATION_DOMAINS",
+    "OBSERVATION_DOMAIN_COMMITTED_RANGE",
+    "OBSERVATION_DOMAIN_WORKTREE",
     "LIMITATIONS",
     "MAX_ACTIVITY_CHARS",
     "MAX_CLIENT_REQUEST_ID_CHARS",

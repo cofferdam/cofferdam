@@ -393,8 +393,8 @@ downstream reads from.
     stores no pre-work revision, so a worker that commits leaves a clean tree and is not observed —
     PR3 deliberately does **not** add a revision diff it has no honest boundary for. Still **no
     evaluator, no verdict, no risk level, no check runner, no model.**
-  - **PR4 — the durable per-turn pre-work Git baseline.** *Implemented on a branch and not
-    deployed; see [`STATUS.md`](STATUS.md).* The boundary PR3 recorded the absence of. Before a
+  - **PR4 — the durable per-turn pre-work Git baseline.** *Merged as `cf29b89` (#49) and deployed;
+    see [`STATUS.md`](STATUS.md).* The boundary PR3 recorded the absence of. Before a
     worker turn is allowed to begin, the **host** reads the project's Git revision and working-tree
     state and commits it — machine-observed, never adapter-reported, prompt-supplied or
     caller-selected. Schema **v6** adds one additive table, `task_turn_git_baselines`, keyed
@@ -411,11 +411,27 @@ downstream reads from.
     fact so PR5 can say changes did not necessarily start clean. **PR4 consumes none of it:** no
     `git diff baseline..HEAD`, `assembler_version` stays 2, no route, no bridge Action. Still **no
     evaluator, no verdict, no risk level, no check runner, no model.**
-  - **PR5 — revision-range observations from the stored boundary.** *Not started.* What PR4's
-    boundary makes answerable: what changed between a recorded pre-work revision and the repository
-    now, including work the worker committed. Must carry PR4's limitations forward — unborn and
-    unavailable boundaries, pre-existing dirt, and the fact that a boundary proves *change since a
-    recorded point*, not causation.
+  - **PR5 — committed-work observations from the stored boundary.** *Implemented on a branch and
+    not deployed; see [`STATUS.md`](STATUS.md).* What PR4's boundary makes answerable: what the
+    repository gained between the recorded pre-work revision and a stable HEAD observed after the
+    adapter returned — the work PR3 structurally cannot see, because a worker that commits leaves a
+    clean tree. **The schema stays v6** and there is no migration: the observation is immutable
+    `task_events.evidence_json` on a dedicated `committed_range_observed` event, which gets its own
+    evidence budget instead of competing with PR3's. Captured at the one host-owned point where the
+    turn is guaranteed open — after the adapter returns and the turn row exists, before `_apply`,
+    under the service lock — so the event's sequence falls inside the turn's own v5 bounds as
+    arithmetic rather than as a later attribution. Only for `dispatch_state == turn_opened`: a
+    refused dispatch and a dispatch that produced no turn stay the explicitly uncertain attempts PR4
+    recorded. **A range is not a history:** `git merge-base --is-ancestor` establishes the relation
+    first, its exit 0/1/128 kept apart, and a divergence is recorded rather than diffed — a tree
+    diff across one reports another branch's files as deleted by a worker that deleted nothing.
+    Rename detection and diff helpers are pinned on the argv rather than left to repository config,
+    and `git diff --name-status -z` is parsed on its own grammar, whose rename records are
+    source-then-destination — the opposite of porcelain's. Committed and uncommitted observations
+    stay **separate domains** that may name the same path, and a boundary PR4 recorded as dirty,
+    incomplete or unavailable may show change but may never produce a conflict. `assembler_version`
+    becomes **3**, with no live Git at assembly. Still **no evaluator, no verdict, no risk level, no
+    check runner, no model, no bridge Action.**
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**

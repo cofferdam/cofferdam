@@ -427,9 +427,16 @@ class ConflictIsNotAVerdict(BundleFixture):
         self.assertEqual(machine["change_kind"], CHANGE_DELETED)
 
     def test_the_bundle_reports_the_new_assembler_version(self):
+        """3 since M2K PR5, which taught the assembler committed-range evidence.
+
+        The number is asserted against a literal rather than against itself so
+        that a bump is a deliberate edit here. PR3 raised it to 2 for the
+        operation rules this file tests; PR5 raised it to 3 because eligibility,
+        relationship resolution and the fingerprint all changed again.
+        """
         self.observe(coverage())
-        self.assertEqual(self.bundle().assembler_version, 2)
-        self.assertEqual(ASSEMBLER_VERSION, 2)
+        self.assertEqual(self.bundle().assembler_version, 3)
+        self.assertEqual(ASSEMBLER_VERSION, 3)
 
 
 if __name__ == "__main__":  # pragma: no cover

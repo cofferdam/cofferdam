@@ -199,7 +199,11 @@ class BaselineEndToEnd(TaskTestCase):
         )
         self.assertIsNone(reopened.turn_baseline(legacy.task_id, 1))
 
-        # 20/21. No revision-range observation exists, and the assembler is untouched.
+        # 20/21. The range still gets no relational table of its own. M2K PR5
+        # consumes this boundary and persists what it reads as immutable task
+        # event evidence, so none of these tables appeared then either — which is
+        # the fact worth keeping asserted, since inventing one is the change this
+        # line exists to notice.
         with sqlite3.connect(str(self.home / "state" / "tasks" / "tasks.sqlite3")) as db:
             tables = {
                 r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -207,7 +211,9 @@ class BaselineEndToEnd(TaskTestCase):
         for forbidden in ("task_turn_git_diffs", "task_revision_changes",
                           "task_commit_observations"):
             self.assertNotIn(forbidden, tables)
-        self.assertEqual(ASSEMBLER_VERSION, 2)
+        # 3 since PR5 taught the assembler that evidence. The version is pinned
+        # rather than compared to itself so that a bump stays a deliberate edit.
+        self.assertEqual(ASSEMBLER_VERSION, 3)
 
         # 22/23. No evaluator and no check runner came with any of it. Matched on
         # whole words: `REASON_PROBE_FAILED` is a capture reason, not a verdict,
