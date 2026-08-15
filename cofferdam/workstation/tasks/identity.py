@@ -84,6 +84,42 @@ def valid_task_id(value: object) -> bool:
     return all(character in _ALPHABET_SET for character in value[len(TASK_ID_PREFIX) :])
 
 
+EVALUATION_ID_PREFIX = "evl_"
+EVALUATION_ID_BODY_CHARS = TASK_ID_BODY_CHARS
+EVALUATION_ID_CHARS = len(EVALUATION_ID_PREFIX) + EVALUATION_ID_BODY_CHARS
+
+
+def new_evaluation_id(now_ms: Optional[int] = None) -> str:
+    """A fresh evaluation id (M2K PR7). **Server-minted, always.**
+
+    Lives here rather than in :mod:`.evaluation` for a reason worth stating: that
+    module is a *pure* evaluator and is held to it structurally — it may not
+    import ``time`` or ``secrets``, because a clock and a random source are
+    exactly the two things that would let a "deterministic" judgement stop being
+    one. Minting an identifier needs both, so it happens outside the purity
+    boundary, and the id is never an input to the evaluation fingerprint.
+
+    Same construction as :func:`new_task_id`, for the same three reasons, and
+    with the same rule: no caller, adapter or worker supplies one.
+    """
+    stamp = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    stamp &= (1 << _TIME_BITS) - 1
+    randomness = secrets.randbits(_RANDOM_BITS)
+    return EVALUATION_ID_PREFIX + _encode(
+        (stamp << _RANDOM_BITS) | randomness, EVALUATION_ID_BODY_CHARS
+    )
+
+
+def valid_evaluation_id(value: object) -> bool:
+    if not isinstance(value, str) or len(value) != EVALUATION_ID_CHARS:
+        return False
+    if not value.startswith(EVALUATION_ID_PREFIX):
+        return False
+    return all(
+        character in _ALPHABET_SET for character in value[len(EVALUATION_ID_PREFIX) :]
+    )
+
+
 def new_correlation_id() -> str:
     """A random handle for one operation, meaningless on its own.
 
@@ -106,10 +142,14 @@ def valid_correlation_id(value: object) -> bool:
 __all__ = [
     "CORRELATION_ID_CHARS",
     "CORRELATION_PREFIX",
+    "EVALUATION_ID_CHARS",
+    "EVALUATION_ID_PREFIX",
     "TASK_ID_CHARS",
     "TASK_ID_PREFIX",
     "new_correlation_id",
+    "new_evaluation_id",
     "new_task_id",
+    "valid_evaluation_id",
     "valid_correlation_id",
     "valid_task_id",
 ]

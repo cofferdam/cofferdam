@@ -581,6 +581,99 @@ observations, incomplete claims, a dirty committed-range boundary, diverged
 history and unavailable Git evidence all land there. A `claim_conflict` is not a
 task-failure verdict either. **None of that is implemented.**
 
+### Deterministic criterion evaluation (M2K PR7, schema v8)
+
+Two additive tables answer, for each criterion, whether the stored machine
+evidence for that turn satisfies it: `task_turn_evaluations`, one row per closed
+turn per evaluator version, and `task_turn_criterion_results`.
+
+**Three values, and no fourth.**
+
+| Result | Meaning |
+| --- | --- |
+| `met` | The stored machine evidence satisfies the criterion |
+| `not_met` | The evidence is complete enough to rule it out, and rules it out |
+| `unverified` | The evidence cannot decide |
+
+**It is not a task verdict**, and there is no column one could be written into.
+No pass, no fail, no aggregate, no score, no confidence, no risk. Six
+equivalences are forbidden: `not_met` is not "the task failed", `met` is not "the
+task passed", `claim_conflict` is neither, "no criteria" is not success, and
+incomplete evidence is not `not_met`.
+
+**When it runs.** A turn's evidence window becomes final when
+`closed_through_event_sequence` is written — the same transaction as the turn's
+`completed_at`. Evaluation runs strictly after that, and in a *separate*
+transaction, so a failure to write a judgement cannot roll back a task's
+lifecycle. The gap that leaves — a turn closed with no judgement — is repaired by
+the same function at start-up, whose query excludes anything already evaluated.
+Restarting ten times produces one record. Nothing runs on a read.
+
+**Why a table rather than an event.** PR5 wrote its observation into
+`task_events.evidence_json` because it was captured while the turn was still
+open, so it took an ordinary sequence inside the turn's v5 bounds. An evaluation
+comes after the close; an event appended then would sit above the closed bound
+and belong to no turn, and moving the bound is the rewrite bounds exist to
+prevent.
+
+**The foreign key names `task_turns`**, unlike PR4's baseline and PR6's criteria.
+Those must be durable *before* the turn row exists, so they name `tasks`. An
+evaluation exists only for a turn that has closed, so naming the turn makes an
+evaluation of a turn that never happened unrepresentable. It binds the exact
+criteria snapshot row too.
+
+**`EVALUATOR_VERSION = 1`**, distinct from `SCHEMA_VERSION`, `ASSEMBLER_VERSION`
+and the criteria model version, and part of the uniqueness constraint — so a
+future version 2 records its own answer without rewriting version 1's.
+
+**What `path_changed` actually means.**
+
+> the turn produced a machine-observed **resulting repository change** for this
+> semantic path, as seen at the post-worker observation boundary.
+
+Not "the file was touched at some instant during execution". Cofferdam observes a
+boundary, not a process: a worker that edits a file and then reverts it leaves no
+resulting change and this build cannot see that it ever happened.
+
+**Machine evidence is the only authority.** The evaluator does not read `claims`,
+`ingestion` or `relationships` at all — a structural fact, asserted by scanning
+its syntax tree for those attribute names. A claim cannot satisfy a criterion, a
+claim's absence cannot fail one, and **incomplete claim ingestion downgrades
+nothing**: claims are not the truth source for these predicates, so their
+completeness is not a gate on them.
+
+**Closure is predicate-specific and asymmetric.** One attributable observation
+can prove a change happened; proving it did *not* needs every domain it could
+have appeared in to have been read completely — both, because a committed change
+is invisible to `git status` and an uncommitted one is invisible to the range.
+Absence in a domain counts only when there is positive evidence the domain was
+examined: an observation in it, or an explicit clean-tree statement.
+`machine_observations_complete` is **true when nobody looked**, so it is not
+sufficient on its own.
+
+**Boundary quality gates positives, not negatives.** A dirty or incomplete
+pre-work boundary blocks `met` — a change seen afterwards may predate the turn —
+but does not block `not_met`, because a dirty tree gives a path nowhere to hide.
+
+**Domains are never collapsed.** `created` in the committed range and `modified`
+in the working tree are two true statements about two moments, so
+`path_operation(P, created)` and `path_operation(P, modified)` are both met. A
+rename is met only on an explicit machine rename record carrying both endpoints,
+and is **never** inferred from a created plus a deleted.
+
+**`manual` is always `unverified`.** The description is never inspected, never
+parsed and never shown to a model. A capability v1 cannot decide — tests pass,
+build succeeds, file contains text — is `unverified` with an
+unsupported-capability reason. Nothing is executed to answer it.
+
+**`legacy_unknown` produces no record.** A turn that predates criteria
+persistence was never asked a question, and a zero-result row would assert
+Cofferdam had checked something it never had. **`not_provided` produces a record
+with zero results and no aggregate**, which the schema enforces so it can never
+be totalled up as a pass.
+
+There is no route, no request field and no bridge Action for any of this.
+
 ### Change claims and artifacts (M2K PR1, schema v4)
 
 Two tables carry the **claim** side of evidence, which Task Core did not have. They are additive:
@@ -1295,9 +1388,11 @@ infer them:
   entirely the adapter's.
 * Follow-up and cancellation are offered only where the adapter declares support.
 * Secrets are never task content and have no field here.
-* Since M2K PR6 a turn can carry acceptance criteria, and **nothing evaluates
-  them**. There is no evaluation record, no criterion result, no verdict and no
-  check runner in this build.
+* Since M2K PR6 a turn can carry acceptance criteria, and since M2K PR7 each one
+  gets a deterministic `met`/`not_met`/`unverified` answer. **Nothing aggregates
+  those answers.** There is no task verdict, no pass/fail, no confidence, no risk
+  and no check runner in this build, and a criterion result is never a statement
+  about whether the task succeeded.
 
 Also not implemented: recovery from `recovery_required`, cross-task branching,
 automatic sub-tasks, full-text search, a complete resource audit, push event

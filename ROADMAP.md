@@ -433,8 +433,8 @@ downstream reads from.
     incomplete or unavailable may show change but may never produce a conflict. `assembler_version`
     becomes **3**, with no live Git at assembly. Still **no evaluator, no verdict, no risk level, no
     check runner, no model, no bridge Action.**
-  - **PR6 — the immutable per-turn acceptance-criteria snapshot.** *Implemented on a branch and not
-    deployed; see [`STATUS.md`](STATUS.md).* What a future evaluator evaluates **against**, and
+  - **PR6 — the immutable per-turn acceptance-criteria snapshot.** *Merged as `cd11232` (#51) and
+    deployed, with the live database migrated to schema v7; see [`STATUS.md`](STATUS.md).* What a future evaluator evaluates **against**, and
     nothing more: after five PRs of evidence the database could describe what happened and held no
     criterion type, criterion set, criterion identity, fingerprint or per-turn criteria authority.
     Schema **v7** adds two additive tables — `task_turn_criteria`, one row per **reserved turn**,
@@ -462,6 +462,36 @@ downstream reads from.
     request field, no bridge Action** — and `assembler_version` stays **3**. Still **no evaluator,
     no `EvaluationRecord`, no met/not_met, no verdict, no risk level, no confidence, no check
     runner, no model.**
+  - **PR7 — deterministic criterion evaluation and the immutable `EvaluationRecord`.** *Implemented
+    on a branch and not deployed; see [`STATUS.md`](STATUS.md).* The first PR that answers anything:
+    for each supported criterion, whether the stored machine evidence for that exact turn satisfies
+    it. Three values and no fourth — `met`, `not_met`, `unverified` — and **no task verdict, no
+    aggregate, no pass/fail, no confidence, no risk, no model, no check runner and no command**, with
+    no column any of them could occupy. Schema **v8** adds `task_turn_evaluations` and
+    `task_turn_criterion_results`; the migration evaluates nothing and backfills nothing. The
+    foreign key names `task_turns`, unlike PR4's and PR6's, because an evaluation may exist only for
+    a turn that has already **closed** — which is also why it cannot be an event: PR5's observation
+    was captured while the turn was open and took a sequence inside its bounds, whereas an event
+    appended after the close would belong to no turn. Evaluation runs strictly after
+    `closed_through_event_sequence` is durable, in a separate transaction, so a failure cannot touch
+    a task's lifecycle; the resulting gap — closed turn, no judgement — is repaired by the *same*
+    function at start-up, whose query excludes anything already evaluated, so repeated restarts
+    produce one record. `EVALUATOR_VERSION = 1` is distinct from the schema, assembler and criteria
+    model versions, and sits in the uniqueness constraint so a future version 2 never rewrites
+    version 1. The record binds both identities in full — criteria `snapshot_id` **and** fingerprint,
+    `assembler_version` **and** evidence `input_fingerprint` — and copies the bundle nowhere.
+    **`path_changed` means a resulting observed repository effect, not any transient touch**;
+    Cofferdam observes a boundary, not a process. **Machine evidence is the sole authority**: the
+    evaluator does not read claims, ingestion or relationships at all, so a claim cannot satisfy a
+    criterion, silence cannot fail one, incomplete claim ingestion downgrades nothing, and
+    `claim_conflict` drives no result. Closure is **predicate-specific**: both observation domains
+    must be read completely before absence is a finding, a dirty pre-work boundary blocks a `met` but
+    not a `not_met`, and domains are never collapsed — `created` in the range and `modified` in the
+    tree are both true. A rename needs an explicit machine rename record and is **never** inferred
+    from created-plus-deleted. `manual` is always `unverified`; `legacy_unknown` produces **no**
+    record; `not_provided` produces a zero-result record the schema forbids from ever reading as a
+    pass. Internal only — no route, no request field, no bridge Action — and `assembler_version`
+    stays **3**.
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**
@@ -491,7 +521,9 @@ downstream reads from.
   shared boundary between a turn and an event sequence. **Schema v6** is PR4's pre-work Git baseline
   (`task_turn_git_baselines`); PR5 needed none and left it at v6. **Schema v7** is PR6's
   acceptance-criteria persistence (`task_turn_criteria`, `task_turn_criterion_items`) and holds
-  criteria only — there is no result, verdict or evaluation column anywhere in it. The
+  criteria only — there is no result, verdict or evaluation column anywhere in it. **Schema v8** is
+  PR7's evaluation persistence (`task_turn_evaluations`, `task_turn_criterion_results`), which holds
+  per-criterion results and, deliberately, no aggregate of them. The
   **`EvidenceBundle` itself is derived, not persisted**: it is assembled on read from stored
   immutable facts and has no table, so later criteria and evaluation records will refer to an
   evidence snapshot by `(task_id, turn_number, assembler_version, input_fingerprint)` rather than by

@@ -61,11 +61,15 @@ pair. PR5 — committed-work Git observations from that boundary — is **merged
 deployed**: workstation and Actions bridge both run it from slot A, the live schema is unchanged at
 **v6** because PR5 needed none, and `assembler_version` is **3**. The immediate rollback is slot B
 at `cf29b89` against the same live schema-v6 database; the pre-PR5 backup is deeper recovery only.
-PR6 — the immutable per-turn acceptance-criteria snapshot — is **implemented on a branch and not
-deployed**; see *In progress* below. It takes the schema to **v7** and leaves `assembler_version` at
-**3**. PR6 stores what a turn was *required* to achieve and evaluates none of it: **no evaluator, no
-verdicts, no criterion results, no risk levels, no confidence, no check runner, no planner**, and
-none of PR3, PR4, PR5 or PR6 adds any of them.
+PR6 — the immutable per-turn acceptance-criteria snapshot — is **merged (#51, `cd11232`) and
+deployed**: workstation and Actions bridge both run it from slot B, and the live task database is
+migrated to **schema v7**. Because the PR5 runtime refuses a v7 database, the rollback is a **pair**
+— slot A at `e9f5e26` together with the verified pre-v7 schema-v6 backup — rather than a slot flip.
+PR7 — deterministic criterion evaluation and the immutable `EvaluationRecord` — is **implemented on
+a branch and not deployed**; see *In progress* below. It takes the schema to **v8** and leaves
+`assembler_version` at **3**. PR7 answers each criterion `met` / `not_met` / `unverified` and
+aggregates nothing: **no task verdict, no pass/fail, no risk levels, no confidence, no model, no
+check runner, no planner**, and none of PR3 through PR7 adds any of them.
 
 **M2H is complete and merged**, closing the M1 post-reboot gate;
 M2F Agent Task Core and M2G the Claude Code adapter merged; the isolated Custom GPT Actions mobile
@@ -774,10 +778,101 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2K PR7 — deterministic criterion evaluation and the immutable `EvaluationRecord`
+
+On `m2k-pr7-criterion-evaluation`, from the merged `cd11232`. **Implemented on a branch, not merged
+and not deployed.**
+
+PR6 froze **what was required** before dispatch. PR2 to PR5 froze **what machine evidence exists**
+for the turn. PR7 is the first PR that answers a question with those two, and it answers exactly one:
+
+    does the stored machine evidence for this exact turn satisfy this exact criterion?
+
+**It is not a task verdict, and there is nowhere for one to live.** No pass, no fail, no aggregate,
+no score, no confidence, no risk, no model, no check runner, no command — and no column any of them
+could be written into. Six equivalences are forbidden and pinned by tests: `not_met` is not "the task
+failed", `met` is not "the task passed", `claim_conflict` is neither, "no criteria" is not success,
+and incomplete evidence is not `not_met`.
+
+**Schema v8, additive, two tables.** `task_turn_evaluations` is one row per closed turn per
+evaluator version; `task_turn_criterion_results` carries the per-criterion answers. No v7 table
+changed shape and the migration writes nothing — it evaluates no historical turn, parses no prompt,
+interprets no claim and fabricates no criteria.
+
+**Why not an event, which is where PR5 put its observation.** The difference is *when*. PR5's
+committed-range observation is captured while the turn is still open, so it takes an ordinary
+sequence inside the turn's own v5 bounds. An evaluation is produced **after** the turn is durably
+closed; an event appended then would sit above `closed_through_event_sequence` and belong to no turn,
+and moving a closed bound to make room is the exact rewrite bounds exist to prevent.
+
+**The foreign key is the one thing unlike v6 and v7, deliberately.** A baseline and a criteria
+snapshot must be durable *before* the turn row exists, so they name `tasks`. An evaluation may exist
+only for a turn that has already closed, so it names `task_turns` — making "an evaluation of a turn
+that never happened" unrepresentable. It also binds the exact criteria snapshot row.
+
+**Timing, and the crash it survives.** A turn's evidence window becomes final when
+`closed_through_event_sequence` is written, in the same transaction as the turn's `completed_at`.
+Evaluation runs strictly after that, in a *separate* transaction — so a failure cannot roll back a
+task's lifecycle, and the interesting gap is a turn that is closed with no judgement yet. That gap is
+not a special case: one function, `evaluate_closed_turns`, runs for one task after a close and for
+every task at start-up, and its query excludes anything already evaluated. Restarting ten times
+produces one record.
+
+**`EVALUATOR_VERSION = 1`**, distinct from `SCHEMA_VERSION`, `ASSEMBLER_VERSION` and the criteria
+model version because those four move for four different reasons. It is in the record, in the
+fingerprint, and in the uniqueness constraint — so a future version 2 records its own answer for a
+turn without rewriting version 1's.
+
+**Both identities are bound in full**: the criteria `snapshot_id` *and* its fingerprint, the
+`assembler_version` *and* the evidence `input_fingerprint`. An id says which durable row was read; a
+fingerprint says what content it represented. The evidence bundle itself is never copied in.
+
+**`path_changed` means a resulting observed repository effect**, not "the file was touched at some
+instant". Cofferdam observes a boundary, not a process: a worker that edits a file and reverts it
+leaves no resulting change and this build cannot see that it happened. That wording is in the module,
+the docs and the tests.
+
+**Machine evidence is the only authority.** The evaluator does not read `claims`, `ingestion` or
+`relationships` at all — asserted structurally, by scanning the syntax tree for those attribute
+names. So a claim cannot satisfy a criterion, a claim's absence cannot fail one, and **incomplete
+claim ingestion does not downgrade anything**, which the PR6 readiness audit had floated as a
+possible global gate and is deliberately not the rule.
+
+**Closure is predicate-specific and asymmetric.** One attributable observation can prove a change;
+absence proves nothing unless every domain it could have appeared in was read completely. Both
+domains must close, because a committed change is invisible to `git status` and an uncommitted one is
+invisible to the range. A dirty or incomplete pre-work boundary blocks a `met` — causation is not
+established — but does not block a `not_met`, because a dirty tree gives a path nowhere to hide.
+
+**Domains are never collapsed.** `created` in the committed range and `modified` in the working tree
+are two true statements about two moments, and both `path_operation(P, created)` and
+`path_operation(P, modified)` are met. A rename is met only on an explicit machine rename record with
+both endpoints — **never** inferred from a created plus a deleted.
+
+**`manual` is always `unverified`**, the description is never inspected, and a capability v1 cannot
+decide is `unverified` with an unsupported-capability reason rather than an exception or an execution.
+
+**`legacy_unknown` produces no record at all** — a turn that was never asked a question gets no
+fabricated zero-result row. **`not_provided` produces a record with zero results and no aggregate**,
+which the schema enforces so it can never be totalled up as "everything passed".
+
+**No API surface.** The evaluator is internal: no route, no request field, no bridge Action. Ten
+bridge routes, nine authenticated, `artifacts_supported` still `false`, `getProjectContext`
+untouched, `ASSEMBLER_VERSION` still **3**.
+
+## M2K records — the evidence foundation (written while each was on its branch)
+
+M2K is **in progress**: PR1 through PR6 are merged and deployed; PR7 is on a branch. See *In
+progress* above for PR7.
+
 ### M2K PR6 — the immutable per-turn acceptance-criteria snapshot
 
-On `m2k-pr6-acceptance-criteria`, from the merged `e9f5e26`. **Implemented on a branch, not merged
-and not deployed.**
+**Merged as `cd11232` (#51) and deployed**: workstation and Actions bridge both run it from slot B,
+and the live task database is migrated to **schema v7**. The rollback is a **pair** — slot A at
+`e9f5e26` plus the verified pre-v7 schema-v6 backup — because the PR5 runtime refuses a v7 database
+outright (measured: `StoreUnavailable` at `TaskStore` first use, at a task read and at `create_app`,
+with the database left byte-identical). The record below was written while it was still on
+`m2k-pr6-acceptance-criteria`, from the merged `e9f5e26`, and is kept as it was written.
 
 Five PRs of evidence work left Cofferdam able to say a great deal about what *happened* and holding
 nothing at all about what was *required*. There was no acceptance criterion type, no criterion set,
@@ -865,11 +960,6 @@ with the shipped PR5 runtime (`e9f5e26`, schema-v6). It refused with `StoreUnava
 database file was **byte-identical** afterwards — same SHA-256, same `sqlite_master`, same rows,
 `integrity_check` ok, `foreign_key_check` clean. It does create the WAL and shm siblings on its way
 to refusing, and writes nothing into them.
-
-## M2K records — the evidence foundation (written while each was on its branch)
-
-M2K is **in progress**: PR1, PR2, PR3, PR4 and PR5 are merged and deployed; PR6 is on a branch. See
-*In progress* above for PR6.
 
 ### M2K PR5 — committed-work Git observations from the durable baseline
 

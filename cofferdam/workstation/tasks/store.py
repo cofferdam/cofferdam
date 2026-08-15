@@ -203,7 +203,38 @@ from .turns import (
 #: record, no met/not_met, no verdict, no check runner and no command anywhere in
 #: this build; ``ASSEMBLER_VERSION`` stays at 3 and the evidence bundle's inputs
 #: are unchanged.
-SCHEMA_VERSION = 7
+#:
+#: Version 8 adds ``task_turn_evaluations`` and ``task_turn_criterion_results``
+#: (M2K PR7) and nothing else. It exists because an evaluation is a judgement
+#: produced by a specific evaluator version against two exact frozen identities —
+#: a criteria snapshot and an evidence bundle — and there was nowhere durable to
+#: put one.
+#:
+#: **Why not ``task_events.evidence_json``, which is where PR5 put its
+#: observation.** The difference is *when*. PR5's committed-range observation is
+#: captured while the turn is still open, so it takes an ordinary sequence inside
+#: the turn's own v5 bounds and attribution is arithmetic. An evaluation is
+#: produced **after** the turn is durably closed. An event appended then would
+#: sit above ``closed_through_event_sequence`` and belong to no turn — or would
+#: require moving a closed bound, which is precisely the rewrite the bounds exist
+#: to prevent. A relational row keyed by the turn is the honest shape.
+#:
+#: Additive in exactly the same way as every version before it: two new tables,
+#: no column of an existing table moved, changed type or gained a constraint, and
+#: **no row rewritten or inferred**. Historical turns get no evaluation. The
+#: migration writes nothing at all: it does not parse a prompt, interpret a
+#: claim, fabricate criteria or run an evaluator.
+#:
+#: The foreign key is the one thing that is *unlike* v6 and v7, and deliberately.
+#: A baseline and a criteria snapshot must exist before the turn row does, so
+#: they name ``tasks``. An evaluation exists only for a turn that has already
+#: closed, so it names ``task_turns`` — which makes "an evaluation of a turn that
+#: does not exist" unrepresentable rather than merely unwritten.
+#:
+#: PR7 evaluates each criterion and aggregates nothing. There is no task verdict,
+#: no pass, no fail, no confidence, no risk, no model and no check runner;
+#: ``ASSEMBLER_VERSION`` stays at 3 and criteria persistence is untouched.
+SCHEMA_VERSION = 8
 
 #: Where the database lives, under COFFERDAM_HOME. Its own directory so the file
 #: and its WAL/shm siblings stay together and can be permissioned as a unit.
@@ -767,6 +798,124 @@ CREATE TABLE IF NOT EXISTS task_turn_criterion_items (
 
 CREATE INDEX IF NOT EXISTS criterion_items_by_turn
     ON task_turn_criterion_items (task_id, turn_number, ordinal);
+
+-- Schema v8. One evaluator version's deterministic judgement on one CLOSED turn.
+--
+-- What this row is NOT, first, because the absence is the design: there is no
+-- task verdict here. No pass, no fail, no succeeded, no score, no confidence, no
+-- risk, no aggregate of any kind, and no column one could be written into. A
+-- task-level judgement needs an independently reviewed doctrine about what a
+-- mixture of per-criterion results *means*, and leaving it no seat is what stops
+-- a later change from inventing one in passing.
+--
+-- The foreign key names `task_turns`, and the contrast with v6 and v7 is the
+-- point rather than an inconsistency. A Git baseline and a criteria snapshot
+-- must be durable BEFORE the turn row exists, so they name `tasks` and the
+-- honest state "recorded, then the adapter refused" stays representable. An
+-- evaluation is the opposite: it may only exist for a turn that has already
+-- closed, so naming `task_turns` makes "an evaluation of a turn that never
+-- happened" impossible to write rather than merely discouraged. It also binds
+-- the exact criteria snapshot row through `criteria_snapshot_id`, so a stored
+-- judgement can never be re-attached to different criteria.
+--
+-- `evaluator_version` is in the uniqueness constraint on purpose. A future
+-- EVALUATOR_VERSION = 2 disagreeing with version 1 is information, not a
+-- correction: it records its own row for the same turn and version 1's row is
+-- never rewritten. That is why this is `UNIQUE (task_id, turn_number,
+-- evaluator_version)` rather than `UNIQUE (task_id, turn_number)`.
+--
+-- Both identities are stored in full — the criteria snapshot id AND its
+-- fingerprint, the assembler version AND the evidence input fingerprint —
+-- because they answer different audit questions. An id says which durable row
+-- was read; a fingerprint says what immutable content that row represented. A
+-- record carrying only one of each could not tell "the same criteria" from "the
+-- same criteria row".
+--
+-- The EvidenceBundle itself is deliberately NOT copied in. It is derived on read
+-- from immutable stored rows and is identified here by its fingerprint; copying
+-- it would create a second durable shape for facts that already have one, and
+-- the two would eventually disagree.
+CREATE TABLE IF NOT EXISTS task_turn_evaluations (
+    evaluation_id              TEXT    PRIMARY KEY,
+    task_id                    TEXT    NOT NULL,
+    turn_number                INTEGER NOT NULL,
+    evaluator_version          INTEGER NOT NULL,
+    criteria_state             TEXT    NOT NULL,
+    criteria_snapshot_id       TEXT    NOT NULL,
+    criteria_fingerprint       TEXT    NOT NULL,
+    assembler_version          INTEGER NOT NULL,
+    evidence_input_fingerprint TEXT    NOT NULL,
+    result_count               INTEGER NOT NULL,
+    evaluation_fingerprint     TEXT    NOT NULL,
+    -- Audit metadata only, and explicitly not part of identity: the fingerprint
+    -- does not hash it, and re-deriving the same judgement tomorrow produces the
+    -- same value it produced today.
+    recorded_at                TEXT    NOT NULL,
+    FOREIGN KEY (task_id, turn_number)
+        REFERENCES task_turns (task_id, turn_number) ON DELETE CASCADE,
+    FOREIGN KEY (criteria_snapshot_id)
+        REFERENCES task_turn_criteria (snapshot_id) ON DELETE CASCADE,
+    UNIQUE (task_id, turn_number, evaluator_version),
+    CHECK (turn_number >= 1),
+    CHECK (evaluator_version >= 1),
+    CHECK (result_count >= 0),
+    -- Only the two states a criteria snapshot can actually be recorded in.
+    -- `legacy_unknown` is absent because a turn that predates criteria
+    -- persistence was never asked a question, and a zero-result row for it would
+    -- assert that Cofferdam checked something it never had.
+    CHECK (criteria_state IN ('present', 'not_provided')),
+    -- A `not_provided` evaluation has zero results, and a `present` one has at
+    -- least one. This is what stops "no criteria" from being stored in a shape
+    -- that a later reader could total up as "everything passed".
+    CHECK ((criteria_state = 'present') = (result_count > 0)),
+    CHECK (length(criteria_fingerprint) = 64),
+    CHECK (length(evidence_input_fingerprint) = 64),
+    CHECK (length(evaluation_fingerprint) = 64)
+);
+
+CREATE INDEX IF NOT EXISTS evaluations_by_turn
+    ON task_turn_evaluations (task_id, turn_number, evaluator_version);
+
+-- One criterion's deterministic answer inside one evaluation.
+--
+-- `result` is closed in the schema because those three words are the whole
+-- doctrine and are meant to outlive every evaluator version: `met`, `not_met`,
+-- `unverified`. There is no `failed`, and the reason there is no `failed` is
+-- that a name is a thing people reach for.
+--
+-- `reason` is closed in CODE (`evaluation.REASONS`) rather than in a CHECK, and
+-- the trade-off is deliberate: the reason vocabulary is per-evaluator-version
+-- detail, and a CHECK listing today's sixteen codes would make adding a
+-- seventeenth in EVALUATOR_VERSION = 2 a schema migration. The invariant that
+-- matters — a reason is always present, bounded, and drawn from the closed
+-- code-owned set valid for its result — is enforced by `record_evaluation` and
+-- asserted by the tests.
+--
+-- There is deliberately **no explanation column**. Not a sentence, not a
+-- narrative, not a model's summary. Free prose in a deterministic record is how
+-- a judgement starts being argued with instead of recomputed, and it is the
+-- obvious place a model would later be attached.
+CREATE TABLE IF NOT EXISTS task_turn_criterion_results (
+    evaluation_id TEXT    NOT NULL,
+    criterion_id  TEXT    NOT NULL,
+    ordinal       INTEGER NOT NULL,
+    result        TEXT    NOT NULL,
+    reason        TEXT    NOT NULL,
+    PRIMARY KEY (evaluation_id, criterion_id),
+    FOREIGN KEY (evaluation_id)
+        REFERENCES task_turn_evaluations (evaluation_id) ON DELETE CASCADE,
+    -- The result names the exact durable criterion row it answered, so a
+    -- judgement can never be re-read against a different criterion.
+    FOREIGN KEY (criterion_id)
+        REFERENCES task_turn_criterion_items (criterion_id) ON DELETE CASCADE,
+    UNIQUE (evaluation_id, ordinal),
+    CHECK (ordinal >= 1),
+    CHECK (result IN ('met', 'not_met', 'unverified')),
+    CHECK (length(reason) BETWEEN 1 AND 64)
+);
+
+CREATE INDEX IF NOT EXISTS criterion_results_by_evaluation
+    ON task_turn_criterion_results (evaluation_id, ordinal);
 """
 
 
@@ -2593,6 +2742,238 @@ class TaskStore:
                 (task_id, int(turn_number)),
             ).fetchone()
         return None if row is None else row["dispatch_state"]
+
+    # -- deterministic criterion evaluation (schema v8) -----------------------
+
+    def closed_turns_awaiting_evaluation(
+        self, task_id: Optional[str] = None, *, limit: int = 256
+    ) -> List[Tuple[str, int]]:
+        """Turns that are durably closed, have criteria, and have no evaluation.
+
+        The single query both callers use: the service asks it for one task after
+        a turn closes, and again for every task at start-up so a crash between
+        the close and the evaluation is repaired. Bounded, ordered and derived
+        entirely from stored rows, so a restart that runs it twice does the same
+        work twice and produces the same nothing the second time.
+
+        Four conditions, each ruling out a different mistake:
+
+        * ``completed_at IS NOT NULL`` — never evaluate a turn that is still
+          running.
+        * ``closed_through_event_sequence IS NOT NULL`` — never evaluate a turn
+          whose exact evidence window is not yet fixed. A turn from before schema
+          v5 has no bound and is skipped forever, which is correct: its evidence
+          cannot be attributed to it in the first place.
+        * a criteria snapshot exists — a ``legacy_unknown`` turn was never asked
+          a question, and :func:`~.evaluation.evaluable` says so.
+        * no row in ``task_turn_evaluations`` for this evaluator version — the
+          idempotency that makes repeated restarts harmless.
+        """
+        from .evaluation import EVALUATOR_VERSION
+
+        clause = "" if task_id is None else " AND t.task_id = ?"
+        arguments: List[Any] = [EVALUATOR_VERSION]
+        if task_id is not None:
+            arguments.append(task_id)
+        arguments.append(int(limit))
+        with self._read() as connection:
+            rows = connection.execute(
+                """
+                SELECT t.task_id AS task_id, t.turn_number AS turn_number
+                  FROM task_turns AS t
+                  JOIN task_turn_bounds AS b
+                    ON b.task_id = t.task_id AND b.turn_number = t.turn_number
+                  JOIN task_turn_criteria AS c
+                    ON c.task_id = t.task_id AND c.turn_number = t.turn_number
+                 WHERE t.completed_at IS NOT NULL
+                   AND b.closed_through_event_sequence IS NOT NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM task_turn_evaluations AS e
+                        WHERE e.task_id = t.task_id
+                          AND e.turn_number = t.turn_number
+                          AND e.evaluator_version = ?
+                   )
+                """
+                + clause
+                + " ORDER BY t.task_id, t.turn_number LIMIT ?",
+                arguments,
+            ).fetchall()
+        return [(row["task_id"], int(row["turn_number"])) for row in rows]
+
+    def evaluation(
+        self, task_id: str, turn_number: int, *, evaluator_version: Optional[int] = None
+    ) -> Optional["EvaluationRecord"]:
+        """One turn's stored evaluation for one evaluator version, or ``None``.
+
+        ``None`` means no evaluation was recorded, and it must never be read as
+        "nothing was met". A historical turn has none because it was never asked
+        a question; a turn evaluated by a future version 2 has none *for version
+        1* and that is a real distinction the uniqueness constraint preserves.
+        """
+        from .evaluation import EVALUATOR_VERSION, CriterionResult, EvaluationRecord
+
+        version = EVALUATOR_VERSION if evaluator_version is None else int(evaluator_version)
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM task_turn_evaluations"
+                " WHERE task_id = ? AND turn_number = ? AND evaluator_version = ?",
+                (task_id, int(turn_number), version),
+            ).fetchone()
+            if row is None:
+                return None
+            # ORDER BY the stored ordinal, never rowid: a VACUUM may reorder the
+            # table and a judgement's order is a fact it recorded.
+            items = connection.execute(
+                "SELECT * FROM task_turn_criterion_results"
+                " WHERE evaluation_id = ? ORDER BY ordinal ASC",
+                (row["evaluation_id"],),
+            ).fetchall()
+        return EvaluationRecord(
+            evaluation_id=row["evaluation_id"],
+            task_id=row["task_id"],
+            turn_number=row["turn_number"],
+            evaluator_version=row["evaluator_version"],
+            criteria_state=row["criteria_state"],
+            criteria_snapshot_id=row["criteria_snapshot_id"],
+            criteria_fingerprint=row["criteria_fingerprint"],
+            assembler_version=row["assembler_version"],
+            evidence_input_fingerprint=row["evidence_input_fingerprint"],
+            result_count=row["result_count"],
+            evaluation_fingerprint=row["evaluation_fingerprint"],
+            recorded_at=row["recorded_at"],
+            results=tuple(
+                CriterionResult(
+                    criterion_id=item["criterion_id"],
+                    ordinal=item["ordinal"],
+                    result=item["result"],
+                    reason=item["reason"],
+                )
+                for item in items
+            ),
+        )
+
+    def record_evaluation(
+        self,
+        *,
+        snapshot: "CriteriaSnapshot",
+        bundle: Any,
+        results: Sequence["CriterionResult"],
+        recorded_at: str,
+    ) -> Optional["EvaluationRecord"]:
+        """Persist one evaluation and every result, atomically. Never overwrite.
+
+        **The parent and its children are one transaction**, and the composite
+        foreign key makes the database enforce it rather than this method
+        promising it. A parent claiming three results that can name none of them
+        is worse than no record at all: it reads as a judgement that was made.
+
+        **An existing evaluation is kept, not replaced.** Returns the stored one
+        unchanged. The inputs are immutable, so a second derivation of the same
+        turn is the same judgement — and if it somehow were not, silently
+        replacing an immutable record would destroy the evidence that something
+        is wrong. The uniqueness constraint is the backstop underneath.
+
+        Refuses outright, before writing anything:
+
+        * a snapshot whose state is not evaluable — ``legacy_unknown`` gets no
+          fabricated record;
+        * a turn that is not durably closed and bounded;
+        * a result whose reason is not in the closed set valid for its result;
+        * a result set whose size disagrees with the snapshot's criteria.
+        """
+        from .evaluation import (
+            EVALUATOR_VERSION,
+            REASONS_FOR_RESULT,
+            RESULTS,
+            evaluable,
+            evaluation_fingerprint,
+            new_evaluation_id,
+        )
+        from .criteria import CRITERIA_PRESENT
+
+        if not evaluable(snapshot):
+            return None
+        items = tuple(results)
+        if snapshot.state == CRITERIA_PRESENT:
+            if len(items) != len(snapshot.criteria):
+                raise StoreUnavailable("an evaluation must answer every criterion")
+        elif items:
+            raise StoreUnavailable("a not_provided evaluation has no results")
+        for item in items:
+            if item.result not in RESULTS:
+                raise StoreUnavailable("unknown evaluation result")
+            if item.reason not in REASONS_FOR_RESULT[item.result]:
+                raise StoreUnavailable("that reason is not valid for that result")
+
+        fingerprint = evaluation_fingerprint(
+            snapshot=snapshot, bundle=bundle, results=items
+        )
+        with self._write() as connection:
+            turn = connection.execute(
+                "SELECT completed_at FROM task_turns"
+                " WHERE task_id = ? AND turn_number = ?",
+                (snapshot.task_id, int(snapshot.turn_number)),
+            ).fetchone()
+            if turn is None or turn["completed_at"] is None:
+                # Never a judgement on an open turn, and never one on a turn that
+                # does not exist. The foreign key would refuse the second; this
+                # refuses the first, which the database cannot see.
+                raise StoreUnavailable("that turn is not durably closed")
+            bound = connection.execute(
+                "SELECT closed_through_event_sequence FROM task_turn_bounds"
+                " WHERE task_id = ? AND turn_number = ?",
+                (snapshot.task_id, int(snapshot.turn_number)),
+            ).fetchone()
+            if bound is None or bound["closed_through_event_sequence"] is None:
+                raise StoreUnavailable("that turn's evidence window is not fixed")
+            existing = connection.execute(
+                "SELECT evaluation_id FROM task_turn_evaluations"
+                " WHERE task_id = ? AND turn_number = ? AND evaluator_version = ?",
+                (snapshot.task_id, int(snapshot.turn_number), EVALUATOR_VERSION),
+            ).fetchone()
+            if existing is not None:
+                return None
+            evaluation_id = new_evaluation_id()
+            connection.execute(
+                """
+                INSERT INTO task_turn_evaluations
+                    (evaluation_id, task_id, turn_number, evaluator_version,
+                     criteria_state, criteria_snapshot_id, criteria_fingerprint,
+                     assembler_version, evidence_input_fingerprint, result_count,
+                     evaluation_fingerprint, recorded_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    evaluation_id,
+                    snapshot.task_id,
+                    int(snapshot.turn_number),
+                    EVALUATOR_VERSION,
+                    snapshot.state,
+                    snapshot.snapshot_id,
+                    snapshot.fingerprint,
+                    bundle.assembler_version,
+                    bundle.input_fingerprint,
+                    len(items),
+                    fingerprint,
+                    recorded_at,
+                ),
+            )
+            for item in items:
+                connection.execute(
+                    """
+                    INSERT INTO task_turn_criterion_results
+                        (evaluation_id, criterion_id, ordinal, result, reason)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        evaluation_id,
+                        item.criterion_id,
+                        int(item.ordinal),
+                        item.result,
+                        item.reason,
+                    ),
+                )
+        return self.evaluation(snapshot.task_id, int(snapshot.turn_number))
 
     def turns(self, task_id: str) -> List["TaskTurn"]:
         """Every turn this task has had, oldest first. Bounded by the row limit."""
