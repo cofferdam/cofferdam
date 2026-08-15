@@ -238,9 +238,18 @@ class PayloadTests(EvidenceApiTestCase):
         self.assertEqual(first["evidence"], second["evidence"])
 
     def test_the_bundle_publishes_its_versions_and_attribution(self):
+        """Two numbers answering two questions, and only one of them has moved.
+
+        `version` is the bundle *shape* a client parses, and it is still 1 —
+        every field a PR2 client knew is still there and still means the same
+        thing. `assembler_version` is the *rules*, and it is 3: PR3 changed what
+        an observation proves, PR5 added a second observation domain and the
+        relationships resolved from it. A client that stored a fingerprint can
+        tell those apart, which is why they are separate numbers.
+        """
         bundle = self.payload()["evidence"]
         self.assertEqual(bundle["version"], 1)
-        self.assertEqual(bundle["assembler_version"], 2)
+        self.assertEqual(bundle["assembler_version"], 3)
         self.assertIn(bundle["turn_attribution"], ("exact", "legacy_unknown"))
 
     def test_the_bundle_carries_no_artifact_body(self):
