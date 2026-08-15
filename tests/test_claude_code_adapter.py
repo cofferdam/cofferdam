@@ -1195,13 +1195,33 @@ class HappyPath(ClaudeTaskTestCase):
             for reference in event.evidence:
                 sources.add(reference.source)
         self.assertIn(EVIDENCE_GIT_OBSERVED, sources)
-        # Nothing the adapter merely said was promoted to an observation.
+        # Nothing the adapter merely said was promoted to an observation. The
+        # whitelist is every operation a *Cofferdam-owned probe* emits, and it is
+        # imported rather than spelled so that adding a probe operation is a
+        # change to the probe rather than a quiet widening here. M2K PR5 added
+        # the committed-range ones, which the service writes after the adapter
+        # has already returned.
+        from cofferdam.workstation.tasks.gitrange import (
+            RANGE_OP_BASELINE,
+            RANGE_OP_COVERAGE,
+            RANGE_OP_LIMITATION,
+            RANGE_OP_PATH,
+            RANGE_OP_TARGET,
+        )
+
+        host_owned = (
+            "rev-parse HEAD",
+            "git status",
+            RANGE_OP_BASELINE,
+            RANGE_OP_TARGET,
+            RANGE_OP_COVERAGE,
+            RANGE_OP_LIMITATION,
+            RANGE_OP_PATH,
+        )
         for event in self.store.events(row.task_id):
             for reference in event.evidence:
                 if reference.source == EVIDENCE_GIT_OBSERVED:
-                    self.assertIn(
-                        reference.operation, ("rev-parse HEAD", "git status")
-                    )
+                    self.assertIn(reference.operation, host_owned)
 
 
 class FollowUp(ClaudeTaskTestCase):

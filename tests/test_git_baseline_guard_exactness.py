@@ -191,8 +191,23 @@ class TheExceptedFileIsStillChecked(unittest.TestCase):
         self.assertIn("timeout=PROBE_TIMEOUT_SECONDS", self.source)
         self.assertIn("MAX_PROBE_OUTPUT", self.source)
 
-    def test_it_is_the_only_excepted_file_in_the_package(self):
-        """If a second one ever appears, this fails and somebody has to argue for it."""
+    def test_the_excepted_files_are_exactly_the_two_host_git_probes(self):
+        """A second one appeared in M2K PR5, and here is the argument for it.
+
+        ``gitrange.py`` is the *other half of the same fact*. PR4 records what
+        the repository was before a worker started; PR5 reads what it committed
+        against that boundary. Both must be host-owned for the identical reason —
+        an adapter-owned baseline is a worker describing its own starting line,
+        and an adapter-owned range is a worker describing its own finish — and
+        both are held to every rule this module checks of the first: a closed
+        argv set, no runtime argv construction, an environment that is not
+        inherited, a timeout and an output cap.
+
+        This test is not "the list may grow". It is a list of two, each of which
+        had to be argued for, and a third still fails here. The rest of this
+        module proves the guards themselves are real by writing a rogue file and
+        requiring every one of them to reject it.
+        """
         offenders = sorted(
             path.name
             for path in TASKS_PACKAGE.rglob("*.py")
@@ -200,7 +215,29 @@ class TheExceptedFileIsStillChecked(unittest.TestCase):
             and path.name not in ("hostclient.py",)
             and "subprocess" in python_code_only(path.read_text("utf-8"))
         )
-        self.assertEqual(offenders, ["gitbaseline.py"])
+        self.assertEqual(offenders, ["gitbaseline.py", "gitrange.py"])
+
+    def test_the_second_probe_is_held_to_the_same_rules(self):
+        """Asserted of ``gitrange.py`` itself, not inherited from a list.
+
+        The failure this prevents is the quiet one: a file added to an exception
+        list and never checked against the reasons the exception exists.
+        """
+        source = (TASKS_PACKAGE / "gitrange.py").read_text("utf-8")
+        code = python_code_only(source)
+
+        self.assertIn("shell=False", source)
+        self.assertIn("env=dict(PROBE_ENVIRONMENT)", source)
+        self.assertIn("timeout=PROBE_TIMEOUT_SECONDS", source)
+        self.assertIn("MAX_PROBE_OUTPUT", source)
+        self.assertNotIn("os.environ", code)
+        # The membership check that makes the command set closed.
+        self.assertIn("RANGE_ALLOWED_COMMANDS", source)
+        for forbidden in (
+            'command.append', 'command +', 'command.extend', '.format(',
+            'f"git', "f'git", '% root', '.join(command', '+ argv', 'argv +',
+        ):
+            self.assertNotIn(forbidden, source, forbidden)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -1014,9 +1014,9 @@ class Cancellation(TaskTestCase):
                     "os\n.\nkill\n(", source.replace("\n\n", "\n"), str(path)
                 )
                 continue
-            if path.name == "gitbaseline.py":
-                # M2K PR4. The host-owned pre-work Git probe. It runs a process
-                # and owns none: four constant argv tuples, `shell=False`, a
+            if path.name in ("gitbaseline.py", "gitrange.py"):
+                # M2K PR4 and PR5. The two host-owned Git probes. Each runs a
+                # process and owns none: constant argv tuples, `shell=False`, a
                 # closed environment, a timeout and an output cap, and every one
                 # of them read-only. It never starts anything that outlives the
                 # call, so there is nothing here to signal, stop or look up —
@@ -1025,10 +1025,12 @@ class Cancellation(TaskTestCase):
                 #
                 # The property this scan protects is that a request handler, a
                 # model or the store can never reach a process. That is still
-                # exactly true: the store does not import this module, and the
-                # only caller is `TaskService._record_pre_work_baseline` on the
-                # dispatch path, which is where the host is supposed to be
-                # looking at the project it is about to hand to a worker.
+                # exactly true: the store does not import either module, and the
+                # only callers are `TaskService._record_pre_work_baseline` and
+                # `TaskService._record_committed_range` on the dispatch path,
+                # which is where the host is supposed to be looking at the
+                # project it is about to hand to a worker — and, in PR5's case,
+                # at what came back from one.
                 for never in (
                     "os.kill", "signal.", "SIGTERM", "SIGKILL", "terminate()",
                     "Popen", "start_new_session", "preexec_fn",
@@ -1256,7 +1258,19 @@ class Evidence(TaskTestCase):
             ),
         ))
         row = self.create(adapter_id="claimer")
-        events = [e for e in self.store.events(row.task_id, limit=200) if e.evidence]
+        events = [
+            event
+            for event in self.store.events(row.task_id, limit=200)
+            if event.evidence
+            # The committed-range event (M2K PR5) is Cofferdam's own, written by
+            # the service after the adapter returned and carrying what the host
+            # read from Git. Its references are `git_observed` because Cofferdam
+            # observed them, which is the distinction this test defends rather
+            # than a violation of it — an adapter has no way to produce this
+            # event, since `committed_range_observed` is core-owned and an
+            # adapter emitting it is demoted to ordinary output.
+            and event.event_type != "committed_range_observed"
+        ]
         self.assertTrue(events)
         for event in events:
             for reference in event.evidence:

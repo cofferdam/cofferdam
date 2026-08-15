@@ -734,6 +734,15 @@ def _bounded_evidence(evidence: Sequence[EvidenceReference]) -> Optional[str]:
                     if reference.change_status
                     else {}
                 ),
+                # M2K PR5, written on the same terms as the PR3 fields above: only
+                # when present, so a worktree observation stays byte-identical to
+                # what a pre-PR5 build wrote. A reader that finds no `domain` is
+                # reading a worktree row, which is what every row without one is.
+                **(
+                    {"domain": bounded_line(reference.domain, 20)}
+                    if reference.domain
+                    else {}
+                ),
             }
         )
     return json.dumps(items, ensure_ascii=False)
@@ -763,6 +772,7 @@ def _evidence_from_json(raw: Optional[str]) -> Tuple[EvidenceReference, ...]:
             change_kind=item.get("change_kind"),
             previous_identifier=item.get("previous_identifier"),
             change_status=item.get("change_status"),
+            domain=item.get("domain"),
         )
         for item in parsed
         if isinstance(item, dict)

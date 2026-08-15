@@ -54,9 +54,13 @@ bounds — is **merged (#47, `52811dc`) and deployed**, with the live task datab
 **schema v5**. PR3 — richer machine-owned Git observations and assembler v2 — is **merged (#48,
 `d98c10f`) and deployed**: workstation and Actions bridge both run it from slot A, the live schema
 is unchanged at v5 because PR3 needed none, and `assembler_version` is 2. PR4 — the durable
-per-turn pre-work Git baseline — is **implemented on a branch and not deployed**; see *In progress*
-below. Nothing after PR4 is started: **no evaluator, no verdicts, no risk levels, no check runner,
-no planner**, and neither PR3 nor PR4 adds any of them.
+per-turn pre-work Git baseline — is **merged (#49, `cf29b89`) and deployed**: workstation and
+Actions bridge both run it from slot B, and the live task database is migrated to **schema v6**,
+with slot A retained at `d98c10f` plus a verified pre-migration schema-v5 backup as the rollback
+pair. PR5 — committed-work Git observations from that boundary — is **implemented on a branch and
+not deployed**; see *In progress* below. It leaves the schema at **v6** and raises
+`assembler_version` to **3**. Nothing after PR5 is started: **no evaluator, no verdicts, no risk
+levels, no check runner, no planner**, and none of PR3, PR4 or PR5 adds any of them.
 
 **M2H is complete and merged**, closing the M1 post-reboot gate;
 M2F Agent Task Core and M2G the Claude Code adapter merged; the isolated Custom GPT Actions mobile
@@ -765,10 +769,121 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2K PR5 — committed-work Git observations from the durable baseline
+
+On `feat/m2k-pr5-committed-range`, from the merged `cf29b89`. **Implemented on a branch, not merged
+and not deployed.**
+
+PR4 recorded a revision before each turn's worker was allowed to start and consumed none of it. PR5
+is the consumption: what the repository gained between that boundary and a stable HEAD observed
+after the adapter returned. That is the work PR3 structurally cannot see — once a worker commits,
+its changes are *in* HEAD, `git status` is clean, and the clean answer is correct and useless.
+
+**The schema did not move.** It is still **v6**, and there is no migration in this PR. The
+observation is persisted as immutable `task_events.evidence_json` on a dedicated code-owned event
+type, `committed_range_observed`, which was possible because `EvidenceReference` already carries
+`change_kind`, `previous_identifier` and `change_status`, and because a dedicated event gets its own
+`MAX_EVIDENCE_ITEMS` budget instead of competing with PR3's status evidence for the same eight
+slots. A relational range table would have been a second durable shape for facts the event column
+already holds — and, given that an older runtime's `_connect()` runs its `_SCHEMA` before the
+forward-version gate, a migration is not something to add without a reason.
+
+**The capture point, and why it is the only one.** `_apply` is the only method that can close a
+turn. Both dispatch paths call the capture after the adapter has returned and a real turn row
+exists, and before `_apply` runs, holding the service lock throughout:
+
+    adapter returns → turn opens → **PR5 capture** → `_apply` → the turn may close
+
+So the event receives an ordinary Task Core sequence *while the turn is open*, and the v5 bound rule
+`opened_after < sequence <= closed_through` attributes it to that turn as arithmetic rather than as
+a later decision. Nothing is captured after a close and attached backwards.
+
+**Only for a turn that exists.** Eligibility is `dispatch_state == turn_opened`, written by the
+store in the same transaction as the turn row. A refused dispatch, and one that started and never
+produced a turn, are left exactly as PR4 recorded them — explicitly uncertain attempts. PR5 invents
+no turn for either.
+
+**A revision range is not a history.** `git diff <baseline> <target>` is a *tree comparison*, and
+calling its output "what the worker committed" is a claim the command never made. Measured on a real
+repository, a baseline recorded on one branch against a target on another reports the other branch's
+files as **deleted** — by a worker that deleted nothing; a hard reset backwards does the same. So
+the history relation is established first with `git merge-base --is-ancestor`, whose three outcomes
+are kept apart: exit 0 is an ancestor, exit 1 is a divergence, exit 128 is an object that could not
+be read. A divergence is recorded as `diverged` with **no** diff run and no changes, and exit 128 is
+recorded as a missing baseline — collapsing the two would report an unreadable object as a rewritten
+history.
+
+**Configuration gets no vote.** Rename detection is a repository setting: with `diff.renames=false`
+a move reports as an add plus a delete, which is a different set of machine facts about the same
+event. Every behaviour config could change is pinned on the argv — `--find-renames`, `--no-ext-diff`,
+`--no-textconv` — the last two also because each can name a **program**, and a probe must not run a
+helper the project chose.
+
+**The record grammar is not PR3's.** `git status --porcelain=v1 -z` and `git diff --name-status -z`
+are different formats, and assuming otherwise is a silent corruption: porcelain packs `XY` and the
+path into one field and emits a rename as **destination then source**, while `--name-status` gives
+the status its own field and emits **source then destination**. Reusing PR3's parser would have
+swapped the source and destination of every rename while looking entirely correct. Both grammars
+were measured against the installed Git (2.53) rather than read from documentation.
+
+**Two observation domains, never merged.** PR3 observes the index and working tree against the
+current HEAD; PR5 observes a committed revision range. A path can legitimately appear in both — a
+worker commits `foo.py` and then edits it again — and that is two machine facts at two moments, not
+a duplicate. Every observation carries its domain, and the relationship group lists the domains that
+named each path rather than reducing them to one operation.
+
+That distinction governs conflicts. *Within* a domain a contradiction stands, because those
+observations describe one instant against one HEAD. *Across* domains an agreement wins, because they
+describe different instants and both can be true: "committed as modified, then deleted" is an
+ordinary sequence, and a claim of "modified" was true when it was made.
+
+**A dirty boundary may never contradict.** PR4 records whether the repository was already dirty
+before the worker started. If it was, a change that predates the turn can be committed inside the
+range and is indistinguishable from the worker's own — so a range whose boundary was `dirty`,
+`incomplete` or `unavailable`, or whose history diverged, contributes observed change and **cannot**
+produce `operation_agreement = false` or `claim_conflict`. The answer there is `unknown` with an
+explicit limitation. Only a `clean_complete` boundary over a valid ancestry is comparison-grade.
+Truncation is deliberately *not* one of these conditions: a short path list is about paths that are
+missing, and the ones recorded were read exactly — the same line PR3 draws.
+
+**`assembler_version` is 3**, because the bundle now consumes this evidence: eligibility,
+relationship resolution and the fingerprint all changed. The fingerprint binds the observation
+domain and every assembly-relevant range fact — whether anything was recorded at all, both
+revisions, the history relation, the boundary quality, the coverage and the limitation. Assembly
+still runs **no Git**: the repository can be deleted after the event is written and the bundle and
+its fingerprint are byte-identical.
+
+**A defect found and fixed.** `TaskService._apply` rebuilds every observation reference field by
+field before storing it, and that reconstruction was never extended when PR3 added `change_kind`,
+`previous_identifier` and `change_status`. Nothing failed — every observation that reached the
+database through an adapter simply arrived shaped like a pre-PR3 one, which the assembler correctly
+reads as "the operation was never established". The effect was that `operation_agreement` was
+permanently `unknown` and `claim_conflict` unreachable on the only path a real task takes; the
+store-level tests write evidence directly and never went through it. The three fields are now
+carried. The domain is deliberately **not** carried from the adapter but forced to `worktree`: an
+adapter setting `committed_range` would be dressing its own report as the host's post-work reading,
+which is the same promotion `source` is already gated against.
+
+**Historical compatibility.** The three pre-v5 turns stay `legacy_unknown` with no observations, no
+baseline row and no range. Nothing is backfilled and no stored `evidence_json` is rewritten. Every
+observation written before PR5 reads as the `worktree` domain, because that is what it is.
+
+**No bridge change.** Ten routes, nine authenticated, no evidence/artifact/claim/baseline/range
+Action, `artifacts_supported` still `false`, `getProjectContext` untouched. **No evaluator, no
+verdict, no risk level, no confidence, no check runner, no provider, no model.**
+
+## M2K records — the evidence foundation (written while each was on its branch)
+
+M2K is **in progress**: PR1, PR2, PR3 and PR4 are merged and deployed; PR5 is on a branch. See
+*In progress* above for PR5.
+
 ### M2K PR4 — the durable per-turn pre-work Git baseline
 
-On `feat/m2k-pr4-git-baseline`, from the merged `d98c10f`. **Implemented on a branch, not merged
-and not deployed.**
+**Merged as `cf29b89` (#49) and deployed**: workstation and Actions bridge both run it from slot B,
+and the live task database is migrated to **schema v6**. The rollback is a pair — slot A at
+`d98c10f` together with a verified pre-migration schema-v5 backup. The record below was written
+while it was still on `feat/m2k-pr4-git-baseline`, from the merged `d98c10f`, and is kept as it was
+written.
 
 PR3's deployment demonstrated the last large machine-observation gap on a live host, and it is not
 a parsing problem: a worker may modify files **and commit them**, after which the working tree is
@@ -1002,10 +1117,6 @@ with a claim that structurally cannot exist.
 `artifacts_supported` still `false`, `getProjectContext` untouched. **No evaluator, no verdict, no
 risk level, no confidence, no check runner, no provider, no model.**
 
-## M2K records — the evidence foundation (written while each was on its branch)
-
-M2K is **in progress**: PR1, PR2 and PR3 are merged and deployed; PR4 is on a branch. See
-*In progress* above for PR4.
 ### M2K PR2 — the derived evidence bundle and exact turn provenance
 
 **Merged as `52811dc` (#47) and deployed**: workstation and Actions bridge both run it from slot B,

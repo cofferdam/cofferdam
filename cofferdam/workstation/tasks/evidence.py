@@ -39,24 +39,28 @@ What agreement means, and what it does not
 
 This is the part that is easy to get wrong in a way nobody notices for a year.
 
-Today's machine observation is ``git status --porcelain``, reduced to *this
-project-relative path appears in the changed set*. That proves the path changed.
-It does **not** prove the file was created, or modified, or deleted, or renamed
-— porcelain's status letters are not carried into the stored
-:class:`~.models.EvidenceReference`, so the durable record genuinely does not
-contain that information.
+**Path agreement and operation agreement are separate questions**, published as
+separate fields, and the second one was unanswerable until M2K PR3. A claim of
+``modified src/foo.py`` matched against an observation at ``src/foo.py`` that
+carries no machine semantics — every observation written before PR3 — produces:
 
-So a claim of ``modified src/foo.py`` matched against an observation that
-``src/foo.py`` changed produces:
-
-    relationship      = ``path_agreed``
-    path_agreement    = ``True``
+    relationship        = ``path_agreed``
+    path_agreement      = ``True``
     operation_agreement = ``unknown``
 
 and it must never be rendered, summarised or re-encoded as "modification
-verified". The vocabulary here is deliberately ``path_agreed`` rather than a
-generic ``agreed`` for exactly that reason: an unqualified word invites a reader
-to supply the qualification themselves, and they will supply the strongest one.
+verified". The vocabulary is deliberately ``path_agreed`` rather than a generic
+``agreed`` for exactly that reason: an unqualified word invites a reader to
+supply the qualification themselves, and they will supply the strongest one.
+
+Since PR3 the stored :class:`~.models.EvidenceReference` **does** carry machine
+semantics — ``change_kind``, ``change_status`` and, for a rename,
+``previous_identifier`` — so ``operation_agreement`` can now be ``true`` or
+``false``, and a matched pair whose operations cannot both be true of one path
+is published as ``claim_conflict``. The bar is high and stays high: a conflict
+requires the machine to have *said* something incompatible, never to have stayed
+silent, and it is a disagreement between two records rather than a verdict about
+anybody's work.
 
 ``claim_only`` means unmatched. Not false, not dishonest, not contradicted —
 **unverified**. A worker may have changed a file and committed it, in which case
@@ -68,14 +72,41 @@ incomplete, which is what :class:`~.claims.ClaimIngestion` records, and the
 completeness state travels next to every ``observed_only`` group so the two are
 read together.
 
-There is no ``claim_conflict`` in this build. Not because conflicts do not
-matter but because **no currently supported observation can prove one**. To say
-a claim and an observation are incompatible, the observation would have to carry
-semantics like "this path does not exist" or "this path was created, not
-modified", and the stored evidence carries neither. Emitting a conflict from the
-absence of a match would be manufacturing the strongest possible statement out
-of the weakest possible evidence. When an observation type arrives that can
-prove incompatibility, this is where it goes.
+Two observation domains, never merged
+-------------------------------------
+
+M2K PR5. Cofferdam now records two kinds of machine observation, and they answer
+different questions asked at different moments:
+
+* ``worktree`` — the index and working tree against the current HEAD. What the
+  repository still has uncommitted.
+* ``committed_range`` — the boundary PR4 recorded before the worker started,
+  against a stable HEAD observed after the adapter returned. What the turn
+  committed, and therefore removed from the dirty tree.
+
+A worker that commits ``foo.py`` and then edits it again produces a fact in each,
+and neither is a duplicate of the other. They are grouped by path, because a path
+is what a claim names, but every observation keeps its domain and the group never
+reduces them to one operation.
+
+That distinction is load-bearing for conflicts. Within one domain, two
+observations describe one instant against one HEAD and cannot both be true, so a
+contradiction stands. *Across* domains they describe different moments and both
+can be true — ``committed: modified`` followed by ``worktree: deleted`` is an
+ordinary sequence of events, and a claim of "modified" is corroborated by the
+first whatever the second says. So a reconciling fact in either domain stops a
+contradiction, and chronology cannot manufacture one.
+
+The other half of that rule is the **boundary quality** PR4 recorded. A range
+whose baseline was already dirty is a real machine observation and not a clean
+causal before-and-after: a change that existed before the turn can be committed
+inside the range and is indistinguishable from the worker's own. Such a range may
+contribute observed change and may **not** contribute ``operation_agreement =
+false``. Neither may a diverged history, an unavailable baseline or an unstable
+target. ``unknown`` with an explicit limitation is the answer in all of them.
+
+No verdict
+----------
 
 No verdict
 ----------
@@ -109,8 +140,12 @@ from .models import (
     CHANGE_RENAMED,
     CHANGE_UNKNOWN,
     EVIDENCE_ARTIFACT,
+    EVIDENCE_COMMIT,
     EVIDENCE_FILE,
     EVIDENCE_GIT_OBSERVED,
+    OBSERVATION_DOMAIN_COMMITTED_RANGE,
+    OBSERVATION_DOMAIN_WORKTREE,
+    OBSERVATION_DOMAINS,
     EvidenceReference,
     TaskEvent,
 )
@@ -131,7 +166,12 @@ BUNDLE_VERSION = 1
 #: ``input_fingerprint`` asks "was this produced by the same rules". Two bundles
 #: with the same inputs and different assembler versions may legitimately differ,
 #: and a caller that could not see that would treat an improvement as corruption.
-ASSEMBLER_VERSION = 2
+#: **3 since M2K PR5**, because the bundle now consumes committed-range
+#: observations: what counts as an eligible observation changed, relationships
+#: are resolved per observation domain, and the fingerprint binds facts that did
+#: not exist at version 2. A stored fingerprint from an earlier version is
+#: therefore expected to differ, which is what this number is for.
+ASSEMBLER_VERSION = 3
 
 # -- turn attribution ---------------------------------------------------------
 
@@ -297,13 +337,35 @@ def status_facts(status: object) -> frozenset:
     return STATUS_FACTS.get(status, frozenset())
 
 
-def _facts_for(change_kind: object, status: object) -> frozenset:
+def _facts_for(
+    change_kind: object,
+    status: object,
+    domain: str = OBSERVATION_DOMAIN_WORKTREE,
+) -> frozenset:
     """Everything the machine proved about one path.
 
-    The exact status is authoritative when present, because it carries both
-    columns. A row written without one — anything from before that field
+    For a **worktree** observation the exact status is authoritative when
+    present, because porcelain's ``XY`` carries two columns and therefore up to
+    two facts. A row written without one — anything from before that field
     existed — falls back to its single label, which is all it ever knew.
+
+    For a **committed-range** observation the status is deliberately *not*
+    consulted. ``git diff --name-status`` speaks a different alphabet from
+    ``git status --porcelain``: a single letter, sometimes followed by a
+    similarity score. Sending ``R080`` through the porcelain table would be
+    asking one dictionary about another language, and the only reason it does not
+    already produce a wrong answer is that no name-status token happens to be two
+    characters long. That is an accident, not a guarantee, so the range reads its
+    single label and nothing else — one comparison, one fact.
     """
+    if domain == OBSERVATION_DOMAIN_COMMITTED_RANGE:
+        if (
+            isinstance(change_kind, str)
+            and change_kind in CHANGE_KINDS
+            and change_kind != CHANGE_UNKNOWN
+        ):
+            return frozenset({change_kind})
+        return frozenset()
     facts = status_facts(status)
     if facts:
         return facts
@@ -315,7 +377,11 @@ def _facts_for(change_kind: object, status: object) -> frozenset:
 
 
 def operation_agreement(
-    claim_operation: object, change_kind: object, status: object = None
+    claim_operation: object,
+    change_kind: object,
+    status: object = None,
+    *,
+    domain: str = OBSERVATION_DOMAIN_WORKTREE,
 ) -> str:
     """Whether one claim operation and one machine observation agree.
 
@@ -336,7 +402,7 @@ def operation_agreement(
         # this function with a rename claim cannot get an unqualified agreement
         # out of it.
         return OPERATION_UNKNOWN
-    facts = _facts_for(change_kind, status)
+    facts = _facts_for(change_kind, status, domain)
     if not facts:
         return OPERATION_UNKNOWN
     if claim_operation in facts:
@@ -378,6 +444,40 @@ LIMIT_PATHS_TRUNCATED = "relationship_paths_truncated"
 LIMIT_EVENTS_TRUNCATED = "events_truncated"
 LIMIT_SOURCES_TRUNCATED = "relationship_sources_truncated"
 
+# -- committed-range limitations (M2K PR5) ------------------------------------
+#
+# Each says a different thing about *why* the range cannot carry its full weight,
+# and none of them is an error. A range that is honestly unavailable is a better
+# record than one that quietly reported no changes.
+
+#: This turn has **no** committed-range observation. Every turn that ran before
+#: PR5 is in this state, and so is any turn whose dispatch never produced a
+#: boundary bound to it. Not "nothing was committed" — nobody looked.
+LIMIT_RANGE_NOT_RECORDED = "committed_range_not_recorded"
+
+#: A range observation exists and could not be read: a missing baseline object, a
+#: target that would not hold still, a probe that failed. No path list.
+LIMIT_RANGE_UNAVAILABLE = "committed_range_unavailable"
+
+#: The range was read and the path list is known to be short — Git's output or
+#: the event's own evidence budget was reached. The paths recorded are exact;
+#: what is not known is whether there were more, so the **absence** of a path is
+#: not evidence that nothing happened there.
+LIMIT_RANGE_INCOMPLETE = "committed_range_incomplete"
+
+#: The baseline was not an ancestor of the target: a branch switch, a reset, a
+#: rebase, a rewritten history. Recorded rather than diffed, because a tree
+#: comparison across a divergence describes somebody else's commits as this
+#: turn's work — including reporting files as **deleted** that nobody deleted.
+LIMIT_RANGE_HISTORY_DIVERGED = "committed_range_history_diverged"
+
+#: The repository was already dirty, or its state was not established, when the
+#: boundary was recorded. The range is a real observation of revision change and
+#: **not** a clean before-and-after of this turn: a change that existed before
+#: the worker started can be committed inside it and is indistinguishable from
+#: the worker's own. Nothing derives a contradiction from a range in this state.
+LIMIT_RANGE_BOUNDARY_NOT_CLEAN = "committed_range_boundary_not_clean"
+
 LIMITATIONS: Tuple[str, ...] = (
     LIMIT_LEGACY_TURN,
     LIMIT_OBSERVATIONS_INCOMPLETE,
@@ -389,6 +489,11 @@ LIMITATIONS: Tuple[str, ...] = (
     LIMIT_PATHS_TRUNCATED,
     LIMIT_EVENTS_TRUNCATED,
     LIMIT_SOURCES_TRUNCATED,
+    LIMIT_RANGE_NOT_RECORDED,
+    LIMIT_RANGE_UNAVAILABLE,
+    LIMIT_RANGE_INCOMPLETE,
+    LIMIT_RANGE_HISTORY_DIVERGED,
+    LIMIT_RANGE_BOUNDARY_NOT_CLEAN,
 )
 
 # -- bounds -------------------------------------------------------------------
@@ -609,6 +714,126 @@ def is_coverage_observation(reference: object) -> bool:
     )
 
 
+# -- the committed-range shapes (M2K PR5) --------------------------------------
+#
+# The words :mod:`.gitrange` writes, restated here as literals rather than
+# imported — the same choice, for the same reason, that PR3's coverage words
+# above are literals. This module is a **standalone reader of stored rows** and
+# must stay one: importing the probe would put :mod:`subprocess` in the
+# assembler's import graph and turn "assembly cannot reach the world" from a
+# property into a promise. ``tests/test_evidence_range.py`` asserts every literal
+# here against the emitter, so the copy cannot drift.
+
+#: A path the range proved changed. ``evidence_type=file``.
+RANGE_OPERATION_PATH = "git diff --name-status"
+#: The boundary revision; its ``result`` is the boundary quality.
+RANGE_OPERATION_BASELINE = "range baseline"
+#: The observed target revision; its ``result`` is the history relation.
+RANGE_OPERATION_TARGET = "range target"
+#: How complete the recorded path list is.
+RANGE_OPERATION_COVERAGE = "range coverage"
+#: Why it is not complete, or that there is no reason to give.
+RANGE_OPERATION_LIMITATION = "range limitation"
+
+#: The ``result`` on a range path row. Deliberately not PR3's ``changed``.
+RANGE_RESULT_COMMITTED = "committed"
+
+#: The two history relations under which a range means "committed since the
+#: baseline". Anything else — a branch switch, a reset, a rebase, a baseline this
+#: repository does not have — is recorded and **not** interpreted as history.
+RANGE_ANCESTRY_LINEAR = "linear"
+RANGE_ANCESTRY_IDENTICAL = "identical"
+RANGE_ANCESTRY_DIVERGED = "diverged"
+RANGE_ELIGIBLE_ANCESTRIES = frozenset(
+    {RANGE_ANCESTRY_LINEAR, RANGE_ANCESTRY_IDENTICAL}
+)
+
+#: The one boundary quality under which a range is a clean before-and-after of
+#: the turn. See :class:`CommittedRangeSummary.comparison_grade`.
+RANGE_BOUNDARY_CLEAN = "clean_complete"
+
+RANGE_COVERAGE_COMPLETE = "complete"
+RANGE_COVERAGE_INCOMPLETE = "incomplete"
+RANGE_COVERAGE_UNAVAILABLE = "unavailable"
+
+#: Written on the limitation row when there is nothing to report, so that "no
+#: limitation" is a recorded fact rather than a missing row.
+RANGE_LIMITATION_NONE = "none"
+
+#: Key suffix that keeps a metadata row's ``result`` apart from its
+#: ``identifier`` while the rows are being folded together. A space, so it can
+#: never collide with an operation name.
+_RESULT = " result"
+
+
+def observation_domain(reference: object) -> str:
+    """Which question this observation answered (M2K PR5).
+
+    A row without a domain is a **worktree** row. That is not a default chosen
+    for convenience: every observation written before PR5 came from
+    ``git status`` against the current HEAD, so reading the absence that way is
+    reading what those rows are. A value this build does not know is also read as
+    ``worktree`` rather than as a third domain, so a future word cannot silently
+    acquire committed-range privileges here.
+    """
+    if not isinstance(reference, EvidenceReference):
+        return OBSERVATION_DOMAIN_WORKTREE
+    domain = reference.domain
+    if isinstance(domain, str) and domain in OBSERVATION_DOMAINS:
+        return domain
+    return OBSERVATION_DOMAIN_WORKTREE
+
+
+def is_range_reference(reference: object) -> bool:
+    """Whether this row belongs to the committed-range domain at all."""
+    return (
+        isinstance(reference, EvidenceReference)
+        and reference.source == EVIDENCE_GIT_OBSERVED
+        and observation_domain(reference) == OBSERVATION_DOMAIN_COMMITTED_RANGE
+    )
+
+
+def range_observation_path(reference: object) -> Optional[str]:
+    """The project-relative path a committed-range row proves changed.
+
+    ``None`` for the range's four metadata rows, whose identifiers are a revision
+    or nothing at all — the same mistake :func:`observation_path` exists to
+    prevent, in a domain where it would be easier to make: a commit id is a
+    plausible-looking string that is not a path, and a matcher that accepted any
+    identifier would compare one to a claimed filename.
+    """
+    if not is_range_reference(reference):
+        return None
+    if reference.evidence_type != EVIDENCE_FILE:
+        return None
+    if reference.operation != RANGE_OPERATION_PATH:
+        return None
+    if reference.result != RANGE_RESULT_COMMITTED:
+        return None
+    try:
+        return normalize_claim_path(reference.identifier)
+    except Exception:
+        return None
+
+
+def _range_metadata_field(reference: object) -> Optional[str]:
+    """Which metadata row this is, or ``None`` if it is not one."""
+    if not is_range_reference(reference):
+        return None
+    operation = reference.operation
+    if reference.evidence_type == EVIDENCE_COMMIT and operation in (
+        RANGE_OPERATION_BASELINE,
+        RANGE_OPERATION_TARGET,
+    ):
+        return operation
+    if reference.evidence_type == EVIDENCE_ARTIFACT and operation in (
+        RANGE_OPERATION_COVERAGE,
+        RANGE_OPERATION_LIMITATION,
+    ):
+        return operation
+    return None
+
+
 def is_clean_tree_observation(reference: object) -> bool:
     """Whether this is the "nothing changed" statement.
 
@@ -650,8 +875,14 @@ class MachineObservation:
     change_kind: Optional[str] = None
     #: The source path of a rename. ``path`` is always the destination.
     previous_path: Optional[str] = None
-    #: The exact machine status, carrying both facts a composite proves.
+    #: The exact machine status, carrying both facts a composite proves. For a
+    #: worktree row this is porcelain's two-character ``XY``; for a
+    #: committed-range row it is a name-status token such as ``A`` or ``R080``.
+    #: Two alphabets, told apart by ``domain`` and never by inspection.
     change_status: Optional[str] = None
+    #: Which question this observation answered (M2K PR5). ``worktree`` for every
+    #: observation recorded before PR5, which is what those observations are.
+    domain: str = OBSERVATION_DOMAIN_WORKTREE
 
     @property
     def reference(self) -> str:
@@ -671,11 +902,86 @@ class MachineObservation:
             "change_kind": self.change_kind,
             "previous_path": self.previous_path,
             "change_status": self.change_status,
+            "domain": self.domain,
             # Said out loud rather than derived, the same way
             # `EvidenceReference.to_dict` says it. `git_observed` is a verified
             # source — Cofferdam ran Git — and that is a statement about *this
             # observation*, never about a claim it happens to match.
             "verified": True,
+        }
+
+
+@dataclass(frozen=True)
+class CommittedRangeSummary:
+    """What the turn's committed-range observation said, as a whole (M2K PR5).
+
+    One of these per bundle, because a turn takes exactly one canonical
+    post-worker observation. It is published even when nothing was recorded, so a
+    reader is told the question was asked — ``recorded=False`` is the answer for
+    every turn that ran before PR5, and it means *nobody looked*, never *nothing
+    was committed*.
+
+    Everything here was read from stored event evidence. No revision is resolved
+    at assembly time, no ancestry is re-checked, and no repository is consulted:
+    delete the project after the event was written and this says exactly what it
+    said before.
+    """
+
+    recorded: bool = False
+    event_sequence: Optional[int] = None
+    baseline_revision: Optional[str] = None
+    target_revision: Optional[str] = None
+    boundary_quality: Optional[str] = None
+    ancestry: Optional[str] = None
+    coverage: Optional[str] = None
+    limitation: Optional[str] = None
+
+    @property
+    def history_valid(self) -> bool:
+        """Whether the baseline was an ancestor of the target."""
+        return self.recorded and self.ancestry in RANGE_ELIGIBLE_ANCESTRIES
+
+    @property
+    def comparison_grade(self) -> bool:
+        """Whether this range may contribute to *disagreement*.
+
+        Two conditions, and both are about whether the range is a clean
+        before-and-after rather than about how much of it was read:
+
+        * the history must hold, or the range is not "since the baseline" at all;
+        * the boundary must have been clean and completely read, or a change that
+          predates the turn can be sitting inside the range wearing the worker's
+          clothes.
+
+        **Coverage is deliberately not one of them.** A truncated path list is
+        about paths that are *missing*, not about the ones that are there — those
+        were read exactly. PR3 draws the same line: incompleteness is published as
+        a limitation that stops absence being read as evidence, and it does not
+        disqualify the observations actually recorded.
+
+        Note what this gates: only the ability to produce ``false``. A range that
+        is not comparison-grade still contributes observed change, still puts its
+        paths in the relationship groups, and still cannot be mistaken for
+        silence.
+        """
+        return self.history_valid and self.boundary_quality == RANGE_BOUNDARY_CLEAN
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "recorded": self.recorded,
+            "event_sequence": self.event_sequence,
+            "baseline_revision": self.baseline_revision,
+            "target_revision": self.target_revision,
+            "boundary_quality": self.boundary_quality,
+            "ancestry": self.ancestry,
+            "coverage": self.coverage,
+            "limitation": self.limitation,
+            # Derived and said out loud, for the reason `EvidenceReference`
+            # publishes `verified`: the rule is short, and a client that had to
+            # re-derive it is a client that can get it wrong in the direction
+            # that manufactures a conflict.
+            "history_valid": self.history_valid,
+            "comparison_grade": self.comparison_grade,
         }
 
 
@@ -702,6 +1008,13 @@ class PathRelationship:
     #: and sorted. Empty when every observation here predates PR3 — which is the
     #: visible reason `operation_agreement` is `unknown` for legacy evidence.
     observed_kinds: Tuple[str, ...] = ()
+    #: Which observation domains named this path (M2K PR5), sorted. Two entries
+    #: mean the same path was both committed inside this turn and is *still*
+    #: changed in the working tree — two facts at two moments, and the reason
+    #: this group does not reduce them to one operation. Each observation in
+    #: ``observation_refs`` carries its own domain, so nothing is lost by
+    #: summarising them here.
+    observation_domains: Tuple[str, ...] = ()
     claim_count: int = 0
     observation_count: int = 0
     sources_truncated: bool = False
@@ -720,6 +1033,7 @@ class PathRelationship:
             # answer the second one.
             "operation_agreement": self.operation_agreement,
             "observed_kinds": list(self.observed_kinds),
+            "observation_domains": list(self.observation_domains),
             "claim_count": self.claim_count,
             "observation_count": self.observation_count,
             "sources_truncated": self.sources_truncated,
@@ -794,6 +1108,11 @@ class EvidenceBundle:
     #: Whether the machine observation set for this turn is known to be whole
     #: (M2K PR3). False when Git reported more than was recorded.
     machine_observations_complete: bool = True
+    #: What this turn committed, and how far that can be trusted (M2K PR5).
+    #: Always present; ``recorded=False`` when no observation was taken.
+    committed_range: CommittedRangeSummary = field(
+        default_factory=CommittedRangeSummary
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -817,6 +1136,7 @@ class EvidenceBundle:
             "limitations": list(self.limitations),
             "repository_reported_clean": self.repository_reported_clean,
             "machine_observations_complete": self.machine_observations_complete,
+            "committed_range": self.committed_range.to_dict(),
         }
 
 
@@ -847,21 +1167,76 @@ def _claim_paths(claim: ChangeClaim) -> Tuple[str, ...]:
 
 def _eligible_observations(
     events: Sequence[TaskEvent],
-) -> Tuple[Tuple[MachineObservation, ...], bool, bool, bool]:
+) -> Tuple[Tuple[MachineObservation, ...], bool, bool, bool, CommittedRangeSummary]:
     """Every eligible path observation in the window, in event order.
 
-    Returns the observations, whether any unsupported ``git_observed`` shape was
-    seen, whether a clean-tree statement was seen, and whether the emitter said
-    its own observation set was **partial**. Ordering is by event
-    sequence and then by position inside that event's evidence list — both
-    durable, neither a timestamp.
+    Returns the observations across **both** domains, whether any unsupported
+    ``git_observed`` shape was seen, whether a clean-tree statement was seen,
+    whether the worktree emitter said its own set was **partial**, and the
+    turn's committed-range summary. Ordering is by event sequence and then by
+    position inside that event's evidence list — both durable, neither a
+    timestamp.
+
+    Committed-range rows are recognised **before** the fall-through, so a range
+    observation is never counted as an unsupported shape. That mattered enough to
+    be worth saying: an assembler that did not know the shape would have been
+    correct in the letter — it would have published a limitation rather than a
+    wrong fact — and useless, since every turn would carry one.
     """
     observations: List[MachineObservation] = []
     unsupported = False
     clean = False
     partial = False
+    range_fields: Dict[str, Optional[str]] = {}
+    range_sequence: Optional[int] = None
+
     for event in sorted(events, key=lambda item: item.sequence):
         for index, reference in enumerate(event.evidence or ()):
+            if not isinstance(reference, EvidenceReference):  # pragma: no cover
+                continue
+            if reference.source != EVIDENCE_GIT_OBSERVED:
+                # An `adapter_reported` reference is not an observation and its
+                # absence from the observation list is not a limitation. It is
+                # a claim, and claims come from the claim table.
+                continue
+
+            if observation_domain(reference) == OBSERVATION_DOMAIN_COMMITTED_RANGE:
+                path = range_observation_path(reference)
+                if path is not None:
+                    observations.append(
+                        MachineObservation(
+                            event_sequence=int(event.sequence),
+                            evidence_index=index,
+                            path=path,
+                            evidence_type=EVIDENCE_FILE,
+                            operation=reference.operation,
+                            result=reference.result,
+                            change_kind=observation_change_kind(reference),
+                            previous_path=observation_previous_path(reference),
+                            change_status=reference.change_status,
+                            domain=OBSERVATION_DOMAIN_COMMITTED_RANGE,
+                        )
+                    )
+                    continue
+                field_name = _range_metadata_field(reference)
+                if field_name is not None:
+                    # Both halves of the row, kept apart. The identifier and the
+                    # result answer different questions — the baseline row's
+                    # identifier is a revision and its result is that boundary's
+                    # quality — and a fallback between them would put an ancestry
+                    # word in a revision field the moment a revision was absent,
+                    # which is exactly when it is absent.
+                    #
+                    # Later rows win, which only matters if a turn somehow
+                    # carried two range events. Events are sorted, so whichever
+                    # rule applies, it applies the same way on every read.
+                    range_fields[field_name] = reference.identifier
+                    range_fields[field_name + _RESULT] = reference.result
+                    range_sequence = int(event.sequence)
+                    continue
+                unsupported = True
+                continue
+
             path = observation_path(reference)
             if path is not None:
                 observations.append(
@@ -874,15 +1249,9 @@ def _eligible_observations(
                         change_kind=observation_change_kind(reference),
                         previous_path=observation_previous_path(reference),
                         change_status=observation_status(reference),
+                        domain=OBSERVATION_DOMAIN_WORKTREE,
                     )
                 )
-                continue
-            if not isinstance(reference, EvidenceReference):  # pragma: no cover
-                continue
-            if reference.source != EVIDENCE_GIT_OBSERVED:
-                # An `adapter_reported` reference is not an observation and its
-                # absence from the observation list is not a limitation. It is
-                # a claim, and claims come from the claim table.
                 continue
             if is_clean_tree_observation(reference):
                 clean = True
@@ -899,7 +1268,44 @@ def _eligible_observations(
                 # limitation either — nothing was lost by not matching it.
                 continue
             unsupported = True
-    return tuple(observations), unsupported, clean, partial
+
+    return (
+        tuple(observations),
+        unsupported,
+        clean,
+        partial,
+        _range_summary(range_fields, range_sequence),
+    )
+
+
+def _range_summary(
+    fields: Dict[str, Optional[str]], sequence: Optional[int]
+) -> CommittedRangeSummary:
+    """Fold the range's metadata rows into one summary.
+
+    A summary is only ``recorded`` when the two rows that make a range a range
+    were both there — the boundary and the target. A partial set of metadata rows
+    is not a range that says less; it is a record this build cannot read, and
+    reading it as a range with missing fields would invent an observation.
+    """
+    if sequence is None or not (
+        RANGE_OPERATION_BASELINE in fields and RANGE_OPERATION_TARGET in fields
+    ):
+        return CommittedRangeSummary()
+    limitation = fields.get(RANGE_OPERATION_LIMITATION + _RESULT)
+    return CommittedRangeSummary(
+        recorded=True,
+        event_sequence=sequence,
+        baseline_revision=fields.get(RANGE_OPERATION_BASELINE),
+        target_revision=fields.get(RANGE_OPERATION_TARGET),
+        boundary_quality=fields.get(RANGE_OPERATION_BASELINE + _RESULT),
+        ancestry=fields.get(RANGE_OPERATION_TARGET + _RESULT),
+        coverage=fields.get(RANGE_OPERATION_COVERAGE + _RESULT),
+        # The sentinel is not published as a limitation: "none" is how the
+        # emitter says there was nothing to report, and passing it through would
+        # make every clean range look like it carried one.
+        limitation=None if limitation == RANGE_LIMITATION_NONE else limitation,
+    )
 
 
 def _aggregate_ingestion(
@@ -989,10 +1395,10 @@ def _rename_agreement(
     return OPERATION_DIFFERS
 
 
-def _group_agreement(
+def _domain_agreement(
     claims: Sequence[ChangeClaim], observations: Sequence[MachineObservation], path: str
 ) -> str:
-    """The operation agreement for one path group.
+    """The operation agreement for one path group **within one domain**.
 
     Resolved across every claim and every observation at this path rather than
     pairwise, because a path group can legitimately hold several of each. The
@@ -1008,6 +1414,11 @@ def _group_agreement(
     2. Otherwise, if every pair that could be judged agreed, the group is
        ``true``.
     3. Otherwise ``unknown``.
+
+    That "a contradiction wins" rule is sound *here* precisely because everything
+    it compares was observed at one moment against one HEAD, so two incompatible
+    facts cannot both be true. :func:`_group_agreement` is what keeps it from
+    being applied across moments, where they can.
     """
     rename = _rename_agreement(claims, observations, path)
     if rename is not None:
@@ -1015,7 +1426,10 @@ def _group_agreement(
 
     verdicts = [
         operation_agreement(
-            claim.operation, observation.change_kind, status=observation.change_status
+            claim.operation,
+            observation.change_kind,
+            status=observation.change_status,
+            domain=observation.domain,
         )
         for claim in claims
         for observation in observations
@@ -1032,8 +1446,61 @@ def _group_agreement(
     return OPERATION_UNKNOWN
 
 
+def _group_agreement(
+    claims: Sequence[ChangeClaim],
+    observations: Sequence[MachineObservation],
+    path: str,
+    *,
+    range_comparable: bool,
+) -> str:
+    """The operation agreement for one path group, across both domains.
+
+    Each domain is resolved on its own and then the two answers are combined,
+    which is not the same as resolving one pool — and the difference is the whole
+    of M2K PR5's safety argument about chronology.
+
+    **Within** a domain, a contradiction wins: those observations describe one
+    instant against one HEAD and cannot both be true.
+
+    **Across** domains, an agreement wins. A committed-range fact and a worktree
+    fact were established at different moments, and a file that was committed as
+    ``modified`` and later deleted produces exactly that pair while the claim
+    "modified" stayed true throughout. Letting the later state contradict the
+    claim would manufacture a conflict out of the passage of time — the sequence
+    the milestone was written to represent, not to punish.
+
+    ``range_comparable`` is :attr:`CommittedRangeSummary.comparison_grade`. When
+    it is false — a dirty or unestablished boundary, a diverged history, an
+    unavailable or unread range — the committed-range domain is excluded from
+    this decision entirely. Its observations remain published, remain in
+    ``observed_kinds`` and still make the path agree; what they may not do is
+    contradict. A change that predates the turn can sit inside such a range
+    wearing the worker's clothes, and no conflict derived from one would be
+    honest.
+    """
+    by_domain: Dict[str, List[MachineObservation]] = {}
+    for observation in observations:
+        by_domain.setdefault(observation.domain, []).append(observation)
+
+    verdicts = []
+    for domain in sorted(by_domain):
+        if domain == OBSERVATION_DOMAIN_COMMITTED_RANGE and not range_comparable:
+            continue
+        verdicts.append(_domain_agreement(claims, by_domain[domain], path))
+    if not verdicts:
+        return OPERATION_UNKNOWN
+    if OPERATION_AGREED in verdicts:
+        return OPERATION_AGREED
+    if all(verdict == OPERATION_DIFFERS for verdict in verdicts):
+        return OPERATION_DIFFERS
+    return OPERATION_UNKNOWN
+
+
 def _relationships(
-    claims: Sequence[ChangeClaim], observations: Sequence[MachineObservation]
+    claims: Sequence[ChangeClaim],
+    observations: Sequence[MachineObservation],
+    *,
+    range_comparable: bool = False,
 ) -> Tuple[Tuple[PathRelationship, ...], bool, bool]:
     """Path-grouped relationships, deterministically ordered.
 
@@ -1070,7 +1537,12 @@ def _relationships(
         refs = slot["observations"]
 
         agreement = (
-            _group_agreement(slot["claim_rows"], slot["obs_rows"], path)
+            _group_agreement(
+                slot["claim_rows"],
+                slot["obs_rows"],
+                path,
+                range_comparable=range_comparable,
+            )
             if claim_ids and refs
             else OPERATION_UNKNOWN
         )
@@ -1117,9 +1589,18 @@ def _relationships(
                         {
                             fact
                             for o in slot["obs_rows"]
-                            for fact in _facts_for(o.change_kind, o.change_status)
+                            for fact in _facts_for(
+                                o.change_kind, o.change_status, o.domain
+                            )
                         }
                     )
+                ),
+                # Every domain that named this path, including one whose facts
+                # were withheld from the agreement decision. A reader is entitled
+                # to see that the range observed something here even when the
+                # range was not allowed to argue about it.
+                observation_domains=tuple(
+                    sorted({o.domain for o in slot["obs_rows"]})
                 ),
                 claim_count=len(claim_ids),
                 observation_count=len(refs),
@@ -1140,6 +1621,7 @@ def input_fingerprint(
     observations: Sequence[MachineObservation],
     ingestion: IngestionSummary,
     machine_complete: bool = True,
+    committed_range: Optional[CommittedRangeSummary] = None,
 ) -> str:
     """A stable hash of exactly the immutable inputs assembly used.
 
@@ -1266,12 +1748,43 @@ def input_fingerprint(
                 # what agreement is decided from for a composite state, so `RM`
                 # and a bare `renamed` must not fingerprint alike.
                 observation.change_status,
+                # M2K PR5. The domain decides which fact table an observation is
+                # read through and whether it may contradict a claim, so the same
+                # path and kind observed in the two domains are different inputs
+                # and must not hash alike.
+                observation.domain,
             ]
         )
     # Whether the machine set was whole is an input to what the bundle says
     # about absence, so it binds too.
     digest.field("machine_complete")
     digest.field(bool(machine_complete))
+
+    # M2K PR5. Every field here changes what the bundle *says*, not merely what
+    # it displays: the revisions are the range's identity, the history relation
+    # and the boundary quality together decide whether a conflict may be derived
+    # at all, and the coverage and limitation decide how an absence is read. A
+    # fingerprint that ignored them would call two materially different readings
+    # of the same paths identical.
+    #
+    # `recorded` is bound separately from the fields, so "no observation was
+    # taken" cannot hash like an observation whose every field happened to be
+    # absent — the difference between nobody looking and looking and finding
+    # nothing, which is the distinction this milestone is built around.
+    summary = committed_range or CommittedRangeSummary()
+    digest.field("committed_range")
+    digest.fields(
+        [
+            summary.recorded,
+            summary.event_sequence,
+            summary.baseline_revision,
+            summary.target_revision,
+            summary.boundary_quality,
+            summary.ancestry,
+            summary.coverage,
+            summary.limitation,
+        ]
+    )
     return digest.hexdigest()
 
 
@@ -1317,12 +1830,23 @@ def assemble(
         unsupported = False
         clean = False
         partial = False
+        # No range either, and for the same reason: a legacy turn owns no
+        # attributable events, so the observation cannot be reached even if one
+        # was somehow written. `recorded=False` says nobody looked, which is
+        # true of every turn that ran before this milestone.
+        committed_range = CommittedRangeSummary()
         limitations.append(LIMIT_LEGACY_TURN)
     else:
         window = list(events)[:MAX_BUNDLE_EVENTS]
         if len(events) > MAX_BUNDLE_EVENTS:
             limitations.append(LIMIT_EVENTS_TRUNCATED)
-        observations, unsupported, clean, partial = _eligible_observations(window)
+        (
+            observations,
+            unsupported,
+            clean,
+            partial,
+            committed_range,
+        ) = _eligible_observations(window)
         if len(observations) > MAX_BUNDLE_OBSERVATIONS:
             limitations.append(LIMIT_OBSERVATIONS_TRUNCATED)
             observations = observations[:MAX_BUNDLE_OBSERVATIONS]
@@ -1346,8 +1870,29 @@ def assemble(
         # and PR3 owes to observations.
         limitations.append(LIMIT_OBSERVATIONS_INCOMPLETE)
 
+    # M2K PR5. What the range could not establish, said out loud. Each of these
+    # is about a different thing and they stack: a diverged history is also an
+    # unavailable range, and a reader needs both words to know why.
+    if not legacy and not committed_range.recorded:
+        limitations.append(LIMIT_RANGE_NOT_RECORDED)
+    elif committed_range.recorded:
+        if committed_range.ancestry == RANGE_ANCESTRY_DIVERGED:
+            limitations.append(LIMIT_RANGE_HISTORY_DIVERGED)
+        if committed_range.coverage == RANGE_COVERAGE_UNAVAILABLE:
+            limitations.append(LIMIT_RANGE_UNAVAILABLE)
+        elif committed_range.coverage == RANGE_COVERAGE_INCOMPLETE:
+            limitations.append(LIMIT_RANGE_INCOMPLETE)
+        if committed_range.boundary_quality != RANGE_BOUNDARY_CLEAN:
+            # The one that governs conflicts. Emitted whenever the boundary was
+            # not a clean, completely read tree, which includes the case where
+            # the range itself read perfectly — those are different failures and
+            # only this one decides what the evidence is allowed to conclude.
+            limitations.append(LIMIT_RANGE_BOUNDARY_NOT_CLEAN)
+
     relationships, paths_truncated, sources_truncated = _relationships(
-        turn_claims, observations
+        turn_claims,
+        observations,
+        range_comparable=committed_range.comparison_grade,
     )
     if paths_truncated:
         limitations.append(LIMIT_PATHS_TRUNCATED)
@@ -1363,6 +1908,7 @@ def assemble(
         observations=observations,
         ingestion=ingestion,
         machine_complete=not partial,
+        committed_range=committed_range,
     )
 
     return EvidenceBundle(
@@ -1388,6 +1934,7 @@ def assemble(
         turn_open=bool(bound is not None and bound.open),
         repository_reported_clean=clean,
         machine_observations_complete=not partial,
+        committed_range=committed_range,
     )
 
 
@@ -1401,7 +1948,31 @@ __all__ = [
     "COMPLETENESS_INGESTION_MISSING",
     "COMPLETENESS_LEGACY_UNKNOWN",
     "COMPLETENESS_STATES",
+    "CommittedRangeSummary",
     "EvidenceBundle",
+    "LIMIT_RANGE_BOUNDARY_NOT_CLEAN",
+    "LIMIT_RANGE_HISTORY_DIVERGED",
+    "LIMIT_RANGE_INCOMPLETE",
+    "LIMIT_RANGE_NOT_RECORDED",
+    "LIMIT_RANGE_UNAVAILABLE",
+    "RANGE_ANCESTRY_DIVERGED",
+    "RANGE_ANCESTRY_IDENTICAL",
+    "RANGE_ANCESTRY_LINEAR",
+    "RANGE_BOUNDARY_CLEAN",
+    "RANGE_COVERAGE_COMPLETE",
+    "RANGE_COVERAGE_INCOMPLETE",
+    "RANGE_COVERAGE_UNAVAILABLE",
+    "RANGE_ELIGIBLE_ANCESTRIES",
+    "RANGE_LIMITATION_NONE",
+    "RANGE_OPERATION_BASELINE",
+    "RANGE_OPERATION_COVERAGE",
+    "RANGE_OPERATION_LIMITATION",
+    "RANGE_OPERATION_PATH",
+    "RANGE_OPERATION_TARGET",
+    "RANGE_RESULT_COMMITTED",
+    "is_range_reference",
+    "observation_domain",
+    "range_observation_path",
     "FINGERPRINT_CHARS",
     "IngestionSummary",
     "LIMITATIONS",

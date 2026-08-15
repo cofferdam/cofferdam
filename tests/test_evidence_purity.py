@@ -137,11 +137,24 @@ class StaticPurityTests(unittest.TestCase):
             and isinstance(node.value, str)
             and node.value not in docstrings
         ]
-        #: The only literals in this module that name a Git operation. Both are
-        #: values the eligibility test *compares against*, never values anything
-        #: runs — and pinning them here means adding a third one is a deliberate
-        #: edit to this list rather than a quiet widening.
-        allowed_git_literals = {"git status", "rev-parse HEAD"}
+        #: The only literals in this module that name a Git operation. Every one
+        #: is a value the eligibility test *compares against*, never a value
+        #: anything runs — and pinning them here means adding another is a
+        #: deliberate edit to this list rather than a quiet widening.
+        #:
+        #: `git diff --name-status` (M2K PR5) is the one that carries option
+        #: syntax, and it is worth being explicit about why that is safe. It is
+        #: the `operation` string the committed-range probe *wrote into the
+        #: database*, and this module reads rows back and compares against it.
+        #: The real argv lives in `gitrange.py` as a constant tuple; this is a
+        #: word in a record, and the module it appears in cannot import
+        #: `subprocess` — asserted immediately above — so there is nothing here
+        #: that could execute it however it is spelled.
+        allowed_git_literals = {
+            "git status",
+            "rev-parse HEAD",
+            "git diff --name-status",
+        }
         self.assertTrue(
             allowed_git_literals <= set(literals),
             "the eligibility comparisons are missing",

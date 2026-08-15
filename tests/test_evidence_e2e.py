@@ -181,10 +181,11 @@ class EvidenceEndToEnd(unittest.TestCase):
 
         # 13, 14. completeness and assembler version are present.
         self.assertEqual(bundle.ingestion.state, "complete")
-        # 2 since M2K PR3: the machine observation semantics changed, so the
-        # rules that produced this bundle are a different version even though
-        # the bundle *shape* is compatible.
-        self.assertEqual(bundle.assembler_version, 2)
+        # 3 since M2K PR5, having been 2 since PR3: the rules that produced this
+        # bundle changed twice — machine observation semantics, then committed-
+        # range evidence and per-domain relationships — even though the bundle
+        # *shape* stayed compatible both times.
+        self.assertEqual(bundle.assembler_version, 3)
 
         # 15. the fingerprint survives a reopen.
         fingerprint = bundle.input_fingerprint

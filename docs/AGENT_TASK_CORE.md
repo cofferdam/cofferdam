@@ -410,14 +410,67 @@ conclude that nothing changed. Both the value type and a schema CHECK refuse it.
 current HEAD, the reflog or commit ancestry. `turn_baseline` answers `None`, which
 means *no boundary was recorded* and never *the tree was clean*.
 
-**PR4 consumes none of it.** No `git diff baseline..HEAD` exists in this build,
-`assembler_version` stays 2, and there is no new route and no bridge operation.
-Deriving committed-work evidence from the boundary is M2K PR5.
-
 **The limit.** A clean host-owned snapshot does not prove only the worker changed
 the repository afterwards — a person, an editor autosave or another tool can
 modify the same tree concurrently. What a stored boundary supports is
 machine-observed change since a recorded point, not proof of causation.
+
+### Committed-work observations (M2K PR5, no schema change)
+
+The boundary above, consumed. After the adapter returns and a real turn exists,
+the host reads what the repository gained between the recorded revision and a
+stable HEAD — the work PR3 structurally cannot see, because a worker that commits
+leaves a clean tree and a clean `git status` is correct and useless.
+
+**No schema change, and no new table.** The observation is immutable
+`task_events.evidence_json` on a dedicated core-owned event type,
+`committed_range_observed`. `EvidenceReference` already carried `change_kind`,
+`previous_identifier` and `change_status`, and a dedicated event gets its own
+`MAX_EVIDENCE_ITEMS` budget rather than competing with PR3's status evidence for
+the same eight slots. Four of those slots are reserved for metadata — baseline,
+target, coverage, limitation — because a truncated path list is still a usable
+observation that says so, while a range whose revisions and history relation were
+not recorded is not interpretable at all.
+
+**Captured while the turn is open.** Both dispatch paths capture after the adapter
+returns and the turn row exists, and before `_apply` — the only method that can
+close a turn — under the same lock. The event therefore takes an ordinary sequence
+inside the turn's own v5 bounds, so attribution is arithmetic rather than a later
+decision. Nothing is captured after a close and attached backwards.
+
+**Only for a turn that exists.** `dispatch_state` must say `turn_opened`. A
+refused dispatch, and one that started and never produced a turn, stay the
+explicitly uncertain attempts PR4 recorded; no turn is invented for either.
+
+**A revision range is not a history.** `git diff <baseline> <target>` is a tree
+comparison. Across a branch switch or a reset it reports the other history's files
+as **deleted**, by a worker that deleted nothing. So `git merge-base --is-ancestor`
+runs first and its three outcomes stay apart — ancestor, diverged, unreadable
+object — and a divergence is recorded with no diff run at all.
+
+**Configuration gets no vote.** `--find-renames`, `--no-ext-diff` and
+`--no-textconv` are pinned on the argv: `diff.renames=false` would turn a move
+into an add plus a delete, and the other two can each name a program the project
+chose. The output is parsed on `--name-status`'s own grammar, whose rename records
+are **source then destination** — the opposite of `git status --porcelain -z`.
+
+**Two domains, never merged.** `worktree` is the index and working tree against
+the current HEAD; `committed_range` is the revision range. A path may appear in
+both — committed, then edited again — and that is two facts at two moments. Every
+observation carries its domain. Within a domain a contradiction stands, because
+those facts describe one instant; across domains an agreement wins, because they
+describe different ones and both can be true.
+
+**A dirty boundary may never contradict.** If PR4 recorded the tree as already
+dirty, incomplete or unavailable, a change that predates the turn can be committed
+inside the range and is indistinguishable from the worker's own. Such a range
+shows observed change and cannot produce `operation_agreement = false` or
+`claim_conflict`; the answer is `unknown` with an explicit limitation.
+
+**`assembler_version` is 3**, and assembly still runs no Git: delete the
+repository after the event is written and the bundle and its fingerprint are
+unchanged. There is no new route and no bridge operation. Evaluating any of it
+remains unstarted.
 
 ### Change claims and artifacts (M2K PR1, schema v4)
 
@@ -1091,12 +1144,13 @@ false, the absence of an observation at a path is **not** evidence that nothing
 happened there.
 
 **What `git status` cannot see.** It compares the index and working tree against
-the **current HEAD**. Cofferdam stores no pre-task or pre-turn revision, so this
-is not a before/after comparison — and **a worker that commits its work leaves a
-clean tree and is not observed**. The claim then stays `claim_only`. Closing that
-gap needs a durable pre-work revision, which is a separate decision about what
-Cofferdam records when a task starts; PR3 deliberately does not fabricate a
-boundary it does not have.
+the **current HEAD**, so it is not a before/after comparison and **a worker that
+commits its work leaves a clean tree and is not observed**. PR4 recorded the
+missing boundary and PR5 reads the range from it, as its own
+`committed_range` observation domain — see *Committed-work observations* above.
+The two domains are never merged: a path may be committed inside a turn and
+changed again afterwards, and both are true. A range whose boundary was already
+dirty shows change and may not contradict a claim.
 
 **Turns that predate v5** report `turn_attribution: legacy_unknown`, keep their
 own claims, and receive **no machine observations at all** — nothing inferred
