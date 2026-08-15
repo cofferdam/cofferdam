@@ -172,7 +172,10 @@ class CommittedRangeEndToEnd(TaskTestCase):
     def test_the_whole_path(self):
         # 1. The schema did not move. PR5 persists into the immutable evidence
         #    column that already existed, so there is no migration to roll back.
-        self.assertEqual(SCHEMA_VERSION, 6)
+        # At least, not exactly: each additive bump since this walk was
+        # written leaves it true. M2K PR6 took it to 7. The literal pin for
+        # the current version lives in `test_task_core.py`.
+        self.assertGreaterEqual(SCHEMA_VERSION, 6)
 
         # 3. A boundary exists before the worker is ever handed control. Captured
         #    here for comparison; PR4 proves the ordering itself.

@@ -411,8 +411,9 @@ downstream reads from.
     fact so PR5 can say changes did not necessarily start clean. **PR4 consumes none of it:** no
     `git diff baseline..HEAD`, `assembler_version` stays 2, no route, no bridge Action. Still **no
     evaluator, no verdict, no risk level, no check runner, no model.**
-  - **PR5 — committed-work observations from the stored boundary.** *Implemented on a branch and
-    not deployed; see [`STATUS.md`](STATUS.md).* What PR4's boundary makes answerable: what the
+  - **PR5 — committed-work observations from the stored boundary.** *Merged as `e9f5e26` (#50) and
+    deployed, with the live database unchanged at schema v6; see [`STATUS.md`](STATUS.md).* What
+    PR4's boundary makes answerable: what the
     repository gained between the recorded pre-work revision and a stable HEAD observed after the
     adapter returned — the work PR3 structurally cannot see, because a worker that commits leaves a
     clean tree. **The schema stays v6** and there is no migration: the observation is immutable
@@ -432,6 +433,35 @@ downstream reads from.
     incomplete or unavailable may show change but may never produce a conflict. `assembler_version`
     becomes **3**, with no live Git at assembly. Still **no evaluator, no verdict, no risk level, no
     check runner, no model, no bridge Action.**
+  - **PR6 — the immutable per-turn acceptance-criteria snapshot.** *Implemented on a branch and not
+    deployed; see [`STATUS.md`](STATUS.md).* What a future evaluator evaluates **against**, and
+    nothing more: after five PRs of evidence the database could describe what happened and held no
+    criterion type, criterion set, criterion identity, fingerprint or per-turn criteria authority.
+    Schema **v7** adds two additive tables — `task_turn_criteria`, one row per **reserved turn**,
+    and `task_turn_criterion_items` — with historical turns **not backfilled**, no prompt parsed,
+    and no claim converted into a requirement. Criteria are a **pre-work durable fact** on the PR4
+    pattern: both the snapshot and the baseline commit before `dispatch_started`, which commits
+    before the adapter call, and a test adapter finds the whole snapshot over a separate read-only
+    connection at its own first instruction while `task_turns` is still empty — which is again why
+    the foreign key names `tasks`. Three states, and the last two must never collapse: `present`, an
+    explicit `not_provided` recorded before dispatch, and `legacy_unknown` for the absence of the
+    row, which the schema refuses to let anyone write. The model is small and closed — `evidence`
+    predicates (`path_changed`, `path_operation` over created/modified/deleted, `rename`) that the
+    *already stored* rows can decide, plus `manual`, which means undecidable by machine and is
+    neither passed nor failed. **No command criteria of any shape** — no shell string, argv, script,
+    test command, executable path or `check_id` — because a criterion carrying a command is dormant
+    execution authority waiting for a runner, and the check-command rule below is what it will use
+    when it exists. Negative/set criteria ("nothing outside S") are **deferred**: they need a
+    bounded structured path set and a stronger completeness semantics than PR2 or PR4 establish.
+    Bounds **refuse rather than truncate**, because a bounded requirement set reads afterwards as
+    the complete one. Snapshot and criterion identity are server-minted; the criteria fingerprint is
+    a domain-tagged length-prefixed SHA-256 over stored facts only, stable across restarts and free
+    of row ids, clocks, absolute paths and provider ids. Retry is PR4-conservative: a refusal does
+    not re-open replacement, so a retry of a reserved turn uses the same snapshot, while a genuinely
+    new follow-up turn may receive a new one. Internal `TaskService` input only — **no route, no
+    request field, no bridge Action** — and `assembler_version` stays **3**. Still **no evaluator,
+    no `EvaluationRecord`, no met/not_met, no verdict, no risk level, no confidence, no check
+    runner, no model.**
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**
@@ -458,11 +488,23 @@ downstream reads from.
   foundation (`task_change_claims`, `task_artifacts`, `task_claim_ingestion`). **Schema v5** is
   PR2's exact turn/event provenance bounds (`task_turn_bounds`) — needed because turn attribution
   provably cannot be reconstructed from v4 durable data, since timestamps are not an authoritative
-  shared boundary between a turn and an event sequence. The **`EvidenceBundle` itself is derived,
-  not persisted**: it is assembled on read from stored immutable facts and has no table, so later
-  criteria and evaluation records will refer to an evidence snapshot by
-  `(task_id, turn_number, assembler_version, input_fingerprint)` rather than by copying it. Any
-  later version is its own decision; "all M2K persistence is v4" was true only of PR1.
+  shared boundary between a turn and an event sequence. **Schema v6** is PR4's pre-work Git baseline
+  (`task_turn_git_baselines`); PR5 needed none and left it at v6. **Schema v7** is PR6's
+  acceptance-criteria persistence (`task_turn_criteria`, `task_turn_criterion_items`) and holds
+  criteria only — there is no result, verdict or evaluation column anywhere in it. The
+  **`EvidenceBundle` itself is derived, not persisted**: it is assembled on read from stored
+  immutable facts and has no table, so later criteria and evaluation records will refer to an
+  evidence snapshot by `(task_id, turn_number, assembler_version, input_fingerprint)` rather than by
+  copying it. PR6 is the other half of that pairing: a future deterministic `EvaluationRecord` binds
+  `(task_id, turn_number, criteria snapshot identity/fingerprint, assembler_version,
+  input_fingerprint)`, which is why **both** identities are frozen before the worker starts and
+  neither is recomputed at evaluation time. Its three-valued result vocabulary is expected to be
+  something equivalent to `met` / `not_met` / `unverified`, and the doctrine is that **evidence
+  limitations map to `unverified`, never to `not_met`** — `legacy_unknown` criteria, incomplete
+  observations, incomplete claims, a dirty committed-range boundary, diverged history and
+  unavailable Git evidence all land there, and a `claim_conflict` is likewise **not** a
+  task-failure verdict. Any later version is its own decision; "all M2K persistence is v4" was true
+  only of PR1.
 - **Validation:** a real task whose claims disagree with Cofferdam's git observations renders a
   flagged conflict; a task with criteria shows verified/unverified truthfully; a network cut
   mid-turn produces `NETWORK_UNREACHABLE`/`PROVIDER_UNREACHABLE` on the task.

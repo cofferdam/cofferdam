@@ -142,8 +142,11 @@ class GitEndToEnd(unittest.TestCase):
     def test_the_whole_path(self):
         # 1. Schema is untouched by PR3. PR4 later took it to 6 by adding the
         #    pre-work baseline table, which changes nothing on this path.
-        self.assertEqual(SCHEMA_VERSION, 6)
-        self.assertEqual(self.store.storage_health()["schema_version"], 6)
+        # At least, not exactly: each additive bump since this walk was
+        # written leaves it true. M2K PR6 took it to 7. The literal pin for
+        # the current version lives in `test_task_core.py`.
+        self.assertGreaterEqual(SCHEMA_VERSION, 6)
+        self.assertGreaterEqual(self.store.storage_health()["schema_version"], 6)
 
         # 3/7/9/11. Real Git changes of each kind.
         self.write("editme.txt", "two\nedited\n")     # modified

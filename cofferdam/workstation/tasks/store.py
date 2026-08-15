@@ -178,7 +178,32 @@ from .turns import (
 #: PR4 stores the boundary and consumes nothing. No ``git diff`` runs anywhere
 #: in this build, ``ASSEMBLER_VERSION`` stays at 2, and the evidence bundle's
 #: inputs are unchanged.
-SCHEMA_VERSION = 6
+#:
+#: Version 7 adds ``task_turn_criteria`` and ``task_turn_criterion_items``
+#: (M2K PR6) and nothing else. It exists because after five PRs of evidence work
+#: the database can say a great deal about what *happened* and holds nothing at
+#: all about what was *required* — no criterion type, no criterion set, no
+#: criterion identity, no per-turn criteria authority. There is nothing for a
+#: future evaluator to evaluate against.
+#:
+#: Additive in exactly the same way as every version before it: two new tables,
+#: no column of an existing table moved, changed type or gained a constraint,
+#: and **no row rewritten or inferred**. Turns that predate this version get no
+#: criteria — not parsed out of a prompt, not derived from a task title, not
+#: reconstructed from what a worker claimed it did. A missing row reads as
+#: ``legacy_unknown``, which is a different answer from ``not_provided`` and must
+#: never be collapsed into it.
+#:
+#: The foreign keys follow PR4's lesson exactly, and see the two table comments
+#: for why: the snapshot names ``tasks`` because the turn row does not exist yet
+#: at the only moment the snapshot may be written, and the criterion items name
+#: the snapshot because that one *does* exist, in the same transaction.
+#:
+#: PR6 stores the requirements and evaluates nothing. There is no evaluation
+#: record, no met/not_met, no verdict, no check runner and no command anywhere in
+#: this build; ``ASSEMBLER_VERSION`` stays at 3 and the evidence bundle's inputs
+#: are unchanged.
+SCHEMA_VERSION = 7
 
 #: Where the database lives, under COFFERDAM_HOME. Its own directory so the file
 #: and its WAL/shm siblings stay together and can be permissioned as a unit.
@@ -592,6 +617,156 @@ CREATE TABLE IF NOT EXISTS task_turn_git_baselines (
     -- cannot conclude that nothing changed.
     CHECK (NOT (working_tree_state = 'clean' AND status_coverage <> 'complete'))
 );
+
+-- Schema v7. What one turn was REQUIRED to achieve, frozen before its worker was
+-- told to start. See `cofferdam.workstation.tasks.criteria` for the vocabulary
+-- and for what a criterion may never carry.
+--
+-- The row is per **reserved turn**, not per task, and that is the design rather
+-- than a normalisation preference. A future evaluator has to know exactly which
+-- criteria were in force for the specific turn it is evaluating, and a mutable
+-- task-level blob cannot answer that: a follow-up that changed the requirements
+-- would retroactively change what turn one is judged against, silently, and
+-- every evaluation already produced would become wrong without any of them
+-- changing. Turn two may have a different snapshot; turn one's is frozen from
+-- the moment its dispatch began.
+--
+-- The foreign key names `tasks`, not `task_turns`, for the reason the v6 table
+-- above sets out at length: the guarantee is *durable before the worker starts*,
+-- and on both dispatch paths the adapter is invoked before the turn row is
+-- written. A composite key into `task_turns` would be unwritable at the only
+-- moment it may be written. Task ownership still travels through the cascade.
+--
+-- `criteria_state` is closed to the two states this build may WRITE. The third
+-- state a reader can see — `legacy_unknown` — is the absence of this row and is
+-- deliberately not writable: a value meaning "nobody recorded anything" must not
+-- be something a writer can record. Do not read a missing row as `not_provided`;
+-- they are different facts and `TaskStore.turn_criteria` keeps them apart.
+--
+-- `dispatch_state` is the same second dimension the v6 baseline carries, with
+-- the same closed vocabulary and the same rule: only `captured` permits
+-- replacement, and it is committed BEFORE the adapter call, which is what makes
+-- it mean "the adapter had provably not been reached" rather than "we did not
+-- find a turn row". It is a column here rather than a join to the baseline
+-- because criteria immutability must not depend on a Git boundary having been
+-- persistable — a project that is not a repository at all still has criteria
+-- that must freeze.
+--
+-- What is deliberately **not** here: no result, no met/not_met count, no score,
+-- no verdict, no pass, no confidence, no risk, no evaluator version, no command,
+-- no check id, no model output. This table says what was asked. Whether it
+-- happened is a later PR's table, and leaving no column for it here is what
+-- stops a half-built evaluator writing into this one.
+CREATE TABLE IF NOT EXISTS task_turn_criteria (
+    task_id             TEXT    NOT NULL,
+    turn_number         INTEGER NOT NULL,
+    criteria_state      TEXT    NOT NULL,
+    -- Server-minted, always. A caller supplies criterion content and never the
+    -- handle Cofferdam files it under; `criteria.SERVER_OWNED_FIELDS` refuses a
+    -- submitted one by name rather than ignoring it.
+    snapshot_id         TEXT    NOT NULL,
+    -- Deterministic over the stored criterion facts only. Stable across a
+    -- restart, independent of insertion order, row ids and any clock. See
+    -- `criteria.criteria_fingerprint` for what is in it and what is kept out.
+    criteria_fingerprint TEXT   NOT NULL,
+    criterion_count     INTEGER NOT NULL,
+    dispatch_state      TEXT    NOT NULL,
+    -- Audit metadata only. Attribution is by turn number, never by clock.
+    recorded_at         TEXT    NOT NULL,
+    PRIMARY KEY (task_id, turn_number),
+    FOREIGN KEY (task_id) REFERENCES tasks (task_id) ON DELETE CASCADE,
+    CHECK (turn_number >= 1),
+    CHECK (criteria_state IN ('present', 'not_provided')),
+    CHECK (dispatch_state IN
+           ('captured', 'dispatch_started', 'dispatch_refused', 'turn_opened')),
+    CHECK (criterion_count >= 0),
+    -- The two states and the count agree, enforced rather than trusted. This is
+    -- the constraint that stops `not_provided` from ever being stored as an
+    -- empty criterion SET — which a future evaluator could read as "all zero
+    -- requirements met" — and stops `present` from meaning nothing at all.
+    CHECK ((criteria_state = 'present') = (criterion_count > 0)),
+    CHECK (length(criteria_fingerprint) = 64),
+    CHECK (length(snapshot_id) BETWEEN 8 AND 64)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS criteria_by_snapshot
+    ON task_turn_criteria (snapshot_id);
+
+-- One acceptance criterion inside one snapshot.
+--
+-- Relational closed fields rather than a JSON blob, and the reason is the same
+-- one `task_change_claims` gives: a criterion needs an identity a future
+-- evaluation result can point at, a closed predicate an evaluator can branch on
+-- without interpreting text, and constraints the database enforces rather than a
+-- validator remembering to. A JSON column would carry all three as convention.
+--
+-- The foreign key here IS composite, and the contrast with the parent table is
+-- deliberate rather than inconsistent. `task_turn_criteria` cannot name
+-- `task_turns` because that row does not exist yet; these items *can* name
+-- `task_turn_criteria` because the parent is written in the same transaction, a
+-- line above. So the database enforces the one thing that matters most: there is
+-- no criterion row without a snapshot that owns it, and no snapshot claiming
+-- `present` can survive its items being rolled back.
+--
+-- `ordinal` is the criterion's stored position, 1-based, and ordering is by this
+-- column and never by rowid. Rowid order is an implementation detail a VACUUM
+-- may change, and a fingerprint that depended on it would move without a single
+-- criterion changing.
+--
+-- What is deliberately **not** here: no command, no argv, no script, no shell
+-- string, no test command, no executable path, no check id, no expression
+-- language, no Python, no SQL. A criterion carrying a command would be dormant
+-- execution authority sitting in a table waiting for a runner, and I-16 makes
+-- user-controlled argv for a spawned process a frozen invariant. When
+-- host-owned named checks exist, a future kind may name one; PR6 does not
+-- invent the authority in advance.
+CREATE TABLE IF NOT EXISTS task_turn_criterion_items (
+    criterion_id TEXT    PRIMARY KEY,
+    task_id      TEXT    NOT NULL,
+    turn_number  INTEGER NOT NULL,
+    ordinal      INTEGER NOT NULL,
+    kind         TEXT    NOT NULL,
+    predicate    TEXT,
+    path         TEXT,
+    to_path      TEXT,
+    operation    TEXT,
+    -- Bounded, human-readable, and NOT executable. It may explain intent and it
+    -- is fingerprinted as part of the exact snapshot, because two snapshots
+    -- whose descriptions differ are not the same requirements. It is never
+    -- parsed, never a fallback rule, and no model reads it in this build.
+    description  TEXT,
+    FOREIGN KEY (task_id, turn_number)
+        REFERENCES task_turn_criteria (task_id, turn_number) ON DELETE CASCADE,
+    UNIQUE (task_id, turn_number, ordinal),
+    CHECK (ordinal >= 1),
+    CHECK (kind IN ('evidence', 'manual')),
+    -- Exactly the evidence kinds carry a predicate, and exactly they carry a
+    -- path. A manual criterion with a path would look evidence-shaped to an
+    -- evaluator that branched on the column instead of the kind.
+    CHECK ((kind = 'evidence') = (predicate IS NOT NULL)),
+    CHECK ((kind = 'evidence') = (path IS NOT NULL)),
+    CHECK (predicate IS NULL
+           OR predicate IN ('path_changed', 'path_operation', 'rename')),
+    -- An operation belongs to exactly one predicate, and must be present for it.
+    -- `renamed` is absent from the operation list on purpose: a rename is a
+    -- two-path fact and this column carries one path, so it has its own
+    -- predicate rather than an operation that could only say half of it.
+    CHECK ((predicate = 'path_operation') = (operation IS NOT NULL)),
+    CHECK (operation IS NULL
+           OR operation IN ('created', 'modified', 'deleted')),
+    CHECK ((predicate = 'rename') = (to_path IS NOT NULL)),
+    CHECK (to_path IS NULL OR to_path <> path),
+    -- A manual criterion must say what a person is being asked to check. An
+    -- evidence criterion may carry one and need not: its structured fields are
+    -- the authority either way.
+    CHECK (kind <> 'manual' OR description IS NOT NULL),
+    CHECK (path IS NULL OR length(path) BETWEEN 1 AND 512),
+    CHECK (to_path IS NULL OR length(to_path) BETWEEN 1 AND 512),
+    CHECK (description IS NULL OR length(description) BETWEEN 1 AND 500)
+);
+
+CREATE INDEX IF NOT EXISTS criterion_items_by_turn
+    ON task_turn_criterion_items (task_id, turn_number, ordinal);
 """
 
 
@@ -1794,6 +1969,10 @@ class TaskStore:
         # it, or a boundary bound to a turn that rolled back, are both states
         # this method must be unable to produce.
         self._mark_baseline_turn_opened_locked(connection, task_id, turn_number)
+        # And the same for the v7 criteria snapshot, for the same reason. Both
+        # pre-work facts were reserved against this turn number before the worker
+        # was called; this is where they stop being reservations.
+        self._mark_criteria_turn_opened_locked(connection, task_id, turn_number)
 
     def _current_cursor_locked(
         self, connection: sqlite3.Connection, task_id: str
@@ -2144,6 +2323,272 @@ class TaskStore:
         with self._read() as connection:
             row = connection.execute(
                 "SELECT dispatch_state FROM task_turn_git_baselines"
+                " WHERE task_id = ? AND turn_number = ?",
+                (task_id, int(turn_number)),
+            ).fetchone()
+        return None if row is None else row["dispatch_state"]
+
+    # -- the pre-work acceptance criteria (schema v7) -------------------------
+
+    def reserve_turn_criteria(
+        self,
+        task_id: str,
+        criteria: Sequence["AcceptanceCriterion"],
+        *,
+        recorded_at: str,
+    ) -> int:
+        """Persist the criteria snapshot for the turn that is **about to** open.
+
+        Returns the turn number the snapshot was written for, which is the number
+        ``_open_turn_locked`` will allocate next and the same number
+        :meth:`reserve_turn_baseline` reserves. All three read
+        ``MAX(turn_number) + 1`` and the service holds its dispatch lock across
+        them, so they agree; the primary key is the backstop rather than the
+        mechanism.
+
+        **An empty sequence is not a failure and not a no-op.** It writes an
+        explicit ``not_provided`` snapshot, because "Cofferdam knew there were no
+        structured criteria" and "this turn predates criteria persistence" are
+        different facts, and omitting the row would make them indistinguishable
+        forever. :meth:`turn_criteria` returns ``legacy_unknown`` for the second
+        and it must never be confused with the first.
+
+        **Why this is a separate write and not part of opening the turn**, and
+        **why replacement is bounded to the window before the adapter is
+        reached**: both answers are PR4's, verbatim, and they are in
+        :meth:`reserve_turn_baseline`. The guarantee is that the snapshot is
+        durable before the worker starts; ``dispatch_state`` is what makes
+        ``captured`` mean the adapter provably had not been reached; a refusal
+        does not re-open replacement because an adapter's refusal is a statement
+        of intent rather than a proof about side effects. A retry of the same
+        reserved turn therefore dispatches against exactly the criteria the first
+        attempt did — which is the property that makes an evaluation of that turn
+        meaningful at all.
+
+        **The snapshot and its criteria are one transaction.** A parent claiming
+        ``present`` whose items failed to insert would be a snapshot that says
+        there were four requirements and can name none of them, which is worse
+        than no snapshot: it reads as recorded fact. The composite foreign key
+        makes the database enforce it rather than this method promising it.
+        """
+        from .criteria import (
+            CRITERIA_PRESENT,
+            criteria_fingerprint,
+            criteria_state,
+            new_criterion_id,
+            new_snapshot_id,
+        )
+
+        items = tuple(criteria)
+        state = criteria_state(items)
+        fingerprint = criteria_fingerprint(state, items)
+        with self._write() as connection:
+            if connection.execute(
+                "SELECT 1 FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone() is None:
+                raise TaskUnknown()
+            highest = connection.execute(
+                "SELECT COALESCE(MAX(turn_number), 0) FROM task_turns WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()[0]
+            turn_number = int(highest or 0) + 1
+            existing = connection.execute(
+                "SELECT dispatch_state FROM task_turn_criteria"
+                " WHERE task_id = ? AND turn_number = ?",
+                (task_id, turn_number),
+            ).fetchone()
+            if existing is not None:
+                if existing["dispatch_state"] not in REPLACEABLE_DISPATCH_STATES:
+                    # Frozen. The stored snapshot stands and the caller dispatches
+                    # against it — including when this attempt supplied different
+                    # criteria, because the turn being retried was already begun
+                    # against the ones already there.
+                    return turn_number
+                # Replacing while the adapter provably has not been reached. The
+                # items cascade with the parent, so no criterion of the replaced
+                # snapshot survives to be read alongside the new one.
+                connection.execute(
+                    "DELETE FROM task_turn_criteria"
+                    " WHERE task_id = ? AND turn_number = ?",
+                    (task_id, turn_number),
+                )
+            connection.execute(
+                """
+                INSERT INTO task_turn_criteria
+                    (task_id, turn_number, criteria_state, snapshot_id,
+                     criteria_fingerprint, criterion_count, dispatch_state,
+                     recorded_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    turn_number,
+                    state,
+                    new_snapshot_id(),
+                    fingerprint,
+                    len(items),
+                    DISPATCH_CAPTURED,
+                    recorded_at,
+                ),
+            )
+            if state == CRITERIA_PRESENT:
+                for criterion in items:
+                    connection.execute(
+                        """
+                        INSERT INTO task_turn_criterion_items
+                            (criterion_id, task_id, turn_number, ordinal, kind,
+                             predicate, path, to_path, operation, description)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            new_criterion_id(),
+                            task_id,
+                            turn_number,
+                            criterion.ordinal,
+                            criterion.kind,
+                            criterion.predicate,
+                            criterion.path,
+                            criterion.to_path,
+                            criterion.operation,
+                            criterion.description,
+                        ),
+                    )
+        return turn_number
+
+    def mark_criteria_dispatch_started(self, task_id: str, turn_number: int) -> None:
+        """Freeze the criteria snapshot, durably, before the adapter is called.
+
+        The counterpart of :meth:`mark_baseline_dispatch_started`, and it must
+        commit at the same moment and for the same reason: from here Cofferdam
+        cannot prove the worker did nothing, so the requirements it is working
+        against stop being changeable. A criteria set edited after a worker began
+        would judge that worker against a target that moved while it was running.
+
+        Idempotent, and re-enterable from ``dispatch_refused`` so a refused
+        follow-up may be sent again against the same reserved turn and the same
+        untouched snapshot. It never moves backwards from ``turn_opened``.
+        """
+        with self._write() as connection:
+            connection.execute(
+                "UPDATE task_turn_criteria SET dispatch_state = ?"
+                " WHERE task_id = ? AND turn_number = ? AND dispatch_state IN (?, ?)",
+                (
+                    DISPATCH_STARTED,
+                    task_id,
+                    int(turn_number),
+                    DISPATCH_CAPTURED,
+                    DISPATCH_REFUSED,
+                ),
+            )
+
+    def mark_criteria_dispatch_refused(self, task_id: str, turn_number: int) -> None:
+        """Record that the adapter answered with a refusal, and no turn opened.
+
+        It does **not** make the snapshot replaceable again, for the reason
+        :meth:`mark_baseline_dispatch_refused` gives at length: ``AdapterRefusal``
+        is a statement of intent, not a proof about side effects.
+        """
+        with self._write() as connection:
+            connection.execute(
+                "UPDATE task_turn_criteria SET dispatch_state = ?"
+                " WHERE task_id = ? AND turn_number = ? AND dispatch_state = ?",
+                (DISPATCH_REFUSED, task_id, int(turn_number), DISPATCH_STARTED),
+            )
+
+    def _mark_criteria_turn_opened_locked(
+        self, connection: sqlite3.Connection, task_id: str, turn_number: int
+    ) -> None:
+        """Bind the snapshot to the turn it belongs to. Caller holds the transaction.
+
+        Written inside the same transaction as the turn row, so a turn whose
+        criteria are not marked — or criteria marked for a turn that rolled back
+        — is not a state this store can produce. A dispatch whose snapshot failed
+        to persist has no row here and the update touches nothing, which is
+        correct: missing criteria stay missing rather than being invented at
+        turn-open.
+        """
+        connection.execute(
+            "UPDATE task_turn_criteria SET dispatch_state = ?"
+            " WHERE task_id = ? AND turn_number = ?",
+            (DISPATCH_TURN_OPENED, task_id, int(turn_number)),
+        )
+
+    def turn_criteria(self, task_id: str, turn_number: int) -> "CriteriaSnapshot":
+        """The criteria in force for one turn. **Never ``None``.**
+
+        Deliberately unlike :meth:`turn_baseline`, which answers ``None`` for a
+        turn with no boundary. A boundary has two states — recorded or not — so
+        ``None`` can carry the whole answer. Criteria have three, and the
+        difference between the last two is the point of the vocabulary: a turn
+        may have criteria, may be **known** to have none, or may predate criteria
+        persistence entirely. Returning ``None`` for the third would put a reader
+        one careless ``or`` away from treating a historical turn as deliberately
+        unconstrained, so the state is always spelled out.
+
+        Every turn on this host that predates schema v7 answers
+        ``legacy_unknown``, and so does any dispatch that crashed before the
+        snapshot was persisted.
+        """
+        from .criteria import (
+            CRITERIA_LEGACY_UNKNOWN,
+            MAX_CRITERIA_PER_TURN,
+            AcceptanceCriterion,
+            CriteriaSnapshot,
+        )
+
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM task_turn_criteria WHERE task_id = ? AND turn_number = ?",
+                (task_id, int(turn_number)),
+            ).fetchone()
+            if row is None:
+                return CriteriaSnapshot(
+                    task_id=task_id,
+                    turn_number=int(turn_number),
+                    state=CRITERIA_LEGACY_UNKNOWN,
+                )
+            # ORDER BY the stored ordinal, never by rowid. See the table comment.
+            items = connection.execute(
+                "SELECT * FROM task_turn_criterion_items"
+                " WHERE task_id = ? AND turn_number = ? ORDER BY ordinal ASC"
+                " LIMIT ?",
+                (task_id, int(turn_number), MAX_CRITERIA_PER_TURN),
+            ).fetchall()
+        return CriteriaSnapshot(
+            task_id=row["task_id"],
+            turn_number=row["turn_number"],
+            state=row["criteria_state"],
+            snapshot_id=row["snapshot_id"],
+            fingerprint=row["criteria_fingerprint"],
+            criterion_count=row["criterion_count"],
+            dispatch_state=row["dispatch_state"],
+            recorded_at=row["recorded_at"],
+            criteria=tuple(
+                AcceptanceCriterion(
+                    ordinal=item["ordinal"],
+                    kind=item["kind"],
+                    predicate=item["predicate"],
+                    path=item["path"],
+                    to_path=item["to_path"],
+                    operation=item["operation"],
+                    description=item["description"],
+                    criterion_id=item["criterion_id"],
+                )
+                for item in items
+            ),
+        )
+
+    def turn_criteria_dispatch_state(
+        self, task_id: str, turn_number: int
+    ) -> Optional[str]:
+        """How far this snapshot's worker dispatch got, or ``None`` if no snapshot.
+
+        ``None`` means no snapshot was recorded and must never be read as "safe
+        to replace".
+        """
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT dispatch_state FROM task_turn_criteria"
                 " WHERE task_id = ? AND turn_number = ?",
                 (task_id, int(turn_number)),
             ).fetchone()

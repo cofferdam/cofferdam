@@ -87,6 +87,11 @@ CODE_SESSION_UNAVAILABLE = "task_session_unavailable"
 CODE_FOLLOWUP_IN_FLIGHT = "task_followup_in_flight"
 #: This task has had as many turns as one task may have.
 CODE_TURN_LIMIT_REACHED = "task_turn_limit_reached"
+#: The acceptance criteria supplied for this turn will not be stored (M2K PR6).
+CODE_CRITERIA_INVALID = "task_criteria_invalid"
+#: Criteria were supplied, could not be made durable, and the dispatch stopped
+#: rather than running a worker against requirements nobody recorded.
+CODE_CRITERIA_UNRECORDED = "task_criteria_unrecorded"
 
 
 class TaskError(Exception):
@@ -421,6 +426,52 @@ class TurnLimitReached(TaskError):
         )
 
 
+class CriteriaInvalid(TaskError):
+    """Acceptance criteria that will not be stored (M2K PR6).
+
+    Raised **before** anything durable is written and before any adapter is
+    invoked, so a refused criteria set leaves no task half-started and no worker
+    running against requirements Cofferdam declined to record.
+
+    ``detail`` is a closed reason code from
+    :mod:`~cofferdam.workstation.tasks.criteria` and a criterion position at
+    most. It never echoes the submitted value: a refusal that repeats a rejected
+    path is a way to describe the host's filesystem one attempt at a time, and a
+    refusal that repeats a rejected description hands the submission back.
+    """
+
+    def __init__(self, detail: Optional[str] = None) -> None:
+        super().__init__(
+            CODE_CRITERIA_INVALID,
+            "those acceptance criteria cannot be accepted",
+            detail,
+        )
+
+
+class CriteriaUnrecorded(TaskError):
+    """Criteria were supplied and could not be made durable before dispatch.
+
+    The dispatch stops here rather than continuing. This is the one place where
+    Task Core treats an evidence-adjacent write as fatal, and the asymmetry is
+    deliberate: a missing Git baseline costs a later observation, while a missing
+    criteria snapshot would leave a worker running against requirements no future
+    evaluation can ever see — which is the silent disappearance of acceptance
+    criteria that :data:`~cofferdam.workstation.tasks.criteria.MAX_CRITERIA_PER_TURN`
+    exists to prevent, arriving by a different door.
+
+    A turn for which **no** criteria were supplied does not take this path: there
+    is nothing to lose, and a store that cannot write ``not_provided`` will fail
+    the task at its next transition anyway.
+    """
+
+    def __init__(self, detail: Optional[str] = None) -> None:
+        super().__init__(
+            CODE_CRITERIA_UNRECORDED,
+            "the acceptance criteria for this turn could not be recorded",
+            detail or "nothing was dispatched; the task was not started",
+        )
+
+
 class StoreUnavailable(TaskError):
     def __init__(self, detail: Optional[str] = None) -> None:
         super().__init__(
@@ -442,6 +493,8 @@ __all__ = [
     "CODE_CLARIFICATION_PENDING",
     "CODE_CLARIFICATION_UNKNOWN",
     "CODE_CLARIFICATION_UNSUPPORTED",
+    "CODE_CRITERIA_INVALID",
+    "CODE_CRITERIA_UNRECORDED",
     "CODE_FOLLOWUP_INVALID",
     "CODE_FOLLOWUP_IN_FLIGHT",
     "CODE_FOLLOWUP_NOT_WAITING",
@@ -469,6 +522,8 @@ __all__ = [
     "ClarificationPending",
     "ClarificationUnknown",
     "ClarificationUnsupported",
+    "CriteriaInvalid",
+    "CriteriaUnrecorded",
     "FollowupInFlight",
     "FollowupInvalid",
     "FollowupNotWaiting",

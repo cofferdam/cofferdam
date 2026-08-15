@@ -62,6 +62,14 @@ from .clarifications import (
     supersede,
     valid_question_id,
 )
+from .criteria import (
+    AcceptanceCriterion,
+    CriteriaSnapshot,
+    CriteriaSubmissionInvalid,
+    criteria_fingerprint,
+    criteria_state,
+    validate_criteria,
+)
 from .errors import (
     AdapterFailed,
     AdapterNotPermitted,
@@ -72,6 +80,8 @@ from .errors import (
     ClarificationPending,
     ClarificationUnknown,
     ClarificationUnsupported,
+    CriteriaInvalid,
+    CriteriaUnrecorded,
     FollowupInFlight,
     FollowupInvalid,
     FollowupNotWaiting,
@@ -388,17 +398,33 @@ class TaskService:
         client_request_id: object = None,
         origin: str = ORIGIN_PWA,
         title: object = None,
+        criteria: object = None,
     ) -> Tuple[TaskRow, bool]:
         """Create a task and run its adapter's start. Returns ``(task, created)``.
 
         ``origin`` is a *parameter of this method*, supplied by the route from
         the authenticated request context. It is not read from a body anywhere
         in this file, and there is no field for it in the request schema.
+
+        ``criteria`` is M2K PR6's acceptance criteria for turn one, and it is an
+        **internal** parameter in exactly the sense ``origin`` is not: no route
+        passes it, the ``/api/tasks`` body allowlist does not contain the key,
+        and the Actions bridge has no field for it. The foundation is usable from
+        inside the daemon — a host-owned planner, a future private surface — and
+        widening the public contract is a separate decision from establishing
+        what a criteria snapshot *is*.
+
+        Validated here, before the task row exists, so a refused criteria set
+        leaves nothing behind: no task, no event, no adapter call. That ordering
+        is what makes "refuse rather than silently drop acceptance criteria"
+        implementable at all — once a task is created and started, refusing is no
+        longer available.
         """
         project, adapter = self._resolve(project_id, adapter_id)
         text = self._valid_prompt(prompt)
         request_key = self._valid_request_id(client_request_id)
         label = bounded_line(title, MAX_LABEL_CHARS)
+        wanted = self._valid_criteria(criteria)
 
         # Re-verified now, not at load: a directory can be deleted or replaced
         # between service start and this moment, and the check that matters is
@@ -412,7 +438,17 @@ class TaskService:
             prompt=text,
             title=label,
             request_key=request_key,
-            payload_hash=_payload_hash(project.project_id, adapter.adapter_id, text)
+            # The criteria fingerprint joins the payload hash **only when
+            # criteria were supplied**, which keeps every hash this build has
+            # already written byte-identical. A retry that reuses a key and
+            # changes the requirements is then an idempotency conflict rather
+            # than a silent return of a task started against the old ones.
+            payload_hash=_payload_hash(
+                project.project_id,
+                adapter.adapter_id,
+                text,
+                *((criteria_fingerprint(criteria_state(wanted), wanted),) if wanted else ()),
+            )
             if request_key
             else None,
         )
@@ -438,9 +474,15 @@ class TaskService:
             project_id=row.project_id,
             correlation_id=row.correlation_id,
         )
-        return self._start(row, adapter, root), True
+        return self._start(row, adapter, root, wanted), True
 
-    def _start(self, row: TaskRow, adapter: TaskAdapter, root: Path) -> TaskRow:
+    def _start(
+        self,
+        row: TaskRow,
+        adapter: TaskAdapter,
+        root: Path,
+        criteria: Sequence[AcceptanceCriterion] = (),
+    ) -> TaskRow:
         """Queue, start, and apply whatever the adapter reports.
 
         Each step is its own durable transition, so a crash anywhere in here
@@ -473,22 +515,51 @@ class TaskService:
                 correlation_id=row.correlation_id,
             )
 
+            # Turn one's two pre-work facts, in this order.
+            #
+            # Criteria first, and the order is a preference rather than a
+            # requirement: both must be durable before `dispatch_started` and
+            # neither depends on the other. What settles it is that this write is
+            # deterministic and cheap while the baseline runs a subprocess, so
+            # doing it first keeps the window in which a crash loses the caller's
+            # requirements as small as it can be.
+            try:
+                criteria_turn = self._record_pre_work_criteria(row, criteria)
+            except TaskError as error:
+                # Only reachable when criteria were supplied — see
+                # :meth:`_record_pre_work_criteria`. The adapter has not been
+                # called and will not be.
+                return self._fail(
+                    row,
+                    CriteriaUnrecorded().code,
+                    "the acceptance criteria for this task could not be recorded",
+                    error.code,
+                )
             # Turn one's pre-work Git boundary, captured and made durable here —
             # the last Cofferdam-controlled instruction before the worker exists.
             # See :meth:`_record_pre_work_baseline`.
             turn_number = self._record_pre_work_baseline(row, root)
 
+            # The number both pre-work facts were reserved against. They allocate
+            # it independently and it agrees by construction, so either non-``None``
+            # answer is the right one to freeze against — and taking the fallback
+            # matters: if the Git capture could not be persisted the baseline
+            # reserved no number, and a criteria snapshot left at ``captured``
+            # while a worker runs would be a criteria set a retry could legally
+            # replace *after* the work happened.
+            dispatch_turn = turn_number if turn_number is not None else criteria_turn
+
             context = self._context(row, root, adapter)
             # Committed before the call, never after: from here on Cofferdam
-            # cannot prove the worker did nothing, so the boundary is frozen.
-            self._mark_dispatch_started(row, turn_number)
+            # cannot prove the worker did nothing, so both pre-work facts freeze.
+            self._mark_dispatch_started(row, dispatch_turn)
             try:
                 outcome = adapter.start(context)
             except AdapterRefusal as refusal:
-                self._mark_dispatch_refused(row, turn_number)
+                self._mark_dispatch_refused(row, dispatch_turn)
                 return self._fail(row, "task_adapter_refused", refusal.message, refusal.detail)
             except Exception as exc:  # an adapter fault must not take the service down
-                self._mark_dispatch_refused(row, turn_number)
+                self._mark_dispatch_refused(row, dispatch_turn)
                 return self._fail(
                     row,
                     "task_adapter_error",
@@ -576,16 +647,62 @@ class TaskService:
         except TaskError:  # pragma: no cover - defensive
             return None
 
+    def _record_pre_work_criteria(
+        self, row: TaskRow, criteria: Sequence[AcceptanceCriterion]
+    ) -> Optional[int]:
+        """Persist this turn's acceptance criteria. Before the worker.
+
+        **Ordering is the entire point of this method**, exactly as it is for
+        :meth:`_record_pre_work_baseline`. Both dispatch paths call it while
+        holding ``self._lock`` and before ``_mark_dispatch_started``, so the
+        snapshot is committed to SQLite before any worker or provider process can
+        observe — let alone influence — what the turn was asked to achieve. There
+        is no path from ``create_task`` or ``send_followup`` to an adapter that
+        does not pass through here first.
+
+        **An empty set is still recorded.** A turn nobody gave criteria writes an
+        explicit ``not_provided`` snapshot rather than no row, because a future
+        evaluator has to be able to tell "Cofferdam knew there were no structured
+        criteria" from "this turn predates criteria persistence". The second is
+        what a missing row means, forever, and there is no way to recover the
+        difference afterwards.
+
+        **Failure is not swallowed when criteria were supplied**, and that is the
+        one place this method deliberately differs from its Git counterpart. An
+        unavailable baseline costs a later observation; unrecorded criteria would
+        leave a worker running against requirements no evaluation can ever see,
+        which is the silent disappearance of acceptance criteria arriving through
+        a different door than the bounds check. So the caller is told and the
+        dispatch stops. When no criteria were supplied there is nothing to lose,
+        and the failure is swallowed the way the baseline's is — a store that
+        cannot write this row will fail the task at its next transition anyway.
+        """
+        try:
+            return self._store.reserve_turn_criteria(
+                row.task_id, tuple(criteria), recorded_at=now_iso()
+            )
+        except TaskError:
+            if criteria:
+                raise
+            return None
+
     def _mark_dispatch_started(self, row: TaskRow, turn_number: Optional[int]) -> None:
-        """Freeze the boundary, durably, immediately before the adapter is called.
+        """Freeze both pre-work facts, durably, immediately before the adapter call.
 
         The ordering here is the crash-safety argument in one line. Once this
         commits, Cofferdam can no longer prove the worker did nothing — so the
-        boundary stops being replaceable, and a later retry that finds it can
-        only dispatch against it rather than draw a new line behind a worker that
+        boundary stops being replaceable, the criteria snapshot stops being
+        changeable, and a later retry that finds either can only dispatch against
+        what is already there rather than draw a new line behind a worker that
         may already have moved.
 
-        ``turn_number`` is ``None`` only when the capture itself could not be
+        The criteria are marked from the **same reserved turn number** as the
+        baseline. Both reservations read ``MAX(turn_number) + 1`` under this
+        service's dispatch lock, so they agree by construction; a snapshot that
+        failed to persist has no row and the update touches nothing, which is the
+        correct outcome rather than an invented one.
+
+        ``turn_number`` is ``None`` only when the Git capture itself could not be
         persisted, in which case there is no boundary to freeze and the dispatch
         proceeds with no recorded boundary at all — which
         :meth:`TaskStore.turn_baseline` reports as absent rather than clean.
@@ -595,20 +712,32 @@ class TaskService:
         try:
             self._store.mark_baseline_dispatch_started(row.task_id, turn_number)
         except TaskError:  # pragma: no cover - defensive
+            pass
+        try:
+            self._store.mark_criteria_dispatch_started(row.task_id, turn_number)
+        except TaskError:  # pragma: no cover - defensive
             return
 
     def _mark_dispatch_refused(self, row: TaskRow, turn_number: Optional[int]) -> None:
         """Record that the adapter answered, and no turn came of it.
 
         Distinct from a crash, which leaves ``dispatch_started`` standing: this
-        says Cofferdam *learned* the outcome. It does not make the boundary
-        replaceable — see :meth:`TaskStore.mark_baseline_dispatch_refused` for
-        why an adapter's refusal cannot prove the worker was untouched.
+        says Cofferdam *learned* the outcome. It makes neither the boundary nor
+        the criteria snapshot replaceable — see
+        :meth:`TaskStore.mark_baseline_dispatch_refused` for why an adapter's
+        refusal cannot prove the worker was untouched, and note that the argument
+        is if anything stronger for criteria: a retry that redrew the
+        requirements after a worker may already have acted on the old ones would
+        judge that work against something it never saw.
         """
         if turn_number is None:
             return
         try:
             self._store.mark_baseline_dispatch_refused(row.task_id, turn_number)
+        except TaskError:  # pragma: no cover - defensive
+            pass
+        try:
+            self._store.mark_criteria_dispatch_refused(row.task_id, turn_number)
         except TaskError:  # pragma: no cover - defensive
             return
 
@@ -748,6 +877,7 @@ class TaskService:
         *,
         client_request_id: object = None,
         source: str = SOURCE_WORKSTATION_PWA,
+        criteria: object = None,
     ) -> TaskRow:
         """Deliver one more user turn to the session this task already owns.
 
@@ -774,11 +904,23 @@ class TaskService:
 
         Nothing is written until the adapter takes the message, and the turn
         record and the state change are one transaction.
+
+        ``criteria`` (M2K PR6) is the acceptance criteria for the turn this
+        message opens, and it is internal in the same sense it is on
+        :meth:`create_task`: no route passes it and no request schema has a field
+        for it. A genuinely new turn may carry a **new** snapshot — the work
+        being asked for is new, so the requirements may be — while the earlier
+        turns keep theirs frozen exactly as they were. A message that merely
+        *resumes* a turn blocked on a question may not carry criteria at all, and
+        is refused rather than silently ignored: that turn is already running and
+        its snapshot is already frozen, so accepting the field would mean
+        accepting requirements Cofferdam is about to discard.
         """
         row = self.get_task(task_id)
         text = self._valid_followup(followup)
         adapter = self._adapters.get(row.adapter_id)
         request_key = self._valid_request_id(client_request_id)
+        wanted = self._valid_criteria(criteria)
 
         if source not in ACCEPTED_FOLLOWUP_SOURCES:
             # `future_gpt_bridge` is in the vocabulary and not in this set, and
@@ -799,7 +941,18 @@ class TaskService:
                 row.task_id,
                 "task_followup:" + row.task_id,
                 request_key,
-                _payload_hash(row.task_id, text),
+                # As on `create_task`, the criteria fingerprint joins the hash
+                # only when criteria were supplied, so no hash this build has
+                # already written moves.
+                _payload_hash(
+                    row.task_id,
+                    text,
+                    *(
+                        (criteria_fingerprint(criteria_state(wanted), wanted),)
+                        if wanted
+                        else ()
+                    ),
+                ),
             )
             if seen is not None:
                 # Already delivered. Sending it again would mean an adapter
@@ -874,14 +1027,37 @@ class TaskService:
                 self._reject(row, "followup", "a turn is already running")
                 raise FollowupInFlight()
 
-            # This follow-up's own pre-work Git boundary, captured and made
-            # durable before the message reaches the session. Only when a new
-            # turn is actually being opened: a message that resumes a turn
-            # blocked on a question is not new work and must not redraw the line
-            # that turn's changes are already being measured from.
+            # A message that resumes a turn cannot carry criteria. That turn's
+            # snapshot froze when its own dispatch began and this message is not
+            # new work, so the field has nowhere honest to go — refused rather
+            # than dropped, because dropping it would accept requirements and
+            # then evaluate against different ones.
+            if wanted and not starts_new_turn:
+                self._reject(row, "followup", "criteria cannot join a running turn")
+                raise CriteriaInvalid(
+                    "this message resumes a turn whose criteria are already frozen"
+                )
+
+            # This follow-up's own pre-work facts, made durable before the
+            # message reaches the session. Only when a new turn is actually being
+            # opened: a message that resumes a turn blocked on a question is not
+            # new work and must not redraw the line that turn's changes are
+            # already being measured from, nor restate what it was asked to do.
             turn_number = None
+            criteria_turn = None
             if starts_new_turn:
+                try:
+                    criteria_turn = self._record_pre_work_criteria(row, wanted)
+                except TaskError:
+                    # Only reachable when criteria were supplied. Nothing has been
+                    # sent to the session and nothing is written.
+                    self._reject(row, "followup", "criteria could not be recorded")
+                    raise CriteriaUnrecorded()
                 turn_number = self._record_pre_work_baseline(row, root)
+            # See `_start`: either reservation's number is the right one, and the
+            # fallback covers a Git capture that could not be persisted while the
+            # criteria snapshot was.
+            dispatch_turn = turn_number if turn_number is not None else criteria_turn
 
             context = self._context(row, root, adapter, followup=text)
             # The adapter is asked **before** anything is written. A follow-up
@@ -889,19 +1065,20 @@ class TaskService:
             # somebody their message accepted while the agent sat idle — the
             # same false success the clarification path refuses.
             #
-            # Which is exactly why the boundary has to be frozen first: this
-            # adapter's refusal can arrive *after* `send_turn` has already put
-            # bytes on a live worker's stdin, so a refusal here proves nothing
-            # about what the repository has been through.
-            self._mark_dispatch_started(row, turn_number)
+            # Which is exactly why both pre-work facts have to be frozen first:
+            # this adapter's refusal can arrive *after* `send_turn` has already
+            # put bytes on a live worker's stdin, so a refusal here proves nothing
+            # about what the repository has been through — or about whether a
+            # worker has already started acting on what it was asked to do.
+            self._mark_dispatch_started(row, dispatch_turn)
             try:
                 outcome = adapter.send_followup(context, text)
             except AdapterRefusal as refusal:
-                self._mark_dispatch_refused(row, turn_number)
+                self._mark_dispatch_refused(row, dispatch_turn)
                 self._reject(row, "followup", refusal.message[:120])
                 raise SessionUnavailable(refusal.message[:120])
             except Exception as exc:
-                self._mark_dispatch_refused(row, turn_number)
+                self._mark_dispatch_refused(row, dispatch_turn)
                 return self._fail(
                     row,
                     "task_adapter_error",
@@ -1303,6 +1480,24 @@ class TaskService:
         """
         row = self.get_task(task_id)
         return self._store.evidence_bundle(row.task_id, turn_number)
+
+    # -- acceptance criteria (M2K PR6) ---------------------------------------
+
+    def turn_criteria(self, task_id: object, turn_number: object) -> CriteriaSnapshot:
+        """What one turn was required to achieve. **Never ``None``.**
+
+        The read half of PR6, and it is not routed anywhere: no HTTP surface
+        publishes a criteria snapshot in this build, and the Actions bridge is
+        unchanged. It exists so the daemon and the tests can ask the question the
+        durable rows now answer.
+
+        A turn with no snapshot answers ``legacy_unknown`` rather than
+        ``not_provided`` — see :meth:`TaskStore.turn_criteria` for why those two
+        must never collapse, and note that this method evaluates nothing. It
+        reports what was asked; whether it happened has no answer in this build.
+        """
+        row = self.get_task(task_id)
+        return self._store.turn_criteria(row.task_id, int(turn_number))
 
     def turn_numbers(self, task_id: object) -> List[int]:
         """Which turns this task has, for a client that needs to ask for one."""
@@ -1942,6 +2137,25 @@ class TaskService:
                 + " characters and contain no control characters"
             )
         return followup
+
+    def _valid_criteria(self, value: object) -> Tuple[AcceptanceCriterion, ...]:
+        """Acceptance criteria, validated into stored shape — or a refusal.
+
+        Refusing rather than trimming is the whole rule, and M2K PR6's module
+        docstring says why acceptance requirements are the one thing in this
+        milestone that may not be silently reduced. Called before anything
+        durable is written on both dispatch paths.
+
+        The refusal detail is a closed reason code and a criterion position at
+        most; the submitted value never travels back out.
+        """
+        try:
+            return validate_criteria(value)
+        except CriteriaSubmissionInvalid as invalid:
+            detail = invalid.reason
+            if invalid.ordinal is not None:
+                detail += " (criterion " + str(invalid.ordinal) + ")"
+            raise CriteriaInvalid(detail) from None
 
     def _valid_request_id(self, value: object) -> Optional[str]:
         """A client's own retry key. Opaque, bounded, and never authority.
