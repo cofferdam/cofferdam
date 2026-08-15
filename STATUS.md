@@ -57,10 +57,15 @@ is unchanged at v5 because PR3 needed none, and `assembler_version` is 2. PR4 �
 per-turn pre-work Git baseline — is **merged (#49, `cf29b89`) and deployed**: workstation and
 Actions bridge both run it from slot B, and the live task database is migrated to **schema v6**,
 with slot A retained at `d98c10f` plus a verified pre-migration schema-v5 backup as the rollback
-pair. PR5 — committed-work Git observations from that boundary — is **implemented on a branch and
-not deployed**; see *In progress* below. It leaves the schema at **v6** and raises
-`assembler_version` to **3**. Nothing after PR5 is started: **no evaluator, no verdicts, no risk
-levels, no check runner, no planner**, and none of PR3, PR4 or PR5 adds any of them.
+pair. PR5 — committed-work Git observations from that boundary — is **merged (#50, `e9f5e26`) and
+deployed**: workstation and Actions bridge both run it from slot A, the live schema is unchanged at
+**v6** because PR5 needed none, and `assembler_version` is **3**. The immediate rollback is slot B
+at `cf29b89` against the same live schema-v6 database; the pre-PR5 backup is deeper recovery only.
+PR6 — the immutable per-turn acceptance-criteria snapshot — is **implemented on a branch and not
+deployed**; see *In progress* below. It takes the schema to **v7** and leaves `assembler_version` at
+**3**. PR6 stores what a turn was *required* to achieve and evaluates none of it: **no evaluator, no
+verdicts, no criterion results, no risk levels, no confidence, no check runner, no planner**, and
+none of PR3, PR4, PR5 or PR6 adds any of them.
 
 **M2H is complete and merged**, closing the M1 post-reboot gate;
 M2F Agent Task Core and M2G the Claude Code adapter merged; the isolated Custom GPT Actions mobile
@@ -769,10 +774,110 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2K PR6 — the immutable per-turn acceptance-criteria snapshot
+
+On `m2k-pr6-acceptance-criteria`, from the merged `e9f5e26`. **Implemented on a branch, not merged
+and not deployed.**
+
+Five PRs of evidence work left Cofferdam able to say a great deal about what *happened* and holding
+nothing at all about what was *required*. There was no acceptance criterion type, no criterion set,
+no criterion identity, no criteria fingerprint and no per-turn criteria authority — so "did the work
+meet what was asked" had no durable question to be an answer to. PR6 is that question and only that
+question. **It evaluates nothing.**
+
+**Schema v7, additive, two tables.** `task_turn_criteria` is one row per **reserved turn** carrying
+the criteria state, a server-minted `snapshot_id`, the criteria fingerprint, the criterion count and
+a `dispatch_state`; `task_turn_criterion_items` carries the closed structured facts, one row per
+criterion. No v6 table changed shape, no row was rewritten, and the migration writes nothing at all.
+
+**The invariant.** A future evaluation must refer to the exact criteria snapshot that was already in
+force **before worker dispatch began**. A worker judged against criteria that changed after it
+started has been judged against a moving target, and no care in the evaluator repairs that
+afterwards. So criteria are a pre-work durable fact, conceptually parallel to PR4's Git baseline,
+and frozen by the same event: once `dispatch_started` is durable for a reserved turn, that turn's
+snapshot is immutable.
+
+    validate → criteria snapshot → PR4 baseline → `dispatch_started` → **adapter runs**
+
+Both pre-work writes commit before `dispatch_started`, which commits before the adapter call. The
+proof is a test in which the adapter, at its **first instruction**, opens a **separate read-only**
+connection and finds: the snapshot row, every criterion row, a final fingerprint, the PR4 baseline,
+`dispatch_state = dispatch_started` — and **no `task_turns` row**, which is exactly why the snapshot
+table's foreign key names `tasks` rather than `task_turns`, the same lesson PR4 recorded.
+
+**Three states, and the difference between the last two is the point.** `present` is an immutable
+snapshot with at least one criterion. `not_provided` is Cofferdam durably recording, before
+dispatch, that no criteria were supplied. `legacy_unknown` is the **absence of the row**, which is
+what every historical turn on this host has, and it is deliberately not writable — the schema
+refuses it. A missing row is never read as `not_provided`, and `not_provided` is never read as an
+empty criterion set that automatically succeeds.
+
+**Criteria model v1 is small and closed.** Two kinds — `evidence` and `manual` — and three evidence
+predicates: `path_changed`, `path_operation` (`created` / `modified` / `deleted`) and `rename`.
+Every one is a question the *already stored* claim, artifact, worktree-observation and
+committed-range rows can decide in the next PR without any new capture. `manual` means undecidable
+by machine, which is neither failed nor passed; a future evaluator returns it as unverified.
+
+**No commands, and not by omission.** There is no shell string, argv, script, test command,
+executable path, `check_id` or expression language, and the validator refuses those field names *by
+name* with their own reason code. A criterion carrying a command would be dormant execution
+authority waiting for a runner. When host-owned named checks with literal argv exist, a future kind
+may name one; PR6 does not invent the authority in advance.
+
+**Negative/set criteria are deferred deliberately.** "Nothing changed outside the allowed set S" is
+a question current evidence can *sometimes* answer, and the sometimes is the problem: it needs a
+bounded structured path set — a third relational layer — and a completeness semantics stronger than
+PR2's `machine_complete` or PR4's `status_coverage` establish today.
+
+**Bounds refuse rather than truncate.** At most 32 criteria per turn and 500 characters of
+description, and over-bound submissions are refused **before dispatch** with no snapshot written.
+This is the one place in M2K where truncation would be wrong in a way it is not wrong elsewhere: a
+bounded *observation* is honestly `incomplete`, but a bounded *requirement set* reads afterwards as
+the complete list of things the work had to do. Paths go through the same
+`normalize_claim_path` / `is_denied_path` doctrine claims and artifacts already use — no absolute
+roots, no traversal, no sensitive names, and no rewriting of a path into a safe-looking one.
+
+**Identity is the server's.** `snapshot_id` and `criterion_id` are minted by the store from the same
+construction as `task_id`; a submitted one is refused. The **fingerprint** is a domain-tagged,
+length-prefixed SHA-256 over the stored criterion facts in `ordinal` order — deterministic, stable
+across a restart, and independent of row ids, insertion order, absolute paths, provider/session ids
+and every clock. It deliberately excludes the task and turn, unlike `input_fingerprint`: it
+identifies *what was asked for*, so two turns given the same requirements share it while each keeps
+its own snapshot id.
+
+**Retry is conservative, mirroring PR4.** `AdapterRefusal` records `dispatch_refused` and does
+**not** re-open replacement: an adapter's refusal is a statement of intent, not a proof about side
+effects, so a retry of the same reserved turn dispatches against exactly the snapshot the first
+attempt did. A genuinely new follow-up turn may receive a new snapshot; a message that merely
+*resumes* a turn is refused if it carries criteria, because that turn's snapshot is already frozen.
+
+**No public surface.** Criteria enter as an internal keyword-only `TaskService` parameter on
+`create_task` and `send_followup`. No route passes it, the `/api/tasks` body allowlist is unchanged,
+and there is no criteria route anywhere — asserted from the route decorators' syntax tree.
+
+**No bridge change.** Ten routes, nine authenticated, no criteria Action, `artifacts_supported`
+still `false`, `getProjectContext` untouched. **No evaluator, no `EvaluationRecord`, no met/not_met,
+no verdict, no risk level, no confidence, no check runner, no command, no provider, no model.**
+`ASSEMBLER_VERSION` stays at **3** and the evidence bundle's inputs are exactly PR5's.
+
+**Rollback measured, not assumed.** An isolated v7 database with real criteria content was opened
+with the shipped PR5 runtime (`e9f5e26`, schema-v6). It refused with `StoreUnavailable` and the
+database file was **byte-identical** afterwards — same SHA-256, same `sqlite_master`, same rows,
+`integrity_check` ok, `foreign_key_check` clean. It does create the WAL and shm siblings on its way
+to refusing, and writes nothing into them.
+
+## M2K records — the evidence foundation (written while each was on its branch)
+
+M2K is **in progress**: PR1, PR2, PR3, PR4 and PR5 are merged and deployed; PR6 is on a branch. See
+*In progress* above for PR6.
+
 ### M2K PR5 — committed-work Git observations from the durable baseline
 
-On `feat/m2k-pr5-committed-range`, from the merged `cf29b89`. **Implemented on a branch, not merged
-and not deployed.**
+**Merged as `e9f5e26` (#50) and deployed**: workstation and Actions bridge both run it from slot A,
+and the live task database is unchanged at **schema v6** because PR5 needed no migration. The
+immediate rollback is slot B at `cf29b89` against that same live database; the pre-PR5 backup is
+deeper recovery only. The record below was written while it was still on
+`feat/m2k-pr5-committed-range`, from the merged `cf29b89`, and is kept as it was written.
 
 PR4 recorded a revision before each turn's worker was allowed to start and consumed none of it. PR5
 is the consumption: what the repository gained between that boundary and a stable HEAD observed
@@ -871,11 +976,6 @@ observation written before PR5 reads as the `worktree` domain, because that is w
 **No bridge change.** Ten routes, nine authenticated, no evidence/artifact/claim/baseline/range
 Action, `artifacts_supported` still `false`, `getProjectContext` untouched. **No evaluator, no
 verdict, no risk level, no confidence, no check runner, no provider, no model.**
-
-## M2K records — the evidence foundation (written while each was on its branch)
-
-M2K is **in progress**: PR1, PR2, PR3 and PR4 are merged and deployed; PR5 is on a branch. See
-*In progress* above for PR5.
 
 ### M2K PR4 — the durable per-turn pre-work Git baseline
 

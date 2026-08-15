@@ -99,8 +99,11 @@ class EvidenceEndToEnd(unittest.TestCase):
     def test_the_whole_path(self):
         # 1. the current schema opens. v6 since M2K PR4; the bundle's inputs are
         #    unchanged by it, which is what the rest of this walk re-proves.
-        self.assertEqual(SCHEMA_VERSION, 6)
-        self.assertEqual(self.store.storage_health()["schema_version"], 6)
+        # At least, not exactly: each additive bump since this walk was
+        # written leaves it true. M2K PR6 took it to 7. The literal pin for
+        # the current version lives in `test_task_core.py`.
+        self.assertGreaterEqual(SCHEMA_VERSION, 6)
+        self.assertGreaterEqual(self.store.storage_health()["schema_version"], 6)
 
         # 2. a task is created.
         task_id = self._task()

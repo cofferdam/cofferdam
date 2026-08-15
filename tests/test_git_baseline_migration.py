@@ -67,16 +67,23 @@ class CleanDatabaseTests(unittest.TestCase):
             pass
         self._temp.cleanup()
 
-    def test_the_schema_version_is_six(self):
-        self.assertEqual(SCHEMA_VERSION, 6)
+    def test_the_schema_version_is_at_least_six(self):
+        """Six is when this table arrived; later versions are additive on top.
 
-    def test_the_recorded_version_is_six(self):
+        Moved off an equality by M2K PR6, which took the constant to 7. The
+        literal pin for the *current* version lives in `test_task_core.py` and in
+        `test_criteria_migration.py`; what matters here is that the build under
+        test is one that has the baseline table.
+        """
+        self.assertGreaterEqual(SCHEMA_VERSION, 6)
+
+    def test_the_recorded_version_is_at_least_six(self):
         self.store.storage_health()
         with sqlite3.connect(str(self.path)) as db:
             value = db.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()[0]
-        self.assertEqual(int(value), 6)
+        self.assertGreaterEqual(int(value), 6)
 
     def test_the_baseline_table_exists(self):
         self.store.storage_health()
@@ -514,16 +521,22 @@ class MigrationTests(unittest.TestCase):
                 r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
             }
 
-    def test_opening_it_migrates_to_six(self):
+    def test_opening_it_migrates_past_five(self):
+        """A v5 database is upgraded to whatever this build is, in one open.
+
+        Asserted as "at least six" since M2K PR6 took the constant to 7: this
+        module's subject is the v5 -> v6 step, and pinning the *current* version
+        here would make every later additive bump edit a PR4 test.
+        """
         self._build_v5()
         store = _open_store(self.home)
         self.addCleanup(store.close)
-        self.assertEqual(store.storage_health()["schema_version"], 6)
+        self.assertGreaterEqual(store.storage_health()["schema_version"], 6)
         with sqlite3.connect(str(self.path)) as db:
             value = db.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()[0]
-        self.assertEqual(int(value), 6)
+        self.assertGreaterEqual(int(value), 6)
 
     def test_the_new_table_is_created_empty(self):
         self._build_v5()
@@ -599,7 +612,7 @@ class MigrationTests(unittest.TestCase):
         first.close()
         second = _open_store(self.home)
         self.addCleanup(second.close)
-        self.assertEqual(second.storage_health()["schema_version"], 6)
+        self.assertGreaterEqual(second.storage_health()["schema_version"], 6)
         with sqlite3.connect(str(self.path)) as db:
             count = db.execute("SELECT COUNT(*) FROM %s" % BASELINE_TABLE).fetchone()[0]
         self.assertEqual(count, 0)

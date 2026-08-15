@@ -472,6 +472,115 @@ repository after the event is written and the bundle and its fingerprint are
 unchanged. There is no new route and no bridge operation. Evaluating any of it
 remains unstarted.
 
+### Acceptance criteria (M2K PR6, schema v7)
+
+Two additive tables carry what a turn was **required** to achieve:
+`task_turn_criteria`, one row per reserved turn, and
+`task_turn_criterion_items`, one row per criterion. Nothing here evaluates
+anything — there is no result, verdict, met/not_met, confidence or risk column,
+and no code that produces one.
+
+**Why it exists.** Five PRs of evidence made the database good at describing what
+happened and left it with nothing to compare that against: no criterion type, no
+criterion set, no criterion identity, no fingerprint, no per-turn criteria
+authority. "Did the work meet what was asked" had no durable question to answer.
+
+**Pre-work, and frozen by the same event as the baseline.** A future evaluation
+must refer to the criteria that were already in force **before dispatch began**;
+a worker judged against criteria that changed after it started has been judged
+against a moving target, and nothing the evaluator does afterwards repairs that.
+So the ordering on both dispatch paths is:
+
+```
+validate → criteria snapshot → PR4 baseline → dispatch_started → adapter runs
+```
+
+Both writes commit before `dispatch_started`, which commits before the adapter
+call. A test adapter opens a **separate read-only connection at its own first
+instruction** and finds the snapshot row, every criterion row, a final
+fingerprint, the baseline and `dispatch_state = dispatch_started` — with **no
+`task_turns` row**, which is why this table's foreign key names `tasks` and not
+`task_turns`, exactly as PR4's does. The criterion items *do* name the snapshot
+compositely, because that parent is written one line above in the same
+transaction: there is no criterion without a snapshot that owns it.
+
+**Three states, and the last two are different facts.**
+
+| State | Meaning |
+| --- | --- |
+| `present` | An immutable snapshot with at least one criterion |
+| `not_provided` | Cofferdam durably recorded, before dispatch, that none were supplied |
+| `legacy_unknown` | **No row.** The turn predates schema v7, or its dispatch crashed before the snapshot was written |
+
+`legacy_unknown` is not writable — the schema's CHECK refuses it — because a
+value meaning "nobody recorded anything" must not be something a writer can
+record. A missing row is never read as `not_provided`, and `not_provided` is
+never an empty criterion set that automatically succeeds.
+
+**The vocabulary is small and closed.** Two kinds:
+
+* `evidence` — a structured predicate over a project-relative path:
+  `path_changed`, `path_operation` with `created` / `modified` / `deleted`, or
+  `rename` with a destination. Every one is a question the *already stored*
+  claim, artifact, worktree and committed-range rows can decide, with no new
+  capture. `renamed` is deliberately not an operation: a rename is a two-path
+  fact and `operation` carries one path.
+* `manual` — a bounded description of something deterministic evidence cannot
+  decide. It means **undecidable by machine**: not failed, not passed. A future
+  evaluator returns it as unverified, and no model reads the description.
+
+**No commands, by refusal rather than omission.** There is no shell string,
+argv, script, test command, executable path, `check_id` or expression language,
+and those field names are refused *by name* with their own reason code rather
+than swept up as unknown. A criterion carrying a command is dormant execution
+authority waiting for a runner. When host-owned named checks with literal argv
+exist, a future kind may name one.
+
+**Bounds refuse; they do not truncate.** At most 32 criteria and 500 characters
+of description, and an over-bound submission is refused before dispatch with no
+snapshot written at all. This is the one place in M2K where truncation would be
+wrong in a way it is not wrong elsewhere: a bounded *observation* is honestly
+`incomplete`, but a bounded *requirement set* reads afterwards as the complete
+list of things the work had to do. Paths go through the same
+`normalize_claim_path` and sensitive-name deny list that claims and artifacts
+use, and a path is refused rather than rewritten into a safe-looking one.
+
+**Identity is the server's.** `snapshot_id` and `criterion_id` are minted by the
+store, from the same construction as `task_id`; a submitted one is refused. The
+**criteria fingerprint** is a domain-tagged, length-prefixed SHA-256 over the
+stored criterion facts in `ordinal` order — deterministic, stable across a
+restart, and independent of row ids, insertion order, absolute paths, provider or
+session ids and every clock. It deliberately excludes the task and the turn,
+unlike `input_fingerprint`: it identifies *what was asked for*, so two turns given
+the same requirements share it while each keeps its own snapshot id.
+
+**Retry is conservative, mirroring PR4.** Only `dispatch_state = captured`
+permits replacement. `AdapterRefusal` records `dispatch_refused` and does not
+re-open it — a refusal is a statement of intent, not a proof about side effects —
+so a retry of the same reserved turn dispatches against exactly the snapshot the
+first attempt did. A genuinely new follow-up turn may receive a new snapshot; a
+message that merely *resumes* a turn is refused if it carries criteria, because
+that turn's snapshot is already frozen.
+
+**Where criteria come from.** An internal, keyword-only `TaskService` parameter
+on `create_task` and `send_followup`. **No route passes it**, the `/api/tasks`
+body allowlist is unchanged, and there is no criteria route or bridge Action.
+They may never come from an `AdapterOutcome` — there is no field — from a
+worker's prose, from a provider session, or from evidence itself. Evidence and
+requirements must come from different places, or a worker has both done the work
+and set the bar.
+
+**What a future evaluator will bind.** A deterministic `EvaluationRecord` is
+expected to reference `task_id`, `turn_number`, the criteria snapshot
+identity/fingerprint, `assembler_version` and the EvidenceBundle's
+`input_fingerprint` — which is why both identities are frozen before the worker
+starts. Its results are expected to need something equivalent to `met`,
+`not_met` and `unverified`, and the doctrine is that **evidence limitations map
+to `unverified`, never to `not_met`**: `legacy_unknown` criteria, incomplete
+observations, incomplete claims, a dirty committed-range boundary, diverged
+history and unavailable Git evidence all land there. A `claim_conflict` is not a
+task-failure verdict either. **None of that is implemented.**
+
 ### Change claims and artifacts (M2K PR1, schema v4)
 
 Two tables carry the **claim** side of evidence, which Task Core did not have. They are additive:
@@ -1186,6 +1295,9 @@ infer them:
   entirely the adapter's.
 * Follow-up and cancellation are offered only where the adapter declares support.
 * Secrets are never task content and have no field here.
+* Since M2K PR6 a turn can carry acceptance criteria, and **nothing evaluates
+  them**. There is no evaluation record, no criterion result, no verdict and no
+  check runner in this build.
 
 Also not implemented: recovery from `recovery_required`, cross-task branching,
 automatic sub-tasks, full-text search, a complete resource audit, push event
