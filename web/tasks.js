@@ -90,6 +90,8 @@
   var detailResult = null;      /* the latest completed turn, when asked for */
   var detailEvidence = null;    /* one turn's evidence bundle, when asked for */
   var evidenceTurn = null;      /* which turn `detailEvidence` describes */
+  var detailAssessment = null;  /* one turn's criteria + evaluation, when asked */
+  var assessmentTurn = null;    /* which turn `detailAssessment` describes */
   var chosenOptions = {};       /* question_id -> the option ids ticked */
   var adapters = null;
   var projects = null;
@@ -840,6 +842,17 @@
           : "Evidence — turn " + String(nextEvidenceTurn(task))) +
         "</button>"
       );
+      /* The assessment, on demand and for one turn at a time, for exactly the
+         reasons the evidence button is. There is no re-run control here and
+         there is not going to be one: an evaluation is immutable, and a browser
+         must not be able to ask for a second opinion on frozen facts. */
+      buttons.push(
+        '<button id="taskShowAssessment" class="ghost"' + (locked() ? " disabled" : "") + ">" +
+        (busy("assessment")
+          ? "Reading…"
+          : "Assessment — turn " + String(nextAssessmentTurn(task))) +
+        "</button>"
+      );
     }
     return buttons.length ? '<div class="task-actions">' + buttons.join("") + "</div>" : "";
   }
@@ -865,6 +878,12 @@
     var total = turnsSoFar(task);
     if (!evidenceTurn || evidenceTurn >= total) { return 1; }
     return evidenceTurn + 1;
+  }
+
+  function nextAssessmentTurn(task) {
+    var total = turnsSoFar(task);
+    if (!assessmentTurn || assessmentTurn >= total) { return 1; }
+    return assessmentTurn + 1;
   }
 
   function interruptionNote(task) {
@@ -1006,6 +1025,180 @@
     relationship_sources_truncated: "Some paths have more sources than are listed.",
     events_truncated: "More events in this turn than were scanned."
   };
+
+  /* ----------------------------------------------------------- assessment */
+
+  /* The words this panel may use, and the one distinction it must never lose.
+
+     `unverified` and `not_met` are different in the way that matters most on a
+     phone screen. `not_met` is a finding about the work: the machine looked
+     completely and the required change is not there. `unverified` is a statement
+     about Cofferdam: the evidence could not decide. Rendering them alike — same
+     colour, same icon, same shape of sentence — would turn every limit of the
+     observer into an accusation about the worker, which is the failure the
+     three-valued vocabulary exists to prevent.
+
+     So they get different tones, different words, and `unverified` gets the
+     neutral tone rather than the error one. There is deliberately no PASS, FAIL,
+     SUCCESS or ERROR anywhere in this section, no aggregate, no count of how
+     many were met, no percentage, no confidence and no risk. None of those is a
+     thing the evaluator produced, and a screen is exactly where an unsupported
+     word becomes a decision. */
+  var RESULT_WORDS = {
+    met: {
+      label: "Met",
+      tone: "ok",
+      hint: "Machine-observed evidence for this turn satisfies it."
+    },
+    not_met: {
+      label: "Not met",
+      tone: "warn",
+      hint: "The machine observation was complete enough to rule it out."
+    },
+    /* Neutral, never `err`. This is about Cofferdam's reach, not the work. */
+    unverified: {
+      label: "Could not verify",
+      tone: "",
+      hint: "The stored evidence cannot decide this either way."
+    }
+  };
+
+  /* Closed reason codes, rendered as short sentences. Every one of them is a
+     statement about evidence, never about the worker. */
+  var REASON_WORDS = {
+    machine_change_observed: "A resulting change for this path was observed.",
+    machine_operation_observed: "The required operation was observed.",
+    machine_rename_observed: "An explicit rename with these endpoints was observed.",
+    complete_resulting_change_absent:
+      "The observation was complete and no resulting change for this path is there.",
+    complete_incompatible_operation:
+      "The observation was complete and every recorded operation differs from the one required.",
+    complete_rename_not_observed:
+      "The observation was complete and no rename with these endpoints was recorded.",
+    manual_criterion: "A person has to check this one. Cofferdam cannot.",
+    unsupported_capability: "This build cannot evaluate this kind of criterion.",
+    evidence_not_attributable:
+      "This turn's events cannot be identified exactly, so nothing can be attributed to it.",
+    machine_observations_incomplete: "Cofferdam recorded only some of what Git reported.",
+    unsupported_observation_shape:
+      "Cofferdam recorded an observation this build cannot interpret.",
+    committed_range_not_recorded:
+      "No committed-work observation was taken for this turn.",
+    committed_range_incomplete: "The committed-work observation was not complete.",
+    committed_range_history_diverged:
+      "The history moved, so there is no before-and-after to compare.",
+    pre_work_boundary_not_clean:
+      "The project already had uncommitted changes when this turn began, so a " +
+      "change cannot be attributed to it — and neither can its absence.",
+    resulting_operation_not_observed:
+      "The path changed, but the kind of change was not recorded.",
+    worktree_not_observed:
+      "Nothing examined the working tree for this turn, so absence there proves nothing."
+  };
+
+  var CRITERIA_STATE_WORDS = {
+    present: null,
+    not_provided:
+      "No structured acceptance criteria were supplied for this turn. Nothing " +
+      "was checked, and nothing about the work follows from that.",
+    legacy_unknown:
+      "Acceptance criteria were not recorded for this historical turn. It ran " +
+      "before Cofferdam stored them, so there is no question to answer here."
+  };
+
+  var EVALUATION_STATE_WORDS = {
+    criteria_legacy_unknown:
+      "No evaluation, because this turn was never given criteria to evaluate.",
+    turn_not_closed:
+      "This turn is still running. Evaluation happens once a turn has finished.",
+    /* Operational, and worth somebody looking. Deliberately not phrased as a
+       criterion result: there is no result record at all, which is a different
+       statement from a result that says the evidence could not decide. */
+    not_recorded:
+      "Evaluation not recorded. This turn has criteria and has finished, so a " +
+      "record was expected — it may not have been written yet."
+  };
+
+  /* What was expected, in the criterion's own structured terms. Rendered from
+     the stored fields rather than re-described, so the screen cannot claim a
+     requirement nobody wrote. */
+  function expectedText(item) {
+    if (item.kind === "manual") { return esc(item.description || "—"); }
+    if (item.predicate === "path_changed") {
+      return "<code>" + esc(item.path) + "</code> changed";
+    }
+    if (item.predicate === "path_operation") {
+      return "<code>" + esc(item.path) + "</code> " + esc(item.operation || "");
+    }
+    if (item.predicate === "rename") {
+      return "<code>" + esc(item.path) + "</code> renamed to <code>" +
+        esc(item.to_path) + "</code>";
+    }
+    return esc(item.predicate || item.kind || "—");
+  }
+
+  function assessmentBlock(task) {
+    if (!detailAssessment || detailAssessment.task_id !== task.task_id) { return ""; }
+    var view = detailAssessment;
+    var criteria = view.criteria || {};
+    var evaluation = view.evaluation || {};
+    var items = criteria.items || [];
+    var results = {};
+    (evaluation.results || []).forEach(function (row) {
+      results[row.criterion_id] = row;
+    });
+
+    var body;
+    if (criteria.state !== "present") {
+      body = '<p class="media-note">' + esc(CRITERIA_STATE_WORDS[criteria.state] ||
+        criteria.state) + "</p>";
+    } else {
+      body = '<ul class="task-assessment-list">' + items.map(function (item) {
+        var row = results[item.criterion_id];
+        var words = row
+          ? (RESULT_WORDS[row.result] || { label: row.result, tone: "", hint: "" })
+          : null;
+        return '<li class="task-assessment-item">' +
+          '<span class="task-assessment-expected">' + expectedText(item) + "</span>" +
+          (words
+            ? badge(words.label, words.tone) +
+              '<span class="muted hint">' +
+              esc(REASON_WORDS[row.reason] || row.reason) + "</span>"
+            : '<span class="muted hint">No result recorded for this criterion.</span>') +
+          "</li>";
+      }).join("") + "</ul>";
+    }
+
+    var note = "";
+    if (!evaluation.recorded && EVALUATION_STATE_WORDS[evaluation.state]) {
+      note = '<p class="media-note' +
+        (evaluation.state === "not_recorded" ? " warn" : "") + '">' +
+        esc(EVALUATION_STATE_WORDS[evaluation.state]) + "</p>";
+    }
+
+    /* Audit handles, tucked away. Deterministic identities and nothing more —
+       not a trust score, not a confidence, not proof of anything. */
+    var handles = "";
+    if (criteria.snapshot_id || evaluation.evaluation_id) {
+      handles = "<details class=\"task-assessment-audit\"><summary>Audit identifiers</summary>" +
+        '<ul class="task-evidence-list">' +
+        (criteria.snapshot_id
+          ? "<li>criteria snapshot <code>" + esc(criteria.snapshot_id) + "</code></li>" +
+            "<li>criteria fingerprint <code>" + esc(criteria.criteria_fingerprint) + "</code></li>"
+          : "") +
+        (evaluation.recorded
+          ? "<li>evaluation <code>" + esc(evaluation.evaluation_id) + "</code></li>" +
+            "<li>evaluation fingerprint <code>" + esc(evaluation.evaluation_fingerprint) + "</code></li>" +
+            "<li>evaluator version <code>" + esc(String(evaluation.evaluator_version)) + "</code></li>" +
+            "<li>evidence <code>" + esc(evaluation.evidence_input_fingerprint) +
+            "</code> (assembler " + esc(String(evaluation.assembler_version)) + ")</li>"
+          : "") +
+        "</ul></details>";
+    }
+
+    return '<div class="task-block task-assessment-detail"><h4>Assessment — turn ' +
+      esc(String(view.turn_number)) + "</h4>" + note + body + handles + "</div>";
+  }
 
   function evidenceRelationships(bundle) {
     var groups = bundle.relationships || [];
@@ -1175,6 +1368,7 @@
           esc(task.final_result) + "</pre></div>"
         : "") +
       resultBlock(task) +
+      assessmentBlock(task) +
       evidenceBlock(task) +
       detailActions(task) +
       /* The raw stream, behind a disclosure. Available for when the summary is
@@ -1666,6 +1860,8 @@
       detailEvents = [];
       detailEvidence = null;
       evidenceTurn = null;
+      detailAssessment = null;
+      assessmentTurn = null;
       appliedGeneration = generation;
       render();
       if (openTaskId) { loadDetail(openTaskId); }
@@ -1899,6 +2095,83 @@
      The fields copied into panel state are chosen rather than spread. Anything
      not named here cannot reach a render, which is the same discipline
      `showResult` applies to `provider_session_id`. */
+  /* The assessment fetch. Named-field copy, exactly as `showEvidence` does it:
+     a field the server adds later cannot reach a render until somebody names it
+     here, and nothing about the response is reinterpreted on the way in. */
+  function showAssessment() {
+    if (!openTaskId || !detail) { return Promise.resolve(null); }
+    if (!beginPending("assessment")) { return Promise.resolve(null); }
+    var taskId = openTaskId;
+    var turn = nextAssessmentTurn(detail);
+    return deps.api(
+      "/api/tasks/" + encodeURIComponent(taskId) + "/turns/" +
+      encodeURIComponent(String(turn)) + "/assessment"
+    ).then(function (response) {
+      endPending();
+      if (!response.ok) {
+        actionError = failureOf(response);
+        render();
+        return null;
+      }
+      var view = (response.payload && response.payload.assessment) || {};
+      var criteria = view.criteria || {};
+      var evaluation = view.evaluation || {};
+      detailAssessment = {
+        task_id: view.task_id,
+        turn_number: view.turn_number,
+        criteria: {
+          state: criteria.state,
+          recorded: criteria.recorded,
+          snapshot_id: criteria.snapshot_id,
+          criteria_fingerprint: criteria.criteria_fingerprint,
+          criterion_count: criteria.criterion_count,
+          items: (criteria.items || []).map(function (item) {
+            return {
+              criterion_id: item.criterion_id,
+              ordinal: item.ordinal,
+              kind: item.kind,
+              predicate: item.predicate,
+              path: item.path,
+              to_path: item.to_path,
+              operation: item.operation,
+              description: item.description
+            };
+          })
+        },
+        evaluation: {
+          state: evaluation.state,
+          recorded: evaluation.recorded,
+          evaluation_id: evaluation.evaluation_id,
+          evaluator_version: evaluation.evaluator_version,
+          criteria_state: evaluation.criteria_state,
+          assembler_version: evaluation.assembler_version,
+          evidence_input_fingerprint: evaluation.evidence_input_fingerprint,
+          evaluation_fingerprint: evaluation.evaluation_fingerprint,
+          result_count: evaluation.result_count,
+          results: (evaluation.results || []).map(function (row) {
+            return {
+              criterion_id: row.criterion_id,
+              ordinal: row.ordinal,
+              result: row.result,
+              reason: row.reason
+            };
+          })
+        }
+      };
+      assessmentTurn = view.turn_number;
+      render();
+      return detailAssessment;
+    }).catch(function (error) {
+      endPending();
+      if (error && error.message === "unauthorized") { return null; }
+      actionError = {
+        message: "Cofferdam could not reach the workstation.", detail: null
+      };
+      render();
+      return null;
+    });
+  }
+
   function showEvidence() {
     if (!openTaskId || !detail) { return Promise.resolve(null); }
     if (!beginPending("evidence")) { return Promise.resolve(null); }
@@ -2069,6 +2342,8 @@
              put the previous task's claims under this task's heading. */
           detailEvidence = null;
           evidenceTurn = null;
+          detailAssessment = null;
+          assessmentTurn = null;
           render();
           loadDetail(openTaskId);
           return;
@@ -2100,6 +2375,7 @@
           case "taskCopyResult": copyResult(); return;
           case "taskShowResult": showResult(); return;
           case "taskShowEvidence": showEvidence(); return;
+          case "taskShowAssessment": showAssessment(); return;
           default: return;
         }
       });
@@ -2204,6 +2480,8 @@
     detailResult = null;
     detailEvidence = null;
     evidenceTurn = null;
+    detailAssessment = null;
+    assessmentTurn = null;
     chosenOptions = {};
     adapters = null;
     projects = null;
@@ -2236,6 +2514,8 @@
       openTaskId = taskId;
       detailEvidence = null;
       evidenceTurn = null;
+      detailAssessment = null;
+      assessmentTurn = null;
       return loadDetail(taskId);
     }
   };

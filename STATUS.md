@@ -65,11 +65,15 @@ PR6 — the immutable per-turn acceptance-criteria snapshot — is **merged (#51
 deployed**: workstation and Actions bridge both run it from slot B, and the live task database is
 migrated to **schema v7**. Because the PR5 runtime refuses a v7 database, the rollback is a **pair**
 — slot A at `e9f5e26` together with the verified pre-v7 schema-v6 backup — rather than a slot flip.
-PR7 — deterministic criterion evaluation and the immutable `EvaluationRecord` — is **implemented on
-a branch and not deployed**; see *In progress* below. It takes the schema to **v8** and leaves
-`assembler_version` at **3**. PR7 answers each criterion `met` / `not_met` / `unverified` and
-aggregates nothing: **no task verdict, no pass/fail, no risk levels, no confidence, no model, no
-check runner, no planner**, and none of PR3 through PR7 adds any of them.
+PR7 — deterministic criterion evaluation and the immutable `EvaluationRecord` — is **merged (#52,
+`7f21fc4`) and deployed**: workstation and Actions bridge both run it from slot A, and the live task
+database is migrated to **schema v8**. Because the PR6 runtime refuses a v8 database, the rollback is
+a **pair** — slot B at `cd11232` plus the verified pre-v8 schema-v7 backup — rather than a slot flip.
+PR8 — the private read-only assessment surface and PWA panel — is **implemented on a branch and not
+deployed**; see *In progress* below. It changes **no schema** (still v8), no evaluator and no stored
+fact: it publishes what PR6 and PR7 already froze. Every one of these still holds: **no task verdict,
+no pass/fail, no aggregate, no risk levels, no confidence, no model, no check runner, no planner**,
+and none of PR3 through PR8 adds any of them.
 
 **M2H is complete and merged**, closing the M1 post-reboot gate;
 M2F Agent Task Core and M2G the Claude Code adapter merged; the isolated Custom GPT Actions mobile
@@ -778,10 +782,86 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2K PR8 — the private read-only assessment surface and PWA panel
+
+On `m2k-pr8-assessment-surface`, from the merged `7f21fc4`. **Implemented on a branch, not merged and
+not deployed.**
+
+PR6 froze the criteria and PR7 froze the evaluation, and both have been durable and **completely
+invisible** — no route, no panel, no way to see either without opening the database. PR8 publishes
+them. It computes nothing: **no schema change (still v8), no evaluator change, no new stored fact.**
+
+**One route, not two.** `GET /api/tasks/{task_id}/turns/{turn_number}/assessment` returns criteria
+and evaluation together, because they are one turn-qualified audit question and a reader needs both
+or neither. Two routes would let a client pair criteria read at one moment with an evaluation read at
+another, and would leave two HTTP contracts free to drift while describing one thing. Route count
+moves **79 → 80**, and the delta is exactly this one GET.
+
+**`require_token`, not `require_task_caller`** — a deliberate departure from the obvious choice, and
+the reason is the Actions bridge. `require_task_caller` is what makes the bridge's ten task routes
+work: it *accepts* the bridge credential. An assessment is Cofferdam's judgement about somebody's
+work measured against what they asked for, which is further from the bridge's business than evidence
+is, and the evidence route already set this precedent. `require_token` has never heard of the bridge
+credential, so a bridge request arrives as an ordinary unauthenticated one and gets 401 — a stronger
+guarantee than a check that rejects it, which a refactor could lose. The test asserts both halves:
+refused here, still accepted where it belongs.
+
+**Consistent read.** `TaskStore.turn_assessment_inputs` reads turn state, criteria and evaluation
+under **one hold of the store's lock**. Criteria and evaluation are immutable once frozen, so
+separate reads are *almost* safe — but a turn that closes mid-request can gain an evaluation between
+two calls, and a response pairing criteria from before that commit with an evaluation from after
+would describe a state that never existed. Every writer takes the same re-entrant lock, so holding it
+closes the window with no new locking machinery.
+
+**The serializer is a whitelist, structurally.** Every published key is written out literally; there
+is no `asdict`, no `vars`, no `__dict__` and no loop over `__dataclass_fields__` anywhere in the
+module — asserted from the syntax tree, because those idioms publish whatever a dataclass gains next.
+The view functions **refuse the wrong type** rather than duck-typing, so a dict cannot arrive dressed
+as a `CriteriaSnapshot`.
+
+**Three criteria states and four evaluation states, all said out loud.** `present`, `not_provided`
+(recorded, zero items, and shaped so it cannot be read as a pass) and `legacy_unknown` (no fabricated
+snapshot, no fake empty set). For the evaluation: `recorded`, `criteria_legacy_unknown`,
+`turn_not_closed`, and `not_recorded` — the last meaning a closed criteria-bearing turn has no record,
+which is worth noticing and is **not** a pass, **not** a skip and **not** an `unverified` criterion
+result. The word *pending* is deliberately absent: it invites polling and implies a record is owed.
+
+**No aggregate anywhere.** No overall result, pass, fail, success, score, percentage, `all_met`,
+confidence or risk — in the response, in the serializer, or in the PWA, asserted in all three.
+
+**The UI distinction that matters most.** `Met` / `Not met` / `Could not verify`, and `unverified`
+renders with a *different badge class and a neutral tone* from `not_met` — asserted by parsing the
+rendered HTML, not by reading the source. `not_met` is a finding about the work; `unverified` is a
+statement about Cofferdam's reach, and rendering them alike would turn every limit of the observer
+into an accusation. Reason codes appear as short sentences beneath. A manual criterion shows its
+description as the expectation, `Could not verify`, and no control to mark it done.
+
+**No mutation of any kind.** GET only; other verbs are unregistered. There is no rerun route, no
+evaluator control and no check-runner control — asserted from the route table and from the shipped
+JavaScript, which contains the string `/assessment` exactly once.
+
+**Evidence is named, not copied.** The assessment carries `assembler_version` and
+`evidence_input_fingerprint` so a client can correlate with the evidence route, and nothing else from
+the bundle. `claim_conflict` is absent entirely: it is a disagreement between records, not a reason a
+criterion went unmet, and placing it beside a result is how a reader would come to treat it as one.
+
+**No bridge exposure.** Ten bridge routes, nine authenticated, no assessment Action,
+`artifacts_supported` still `false`, `getProjectContext` untouched.
+
+## M2K records — the evidence foundation (written while each was on its branch)
+
+M2K is **in progress**: PR1 through PR7 are merged and deployed; PR8 is on a branch. See *In
+progress* above for PR8.
+
 ### M2K PR7 — deterministic criterion evaluation and the immutable `EvaluationRecord`
 
-On `m2k-pr7-criterion-evaluation`, from the merged `cd11232`. **Implemented on a branch, not merged
-and not deployed.**
+**Merged as `7f21fc4` (#52) and deployed**: workstation and Actions bridge both run it from slot A,
+and the live task database is migrated to **schema v8**. The rollback is a **pair** — slot B at
+`cd11232` plus the verified pre-v8 schema-v7 backup — because the PR6 runtime refuses a v8 database
+outright (measured: `StoreUnavailable` at `TaskStore` first use, at a task read and at `create_app`,
+with the main database and both WAL/shm siblings byte-identical afterwards). The record below was
+written while it was still on `m2k-pr7-criterion-evaluation`, from the merged `cd11232`, and is kept
+as it was written.
 
 PR6 froze **what was required** before dispatch. PR2 to PR5 froze **what machine evidence exists**
 for the turn. PR7 is the first PR that answers a question with those two, and it answers exactly one:
@@ -863,11 +943,6 @@ which the schema enforces so it can never be totalled up as "everything passed".
 **No API surface.** The evaluator is internal: no route, no request field, no bridge Action. Ten
 bridge routes, nine authenticated, `artifacts_supported` still `false`, `getProjectContext`
 untouched, `ASSEMBLER_VERSION` still **3**.
-
-## M2K records — the evidence foundation (written while each was on its branch)
-
-M2K is **in progress**: PR1 through PR6 are merged and deployed; PR7 is on a branch. See *In
-progress* above for PR7.
 
 ### M2K PR6 — the immutable per-turn acceptance-criteria snapshot
 

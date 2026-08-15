@@ -70,6 +70,7 @@ from .criteria import (
     criteria_state,
     validate_criteria,
 )
+from .assessment import assessment_view
 from .evaluation import EvaluationRecord, evaluable, evaluate
 from .errors import (
     AdapterFailed,
@@ -1620,6 +1621,36 @@ class TaskService:
         """
         row = self.get_task(task_id)
         return self._store.turn_criteria(row.task_id, int(turn_number))
+
+    def turn_assessment(self, task_id: object, turn_number: object):
+        """One turn's published assessment, or ``None`` for no such turn.
+
+        The read half of M2K PR8, and it is **only** a read. It does not evaluate,
+        does not recover, does not refresh the task through its adapter, and
+        cannot reach a provider, Git or the filesystem. Calling it a thousand
+        times leaves the database byte-identical — asserted rather than promised.
+
+        ``get_task`` rather than ``refresh_task`` on purpose: the task detail
+        route asks an adapter what it has seen, which is a legitimate side effect
+        for that route and would be a completely illegitimate one here. An audit
+        view of what was required and what was decided must not be able to move a
+        task's state by being looked at.
+
+        Returns ``None`` only when the turn does not exist. A historical turn
+        whose criteria are ``legacy_unknown`` returns a real assessment saying so.
+        """
+        row = self.get_task(task_id)
+        inputs = self._store.turn_assessment_inputs(row.task_id, int(turn_number))
+        if inputs is None:
+            return None
+        turn_open, snapshot, record = inputs
+        return assessment_view(
+            task_id=row.task_id,
+            turn_number=int(turn_number),
+            snapshot=snapshot,
+            record=record,
+            turn_open=turn_open,
+        )
 
     def turn_numbers(self, task_id: object) -> List[int]:
         """Which turns this task has, for a client that needs to ask for one."""

@@ -547,6 +547,32 @@ function makeApi(behaviour) {
           }
         });
       }
+      if (pathname.indexOf("/assessment") !== -1) {
+        if (behaviour.assessmentRefuse) {
+          return Promise.resolve({
+            ok: false,
+            status: behaviour.assessmentRefuse,
+            payload: { error: {
+              code: "not_found", message: "that task has no such turn", detail: null
+            } }
+          });
+        }
+        /* The stub answers for the turn that was asked for, the way the real
+           route does. A fixture that always returned turn 2 would make the
+           panel's next-turn arithmetic wrap and would hide the bug it exists to
+           catch. */
+        const askedTurn = Number((pathname.match(/\/turns\/(\d+)\//) || [])[1] || 1);
+        const view = Object.assign({}, behaviour.assessmentPayload || {});
+        view.turn_number = askedTurn;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          payload: {
+            assessment: view,
+            generated_at: "2026-08-16T12:00:00Z"
+          }
+        });
+      }
       if (pathname.indexOf("/evidence") !== -1) {
         if (behaviour.evidenceRefuse) {
           return Promise.resolve({
@@ -2342,6 +2368,174 @@ function run() {
         fire("click", button("taskShowEvidence"));
         return drain().then(function () {
           return { html: html(), requests: record.requests.slice() };
+        });
+      });
+    });
+  }
+
+  /* -- assessment (M2K PR8) ------------------------------------------------ */
+
+  /* One assessment carrying all three results at once, plus a manual criterion.
+     One scenario rather than three, for the reason the evidence fixture gives:
+     what is under test is that `met`, `not_met` and `unverified` read
+     *differently on the same screen*, which a fixture per result would stop
+     proving. */
+  function assessmentView(overrides) {
+    return Object.assign({
+      version: 1,
+      task_id: "task_a",
+      turn_number: 1,
+      criteria: {
+        state: "present",
+        recorded: true,
+        snapshot_id: "acs_" + "a".repeat(26),
+        criteria_fingerprint: "c".repeat(64),
+        criterion_count: 4,
+        items: [
+          { criterion_id: "acr_1", ordinal: 1, kind: "evidence",
+            predicate: "path_changed", path: "src/app.py", to_path: null,
+            operation: null, description: null },
+          { criterion_id: "acr_2", ordinal: 2, kind: "evidence",
+            predicate: "path_operation", path: "src/gone.py", to_path: null,
+            operation: "created", description: null },
+          { criterion_id: "acr_3", ordinal: 3, kind: "evidence",
+            predicate: "rename", path: "src/old.py", to_path: "src/new.py",
+            operation: null, description: null },
+          { criterion_id: "acr_4", ordinal: 4, kind: "manual",
+            predicate: null, path: null, to_path: null, operation: null,
+            description: "a person confirms the page renders" }
+        ]
+      },
+      evaluation: {
+        state: "recorded",
+        recorded: true,
+        evaluation_id: "evl_" + "b".repeat(26),
+        evaluator_version: 1,
+        criteria_state: "present",
+        criteria_snapshot_id: "acs_" + "a".repeat(26),
+        criteria_fingerprint: "c".repeat(64),
+        assembler_version: 3,
+        evidence_input_fingerprint: "f".repeat(64),
+        result_count: 4,
+        evaluation_fingerprint: "d".repeat(64),
+        results: [
+          { criterion_id: "acr_1", ordinal: 1, result: "met",
+            reason: "machine_change_observed" },
+          { criterion_id: "acr_2", ordinal: 2, result: "not_met",
+            reason: "complete_resulting_change_absent" },
+          { criterion_id: "acr_3", ordinal: 3, result: "unverified",
+            reason: "pre_work_boundary_not_clean" },
+          { criterion_id: "acr_4", ordinal: 4, result: "unverified",
+            reason: "manual_criterion" }
+        ]
+      }
+    }, overrides || {});
+  }
+
+  function assessmentScenario(view, extra) {
+    return mount(Object.assign({
+      initial: listPayload([taskPayload({ task_id: "task_a", state: "completed" })]),
+      detail: taskPayload({
+        task_id: "task_a", state: "completed", result: "Done."
+      }),
+      assessmentPayload: view,
+      result: () => ({ payload: {} })
+    }, extra || {})).then(function () {
+      fire("click", openButton("task_a"));
+      return drain().then(function () {
+        fire("click", button("taskShowAssessment"));
+        return drain().then(function () {
+          return { html: html(), requests: record.requests.slice() };
+        });
+      });
+    });
+  }
+
+  if (scenario === "assessment-shows-all-three-results") {
+    return assessmentScenario(assessmentView());
+  }
+
+  if (scenario === "assessment-not-provided") {
+    return assessmentScenario(assessmentView({
+      criteria: {
+        state: "not_provided", recorded: true,
+        snapshot_id: "acs_" + "a".repeat(26),
+        criteria_fingerprint: "c".repeat(64),
+        criterion_count: 0, items: []
+      },
+      evaluation: {
+        state: "recorded", recorded: true,
+        evaluation_id: "evl_" + "b".repeat(26), evaluator_version: 1,
+        criteria_state: "not_provided",
+        criteria_snapshot_id: "acs_" + "a".repeat(26),
+        criteria_fingerprint: "c".repeat(64),
+        assembler_version: 3, evidence_input_fingerprint: "f".repeat(64),
+        result_count: 0, evaluation_fingerprint: "d".repeat(64), results: []
+      }
+    }));
+  }
+
+  if (scenario === "assessment-legacy-unknown") {
+    return assessmentScenario(assessmentView({
+      criteria: {
+        state: "legacy_unknown", recorded: false, snapshot_id: null,
+        criteria_fingerprint: null, criterion_count: 0, items: []
+      },
+      evaluation: {
+        state: "criteria_legacy_unknown", recorded: false,
+        evaluation_id: null, evaluator_version: null, criteria_state: null,
+        criteria_snapshot_id: null, criteria_fingerprint: null,
+        assembler_version: null, evidence_input_fingerprint: null,
+        result_count: 0, evaluation_fingerprint: null, results: []
+      }
+    }));
+  }
+
+  if (scenario === "assessment-evaluation-not-recorded") {
+    return assessmentScenario(assessmentView({
+      evaluation: {
+        state: "not_recorded", recorded: false,
+        evaluation_id: null, evaluator_version: null, criteria_state: null,
+        criteria_snapshot_id: null, criteria_fingerprint: null,
+        assembler_version: null, evidence_input_fingerprint: null,
+        result_count: 0, evaluation_fingerprint: null, results: []
+      }
+    }));
+  }
+
+  if (scenario === "assessment-turn-not-closed") {
+    return assessmentScenario(assessmentView({
+      evaluation: {
+        state: "turn_not_closed", recorded: false,
+        evaluation_id: null, evaluator_version: null, criteria_state: null,
+        criteria_snapshot_id: null, criteria_fingerprint: null,
+        assembler_version: null, evidence_input_fingerprint: null,
+        result_count: 0, evaluation_fingerprint: null, results: []
+      }
+    }));
+  }
+
+  if (scenario === "assessment-second-turn") {
+    return mount({
+      initial: listPayload([taskPayload({ task_id: "task_a", state: "completed" })]),
+      detail: taskPayload({ task_id: "task_a", state: "completed", result: "Done." }),
+      assessmentPayload: assessmentView(),
+      /* Two turns, so the button advances rather than wrapping back to one.
+         `turnsSoFar` reads this from the result payload, exactly as the evidence
+         button does — the client never guesses a turn count. */
+      resultPayload: { task_id: "task_a", turn_count: 2 }
+    }).then(function () {
+      fire("click", openButton("task_a"));
+      return drain().then(function () {
+        fire("click", button("taskShowResult"));
+        return drain().then(function () {
+          fire("click", button("taskShowAssessment"));
+          return drain().then(function () {
+            fire("click", button("taskShowAssessment"));
+            return drain().then(function () {
+              return { html: html(), requests: record.requests.slice() };
+            });
+          });
         });
       });
     });

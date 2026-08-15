@@ -300,6 +300,7 @@ from .runtime.overlay_writes import (
 )
 from .store import ActionStore, screenshot_path
 from .tasks import TaskService, TaskStore, build_registry as build_task_adapters
+from .tasks.assessment import AssessmentTooLarge
 from .tasks.clarifications import (
     SOURCE_FUTURE_GPT_BRIDGE as ANSWER_SOURCE_ACTIONS_BRIDGE,
     SOURCE_WORKSTATION_PWA as ANSWER_SOURCE_WORKSTATION_PWA,
@@ -2570,6 +2571,104 @@ def create_app(
             content={
                 "evidence": bundle.to_dict(),
                 # Outside the bundle, and labelled. See the docstring.
+                "generated_at": now_iso(),
+            },
+            headers=TASK_CONTENT_HEADERS,
+        )
+
+    # The assessment view (M2K PR8): what this turn was required to do, and what
+    # the deterministic evaluator made of it. Both facts have been durable since
+    # PR6 and PR7 and completely invisible until now.
+    #
+    # **One route, not two.** Criteria and evaluation are one turn-qualified audit
+    # question and a reader needs both or neither. Two routes would let a client
+    # pair criteria read at one moment with an evaluation read at another and
+    # draw a conclusion about the pair — which is exactly the window
+    # `turn_assessment_inputs` holds one lock to close — and would leave two HTTP
+    # contracts free to drift while describing one thing.
+    #
+    # **`require_token`, not `require_task_caller`**, and this is a deliberate
+    # departure from the obvious choice. `require_task_caller` is what makes the
+    # Actions bridge's ten task routes work: it accepts the bridge's own
+    # credential. An assessment is Cofferdam's judgement about somebody's work
+    # measured against what they asked for, which is further from the bridge's
+    # business than evidence is — and the evidence route already set the
+    # precedent for the same reason. `require_token` has never heard of the
+    # bridge credential, so a bridge request arrives as an ordinary
+    # unauthenticated one and gets 401. That is a stronger guarantee than a check
+    # that rejects it, which a later refactor could lose.
+    #
+    # **GET only.** There is no POST, PUT, PATCH or DELETE on this path and no
+    # rerun route anywhere: an evaluation is immutable, and a browser must not be
+    # able to ask for another one. FastAPI answers the other verbs 405 because
+    # nothing registered them.
+    #
+    # What is absent and stays absent: no aggregate, no pass/fail, no score, no
+    # confidence, no risk, no evidence body, no claim relationships, no path
+    # selector, no filesystem read, no Git execution, no provider call.
+
+    @app.get(
+        "/api/tasks/{task_id}/turns/{turn_number}/assessment",
+        dependencies=[Depends(require_token)],
+    )
+    async def get_turn_assessment(task_id: str, turn_number: int) -> JSONResponse:
+        """One turn's criteria and its deterministic evaluation. Read-only.
+
+        Everything in the body was already stored: the criteria snapshot frozen
+        before the worker was dispatched, and the evaluation written after the
+        turn closed. This route assembles no judgement, runs no evaluator,
+        triggers no recovery and writes nothing — reading it a thousand times
+        leaves the database byte-identical.
+
+        Three criteria states and four evaluation states are published as closed
+        words rather than left to be inferred from a null. The distinctions
+        matter and are easy to lose:
+
+        * criteria ``legacy_unknown`` means the turn predates criteria
+          persistence — **not** that it had none;
+        * criteria ``not_provided`` means Cofferdam recorded, before dispatch,
+          that none were supplied — **not** that everything passed;
+        * evaluation ``not_recorded`` means a closed criteria-bearing turn has no
+          record, which is an operational fact worth noticing — **not** a pass,
+          and **not** an ``unverified`` criterion result.
+
+        There is no aggregate anywhere in the response, and no code here or
+        downstream computes one. A list of per-criterion results is not a verdict
+        on the task.
+
+        `no-store`, like every other task-content route: this describes somebody's
+        private work.
+        """
+        if turn_number < 1:
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="a turn number starts at one",
+                status_code=422,
+            )
+        try:
+            assessment = await _run_task(
+                tasks.turn_assessment, task_id, turn_number
+            )
+        except AssessmentTooLarge:
+            # Fails closed. A trimmed audit view would look complete and would
+            # not be, which is worse than an error that says so.
+            raise ApiError(
+                code=CODE_INVALID_PARAMS,
+                message="the assessment does not fit the response contract",
+                status_code=500,
+            )
+        if assessment is None:
+            raise ApiError(
+                code=CODE_NOT_FOUND,
+                message="that task has no such turn",
+                status_code=404,
+            )
+        return JSONResponse(
+            content={
+                "assessment": assessment,
+                # Outside the assessment and labelled, exactly as the evidence
+                # route does it: a read clock is presentation metadata and is not
+                # part of any stored identity.
                 "generated_at": now_iso(),
             },
             headers=TASK_CONTENT_HEADERS,

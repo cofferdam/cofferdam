@@ -462,8 +462,9 @@ downstream reads from.
     request field, no bridge Action** — and `assembler_version` stays **3**. Still **no evaluator,
     no `EvaluationRecord`, no met/not_met, no verdict, no risk level, no confidence, no check
     runner, no model.**
-  - **PR7 — deterministic criterion evaluation and the immutable `EvaluationRecord`.** *Implemented
-    on a branch and not deployed; see [`STATUS.md`](STATUS.md).* The first PR that answers anything:
+  - **PR7 — deterministic criterion evaluation and the immutable `EvaluationRecord`.** *Merged as
+    `7f21fc4` (#52) and deployed, with the live database migrated to schema v8; see
+    [`STATUS.md`](STATUS.md).* The first PR that answers anything:
     for each supported criterion, whether the stored machine evidence for that exact turn satisfies
     it. Three values and no fourth — `met`, `not_met`, `unverified` — and **no task verdict, no
     aggregate, no pass/fail, no confidence, no risk, no model, no check runner and no command**, with
@@ -493,6 +494,26 @@ downstream reads from.
     record; `not_provided` produces a zero-result record the schema forbids from ever reading as a
     pass. Internal only — no route, no request field, no bridge Action — and `assembler_version`
     stays **3**.
+  - **PR8 — the private read-only assessment surface and PWA panel.** *Implemented on a branch and
+    not deployed; see [`STATUS.md`](STATUS.md).* Everything M2K has stored since PR6 has been
+    invisible; this publishes it and computes nothing. **No schema change (still v8), no evaluator
+    change, no new stored fact.** One turn-qualified route —
+    `GET /api/tasks/{task_id}/turns/{turn_number}/assessment` — returns criteria and evaluation
+    together, because they are one audit question and two routes would let a client pair states that
+    never coexisted. Route count 79 → 80, GET only, no rerun route, no mutation verb. Guarded by
+    `require_token` rather than `require_task_caller`, so the **Actions bridge credential is refused**
+    — the evidence route's precedent, for a stronger version of its reason. Read consistently under
+    one hold of the store lock. The serializer is a **structural whitelist**: every key written out,
+    no `asdict`/`vars`/`__dict__`, and wrong types refused rather than duck-typed. Three criteria
+    states and four evaluation states are published as closed words — including `not_recorded` for a
+    closed criteria-bearing turn with no record, which is an operational fact and **not** a pass — so
+    a client never infers meaning from a null. **No aggregate** in the response, the serializer or the
+    UI: no overall result, pass, fail, score, percentage, confidence or risk. The panel renders
+    `Met` / `Not met` / `Could not verify`, with `unverified` in a **different badge class and a
+    neutral tone** from `not_met`, because one is a finding about the work and the other is a
+    statement about Cofferdam's reach. Evidence is **named** by `assembler_version` and
+    `evidence_input_fingerprint`, never copied, and `claim_conflict` is absent entirely. No bridge
+    Action, no public exposure.
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**

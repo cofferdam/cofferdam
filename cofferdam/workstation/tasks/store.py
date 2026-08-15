@@ -3010,6 +3010,46 @@ class TaskStore:
                 )
         return self.evaluation(snapshot.task_id, int(snapshot.turn_number))
 
+    def turn_assessment_inputs(self, task_id: str, turn_number: int):
+        """The criteria and evaluation for one turn, read as one consistent view.
+
+        Returns ``None`` when the task has no such turn — which is what makes the
+        route's 404 a fact about the turn rather than about the criteria. A turn
+        that exists but predates criteria persistence is **not** ``None``: it has
+        a legitimate assessment whose criteria state is ``legacy_unknown``.
+
+        **Why this exists rather than two calls from the service.** Criteria and
+        evaluation are immutable once frozen, so reading them separately is
+        *almost* safe — but not quite. A turn that closes while a read is in
+        flight can gain an evaluation between the two calls, and a response that
+        combined criteria from before that commit with an evaluation from after
+        would describe a pair of states that never coexisted. Holding one lock
+        across all three reads removes the window entirely.
+
+        The lock is the store's own ``RLock``, taken by :meth:`_read` and by every
+        writer through :meth:`_write`. It is re-entrant, so the nested reader
+        calls below take it again without deadlocking, and no writer in this
+        process can interleave while it is held. That is the whole consistency
+        argument — no new locking, no transaction of its own, nothing to keep in
+        step with the rest of the store.
+
+        Writes nothing, opens nothing, runs nothing. A missing evaluation is
+        reported as missing; it is never created here, and this method has no way
+        to create one.
+        """
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT completed_at FROM task_turns"
+                " WHERE task_id = ? AND turn_number = ?",
+                (task_id, int(turn_number)),
+            ).fetchone()
+            if row is None:
+                return None
+            turn_open = row["completed_at"] is None
+            snapshot = self.turn_criteria(task_id, int(turn_number))
+            record = self.evaluation(task_id, int(turn_number))
+        return turn_open, snapshot, record
+
     def turns(self, task_id: str) -> List["TaskTurn"]:
         """Every turn this task has had, oldest first. Bounded by the row limit."""
         with self._read() as connection:
