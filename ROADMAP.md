@@ -539,8 +539,9 @@ downstream reads from.
     schema version. A future aggregate carries its own `AGGREGATOR_VERSION`, and is **derived on
     read** rather than persisted. Vocabulary avoids `success`/`failed`/`passed`, which already belong
     to lifecycle. D-2026-08-16-2 through D-2026-08-16-6.
-  - **PR10 — the criterion continuity persistence foundation.** *Implemented on
-    `m2k-pr10-criterion-continuity`, not merged and not deployed.* Persists the prerequisite PR9
+  - **PR10 — the criterion continuity persistence foundation.** *Merged as `1efd49b` (#55) and
+    deployed to slot A; the live database migrated to schema v9 with both continuity tables created
+    empty.* Persists the prerequisite PR9
     named, and **computes no aggregate**. **Schema v9**, additive:
     `task_turn_criteria_continuity` and `task_turn_criterion_supersessions`, created **empty** with
     **no backfill** — a turn that predates them has no row and reads `legacy_unknown`, forever.
@@ -562,7 +563,36 @@ downstream reads from.
     check runner, no command execution**; `EVALUATOR_VERSION` stays 1 and `ASSEMBLER_VERSION` stays
     3. Rollback is a **pair** — slot A at `7f21fc4` plus a verified pre-v9 backup — because the
     deployed PR8 runtime refuses a v9 database; that refusal was measured against the real deployed
-    source and leaves the file byte-identical.
+    source and leaves the file byte-identical. The rollback pair is **slot B at `059fdcb`** plus the
+    verified pre-v9 schema-v8 backup.
+  - **PR11 — the pure continuity lineage resolver.** *Implemented on `m2k-pr11-lineage-resolver`,
+    not merged and not deployed.* Derives **which criteria are active at a given turn** from PR6's
+    immutable snapshots and PR10's immutable declarations. **No schema change — v9 stays**, because
+    the resolver is pure read logic and the answer is **derived on read, never persisted**: the
+    sources are immutable and the function is deterministic, so persisting it would only add a write
+    path, a recovery path and a second place for the truth to live. `RESOLVER_VERSION = 1`, distinct
+    from `SCHEMA_VERSION`, `CRITERIA_MODEL_VERSION`, `CONTINUITY_MODEL_VERSION`, `ASSEMBLER_VERSION`
+    and `EVALUATOR_VERSION`. Semantics: `root` → current snapshot; `extend` → resolved predecessor
+    set then current, with **no** deduplication by text, path or fingerprint; `replace` → current
+    only; `revise` → resolved predecessor set minus explicitly superseded, in place, then current.
+    **`replace` is a lineage cut point**: an unknown predecessor blocks `extend` and `revise` — both
+    are statements *about* the prior set — but not `replace`, so an earlier `legacy_unknown` or
+    `not_declared` segment no longer poisons a task forever. The predecessor's *identity* is still
+    validated for `replace`; only the traversal is skipped. A supersession is valid only if its
+    old-side criterion is **actually active** in the resolved predecessor set — historical membership
+    is not active membership — and a stale edge **fails closed** rather than being ignored. Ordering
+    is inheritance-first and stable, with removals in place and current criteria appended in stored
+    ordinal order; never sorted by id, text, path or fingerprint. A resolved **empty** active set
+    means the declared requirement set is empty and **never** that the task passed. Unavailable
+    reasons are a closed code-owned vocabulary carrying no partial set. Bounded at
+    `MAX_LINEAGE_DEPTH = 256` with cycle defence, so a corrupted row answers rather than hangs. The
+    whole fetch runs in **one deferred read transaction** so a lineage can never be half-old and
+    half-new, and the pure `resolve()` reaches no SQLite, filesystem, Git, subprocess, socket,
+    provider or clock. Internal only: `TaskService.resolve_active_criteria`, **no HTTP route, no
+    bridge Action, no PWA control**, and the PR8 assessment response is unchanged. Still **no
+    `AGGREGATOR_VERSION`, no task aggregate, no check runner, no command execution**;
+    `EVALUATOR_VERSION` stays 1 and `ASSEMBLER_VERSION` stays 3. D-2026-08-16-10 through
+    D-2026-08-16-13.
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**

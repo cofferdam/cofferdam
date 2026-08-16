@@ -2562,6 +2562,119 @@ canonical order. No clock, no rowid, no minted id, no provider or session identi
 reaches it. **There is deliberately no `AGGREGATOR_VERSION`**: nothing aggregates, and the constant
 would imply something does.
 
+## D-2026-08-16-10 — The active criterion set is derived on read, never stored (EFE DECISION, ACTIVE)
+
+**Decision.** "Which criteria are in force at this turn" is computed from PR6's immutable criteria
+snapshots and PR10's immutable continuity declarations every time it is asked. It is **not** written
+to any table, and M2K PR11 adds **no schema version** — v9 stays.
+
+**Why derive.** Every input is already immutable and already fingerprinted, and the function over
+them is deterministic and versioned, so the answer can be reproduced at any later date from rows
+nobody may edit. Storing it would buy nothing and cost three things: a new write path to get wrong, a
+new recovery path for a crash between the sources and the cache, and a second place for the truth to
+live that could disagree with the first. A cached active set that drifted from its sources would be
+worse than no cache, because it would look authoritative.
+
+**`RESOLVER_VERSION = 1`**, code-owned and distinct from `SCHEMA_VERSION` (the shape of the tables),
+`CRITERIA_MODEL_VERSION` (what a criterion is), `CONTINUITY_MODEL_VERSION` (what a declaration
+means), `ASSEMBLER_VERSION` (how a bundle is built) and `EVALUATOR_VERSION` (how a criterion is
+answered). Six constants because six things move for six reasons, and a reader must be able to tell
+which one did. It is bound into the resolved fingerprint, so a future version 2 that resolved the
+same rows into a different set produces a **visibly different** identity rather than silently
+reinterpreting a stored one.
+
+**Still no `AGGREGATOR_VERSION`, and this is not a step towards one.** A resolved active set says
+*what is currently required*. It contains no verdict, no acceptance outcome and no count of what was
+met, and a **resolved empty set means the declared requirement set is empty — never that the task
+passed**. D-2026-08-16-4 stands: task acceptance remains unavailable.
+
+## D-2026-08-16-11 — `replace` is a lineage cut point, so unknown history does not poison a task (EFE DECISION, ACTIVE)
+
+**Decision.** Resolving an explicit `replace` does **not** require the predecessor's active set. The
+current snapshot becomes the active set outright.
+
+**Why.** `replace` says the prior requirement set is wholly superseded — whatever it was. Demanding
+that it first be *known* would make the resolver require an answer it has just been told is
+irrelevant, and the consequence would be permanent: a task with one `legacy_unknown` turn from before
+continuity existed, or one turn nobody declared anything for, could never have a knowable requirement
+set again, no matter what anybody declared afterwards. That is too conservative to be honest. An
+authoritative `replace` is exactly how a user or a future planner re-establishes a known requirement
+set after an unknown segment.
+
+**The contrast is the argument.** `extend` and `revise` are statements *about* the prior active set —
+"those remain, plus these", "those remain except the ones I name" — so an unknown predecessor makes
+them genuinely unanswerable, and both are **unavailable** rather than best-effort. `root` needs no
+predecessor at all. Only `replace` both names one and does not depend on it.
+
+**Cutting a dependency is not ignoring a declaration.** A `replace`'s predecessor is still validated
+to exist, to belong to this task and to come from an earlier turn. What is skipped is the traversal,
+not the check. A malformed `root` is likewise **never reinterpreted as `replace`** — that would be
+the resolver inventing the declaration PR10 requires somebody to make.
+
+**The fingerprint says so honestly.** A predecessor a `replace` did not traverse is **not** bound
+into the resolved fingerprint, and its turn does not appear in the lineage trace. Two turns replacing
+with identical criteria agree whatever came before them, because nothing before them played any part
+in either answer.
+
+## D-2026-08-16-12 — A supersession is valid only against an *active* criterion, and a stale one fails closed (EFE DECISION, ACTIVE)
+
+**Decision.** When `revise` retires a criterion, that criterion must be **active in the resolved
+predecessor set**. Existing somewhere in the task's history is not enough. A relation whose old side
+is not active makes the resolution **unavailable** with
+`supersession_target_not_active`; it is never skipped.
+
+**Why not skip it.** Ignoring the stale edge would produce an active set that no declaration asks
+for — the predecessor's set unchanged, plus the current criteria — and present it as authoritative.
+The declaration said *retire this*, the rows say *this was already retired two turns ago*, and the
+only honest reading of that contradiction is that the stored lineage does not determine an answer.
+Silently resolving would be exactly the guessing the whole milestone exists to prevent.
+
+**Where it can come from.** PR10's write validation requires a relation's old side to belong to the
+declared predecessor's own snapshot, and every criterion of a snapshot is active in that snapshot's
+own resolved set, so a valid write cannot produce a stale edge. This is therefore a **read-time
+invariant against corrupted state** — a restored database, a hand-edited row, a future version with a
+bug — and it is checked because "the schema should make this impossible" is not a reason for a read
+to trust it. The same doctrine covers a snapshot mismatch, a cross-task or later-turn predecessor, an
+impossible `root`, a mode disagreeing with its relations, a duplicate active criterion id, a cycle,
+and a chain past `MAX_LINEAGE_DEPTH`. **Nothing is repaired on read.**
+
+**A known PR10 limitation, recorded rather than widened.** Because the old side must belong to the
+*declared* predecessor's own snapshot, a `revise` cannot retire a criterion it merely **inherited**
+through an earlier `extend` unless it declares that earlier snapshot as its predecessor — which then
+cuts the intervening turn's own criteria out of the lineage. PR11 does not loosen PR10's rule to make
+this convenient; loosening a write-time validation from inside a read would be the wrong direction.
+Revisit it in PR10's own terms if it proves limiting in practice.
+
+## D-2026-08-16-13 — Lineage order is submission order, and lineage is read under one snapshot (EFE DECISION, ACTIVE)
+
+**Decision, ordering.** The resolved active set is ordered **inheritance first**: surviving inherited
+entries keep their relative order, superseded entries are removed **in place** with nothing promoted
+into the hole, and this turn's own criteria follow in stored `ordinal` order. It is **never** sorted
+by criterion id, description, path or fingerprint.
+
+**Why.** The order somebody wrote their requirements in is a fact about the requirements — the same
+reason D-2026-08-14 kept `ordinal` stored rather than derived from a rowid, and the same reason
+`validate_criteria` preserves the caller's order instead of sorting it. Sorting by id would order by
+a minted handle; sorting by text would order by prose; either would present a list nobody submitted.
+
+**Decision, consistency.** The whole lineage fetch runs inside **one deferred read transaction**, not
+a chain of autocommit reads. Resolution walks several turns' snapshots and declarations, so it is
+precisely the read that could otherwise inherit an active set from before another process's commit
+and supersede against rows from after it — a graph that never existed. In WAL mode a deferred
+transaction pins the read snapshot at the first statement without blocking any writer, so the cost is
+nothing. It is deferred rather than `IMMEDIATE` because a reader must never take the write lock.
+
+**Decision, purity.** Fetching and resolving are separate. The resolver takes a frozen input graph
+and reaches no SQLite, filesystem, Git, subprocess, socket, provider, environment or clock, and
+mutates nothing — asserted from the syntax tree, again at runtime with those callables poisoned, and
+again by deleting the project repository and getting a byte-identical fingerprint. A pure function
+that *could* write would be pure only by convention, and the claim being defended is that a
+resolution describes what was declared and frozen rather than what the world looks like now.
+
+**Bounded, because "impossible" is not a termination proof.** `MAX_LINEAGE_DEPTH = 256` and a visited
+set of turns. PR10's strictly-earlier rule should make a cycle unreachable; a read that runs at
+start-up must still **answer** rather than hang if it meets one.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when
