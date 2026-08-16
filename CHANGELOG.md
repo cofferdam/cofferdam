@@ -8,6 +8,37 @@ release.
 
 ### Added
 
+- **M2K PR17 — you can now write down "this file must exist", even though Cofferdam cannot check it
+  yet.** Nothing is visible yet and nothing behaves differently.
+
+  **What it adds.** Until now every requirement you could state was about what a worker *did*: change
+  this file, create that one, rename a third. You can now also state what must be *true* — that a path
+  exists, or that it does not. Those are genuinely different requests: "create this file" is satisfied
+  the moment it is created and says nothing about next week, whereas "this file must exist" is a
+  standing requirement that can be checked again and again.
+
+  **What it does not do.** Cofferdam cannot yet answer them. Ask it and it says plainly that it has no
+  way to check that kind of requirement — not that the requirement failed. That is deliberate: getting
+  the wording into the system first, on its own, keeps the change that stores your requirements
+  separate from the change that judges them.
+
+  **It will never rewrite the old kind into the new kind.** A requirement you wrote as "create this
+  file" stays exactly that, forever. Nothing converts it into "this file must exist" — that would be
+  Cofferdam inventing a requirement you did not ask for, and none of the machinery is allowed to do
+  it, not even when carrying requirements forward from an earlier message.
+
+  **The part that needed real care.** Storing a new kind of requirement meant rebuilding the table
+  that holds every requirement you have ever set — the first change of this kind this project has
+  made. Everything in it is carried across untouched: the same requirements, with the same identities,
+  still correctly linked to the judgements and the history that refer to them. The rebuild was
+  interrupted at every single step during testing, and every time the result was the old, intact
+  database rather than a half-finished one; retrying then works. Older versions of Cofferdam handed
+  the new database refuse to open it rather than damaging it.
+
+  **One consequence worth knowing.** Once you have written a requirement of the new kind, going back
+  to an older version of Cofferdam would mean losing those particular requirements — the older version
+  has nowhere to put them. Before you write any, going back is clean.
+
 - **M2K PR16 — Cofferdam can now say where each of your standing requirements stands, including
   "I don't know".** Nothing is visible yet and nothing new is saved — no screen changes, and nothing
   exposed to your phone or to a connected assistant.

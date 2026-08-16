@@ -28,6 +28,8 @@ import types
 import unittest
 from pathlib import Path
 
+from cofferdam.workstation.tasks.store import SCHEMA_VERSION
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 #: The commit **actually running in production** when PR14 was written: M2K PR10
@@ -140,11 +142,11 @@ class TheDeployedRuntimeRefusesCleanly(ForwardSchemaCase):
         module = self.old_store_module()
         self.assertEqual(9, module.SCHEMA_VERSION)
 
-    def test_the_database_really_is_version_ten(self):
+    def test_the_database_really_is_newer_than_the_deployed_build(self):
         connection = sqlite3.connect("file:%s?mode=ro" % self.database, uri=True)
         try:
             self.assertEqual(
-                "10",
+                str(SCHEMA_VERSION),
                 connection.execute(
                     "SELECT value FROM schema_meta WHERE key='schema_version'"
                 ).fetchone()[0],
@@ -227,7 +229,7 @@ class TheDeployedRuntimeRefusesCleanly(ForwardSchemaCase):
         connection = sqlite3.connect("file:%s?mode=ro" % self.database, uri=True)
         try:
             self.assertEqual(
-                "10",
+                str(SCHEMA_VERSION),
                 connection.execute(
                     "SELECT value FROM schema_meta WHERE key='schema_version'"
                 ).fetchone()[0],

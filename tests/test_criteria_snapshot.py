@@ -100,11 +100,28 @@ class TheVocabulary(unittest.TestCase):
     def test_two_kinds_and_no_more(self):
         self.assertEqual(CRITERION_KINDS, (KIND_EVIDENCE, KIND_MANUAL))
 
-    def test_three_predicates_and_no_more(self):
+    def test_five_predicates_and_no_more(self):
+        """Three turn-change predicates and, since M2K PR17, two state ones.
+
+        Still closed, and the split is the point: the first three ask what a
+        worker did during a turn, the last two what the project is at its
+        boundary. Nothing converts one into the other.
+        """
+        from cofferdam.workstation.tasks.criteria import (
+            CHANGE_PREDICATES,
+            PREDICATE_PATH_ABSENT,
+            PREDICATE_PATH_EXISTS,
+            STATE_PREDICATES,
+        )
+
         self.assertEqual(
-            EVIDENCE_PREDICATES,
+            CHANGE_PREDICATES,
             (PREDICATE_PATH_CHANGED, PREDICATE_PATH_OPERATION, PREDICATE_RENAME),
         )
+        self.assertEqual(
+            STATE_PREDICATES, (PREDICATE_PATH_EXISTS, PREDICATE_PATH_ABSENT)
+        )
+        self.assertEqual(EVIDENCE_PREDICATES, CHANGE_PREDICATES + STATE_PREDICATES)
 
     def test_three_operations_and_no_more(self):
         self.assertEqual(

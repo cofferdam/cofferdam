@@ -56,10 +56,22 @@ What a criterion may say, in version 1
 Two kinds, and the vocabulary is closed:
 
 ``evidence``
-    A structured predicate over a project-relative path that the *stored*
-    EvidenceBundle could decide deterministically — ``path_changed``,
-    ``path_operation`` with a closed operation, or ``rename``. Three predicates,
-    each naming a path, and no expression language of any kind.
+    A structured predicate over a project-relative path. Each names a path, and
+    there is no expression language of any kind.
+
+    Three are **turn-change** predicates, decidable from the stored
+    EvidenceBundle: ``path_changed``, ``path_operation`` with a closed operation,
+    and ``rename``. Each asks what a worker *did* during one turn, so each is
+    answerable at its own turn and nowhere else.
+
+    Two are **state** predicates, added in M2K PR17: ``path_exists`` and
+    ``path_absent``. They ask what the project *is* at a turn's final-state
+    boundary rather than what happened during it, which is what will one day make
+    an inherited requirement answerable. **They are representable and not yet
+    evaluated** — PR7's evaluator returns ``unverified`` /
+    ``unsupported_capability`` for them and :mod:`.binding` returns
+    ``unverified`` / ``unsupported_predicate``, both by prior design rather than
+    by accident. Nothing converts a change predicate into a state one.
 
 ``manual``
     A bounded human-readable description of something today's deterministic
@@ -242,11 +254,51 @@ PREDICATE_PATH_OPERATION = "path_operation"
 #: which PR3 deliberately keeps apart.
 PREDICATE_RENAME = "rename"
 
-EVIDENCE_PREDICATES: Tuple[str, ...] = (
+#: The three above are **turn-change** predicates: each asks what a worker *did*
+#: during one particular turn, which is why each is answerable at its own turn
+#: and nowhere else. Named as a set because that distinction is now load-bearing
+#: — :mod:`.binding` decides what it can honestly say by exactly this split.
+CHANGE_PREDICATES: Tuple[str, ...] = (
     PREDICATE_PATH_CHANGED,
     PREDICATE_PATH_OPERATION,
     PREDICATE_RENAME,
 )
+
+
+#: The path exists at the turn's final-state boundary. **A state predicate**
+#: (M2K PR17): it asks what the project *is*, not what a worker did, which is
+#: what makes it re-askable at any turn rather than only at its own.
+#:
+#: *Any* filesystem object counts — file, directory, symlink or other. PR14
+#: already records kind separately, so folding kind in here would ask two
+#: questions with one word, and there are deliberately no kind predicates.
+PREDICATE_PATH_EXISTS = "path_exists"
+
+#: The path does not exist at the turn's final-state boundary. The mirror of
+#: :data:`PREDICATE_PATH_EXISTS`, and **not** the same as "something deleted it":
+#: a path that never existed satisfies this too.
+PREDICATE_PATH_ABSENT = "path_absent"
+
+#: Representable from M2K PR17, and **not yet evaluated by anything**. PR7's
+#: evaluator answers them ``unverified`` / ``unsupported_capability`` and
+#: :mod:`.binding` answers them ``unverified`` / ``unsupported_predicate`` — both
+#: were built total for exactly this, so a criterion a newer build understands
+#: gets an honest answer from an older one rather than a crash or a guess.
+#:
+#: **They are authored, never derived.** ``path_operation(P, created)`` does not
+#: become ``path_exists(P)`` and ``path_operation(P, deleted)`` does not become
+#: ``path_absent(P)``: the first pair asks what a worker did in one turn, the
+#: second what is true at a boundary. A requirement to *create* a file is silent
+#: about whether it must still be there in nine turns' time, and manufacturing
+#: that second requirement would enforce something nobody asked for. No
+#: migration, continuity mode, resolver, binder or evaluator performs that
+#: conversion — see D-2026-08-17-4.
+STATE_PREDICATES: Tuple[str, ...] = (
+    PREDICATE_PATH_EXISTS,
+    PREDICATE_PATH_ABSENT,
+)
+
+EVIDENCE_PREDICATES: Tuple[str, ...] = CHANGE_PREDICATES + STATE_PREDICATES
 
 #: The operations ``path_operation`` may name. The same three words the claim
 #: vocabulary uses for non-rename changes, and identical spelling is the point:
@@ -816,6 +868,7 @@ __all__ = [
     "CRITERION_ID_PREFIX",
     "CRITERION_KINDS",
     "CRITERION_OPERATIONS",
+    "CHANGE_PREDICATES",
     "EVIDENCE_PREDICATES",
     "EXCLUDED_OPERATIONS",
     "FINGERPRINT_CHARS",
@@ -827,9 +880,12 @@ __all__ = [
     "OPERATION_CREATED",
     "OPERATION_DELETED",
     "OPERATION_MODIFIED",
+    "PREDICATE_PATH_ABSENT",
     "PREDICATE_PATH_CHANGED",
+    "PREDICATE_PATH_EXISTS",
     "PREDICATE_PATH_OPERATION",
     "PREDICATE_RENAME",
+    "STATE_PREDICATES",
     "REASON_COMMAND_NOT_SUPPORTED",
     "REASON_CRITERION_MALFORMED",
     "REASON_DESCRIPTION_INVALID",

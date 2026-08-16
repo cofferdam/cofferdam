@@ -2487,6 +2487,126 @@ until state predicates exist, because today an inherited requirement can only be
 
 ---
 
+## The criteria vocabulary and the v11 rebuild (M2K PR17)
+
+Two predicates were added — `path_exists(P)` and `path_absent(P)` — and **nothing
+evaluates them**. This section is about what that costs and why it is safe.
+
+### Five predicates, in two families
+
+| Family | Predicates | Asks |
+| --- | --- | --- |
+| change | `path_changed`, `path_operation`, `rename` | what did the worker **do** during this turn? |
+| state | `path_exists`, `path_absent` | what **is** true at this turn's final-state boundary? |
+
+`path_exists` means **any** filesystem object — file, directory, symlink or
+other. PR14 already records kind separately, so folding kind into the predicate
+would ask two questions with one word; there are deliberately no kind
+predicates. `path_absent` is not "something deleted it": a path that never
+existed satisfies it too.
+
+Validation needed no new rules. A state predicate requires a `path`, refuses an
+`operation` and refuses a `to_path`, all from the existing structure — and it
+reuses the **same** path gate as every other criterion, so `../escape`, absolute
+paths, `~`, embedded NULs and the sensitive deny list are refused exactly as
+before. A criterion grants no filesystem access; observation remains PR14's job.
+
+### Why this required a table rebuild
+
+`task_turn_criterion_items` enumerates the predicate list in a `CHECK`, and
+SQLite has no `ALTER TABLE ... DROP CONSTRAINT` — both verified by attempting
+them rather than assumed. So the table is rebuilt. **The intentional delta is
+exactly one clause**: the other eleven checks already constrain the new
+predicates correctly, because a state predicate is not `path_operation` (so
+`operation` must be NULL), is not `rename` (so `to_path` must be NULL), and is an
+evidence kind (so `path` is required).
+
+This is the **first destructive-shape migration in this project**. Every earlier
+step was a pure `CREATE TABLE IF NOT EXISTS`.
+
+### Foreign keys, which are the actual risk
+
+Three keys point at the table: `task_turn_criterion_results` (`CASCADE`) and both
+sides of `task_turn_criterion_supersessions` (`CASCADE` and `RESTRICT`).
+Measured, not reasoned about:
+
+* with enforcement **on**, `DROP TABLE` is **refused** by the `RESTRICT` side;
+* with enforcement **off**, the child rows survive untouched — no cascade fires.
+
+So enforcement is suspended for the rebuild, **outside** the transaction, because
+`PRAGMA foreign_keys` is a no-op inside one — confirmed empirically, not trusted.
+It is restored in a `finally` and the restoration is **verified**: a connection
+that silently continued without enforcement would be worse than a failed
+migration. `PRAGMA foreign_key_check` runs inside the transaction before the
+commit, so a rebuild that orphaned anything rolls back.
+
+The new table is built aside and renamed **in**, never the reverse: modern SQLite
+rewrites `REFERENCES` clauses in *other* tables on rename, so renaming the old
+table out of the way would repoint all three foreign keys at the doomed table.
+The one artifact is cosmetic — `RENAME TO` stores the name quoted, so a migrated
+database reads `CREATE TABLE "task_turn_criterion_items"` where a fresh one reads
+it unquoted. A test asserts the quoting is the **only** difference.
+
+### Interruption
+
+The migration is interrupted at every step — before the new table, during the
+copy, before the drop, during the rename, at the foreign-key check, at the
+commit, at the transaction start — and each time the database is still v10 and
+whole, with every row, no half-built table, clean integrity and foreign keys, and
+a retry that then succeeds.
+
+Completion is detected from the **stored DDL, not the version number**, and the
+version bump is deliberately last. A crash between the rename and the bump
+therefore leaves a database whose shape is already correct, and the next open
+does nothing rather than rebuilding an already-rebuilt table.
+
+**No backfill and no conversion.** Historical predicate strings are exactly what
+they were; `path_operation(P, created)` was not rewritten to `path_exists(P)` and
+never will be.
+
+### Representable before evaluatable
+
+This was the question that decided whether the PR could exist: can the vocabulary
+land before anything understands it? Yes — and by prior design rather than luck.
+
+| Layer | Answer for a state predicate |
+| --- | --- |
+| PR7 evaluator | `unverified` / `unsupported_capability` — it dispatches on a predicate table and this is the seat reserved for a capability that does not exist yet |
+| PR16 binder | `unverified` / `unsupported_predicate` — the branch was written and tested with `path_exists` literally, before the predicate existed |
+| PR11 resolver, PR10 continuity | predicate-agnostic; a state criterion is inherited, superseded and cut exactly like any other |
+| PR14 observer | contributes the criterion's `path` to the bounded target scope, and never sees the predicate |
+
+Verified end to end rather than argued: the turn evaluates, the evaluation record
+is complete and valid with the right result count, the turn closes normally, the
+current assessment resolves — and **no `met` or `not_met` appears anywhere**.
+
+PR14 recording `present` for the path is target *selection*, not interpretation.
+Observing that a path exists is not deciding a criterion, and nothing joins them.
+
+### Versions
+
+Only the schema moved: **v11**. `EVALUATOR_VERSION` stays 1,
+`CURRENT_ASSESSMENT_VERSION` stays 1, `FINAL_STATE_OBSERVER_VERSION` stays 1,
+`CRITERIA_MODEL_VERSION` stays 1 — the existing criteria fingerprint already binds
+predicate and path honestly, so `path_exists(foo.py)` and `path_absent(foo.py)`
+hash differently with no new fingerprint version, and neither hashes like the
+`path_operation` criterion it superficially resembles.
+
+### Rollback stops being clean once v11 is written to
+
+A slot flip cannot walk a schema backwards, so a rollback is a **pair**: the old
+runtime plus a verified pre-v11 backup.
+
+* **Before** any v11-only criterion exists — restoring that backup is a clean
+  point-in-time downgrade.
+* **After** a `path_exists` or `path_absent` criterion has been stored — restoring
+  it **destroys requirements a user actually stated**, because the old schema
+  cannot represent them.
+
+Those two cases must never both be called "simple rollback".
+
+---
+
 ## Limitations of this milestone
 
 Stated in the API payload as well as here, because a client should never have to
