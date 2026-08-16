@@ -247,7 +247,18 @@ from .turns import (
 #: It is still not that answer — nothing aggregates, ``EVALUATOR_VERSION`` stays
 #: at 1, ``ASSEMBLER_VERSION`` stays at 3, there is no ``AGGREGATOR_VERSION``,
 #: no task verdict, no check runner and no command execution.
-SCHEMA_VERSION = 9
+#:
+#: **v10** is PR14's effective post-worker path state:
+#: ``task_turn_final_state`` and ``task_turn_final_state_paths``, additive,
+#: created empty and **never backfilled**. PR13 established that every predicate
+#: this build has asks *what the worker did this turn* and none asks *what the
+#: project now is*, so an inherited requirement has no answerable current status.
+#: These tables record the missing fact — whether a bounded set of paths exists
+#: on the **working tree** at the moment the worker stopped — and nothing more:
+#: no content, no digest, no evaluation, no predicate, no aggregate.
+#: ``EVALUATOR_VERSION`` stays at 1, ``ASSEMBLER_VERSION`` stays at 3, and there
+#: is still no ``AGGREGATOR_VERSION``.
+SCHEMA_VERSION = 10
 
 #: Where the database lives, under COFFERDAM_HOME. Its own directory so the file
 #: and its WAL/shm siblings stay together and can be permissioned as a unit.
@@ -972,6 +983,127 @@ CREATE INDEX IF NOT EXISTS supersessions_by_turn
 
 CREATE INDEX IF NOT EXISTS supersessions_by_predecessor
     ON task_turn_criterion_supersessions (predecessor_criterion_id);
+
+-- Schema v10. What was actually there when the worker stopped.
+--
+-- M2K PR13 established why this table has to exist. Every acceptance predicate
+-- this build can express is a *turn-change* observation — "the worker did X
+-- during this turn" — and none of them asks "does the project now satisfy X".
+-- So a requirement inherited across turns has no answerable current status, and
+-- no amount of care in a future aggregate repairs that. This is the missing
+-- primitive: an immutable observation of effective post-worker path state.
+--
+-- **The working tree is the authority, and that is the whole point.** Not HEAD:
+-- a worker that deletes `foo.py` without committing has left a project in which
+-- `foo.py` is gone, and a HEAD-only probe would call it present. Not the index
+-- either: `git rm --cached` is a staging intention, not a state of the project.
+-- `head_revision` is stored as an **audit anchor** — which committed revision
+-- this observation sat alongside — and a worktree result that disagrees with it
+-- is not a contradiction, because the two describe different things.
+--
+-- The foreign key names `task_turns`, and the contrast with v6, v7 and v9 is the
+-- design rather than an inconsistency. A Git baseline, a criteria snapshot and a
+-- continuity declaration must all be durable BEFORE the turn row exists, so they
+-- name `tasks`. This is the opposite: it is taken after the worker returns, when
+-- the turn row provably exists, so naming `task_turns` makes "a final state for a
+-- turn that never happened" impossible to write rather than merely discouraged.
+--
+-- What is deliberately **not** here: no content, no digest, no size, no preview,
+-- no permissions, no mtime, no directory listing, no inode, no owner. Existence
+-- and a bounded kind. A path-state row that carried content would be a second
+-- artifact surface arriving without its own review, and every one of those
+-- fields is a way for project text to reach a database that has no need of it.
+--
+-- No backfill, ever. A turn that ran before this table existed has no row and
+-- reads `legacy_unknown`, forever. Reconstructing a historical boundary by
+-- looking at the filesystem now would produce a row that is precisely wrong: a
+-- statement about today wearing the timestamp of a turn that ended long ago.
+CREATE TABLE IF NOT EXISTS task_turn_final_state (
+    task_id             TEXT    NOT NULL,
+    turn_number         INTEGER NOT NULL,
+    -- Server-minted, always.
+    observation_id      TEXT    NOT NULL,
+    -- The semantics under which this was observed. Bound into the fingerprint,
+    -- so a future observer with a different authority or kind vocabulary cannot
+    -- be silently read as this one.
+    observer_version    INTEGER NOT NULL,
+    observation_state   TEXT    NOT NULL,
+    -- NULL exactly when the observation is `complete`. `incomplete` and
+    -- `unavailable` must each say why, in code-owned vocabulary.
+    limitation_reason   TEXT,
+    -- The PR11 resolved-active-criteria fingerprint that selected these targets.
+    -- Audit of *why these paths*, which is half of what an observation asserts:
+    -- two turns that found the same paths present are not the same fact if they
+    -- were answering different requirement sets.
+    lineage_fingerprint TEXT,
+    -- Audit context only. Never the authority for effective existence.
+    head_revision       TEXT,
+    path_count          INTEGER NOT NULL,
+    observation_fingerprint TEXT NOT NULL,
+    -- Audit metadata only. Attribution is by turn number, never by clock.
+    recorded_at         TEXT    NOT NULL,
+    PRIMARY KEY (task_id, turn_number),
+    FOREIGN KEY (task_id) REFERENCES tasks (task_id) ON DELETE CASCADE,
+    FOREIGN KEY (task_id, turn_number)
+        REFERENCES task_turns (task_id, turn_number) ON DELETE CASCADE,
+    CHECK (turn_number >= 1),
+    CHECK (observation_state IN ('complete', 'incomplete', 'unavailable')),
+    -- The state and its reason agree, enforced rather than trusted. This is what
+    -- stops an `incomplete` observation from losing the one field that tells a
+    -- reader not to treat it as whole.
+    CHECK ((observation_state = 'complete') = (limitation_reason IS NULL)),
+    CHECK (path_count >= 0),
+    -- An `unavailable` observation has no path set at all: there was no
+    -- defensible target list, so storing children would imply one.
+    CHECK (observation_state <> 'unavailable' OR path_count = 0),
+    CHECK (observer_version >= 1),
+    CHECK (length(observation_fingerprint) = 64),
+    CHECK (length(observation_id) BETWEEN 8 AND 64)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS final_state_by_id
+    ON task_turn_final_state (observation_id);
+
+-- Schema v10. One path, as the machine found it at the post-worker boundary.
+--
+-- `absent` is a **positive observation**: the safe anchored lookup completed and
+-- determined nothing is there. That is why an IO error, a permission refusal and
+-- a refused symlink traversal are all `unavailable` with a reason instead —
+-- collapsing "we looked and it is not there" into "we could not look" is the
+-- single most damaging mistake this table could make, because a future layer
+-- would read the second as evidence of the first.
+--
+-- `kind` exists exactly when the path is present, and a symlink is recorded as
+-- the link object itself rather than followed. A broken symlink is therefore
+-- `present`/`symlink`, not absent: the path exists, and what it points at is a
+-- question this build does not ask.
+CREATE TABLE IF NOT EXISTS task_turn_final_state_paths (
+    task_id     TEXT    NOT NULL,
+    turn_number INTEGER NOT NULL,
+    -- Deterministic order, taken from the resolved active criteria set. Ordering
+    -- is by this column and never by rowid, for the reason every other M2K table
+    -- gives: a VACUUM may change rowid order and a fingerprint must not move.
+    ordinal     INTEGER NOT NULL,
+    path        TEXT    NOT NULL,
+    path_state  TEXT    NOT NULL,
+    kind        TEXT,
+    reason      TEXT,
+    PRIMARY KEY (task_id, turn_number, ordinal),
+    FOREIGN KEY (task_id, turn_number)
+        REFERENCES task_turn_final_state (task_id, turn_number) ON DELETE CASCADE,
+    -- One row per path. The target list is deduplicated before it gets here, and
+    -- this makes that a database fact rather than a convention.
+    UNIQUE (task_id, turn_number, path),
+    CHECK (ordinal >= 1),
+    CHECK (path_state IN ('present', 'absent', 'unavailable')),
+    CHECK ((path_state = 'present') = (kind IS NOT NULL)),
+    CHECK (kind IS NULL OR kind IN ('file', 'directory', 'symlink', 'other')),
+    CHECK ((path_state = 'unavailable') = (reason IS NOT NULL)),
+    CHECK (length(path) BETWEEN 1 AND 512)
+);
+
+CREATE INDEX IF NOT EXISTS final_state_paths_by_turn
+    ON task_turn_final_state_paths (task_id, turn_number, ordinal);
 
 -- Schema v8. One evaluator version's deterministic judgement on one CLOSED turn.
 --
@@ -3480,6 +3612,179 @@ class TaskStore:
             nodes=nodes,
             snapshot_owners=owners,
             earliest_snapshot_turn=None if earliest is None else int(earliest),
+        )
+
+    # -- effective post-worker path state (schema v10) ------------------------
+
+    def record_final_state(
+        self,
+        task_id: str,
+        turn_number: int,
+        *,
+        state: str,
+        limitation_reason: Optional[str],
+        lineage_fingerprint: Optional[str],
+        head_revision: Optional[str],
+        paths: Sequence["PathObservation"],
+        recorded_at: str,
+    ) -> None:
+        """Persist one turn's effective post-worker path state. **Write-once.**
+
+        M2K PR14. Called after the worker returns and after PR5's committed-range
+        observation, and **before the turn is durably closed** — which is what
+        makes the row a statement about the boundary rather than about whenever
+        somebody next looked.
+
+        **An existing row is never replaced.** Unlike the pre-dispatch facts,
+        whose `captured` state exists precisely so a retry can redraw a boundary
+        the worker provably never saw, this one describes a moment that has
+        already happened. Rewriting it later would mean overwriting an
+        observation with a different observation and calling both "the end of
+        turn N". A second call is a no-op.
+
+        The whole observation lands in one transaction with its paths, so a
+        parent claiming ``complete`` can never survive its children being rolled
+        back.
+        """
+        from .finalstate import (
+            FINAL_STATE_OBSERVER_VERSION,
+            OBSERVATION_UNAVAILABLE,
+            final_state_fingerprint,
+        )
+        from .identity import new_final_state_id
+
+        rows = tuple(paths)
+        if state == OBSERVATION_UNAVAILABLE:
+            # No defensible target list, so no children: storing some would imply
+            # the set was known.
+            rows = ()
+        fingerprint = final_state_fingerprint(
+            task_id,
+            int(turn_number),
+            state,
+            limitation_reason,
+            lineage_fingerprint,
+            head_revision,
+            rows,
+        )
+        with self._write() as connection:
+            existing = connection.execute(
+                "SELECT 1 FROM task_turn_final_state"
+                " WHERE task_id = ? AND turn_number = ?",
+                (task_id, int(turn_number)),
+            ).fetchone()
+            if existing is not None:
+                return
+            connection.execute(
+                """
+                INSERT INTO task_turn_final_state
+                    (task_id, turn_number, observation_id, observer_version,
+                     observation_state, limitation_reason, lineage_fingerprint,
+                     head_revision, path_count, observation_fingerprint,
+                     recorded_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    int(turn_number),
+                    new_final_state_id(),
+                    FINAL_STATE_OBSERVER_VERSION,
+                    state,
+                    limitation_reason,
+                    lineage_fingerprint,
+                    head_revision,
+                    len(rows),
+                    fingerprint,
+                    recorded_at,
+                ),
+            )
+            for observation in rows:
+                connection.execute(
+                    """
+                    INSERT INTO task_turn_final_state_paths
+                        (task_id, turn_number, ordinal, path, path_state, kind,
+                         reason)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task_id,
+                        int(turn_number),
+                        observation.ordinal,
+                        observation.path,
+                        observation.state,
+                        observation.kind,
+                        observation.reason,
+                    ),
+                )
+
+    def turn_final_state(
+        self, task_id: str, turn_number: int
+    ) -> "FinalStateObservation":
+        """One turn's effective post-worker path state. **Never ``None``.**
+
+        Four states, and the fourth is absence:
+        :data:`~.finalstate.OBSERVATION_LEGACY_UNKNOWN` for a turn with no row —
+        one that ran before PR14, or one whose process died before the boundary
+        could be recorded. The two are deliberately not distinguished, because
+        they mean the same thing to every consumer: nothing was recorded, so
+        nothing may be assumed.
+
+        **This never looks at the world.** It reads two tables and returns them.
+        It opens no repository, runs no Git, stats no path and calls no observer
+        — a read that probed the filesystem would let repository drift silently
+        rewrite historical answers, and would make an audit unreproducible.
+        Delete the project after the observation was stored and this returns
+        exactly what it returned before.
+
+        Internal. There is no route, no bridge Action and no PWA control that
+        reaches this in PR14 — a read surface is its own review.
+        """
+        from .finalstate import (
+            OBSERVATION_LEGACY_UNKNOWN,
+            FinalStateObservation,
+            PathObservation,
+        )
+
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM task_turn_final_state"
+                " WHERE task_id = ? AND turn_number = ?",
+                (task_id, int(turn_number)),
+            ).fetchone()
+            if row is None:
+                return FinalStateObservation(
+                    task_id=task_id,
+                    turn_number=int(turn_number),
+                    state=OBSERVATION_LEGACY_UNKNOWN,
+                )
+            # ORDER BY the stored ordinal, never by rowid.
+            items = connection.execute(
+                "SELECT * FROM task_turn_final_state_paths"
+                " WHERE task_id = ? AND turn_number = ? ORDER BY ordinal ASC",
+                (task_id, int(turn_number)),
+            ).fetchall()
+        return FinalStateObservation(
+            task_id=row["task_id"],
+            turn_number=int(row["turn_number"]),
+            state=row["observation_state"],
+            observation_id=row["observation_id"],
+            observer_version=int(row["observer_version"]),
+            limitation_reason=row["limitation_reason"],
+            lineage_fingerprint=row["lineage_fingerprint"],
+            head_revision=row["head_revision"],
+            path_count=int(row["path_count"]),
+            fingerprint=row["observation_fingerprint"],
+            recorded_at=row["recorded_at"],
+            paths=tuple(
+                PathObservation(
+                    ordinal=int(item["ordinal"]),
+                    path=item["path"],
+                    state=item["path_state"],
+                    kind=item["kind"],
+                    reason=item["reason"],
+                )
+                for item in items
+            ),
         )
 
     # -- deterministic criterion evaluation (schema v8) -----------------------

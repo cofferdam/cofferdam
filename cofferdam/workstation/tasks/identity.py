@@ -139,6 +139,27 @@ def valid_correlation_id(value: object) -> bool:
     return all(c in "0123456789abcdef" for c in value[len(CORRELATION_PREFIX) :])
 
 
+FINAL_STATE_ID_PREFIX = "fst_"
+FINAL_STATE_ID_BODY_CHARS = TASK_ID_BODY_CHARS
+FINAL_STATE_ID_CHARS = len(FINAL_STATE_ID_PREFIX) + FINAL_STATE_ID_BODY_CHARS
+
+
+def new_final_state_id(now_ms: Optional[int] = None) -> str:
+    """A fresh final-state observation id (M2K PR14). **Server-minted, always.**
+
+    Here rather than in :mod:`.finalstate` for the reason
+    :func:`new_evaluation_id` gives: that module's fingerprint must survive a
+    restart unchanged, so the clock and the random source that mint a row handle
+    stay outside it. The id is never an input to the observation fingerprint.
+    """
+    stamp = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    stamp &= (1 << _TIME_BITS) - 1
+    randomness = secrets.randbits(_RANDOM_BITS)
+    return FINAL_STATE_ID_PREFIX + _encode(
+        (stamp << _RANDOM_BITS) | randomness, FINAL_STATE_ID_BODY_CHARS
+    )
+
+
 __all__ = [
     "CORRELATION_ID_CHARS",
     "CORRELATION_PREFIX",
@@ -147,7 +168,10 @@ __all__ = [
     "TASK_ID_CHARS",
     "TASK_ID_PREFIX",
     "new_correlation_id",
+    "FINAL_STATE_ID_CHARS",
+    "FINAL_STATE_ID_PREFIX",
     "new_evaluation_id",
+    "new_final_state_id",
     "new_task_id",
     "valid_evaluation_id",
     "valid_correlation_id",

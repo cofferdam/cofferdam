@@ -2919,6 +2919,110 @@ unchanged and still binding (D-2026-08-11-7).
 before a real planner or user-facing caller begins submitting them, or the first genuine mistake will
 be reported as an infrastructure failure.
 
+## D-2026-08-16-20 — Effective post-worker state is the working tree, and HEAD is only an anchor (EFE DECISION, ACTIVE)
+
+**Decision.** A final-state observation records the state of a bounded set of paths **on the working
+tree filesystem**, under the authoritative project root, at the post-worker observation boundary. Not
+the committed HEAD tree, and not the index.
+
+**Why not HEAD.** A worker that deletes `foo.py` without committing has left a project in which
+`foo.py` is gone; a HEAD-only probe would call it present. A worker that creates `bar.py` without
+committing has left a project in which it exists; a HEAD-only probe would call it absent. Both are
+wrong about the thing anybody actually cares about — what the project *is* now — and the mistake runs
+in both directions, so no amount of care downstream repairs it.
+
+**Why not the index.** `git rm --cached foo.py` empties the index and leaves the file on disk.
+"Does this path exist in the effective project workspace" is answered by the filesystem; the index is
+a staging intention, and recording it as state would let a plan masquerade as a fact.
+
+**HEAD is still recorded, as an audit anchor.** It says which committed revision the observation sat
+alongside, which is genuine context. It is never the authority for existence, and a worktree result
+that disagrees with it is not a contradiction: the two describe different things. Both directions are
+pinned by tests, including the `git rm --cached` divergence.
+
+**Path state only, in v1.** `present` / `absent` / `unavailable`, plus a bounded kind of `file` /
+`directory` / `symlink` / `other` for a present path. **No content, digest, size, mtime, permissions
+or directory listing** — a path-state row carrying content would be a second artifact surface
+arriving without its own review, and every one of those fields is a way for project text to reach a
+database with no need of it.
+
+**`absent` is a positive machine observation** — the safe anchored lookup completed and determined
+nothing is there. An IO error, a permission refusal and a refused symlink traversal are therefore
+`unavailable` with a closed reason, never `absent`. Collapsing "we could not look" into "it is not
+there" is the single most damaging thing this surface could do, because a future acceptance layer
+would read the second as evidence.
+
+**Containment is the kernel's, and one detail is load-bearing.** The verified root is opened, then
+each component relative to the descriptor above it with `O_NOFOLLOW`. With that flag an intermediate
+**directory symlink** reports `ENOTDIR`, not `ELOOP`, which is indistinguishable from "a regular file
+where a directory was expected" — so the blocked component is `lstat`-ed to tell them apart. Without
+that step `repo/external -> /outside` with target `external/x` would have been recorded as `absent`,
+which is exactly the false negative above. An intermediate symlink is refused **even when it points
+inside the project**: the rule is about traversal, because a link that is safe today can be repointed
+tomorrow. A *final*-component symlink is observed as itself without being followed, so a broken
+symlink is a `present` `symlink` rather than an absent path.
+
+**Targets are the resolved active criteria's paths**, `path` and `to_path`, deduplicated by exact
+equality only and in the resolver's deterministic order. Never the whole repository — that would be
+an unbounded read of somebody's project at every turn boundary. Where the lineage is unavailable
+there is no defensible target set and the observation says so; substituting the current snapshot
+would be a guessed requirement set wearing an observation's clothes. A resolved **empty** active set
+is a complete observation of nothing, and means nothing about acceptance.
+
+**Nothing is reinterpreted.** `path_operation(foo.py, created)` asks what the worker did; observing
+that `foo.py` is present does not satisfy it. No new predicate is added, `EVALUATOR_VERSION` stays 1,
+`ASSEMBLER_VERSION` stays 3, and `EvidenceBundle` v3 does not carry final state — PR7 stays
+turn-local, and a state predicate is its own PR.
+
+## D-2026-08-16-21 — The observation is taken once at the turn boundary and never re-derived (EFE DECISION, ACTIVE)
+
+**Decision.** The final-state observation happens after the worker returns, after PR5's
+committed-range observation, and **before the turn is durably closed** — all inside the dispatch lock
+— and the result is stored. A read returns the stored row and touches nothing.
+
+**Why reading may never probe.** If a read meant *go and look now*, then repository drift would
+silently change historical answers, an audit could not be reproduced, and a remote read would become
+a live probe of somebody's filesystem. Proven rather than promised: deleting the project after
+capture changes no stored answer, and the read path is asserted not to invoke the observer at all.
+
+**Why that exact position.** The turn row must already exist, so the fact has somewhere to belong;
+the turn must not yet be closed, so the observation describes the boundary rather than something
+seen afterwards. Pinned by a test that inspects the turn row from inside the write, and by one that
+records the call order.
+
+**Boundary loss is never repaired.** A process that dies before the observation leaves no row, and
+the read answers `legacy_unknown`. That state deliberately does not distinguish "predates PR14" from
+"the boundary was lost", because they mean the same thing to every consumer — nothing was recorded,
+so nothing may be assumed. The third option, looking at the filesystem now and filing the answer
+under a turn that ended long ago, is a statement about today wearing yesterday's timestamp, and no
+recovery path may do it. The migration is held to the same rule: **no backfill**, no project opened,
+no Git run, no observer called.
+
+**Complete, incomplete, unavailable — and partial is never called whole.** One unobservable path
+makes the observation `incomplete`; the paths that *were* observed are still stored, because they are
+real facts worth auditing, and the state says plainly that no consumer may treat it as complete.
+`unavailable` carries no paths at all, because there was no defensible target list.
+
+**Bounded, and honest about what the bound buys.** At most 256 target paths — chosen for filesystem
+work at a turn boundary, not derived from PR6's per-snapshot limit, because an active set accumulates
+across turns — and refused rather than truncated. The set is read twice with bounded retries and
+refused as `observation_unstable` if it will not settle; no optimistic result follows detected
+instability. The limitation is stated rather than implied: v1 observes existence and kind, so a file
+whose *contents* changed between passes looks identical to both, and a content-level guarantee would
+need content evidence this PR deliberately does not collect.
+
+**An observation failure never rewrites the task.** A project that could not be read is a gap in
+Cofferdam's evidence, not a fault in the user's work. A completed worker stays completed and the gap
+is recorded as an explicitly unavailable observation — the same rule the Git baseline and the
+committed range already follow.
+
+**`FINAL_STATE_OBSERVER_VERSION = 1`**, code-owned and distinct from `SCHEMA_VERSION`,
+`CRITERIA_MODEL_VERSION`, `CONTINUITY_MODEL_VERSION`, `ASSEMBLER_VERSION`, `EVALUATOR_VERSION`,
+`RESOLVER_VERSION` and the future binding and aggregate versions. Bound into a deterministic
+observation fingerprint over the observer version, the target, the state and limitation, the lineage
+fingerprint that selected the paths, the HEAD anchor and every path result in stored order — and not
+over any clock, minted id, rowid or host path.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

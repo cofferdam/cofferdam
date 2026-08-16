@@ -617,6 +617,9 @@ class TaskService:
             # which the turn is *guaranteed* open — which is what makes the
             # event's sequence fall inside the turn's own bounds.
             self._record_committed_range(row, root, opened)
+            # M2K PR14, immediately after PR5's observation and still before
+            # `_apply` can close the turn.
+            self._record_final_state(row, root, opened)
             return self._apply(row, outcome)
 
     def _record_pre_work_baseline(self, row: TaskRow, root: Path) -> Optional[int]:
@@ -836,6 +839,161 @@ class TaskService:
         return turn.turn_number
 
     # -- the committed range (M2K PR5) ---------------------------------------
+
+    def _record_final_state(
+        self, row: TaskRow, root: Path, turn_number: Optional[int]
+    ) -> None:
+        """Observe what is actually there, while the turn is still open.
+
+        M2K PR14, and the position is the argument. Both dispatch paths call it
+        after the adapter has returned, after :meth:`_record_committed_range`,
+        and before :meth:`_apply` — the only method that can close a turn — with
+        ``self._lock`` held throughout. So the observation describes the
+        repository as the worker left it, and it is durable before anything can
+        report the turn finished.
+
+        **PR13 is why this exists.** Every acceptance predicate this build has
+        asks *what the worker did during this turn*; none asks *what the project
+        now is*. An inherited requirement therefore has no answerable current
+        status, and this is the missing fact — not the answer, just the evidence
+        a later layer will need.
+
+        **Which paths.** The active criteria for this turn, resolved by PR11, and
+        the paths they name. Not the whole repository, which would be an
+        unbounded read of somebody's project at every turn boundary; not the
+        current snapshot alone, which is not the active requirement set. If the
+        lineage cannot be resolved there is no defensible target list, and the
+        observation says so rather than substituting a plausible one.
+
+        **Failure cannot fail the task**, for the reason
+        :meth:`_record_committed_range` gives at length. A project that could not
+        be read is a gap in Cofferdam's evidence, not a fault in the user's work,
+        and turning a completed worker into a failed task over it would be the
+        observer grading the worker on its own limitations. Every wall is
+        recorded as an explicitly unavailable observation with a bounded reason;
+        a store that cannot write even that is swallowed, and the turn closes.
+
+        **Nothing here evaluates anything.** No criterion is decided, no result
+        is produced, and observing that a path exists does not satisfy a
+        `path_operation` criterion that asked whether the worker created it.
+        """
+        if turn_number is None:
+            return
+        from .finalstate import (
+            MAX_FINAL_STATE_TARGETS,
+            OBSERVATION_COMPLETE,
+            OBSERVATION_INCOMPLETE,
+            OBSERVATION_UNAVAILABLE,
+            PATH_UNAVAILABLE,
+            REASON_LINEAGE_UNAVAILABLE,
+            REASON_POST_WORKER_BOUNDARY_LOST,
+            REASON_TARGET_LIMIT_EXCEEDED,
+            PathObservation,
+            observe_paths,
+            target_paths,
+        )
+        from .lineage import resolve
+
+        try:
+            state = OBSERVATION_COMPLETE
+            limitation: Optional[str] = None
+            observations: Tuple[PathObservation, ...] = ()
+            lineage_fingerprint: Optional[str] = None
+
+            resolved = resolve(
+                self._store.lineage_inputs(row.task_id, int(turn_number))
+            )
+            if not resolved.resolved:
+                # PR11 already refuses to guess an active set through unknown
+                # lineage; guessing a *path* set through the same hole would be
+                # the same mistake wearing an observation's clothes.
+                state, limitation = OBSERVATION_UNAVAILABLE, REASON_LINEAGE_UNAVAILABLE
+            else:
+                lineage_fingerprint = resolved.fingerprint
+                targets = target_paths(resolved.active)
+                if len(targets) > MAX_FINAL_STATE_TARGETS:
+                    # Refused, never trimmed. A truncated path set presented as an
+                    # observation is the silent reduction every bounded surface in
+                    # this milestone refuses.
+                    state, limitation = (
+                        OBSERVATION_UNAVAILABLE,
+                        REASON_TARGET_LIMIT_EXCEEDED,
+                    )
+                else:
+                    results, unstable = observe_paths(root, targets)
+                    if unstable is not None:
+                        state, limitation = OBSERVATION_UNAVAILABLE, unstable
+                    else:
+                        observations = tuple(
+                            PathObservation(
+                                ordinal=index,
+                                path=path,
+                                state=result[0],
+                                kind=result[1],
+                                reason=result[2],
+                            )
+                            for index, (path, result) in enumerate(
+                                zip(targets, results), start=1
+                            )
+                        )
+                        blocked = [
+                            item
+                            for item in observations
+                            if item.state == PATH_UNAVAILABLE
+                        ]
+                        if blocked:
+                            # The paths that *were* observed are real facts worth
+                            # keeping, so they are stored — but the observation
+                            # says plainly that it is not whole, and no consumer
+                            # may read it as complete.
+                            state = OBSERVATION_INCOMPLETE
+                            limitation = blocked[0].reason
+        except ProjectRootInvalid:
+            state, limitation, observations, lineage_fingerprint = (
+                OBSERVATION_UNAVAILABLE,
+                REASON_POST_WORKER_BOUNDARY_LOST,
+                (),
+                None,
+            )
+        except TaskError:
+            # The lineage could not be read at all. Recorded as unavailable
+            # rather than left absent, so the gap is a fact instead of a silence.
+            state, limitation, observations, lineage_fingerprint = (
+                OBSERVATION_UNAVAILABLE,
+                REASON_LINEAGE_UNAVAILABLE,
+                (),
+                None,
+            )
+
+        head_revision = None
+        try:
+            summary = self._store.turn_baseline(row.task_id, int(turn_number))
+            head_revision = summary.head_revision if summary is not None else None
+        except TaskError:  # pragma: no cover - defensive
+            head_revision = None
+
+        try:
+            self._store.record_final_state(
+                row.task_id,
+                int(turn_number),
+                state=state,
+                limitation_reason=limitation,
+                lineage_fingerprint=lineage_fingerprint,
+                head_revision=head_revision,
+                paths=observations,
+                recorded_at=now_iso(),
+            )
+        except TaskError:
+            # Same rule as the Git baseline: evidence that could not be written
+            # does not convert a finished worker into a failed task.
+            self._audit(
+                "task_final_state",
+                "unavailable",
+                task_id=row.task_id,
+                adapter_id=row.adapter_id,
+                project_id=row.project_id,
+                correlation_id=row.correlation_id,
+            )
 
     def _record_committed_range(
         self, row: TaskRow, root: Path, turn_number: Optional[int]
@@ -1210,6 +1368,12 @@ class TaskService:
                 # still being measured from its own boundary.
                 opened = self._store.current_turn(row.task_id)
                 self._record_committed_range(
+                    row, root, opened.turn_number if opened is not None else None
+                )
+                # M2K PR14, at the same point in the lifecycle as the first
+                # turn's: the turn is open, `_apply` has not run, and the lock
+                # has not been released since.
+                self._record_final_state(
                     row, root, opened.turn_number if opened is not None else None
                 )
             self._audit(
@@ -1702,6 +1866,28 @@ class TaskService:
         """
         row = self.get_task(task_id)
         return self._store.turn_criteria(row.task_id, int(turn_number))
+
+    def turn_final_state(self, task_id: object, turn_number: object):
+        """What was actually there when this turn's worker stopped. **A read.**
+
+        M2K PR14's read half, and it is **only** a read. It opens no repository,
+        runs no Git, stats no path and invokes no observer — the observation was
+        taken once at the turn boundary and stored, and asking about it later
+        returns that row. A read that went and looked would let repository drift
+        silently rewrite history, and would turn an audit query into a live probe
+        of somebody's filesystem.
+
+        **Never ``None``.** A turn with no observation answers
+        :data:`~.finalstate.OBSERVATION_LEGACY_UNKNOWN`, which covers both a turn
+        that predates PR14 and one whose process died before the boundary could
+        be recorded. Neither is ever repaired later.
+
+        Internal. No HTTP route, no bridge Action, no PWA control, and the PR8
+        assessment response is unchanged. Calling it a thousand times leaves the
+        database byte-identical.
+        """
+        row = self.get_task(task_id)
+        return self._store.turn_final_state(row.task_id, int(turn_number))
 
     def resolve_active_criteria(self, task_id: object, turn_number: object):
         """Which criteria are in force at one turn, or why that is unknown.

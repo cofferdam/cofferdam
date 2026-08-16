@@ -8,6 +8,54 @@ release.
 
 ### Added
 
+- **M2K PR14 — Cofferdam now writes down what was actually there when a worker finished.**
+  Nothing about this is visible yet, and that is deliberate. No screen changes and nothing new is
+  exposed to your phone or to a connected assistant.
+
+  **The gap it fills.** Everything Cofferdam records about a piece of work is a note about *what the
+  worker did*: it changed this file, it created that one, it renamed a third. Nothing it stores says
+  *what your project looks like now*. That is why it still cannot tell you whether a request carried
+  over from an earlier message is satisfied — the old note is about an old moment, and re-asking
+  "did somebody touch this file?" about a later piece of work would report a file that was correctly
+  left alone as a failure.
+
+  **What it now records.** When a worker finishes, and before the piece of work is written down as
+  closed, Cofferdam looks at the files your requirements actually name and notes whether each one is
+  there — a file, a folder, a shortcut, or nothing at all. That note is saved once and never
+  changes. Asking about it later reads the saved note; it does not go and look again, so a piece of
+  history cannot quietly rewrite itself because you have edited the project since, and moving or
+  deleting the project afterwards changes no past answer.
+
+  **It looks at the project as it really is.** If a worker deleted a file without committing it,
+  Cofferdam says the file is gone, because it is. If a worker created one without committing it,
+  Cofferdam says it is there. It records which committed version the work sat alongside, but the
+  files on disk are what it believes.
+
+  **It only looks at what it was asked about.** Never the whole project — just the files your
+  standing requirements mention. If Cofferdam cannot work out what your requirements currently are,
+  it records that it could not, rather than looking at a plausible-seeming list instead.
+
+  **It will not follow a shortcut out of your project.** If a folder in the path is a link pointing
+  somewhere else, Cofferdam refuses to look through it rather than reading whatever is on the other
+  side, and it never describes anything outside the project. A shortcut that is itself the thing
+  being asked about is reported as a shortcut, without following it — including a broken one, which
+  is still something rather than nothing.
+
+  **"Not there" and "could not look" are kept apart.** If a file is missing, Cofferdam says so. If it
+  was blocked — no permission, a refused shortcut, a read error — it says *that* instead, and never
+  quietly files it as "missing". Nothing reads a failure to look as proof of absence.
+
+  **It records nothing about contents.** No text, no size, no timestamps, no permissions, no listing
+  of what is inside a folder. Only whether something is there, and what sort of thing it is.
+
+  **If it cannot look, your work is still your work.** A project Cofferdam could not read is a gap in
+  its own notes, not a fault in what the worker did. A finished piece of work stays finished.
+
+  **What it does not do yet.** It still does not tell you whether a task succeeded, and it does not
+  change any existing judgement. Noticing that a file exists does **not** turn "the worker was
+  supposed to create this file" into a pass — those are different questions, and joining them is the
+  next thing to be designed rather than something slipped in here.
+
 - **M2K PR13 — Cofferdam writes down why it still will not tell you whether a task is done.**
   This change is documentation only. Nothing is saved, no screen changes, and the app behaves exactly
   as it did yesterday.
