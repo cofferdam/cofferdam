@@ -245,15 +245,23 @@ class TheDeployedRuntimeRefusesCleanly(ForwardSchemaCase):
         store.close()
         self.assertEqual(before, digest(self.database))
 
-    def test_the_wal_and_shm_sidecars_are_untouched_too(self):
-        """Not even a journal write escapes the refusal.
+    def test_no_journal_write_escapes_the_refusal(self):
+        """The WAL stays empty, so there is no pending write to carry forward.
 
-        The main file being byte-identical would still be satisfied by a runtime
-        that wrote into the WAL and simply never checkpointed — a rollback would
-        then carry that write forward the next time anything opened the database.
-        So the sidecars are measured as well, and the WAL stays empty: the old
-        build reads `schema_meta`, sees a version it does not know, and declines
-        before it opens a write transaction.
+        A byte-identical main file is not on its own enough: it is also what a
+        runtime that wrote into the WAL and never checkpointed would leave
+        behind, and the next process to open the database would replay that write
+        into a rollback. So the WAL is measured too, and it does not move — the
+        old build reads `schema_meta`, sees a version it does not know, and
+        declines before opening a write transaction.
+
+        **`-shm` is deliberately excluded.** It is SQLite's shared-memory index
+        for the WAL: scratch state, rebuilt from the WAL, and its bytes change on
+        an ordinary read-only open. Asserting it byte-identical would be pinning
+        an implementation detail that carries no durable meaning, and it is
+        genuinely unstable — an earlier draft of this test did exactly that and
+        failed intermittently depending on what had opened the file before it.
+        What matters for a rollback is the main file and the journal.
         """
         before = self.files()
         module = self.old_store_module()
@@ -262,7 +270,15 @@ class TheDeployedRuntimeRefusesCleanly(ForwardSchemaCase):
         with self.assertRaises(module.StoreUnavailable):
             store.turns("task_v10")
         store.close()
-        self.assertEqual(before, self.files())
+        after = self.files()
+        for name in ("main", "-wal"):
+            self.assertEqual(before[name], after[name], "%s moved" % name)
+        # The WAL holds nothing: an empty file, or none at all.
+        self.assertIn(
+            after["-wal"],
+            (None, hashlib.sha256(b"").hexdigest()),
+            "the refusal left a non-empty journal",
+        )
 
     def test_integrity_and_foreign_keys_survive_the_refusal(self):
         module = self.old_store_module()
