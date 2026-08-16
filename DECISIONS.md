@@ -2735,6 +2735,190 @@ disagreement would surface only as a stored relation the reader refuses — the 
 discover it. **PR11's read-time checks are kept regardless**: write-time prevention is an additional
 guarantee, and a restored, imported or future-buggy database can still present a stale relation.
 
+## D-2026-08-16-15 — Every v1 acceptance predicate is a turn-change observation, not a final-state assertion (EFE DECISION, ACTIVE)
+
+**Decision.** The three evidence predicates this build can express — `path_changed`,
+`path_operation` and `rename` — each assert **"the worker did X during this turn"**. None asserts
+**"the project now satisfies X"**. This is recorded as doctrine because the distinction is invisible
+in the criterion vocabulary and decisive for everything built on top of it.
+
+**Read from the implementation, not inferred.** `evaluation._evaluate_path_changed`,
+`_evaluate_path_operation` and `_evaluate_rename` each consult
+`_attributable_observations(bundle, path)` and nothing else — observations attributed to *the turn
+being evaluated*. There is no code path in which any of them reads repository state, a prior turn's
+observations, or anything outside the one `EvidenceBundle` handed in.
+
+| predicate | class | asserts | monotonic | can absence at a later turn prove `not_met`? | meaningfully re-evaluable at a later turn? |
+|---|---|---|---|---|---|
+| `path_changed(P)` | action/change | the worker produced a resulting change at P **this turn** | no | no — it proves only that *this* turn did not change P | mechanically yes, semantically no |
+| `path_operation(P, OP)` | action/change | the worker performed OP at P **this turn** | no | no | mechanically yes, semantically no |
+| `rename(S, D)` | action/change | the worker renamed S→D **this turn** | no | no | mechanically yes, semantically no |
+| `manual` | undecidable | a person must check | n/a | no — it is never decided by machine | no |
+
+**Consequence, and it is the load-bearing one.** Re-evaluating an *inherited* criterion against the
+target turn's bundle is a **category error**, not an approximation. `path_operation(foo.py, created)`
+asked at turn 2 means "did turn 2's worker create foo.py". For a well-behaved turn 2 that correctly
+leaves the file alone, the honest answer is *no*, and `_evaluate_path_operation` renders that as
+`not_met` the moment closure is complete. The naive approach does not risk a false negative — it
+manufactures one reliably, and it does so most often when the work was **correct**.
+
+**Two classes follow from this, and are not invented for convenience.** *Action/change* criteria bind
+to the turn that asked them and cannot be re-asked later. *State/invariant* criteria — which would
+assert something about the resulting project rather than about worker behaviour — could be evaluated
+at any turn. **Every criterion this build can express is in the first class; the second class is
+empty** until final-state predicates exist. No class marker is added to the schema now: a
+discriminator with one inhabited value is a column that teaches a reader the wrong thing.
+
+## D-2026-08-16-16 — Continuity is requirement lineage, never evaluation lineage (EFE DECISION, ACTIVE)
+
+**Decision.** A continuity declaration says which **requirements** remain active. It says nothing
+whatever about evidence or evaluation. Specifically, `extend` and a surviving `revise` criterion do
+**not** imply any of:
+
+* that the earlier evidence is still current;
+* that the earlier `EvaluationRecord` is still authoritative;
+* that no later work regressed the requirement;
+* that current repository state satisfies it.
+
+**Why the conflation is tempting and wrong.** "The requirement is still active" and "the requirement
+is still met" are one short step apart in English and a whole layer apart in fact. Continuity is
+authored by a person or a planner **before** the turn runs (D-2026-08-16-9); it is an intent, frozen
+pre-dispatch, and an intent cannot certify a state of the world it precedes. Letting lineage carry
+evaluation would mean a declaration made before any work happened silently vouched for the work.
+
+**Therefore active-criterion resolution (PR11) and current-acceptance binding are separate layers**,
+and the second does not exist. PR11 deliberately answers only the first question and contains no
+result vocabulary at all.
+
+## D-2026-08-16-17 — No stored evaluation is authoritative for a later turn, in either direction (EFE DECISION, ACTIVE)
+
+**Decision.** An `EvaluationRecord` is authoritative for **its own turn and no other**. It is never
+carried forward as the current answer for a later target turn, and this holds for all three result
+values. There is no optimistic carry-forward and no pessimistic one.
+
+**`met` is not monotonic.** Turn 1 creates `foo.py` and A is `met`. Turn 3 deletes it. A is still
+active, the stored `met` is still a true statement about turn 1, and it is a false statement about
+turn 3. Reusing it would report a satisfied requirement over a broken one.
+
+**`not_met` is not monotonic either, and this direction matters more than it looks.** Turn 1 leaves A
+`not_met`. The user says "fix it", continuity preserves A, and turn 2 repairs it. A stale `not_met`
+carried forward would tell somebody their completed fix had failed — the system contradicting work it
+watched succeed. The pessimistic direction is not the safe one; it is just the other wrong one.
+
+**`unverified` is emphatically not permanent.** It usually records a *limitation of the observer* —
+inexact attribution, a dirty pre-work boundary, unread coverage — and every one of those can be
+absent next turn. Treating it as settled would freeze a gap in Cofferdam's own evidence into a
+permanent property of the user's work.
+
+**So the rule is symmetric:** none of `met`, `not_met` or `unverified` may be reused as a current
+answer without independent current evidence. Where such evidence does not exist, the current status
+is **unavailable/unverified** — never a reused stale value, and never inferred preservation.
+Stored records are not deleted or invalidated by this; they remain exactly what they always were,
+true of their own turn.
+
+## D-2026-08-16-18 — Cofferdam cannot currently prove preservation, and that is what blocks the aggregate (EFE DECISION, ACTIVE)
+
+**Decision.** The current evidence architecture can sometimes prove that a later change happened at a
+path. It can **never** prove that one did not. Since cross-turn acceptance requires exactly the
+second, the per-turn aggregate cannot be implemented on today's primitives, and no amount of care in
+the aggregator repairs that.
+
+**Three independent reasons, each sufficient on its own.**
+
+1. **Cofferdam observes only inside turn windows.** Between one turn's post-work observation and the
+   next turn's pre-work baseline — and after the last turn, up to the moment somebody reads — the
+   repository is unobserved. A human edit, a rebase, an external tool or another agent leaves no
+   trace in any bundle.
+2. **Both observation domains are diffs, not state.** `worktree` records paths that differ from HEAD;
+   `committed_range` records paths changed within the range. Neither enumerates what exists, so
+   "does `foo.py` exist now" has no answer anywhere in stored evidence.
+3. **Absence already cannot be read inside a single window** whenever attribution is inexact, the
+   pre-work boundary was dirty, or coverage was incomplete — `evaluation._closure` refuses that
+   reasoning today, for reasons that only get stronger across several turns.
+
+**One inter-turn check is available now and costs nothing**, recorded so it is not rediscovered:
+a turn's `CommittedRangeSummary.target_revision` and the following turn's `GitBaseline.head_revision`
+are both already stored, so **committed drift between turns is detectable by comparing two stored
+strings**, and the next turn's `working_tree_state` says whether the tree matched HEAD at that
+instant. This proves only that a gap is non-empty, never what happened in it — which is enough to
+answer `unavailable` honestly rather than leaving a silent hole, and not enough to certify anything.
+
+**What is actually required, in dependency order.**
+
+1. A **final-state evidence surface**: does this path exist at this revision. A different Git question
+   (`ls-tree`/`cat-file -e`) from every question PR3–PR5 ask, and therefore a genuinely new evidence
+   primitive rather than a re-read of stored rows.
+2. **Final-state predicates** — conceptually `path_exists` / `path_absent` — which are re-evaluable at
+   any turn because they describe the project rather than a worker's behaviour.
+3. Only then a **cross-turn binding layer**.
+
+**Do not weaken exact-turn evidence to get there.** PR2 and PR7 made exact turn bounds load-bearing
+deliberately, and `EvidenceBundle` v3 must not be reinterpreted to make aggregation convenient.
+Anything cross-turn is a **new derived layer over** the per-turn bundles, never a loosening of them.
+
+## D-2026-08-16-19 — Cross-turn acceptance is its own versioned derived layer, and it is not built yet (EFE DECISION, ACTIVE)
+
+**Decision.** Between the lineage resolver and any future aggregate there is a **missing layer**: for
+each criterion active at target turn N, what is its status *at N*, and what evidence supports that.
+It is the right shape, it is deliberately not built, and building it before D-2026-08-16-18's
+primitives exist would produce a layer that answers `unavailable` for essentially every inherited
+criterion — correct, and useless.
+
+**Conceptual shape**, recorded so the eventual implementation is reviewed against a written intent
+rather than invented under deadline. Per active criterion at the target turn: the criterion identity;
+the target turn; the origin turn and snapshot; a current result of `met` / `not_met` / `unverified`;
+the identity of the evidence or evaluation supporting **that** result; and a provenance marker saying
+whether it was *newly evaluated at this turn*, *carried under an explicit rule*, *invalidated by later
+evidence* or *unavailable*. That provenance field is the point of the whole layer: an answer that
+cannot say why it believes itself is not auditable.
+
+**Its own semantic version, in code, when it exists.** Not `RESOLVER_VERSION` (which requirements are
+live), not `EVALUATOR_VERSION` (how one criterion is decided against one bundle), not a future
+`AGGREGATOR_VERSION` (what a mixture of results means). Binding a result to a turn across a lineage is
+a fourth distinct operation and will change for its own reasons. **No such constant is added by this
+documentation PR**, in executable code or anywhere else.
+
+**Derived, not persisted — provisionally.** Every input is immutable and the composition is
+deterministic, so the same argument that made PR11 derived applies. The one thing that could overturn
+it is D-2026-08-16-18's first requirement: a final-state observation is a **new observation**, and
+observations are persisted facts. So the *binding* stays derived while the *final-state evidence* it
+reads will need storage of its own. That is a schema question for the PR that introduces it, not now.
+
+**What must be true before a runtime per-turn aggregate may be built.** Every criterion active at the
+target turn must have a well-defined **current** binding. PR9's ordered rule — any `not_met`
+dominates, any `unverified` yields `incomplete`, only all-met yields `met` — remains valid doctrine
+and is not in question; its **inputs** are what do not exist. Concretely the aggregate is unblocked
+only when either every active criterion originates at the target turn, or final-state predicates make
+inherited criteria answerable.
+
+**A narrowing deliberately not taken.** For a `root` or `replace` turn every active criterion
+originates at that turn, so PR7's evaluation already *is* a legitimate current binding and PR9's rule
+would be sound for those turns. This is true and it is not being shipped: an aggregate whose
+correctness silently depends on a lineage shape the caller does not control is a trap, and the first
+`extend` would break it without any error.
+
+**`replace` cuts evaluation history exactly where it cuts lineage.** Criteria from before a `replace`
+are not active after it, so no cross-turn binding is ever required for them and no evidence traversal
+needs to cross that point. The resolver's walk already stops there, so the two layers agree **by
+construction** rather than by coordination — which also bounds how far back a future binding layer
+could ever need to look. For `revise`, survivors need the cross-turn rule, newly added criteria bind
+directly to the target turn, and superseded criteria leave the active set: their stored evaluations
+stay true of their own turns and must never contribute to a current answer. Where the resolver already
+answers *unavailable* — `not_declared`, `legacy_unknown`, malformed lineage — acceptance is
+unavailable too, and no composition may be attempted through unknown continuity.
+
+**Named checks are one of the two roads out, not a detour.** A host-owned named check ("the tests pass")
+is inherently a **current-run** property: it is answered by running it now, so it is final-state by
+nature and re-evaluable at any turn without any of the problems above. It solves the cross-turn
+problem for the criteria that use it and solves nothing for path criteria. Its trust boundary is
+unchanged and still binding (D-2026-08-11-7).
+
+**Recorded debt, not fixed here.** `TaskService.send_followup` translates a store-level
+`ContinuityInvalid` into `ContinuityUnrecorded`, so a caller's *invalid declaration* is reported as
+*could not be recorded*. Harmless today because no caller supplies declarations; it must be fixed
+before a real planner or user-facing caller begins submitting them, or the first genuine mistake will
+be reported as an infrastructure failure.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

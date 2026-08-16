@@ -797,10 +797,104 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2K PR13 — cross-turn acceptance evidence-binding doctrine (documentation only)
+
+On `m2k-pr13-crossturn-doctrine`, from the merged `2dc4177`. **Documentation and design only** — no
+schema, no route, no runtime, no evaluator change, no `AGGREGATOR_VERSION`, nothing deployed.
+
+PR11 and PR12 answered *which criteria are active at turn N*. Before an aggregate can be built on
+that, a second question has to be answered and it turns out to be much harder: **what is the current
+acceptance state of an active criterion that was evaluated at an earlier turn?** This PR settles the
+doctrine and records, precisely, why the runtime cannot be built yet.
+
+**The finding, stated once.** Every acceptance predicate this build has is a **turn-change
+observation**, not a final-state assertion. `path_changed`, `path_operation` and `rename` are all
+evaluated exclusively against observations *attributable to the turn being evaluated*, and each one
+means "the worker did X during this turn" — never "the project now satisfies X". There is no
+predicate, and no evidence primitive, that asks whether a path exists now.
+
+**Why that breaks all three naive answers.**
+
+* *Carry the old result forward.* A stored `met` cannot survive a later regression and a stored
+  `not_met` cannot survive a later repair. Neither is monotonic, so neither is authoritative later.
+* *Re-evaluate against the target turn.* This is not merely imprecise, it is a **category error**.
+  `path_operation(foo.py, created)` asked at turn 2 means "did turn 2's worker create foo.py", and
+  for a well-behaved turn 2 that legitimately leaves the file alone the honest answer is *no* — which
+  the evaluator renders as `not_met` whenever closure is complete. Naive re-evaluation does not risk
+  a false negative; it reliably manufactures one.
+* *Inherited met stays met unless superseded.* Continuity records **user intent about requirements**.
+  It is not, and was never, a claim about repository state, so it cannot certify preservation.
+
+**No result value is monotonic.** `met` can be regressed, `not_met` can be repaired, and
+`unverified` can become decidable when better evidence arrives. All three are non-monotonic across
+turns, so no stored per-turn result may be reused as a current answer without independent current
+evidence.
+
+**Regression detection, audited honestly.** Cofferdam can sometimes prove a later change happened at
+a path — a later turn's attributable observation contradicting the requirement. It can **never**
+prove one did not, for three independent reasons: it observes only *inside* turn windows, so
+inter-turn and post-last-turn drift is unobserved; both observation domains are **diffs** (`worktree`
+= differs from HEAD, `committed_range` = changed in the range), so neither enumerates what exists;
+and any turn with inexact attribution, a dirty pre-work boundary or incomplete coverage already
+refuses absence reasoning inside its own window. Proving preservation is the requirement, and it is
+exactly what is missing.
+
+**One cheap thing that is available today**, recorded because it costs no new probe: a turn's
+`target_revision` and the next turn's pre-work `head_revision` are both already stored, so committed
+drift *between* turns is detectable by comparing two stored strings. It cannot say what changed, only
+that the gap is not empty — which is enough to answer `unavailable` honestly instead of leaving a
+silent hole.
+
+**What the architecture actually needs**, in order: a **final-state evidence surface** (does this
+path exist at this revision — a different Git question from any this build asks), then **final-state
+predicates** that can be evaluated at any turn, then a distinct **cross-turn binding layer** carrying
+its own semantic version. Building the binding layer first would produce a layer that answers
+`unavailable` for essentially every inherited criterion — correct, and useless.
+
+**Two classes of criterion, justified rather than invented.** The classification above splits
+criteria into *action/change* (bind to their origin turn, not re-evaluable later) and
+*state/invariant* (evaluable at any turn against a final-state surface). Every criterion this build
+can express today is in the first class; the second is empty until final-state predicates exist.
+
+**A narrowing worth knowing.** For a `root` or `replace` turn, every active criterion originates at
+that turn, so PR7's existing evaluation *is* a legitimate current binding and PR9's aggregation rule
+would be sound — for those turns only. That is real, and it is deliberately **not** being shipped: a
+rule whose correctness depends on a lineage shape the caller does not control is a trap.
+
+**`replace` cuts evaluation history exactly where it cuts lineage.** Criteria from before a
+`replace` are not active after it, so no cross-turn binding is ever needed for them — the resolver's
+walk already stops there, so the two layers agree by construction rather than by coordination. For
+`revise`, survivors need the cross-turn rule, newly added criteria bind to the target turn directly,
+and superseded criteria leave the active set — their stored evaluations remain true records of their
+own turns and must never contribute to a current answer. `manual` is unchanged: inherited or not, it
+is `unverified` at every turn it is active, and continuity can never promote it.
+
+**Safety default, binding on all future work.** Where the current status of an active criterion
+cannot be established, the answer is `unavailable`/`unverified`. Never a reused stale `met`, never a
+reused stale `not_met`, never inferred preservation.
+
+## M2K records — the evidence foundation (written while each was on its branch)
+
+M2K is **in progress**: PR1 through PR8 are merged and deployed; PR9 is merged (`b2314f0`, #54) and
+needed no deployment because it changed only documentation; PR10 is merged (`1efd49b`, #55) and
+deployed to slot A on schema v9; PR11 (`3bb9a5b`, #56) and PR12 (`2dc4177`, #57) are merged and
+**intentionally not deployed**; PR13 is on a branch and is documentation only.
+See *In progress* above for PR13.
+
+**Merged is not deployed, and here that is a decision rather than a lag.** Production runs the PR10
+runtime from slot A at `1efd49b`. PR11 adds a pure read-only resolver and PR12 corrects a write-time
+validation that no caller in this build can reach — neither changes anything a running service does,
+because nothing supplies a continuity declaration yet. Spending a slot flip on zero observable change
+would be ceremony. The A/B slots are **deployment machinery, not feature-development machinery**: work
+is developed on branches and merged to `main`, and a deployment happens when a running service
+actually needs the change. PR11 and PR12 will go out together with the first change that does.
+
 ### M2K PR12 — inherited-active supersession validation
 
-On `m2k-pr12-inherited-supersession`, from the merged `3bb9a5b`. **Implemented on a branch, not
-merged and not deployed.**
+**Merged as `2dc4177` (#57) and deliberately NOT deployed.** Production remains on the PR10
+runtime — workstation and Actions bridge both from **slot A at `1efd49b`**, live schema **v9**,
+rollback runtime slot B at `059fdcb`. The record below was written while PR12 was still on
+`m2k-pr12-inherited-supersession`, from the merged `3bb9a5b`, and is kept as it was written.
 
 Corrects the one semantic mismatch PR11 discovered between PR10's write-time validation and PR11's
 read-time resolution, and closes it in the direction that makes the write agree with the read.
@@ -856,13 +950,6 @@ the predecessor lineage could move. Asserted by observing `in_transaction` durin
 replacement: a restored database, an imported fixture or a future bug can still present a stale
 relation, and `supersession_target_not_active` must still catch it on read.
 
-## M2K records — the evidence foundation (written while each was on its branch)
-
-M2K is **in progress**: PR1 through PR8 are merged and deployed; PR9 is merged (`b2314f0`, #54) and
-needed no deployment because it changed only documentation; PR10 is merged (`1efd49b`, #55) and
-deployed to slot A on schema v9; PR11 is merged (`3bb9a5b`, #56) and **intentionally not deployed**;
-PR12 is on a branch.
-See *In progress* above for PR12.
 
 ### M2K PR11 — the pure continuity lineage resolver
 
