@@ -129,8 +129,15 @@ class CleanDatabaseTests(unittest.TestCase):
                 r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
             }
 
-    def test_the_schema_version_is_eight(self):
-        self.assertEqual(SCHEMA_VERSION, 8)
+    def test_the_evaluation_tables_arrived_by_version_eight(self):
+        """PR7's tables exist, and the build is at or past the version that added them.
+
+        Deliberately not an equality against 8 any more. This module's subject is
+        the evaluation migration, and pinning the *current* schema version here
+        made every later additive bump fail in a file that has nothing to say
+        about it — `test_task_core.py` owns the one exact assertion.
+        """
+        self.assertGreaterEqual(SCHEMA_VERSION, 8)
 
     def test_both_evaluation_tables_exist(self):
         self.assertIn(EVALUATION_TABLE, self._tables())
@@ -377,16 +384,23 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(int(value), 7)
         self.assertNotIn(EVALUATION_TABLE, self._tables())
 
-    def test_opening_it_migrates_to_eight(self):
+    def test_opening_a_v7_database_migrates_it_forward(self):
+        """A v7 database reaches the build's current version, whatever that is.
+
+        The recorded number is read from ``schema_meta`` rather than trusted from
+        ``storage_health``, so this still proves the migration wrote it — it just
+        no longer re-pins a version this module does not own.
+        """
         self._build_v7()
         store = _open_store(self.home)
         self.addCleanup(store.close)
-        self.assertEqual(store.storage_health()["schema_version"], 8)
+        self.assertEqual(store.storage_health()["schema_version"], SCHEMA_VERSION)
         with sqlite3.connect(str(self.path)) as db:
             value = db.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()[0]
-        self.assertEqual(int(value), 8)
+        self.assertEqual(int(value), SCHEMA_VERSION)
+        self.assertGreaterEqual(int(value), 8)
 
     def test_the_new_tables_are_created_empty(self):
         self._build_v7()
@@ -451,7 +465,7 @@ class MigrationTests(unittest.TestCase):
         first.close()
         second = _open_store(self.home)
         self.addCleanup(second.close)
-        self.assertEqual(second.storage_health()["schema_version"], 8)
+        self.assertEqual(second.storage_health()["schema_version"], SCHEMA_VERSION)
         with sqlite3.connect(str(self.path)) as db:
             self.assertEqual(
                 db.execute("SELECT COUNT(*) FROM %s" % EVALUATION_TABLE).fetchone()[0], 0
@@ -480,7 +494,7 @@ class MigrationTests(unittest.TestCase):
         try:
             store = _open_store(self.home)
             self.addCleanup(store.close)
-            self.assertEqual(store.storage_health()["schema_version"], 8)
+            self.assertEqual(store.storage_health()["schema_version"], SCHEMA_VERSION)
         finally:
             socket.socket, subprocess.run, subprocess.Popen = saved
 

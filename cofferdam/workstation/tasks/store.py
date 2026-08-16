@@ -239,7 +239,15 @@ from .turns import (
 #: PR7 evaluates each criterion and aggregates nothing. There is no task verdict,
 #: no pass, no fail, no confidence, no risk, no model and no check runner;
 #: ``ASSEMBLER_VERSION`` stays at 3 and criteria persistence is untouched.
-SCHEMA_VERSION = 8
+#:
+#: **v9** is PR10's criterion continuity: ``task_turn_criteria_continuity`` and
+#: ``task_turn_criterion_supersessions``, additive, created empty and **never
+#: backfilled**. It stores what a turn's criteria say about the turn before them,
+#: which PR9 identified as the missing prerequisite for any task-level answer.
+#: It is still not that answer — nothing aggregates, ``EVALUATOR_VERSION`` stays
+#: at 1, ``ASSEMBLER_VERSION`` stays at 3, there is no ``AGGREGATOR_VERSION``,
+#: no task verdict, no check runner and no command execution.
+SCHEMA_VERSION = 9
 
 #: Where the database lives, under COFFERDAM_HOME. Its own directory so the file
 #: and its WAL/shm siblings stay together and can be permissioned as a unit.
@@ -803,6 +811,153 @@ CREATE TABLE IF NOT EXISTS task_turn_criterion_items (
 
 CREATE INDEX IF NOT EXISTS criterion_items_by_turn
     ON task_turn_criterion_items (task_id, turn_number, ordinal);
+
+-- Schema v9. What this turn's criteria say about the turn before it.
+--
+-- The fact M2K PR9 identified as missing and refused to guess at. Every turn's
+-- requirements were already stored; the *relationship* between two turns'
+-- requirements was not, so neither "every turn's criteria are still live" nor
+-- "only the latest turn counts" can be correct, and a task-level answer was
+-- unavailable. This row is the declaration that makes one possible later. It is
+-- not that answer: nothing here aggregates, and there is no column a verdict
+-- could be written into.
+--
+-- The state is three-valued in the same shape criteria use, and for the same
+-- reason. `declared` and `not_declared` are stored; a MISSING ROW means
+-- `legacy_unknown` — a turn that ran before this table existed. Writing an
+-- explicit `not_declared` rather than omitting the row is the whole point:
+-- "nobody declared a relationship" is recoverable, "we cannot know whether
+-- anybody did" is not, and only one of them may ever be read as permission to
+-- assume.
+--
+-- No backfill exists. A historical turn gets no row, because deriving lineage
+-- from a prompt, a title, worker prose, a claim, or from "the latest turn wins"
+-- would manufacture an intent nobody expressed.
+--
+-- The foreign key names `tasks` and `task_turn_criteria`, and NOT `task_turns` —
+-- the same choice, for the same reason, that PR4's baseline and PR6's criteria
+-- made. This is a pre-work fact: it is committed before the adapter is reached
+-- and therefore before the turn row exists. Requiring the turn would recreate
+-- exactly the ordering mistake those two tables were shaped to avoid. The
+-- composite key to `task_turn_criteria` IS available, because the current
+-- snapshot was written moments earlier against the same reserved turn number.
+CREATE TABLE IF NOT EXISTS task_turn_criteria_continuity (
+    task_id                 TEXT    NOT NULL,
+    turn_number             INTEGER NOT NULL,
+    continuity_state        TEXT    NOT NULL,
+    -- Server-minted, always. `continuity.SERVER_OWNED_CONTINUITY_FIELDS` refuses
+    -- a submitted one by name rather than quietly overwriting it.
+    continuity_id           TEXT    NOT NULL,
+    -- NULL exactly when the state is `not_declared`: there is no mode, because
+    -- there is no declaration. Never a default — `extend`, `replace` and
+    -- `latest wins` are all things somebody has to say.
+    mode                    TEXT,
+    -- The snapshot this declaration is about. Always present: a declaration with
+    -- no current snapshot describes nothing.
+    current_snapshot_id     TEXT    NOT NULL,
+    -- The exact prior snapshot this turn stands on, by durable identity rather
+    -- than by "the previous turn number" worked out at read time. A turn number
+    -- guessed later would silently re-point if turns were ever reordered or a
+    -- reservation was replaced; a snapshot id names one immutable row forever.
+    predecessor_snapshot_id TEXT,
+    -- Deterministic over the stored lineage facts only. See
+    -- `continuity.continuity_fingerprint` for what is in it and what is kept out.
+    continuity_fingerprint  TEXT    NOT NULL,
+    relation_count          INTEGER NOT NULL,
+    -- Frozen with the criteria snapshot and the Git baseline, by the same
+    -- transition and at the same instant. `captured` is the only replaceable
+    -- state; everything past it means Cofferdam can no longer prove the worker
+    -- did nothing.
+    dispatch_state          TEXT    NOT NULL,
+    -- Audit metadata only. Attribution is by turn number, never by clock.
+    recorded_at             TEXT    NOT NULL,
+    PRIMARY KEY (task_id, turn_number),
+    FOREIGN KEY (task_id) REFERENCES tasks (task_id) ON DELETE CASCADE,
+    FOREIGN KEY (task_id, turn_number)
+        REFERENCES task_turn_criteria (task_id, turn_number) ON DELETE CASCADE,
+    -- Lineage never leaves the task. Enforced here as well as validated in the
+    -- store, because a cross-task predecessor would let one task's requirements
+    -- be retired by another's.
+    FOREIGN KEY (predecessor_snapshot_id)
+        REFERENCES task_turn_criteria (snapshot_id) ON DELETE RESTRICT,
+    CHECK (turn_number >= 1),
+    CHECK (continuity_state IN ('declared', 'not_declared')),
+    CHECK (mode IS NULL OR mode IN ('root', 'extend', 'replace', 'revise')),
+    -- The state and the mode agree, enforced rather than trusted. This is what
+    -- stops `not_declared` from ever acquiring a mode by a later careless write,
+    -- which is the one way an undeclared turn could start looking declared.
+    CHECK ((continuity_state = 'declared') = (mode IS NOT NULL)),
+    -- Exactly `root` has no predecessor, and exactly the others must have one.
+    CHECK ((mode = 'root') = (mode IS NOT NULL AND predecessor_snapshot_id IS NULL)),
+    CHECK (mode IS NOT NULL OR predecessor_snapshot_id IS NULL),
+    -- Relations belong to `revise` and to nothing else: `extend` retires
+    -- nothing and `replace` retires everything, so in both a relation would
+    -- contradict the mode it was filed under.
+    CHECK (relation_count >= 0),
+    CHECK ((relation_count > 0) = (mode = 'revise')),
+    CHECK (dispatch_state IN
+           ('captured', 'dispatch_started', 'dispatch_refused', 'turn_opened')),
+    CHECK (length(continuity_fingerprint) = 64),
+    CHECK (length(continuity_id) BETWEEN 8 AND 64)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS continuity_by_id
+    ON task_turn_criteria_continuity (continuity_id);
+
+CREATE INDEX IF NOT EXISTS continuity_by_predecessor
+    ON task_turn_criteria_continuity (predecessor_snapshot_id);
+
+-- Schema v9. One declared "this new criterion retires that old one".
+--
+-- PR9 concluded a snapshot-level relation alone is insufficient, and this is
+-- why: a later turn routinely supersedes ONE requirement while its siblings stay
+-- live, and `replace` cannot say that without retiring everything.
+--
+-- The relation is deliberately a plain bounded many-to-many. One old criterion
+-- may be superseded by several new ones (a requirement split in two) and several
+-- old ones may be superseded by a single new one (two requirements merged), and
+-- neither needed a special case: forbidding either would have meant inventing a
+-- direction the domain does not have, and the pair uniqueness below is all the
+-- structure that is actually required.
+--
+-- Both sides are durable criterion ids, never text. `continuity.py` says at
+-- length why: identical descriptions, fingerprints, paths and ordinals are all
+-- things two unrelated criteria can share, so lineage is declared authority and
+-- never inferred similarity. The store additionally checks that the current
+-- criterion belongs to THIS snapshot and the predecessor criterion belongs to
+-- the DECLARED predecessor snapshot, which is the part a foreign key cannot say.
+CREATE TABLE IF NOT EXISTS task_turn_criterion_supersessions (
+    supersession_id          TEXT    PRIMARY KEY,
+    task_id                  TEXT    NOT NULL,
+    turn_number              INTEGER NOT NULL,
+    -- Deterministic ordering for reads and for the fingerprint's canonical form.
+    ordinal                  INTEGER NOT NULL,
+    current_criterion_id     TEXT    NOT NULL,
+    predecessor_criterion_id TEXT    NOT NULL,
+    FOREIGN KEY (task_id, turn_number)
+        REFERENCES task_turn_criteria_continuity (task_id, turn_number)
+        ON DELETE CASCADE,
+    FOREIGN KEY (current_criterion_id)
+        REFERENCES task_turn_criterion_items (criterion_id) ON DELETE CASCADE,
+    FOREIGN KEY (predecessor_criterion_id)
+        REFERENCES task_turn_criterion_items (criterion_id) ON DELETE RESTRICT,
+    UNIQUE (task_id, turn_number, ordinal),
+    -- The same edge twice is a caller mistake, not extra meaning. Without this,
+    -- `relation_count` would count submissions rather than relationships.
+    UNIQUE (task_id, turn_number, current_criterion_id, predecessor_criterion_id),
+    CHECK (turn_number >= 1),
+    CHECK (ordinal >= 1),
+    -- A criterion cannot retire itself. Unreachable while the two sides come
+    -- from different turns, and cheap insurance against a future path where they
+    -- might not.
+    CHECK (current_criterion_id <> predecessor_criterion_id)
+);
+
+CREATE INDEX IF NOT EXISTS supersessions_by_turn
+    ON task_turn_criterion_supersessions (task_id, turn_number, ordinal);
+
+CREATE INDEX IF NOT EXISTS supersessions_by_predecessor
+    ON task_turn_criterion_supersessions (predecessor_criterion_id);
 
 -- Schema v8. One evaluator version's deterministic judgement on one CLOSED turn.
 --
@@ -2127,6 +2282,12 @@ class TaskStore:
         # pre-work facts were reserved against this turn number before the worker
         # was called; this is where they stop being reservations.
         self._mark_criteria_turn_opened_locked(connection, task_id, turn_number)
+        # And the v9 continuity declaration, in the same transaction as the other
+        # two. All three pre-work facts were reserved against this turn number
+        # before the worker was called; this is where all three stop being
+        # reservations. A turn whose lineage stayed a reservation would be a turn
+        # a later retry could legally re-point.
+        self._mark_continuity_turn_opened_locked(connection, task_id, turn_number)
 
     def _current_cursor_locked(
         self, connection: sqlite3.Connection, task_id: str
@@ -2666,6 +2827,345 @@ class TaskStore:
             " WHERE task_id = ? AND turn_number = ?",
             (DISPATCH_TURN_OPENED, task_id, int(turn_number)),
         )
+
+    def reserve_turn_continuity(
+        self,
+        task_id: str,
+        declaration: object,
+        *,
+        recorded_at: str,
+    ) -> int:
+        """Persist what this turn's criteria say about the turn before them.
+
+        M2K PR10. Called immediately after :meth:`reserve_turn_criteria`, against
+        the same reserved turn number, and **before** ``dispatch_started`` — so
+        the lineage a future task-level answer would stand on is frozen before
+        the worker exists, exactly as its criteria and its Git baseline are.
+
+        ``declaration`` is ``None`` for every caller that exists today, and that
+        writes an explicit :data:`~.continuity.CONTINUITY_NOT_DECLARED` row
+        rather than no row. **Omitting it would be the bug this table exists to
+        prevent**: "nobody declared a relationship" and "this turn predates
+        continuity" are different facts, only the first is recoverable, and a
+        future aggregate must be able to tell them apart forever. It is
+        emphatically not `extend`, not `replace`, not `independent` and not
+        `preserve previous` — it is the absence of an answer, recorded.
+
+        **The lineage checks the database cannot make** are made here, where the
+        predecessor can be looked up: that it exists, belongs to *this* task,
+        comes from an *earlier* turn, and that every superseded criterion is
+        actually one of its criteria. A caller may name a predecessor snapshot id
+        because an earlier read published it; it may never name a *current*
+        criterion id, because those are minted moments ago inside this
+        reservation — so relations address the current side by ordinal and the
+        store resolves it.
+
+        **Replacement is bounded to the pre-adapter window**, by the same rule and
+        the same tuple as criteria and baselines: only ``captured`` may be
+        replaced. A retry of the same reserved turn therefore dispatches against
+        exactly the lineage the first attempt did, and a refusal does not reopen
+        it — an adapter's refusal is a statement of intent, never a proof the
+        worker was untouched.
+
+        Returns the reserved turn number, or raises
+        :class:`~.continuity.ContinuityInvalid` before anything is written.
+        """
+        from .errors import ContinuityInvalid
+        from .continuity import (
+            CONTINUITY_DECLARED,
+            CONTINUITY_NOT_DECLARED,
+            CONTINUITY_ROOT,
+            REASON_NOT_FIRST_TURN,
+            REASON_PREDECESSOR_FOREIGN_TASK,
+            REASON_PREDECESSOR_NOT_EARLIER,
+            REASON_PREDECESSOR_UNKNOWN,
+            REASON_RELATION_CURRENT_UNKNOWN,
+            REASON_RELATION_PREDECESSOR_UNKNOWN,
+            continuity_fingerprint,
+            new_continuity_id,
+            new_supersession_id,
+        )
+
+        with self._write() as connection:
+            if connection.execute(
+                "SELECT 1 FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone() is None:
+                raise TaskUnknown()
+            highest = connection.execute(
+                "SELECT COALESCE(MAX(turn_number), 0) FROM task_turns WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()[0]
+            turn_number = int(highest or 0) + 1
+
+            existing = connection.execute(
+                "SELECT dispatch_state FROM task_turn_criteria_continuity"
+                " WHERE task_id = ? AND turn_number = ?",
+                (task_id, turn_number),
+            ).fetchone()
+            if existing is not None:
+                if existing["dispatch_state"] not in REPLACEABLE_DISPATCH_STATES:
+                    # Frozen. The stored declaration stands and the caller
+                    # dispatches against it, including when this attempt supplied
+                    # a different one: the turn being retried was already begun
+                    # against the lineage already there.
+                    return turn_number
+                connection.execute(
+                    "DELETE FROM task_turn_criteria_continuity"
+                    " WHERE task_id = ? AND turn_number = ?",
+                    (task_id, turn_number),
+                )
+
+            current = connection.execute(
+                "SELECT snapshot_id FROM task_turn_criteria"
+                " WHERE task_id = ? AND turn_number = ?",
+                (task_id, turn_number),
+            ).fetchone()
+            if current is None:
+                # No snapshot means the criteria write failed. Continuity about a
+                # snapshot that does not exist would describe nothing, and the
+                # foreign key would refuse it anyway.
+                raise ContinuityInvalid(REASON_RELATION_CURRENT_UNKNOWN)
+            current_snapshot_id = current["snapshot_id"]
+
+            if declaration is None:
+                state, mode, predecessor_snapshot_id = (
+                    CONTINUITY_NOT_DECLARED,
+                    None,
+                    None,
+                )
+                resolved: Tuple[Tuple[str, str], ...] = ()
+            else:
+                state = CONTINUITY_DECLARED
+                mode = declaration.mode
+                predecessor_snapshot_id = declaration.predecessor_snapshot_id
+
+                if mode == CONTINUITY_ROOT:
+                    # `root` is a structural claim — "there is no predecessor" —
+                    # so it is checked against the database rather than believed.
+                    earlier = connection.execute(
+                        "SELECT COUNT(*) FROM task_turn_criteria"
+                        " WHERE task_id = ? AND turn_number < ?",
+                        (task_id, turn_number),
+                    ).fetchone()[0]
+                    if earlier:
+                        raise ContinuityInvalid(REASON_NOT_FIRST_TURN)
+                else:
+                    prior = connection.execute(
+                        "SELECT task_id, turn_number FROM task_turn_criteria"
+                        " WHERE snapshot_id = ?",
+                        (predecessor_snapshot_id,),
+                    ).fetchone()
+                    if prior is None:
+                        raise ContinuityInvalid(REASON_PREDECESSOR_UNKNOWN)
+                    if prior["task_id"] != task_id:
+                        # Lineage never crosses tasks: one task's requirements
+                        # must not be retirable by another's declaration.
+                        raise ContinuityInvalid(REASON_PREDECESSOR_FOREIGN_TASK)
+                    if int(prior["turn_number"]) >= turn_number:
+                        # A predecessor is strictly earlier. Naming the current
+                        # turn — or a later one — would be a cycle rather than a
+                        # lineage.
+                        raise ContinuityInvalid(REASON_PREDECESSOR_NOT_EARLIER)
+                    prior_turn = int(prior["turn_number"])
+
+                    for relation in declaration.relations:
+                        prior_item = connection.execute(
+                            "SELECT task_id, turn_number FROM task_turn_criterion_items"
+                            " WHERE criterion_id = ?",
+                            (relation.predecessor_criterion_id,),
+                        ).fetchone()
+                        if (
+                            prior_item is None
+                            or prior_item["task_id"] != task_id
+                            or int(prior_item["turn_number"]) != prior_turn
+                        ):
+                            # The superseded criterion must be one of the declared
+                            # predecessor's own. Anything else would let a
+                            # declaration retire a requirement from a turn it never
+                            # claimed to stand on.
+                            raise ContinuityInvalid(REASON_RELATION_PREDECESSOR_UNKNOWN)
+
+                pairs = []
+                for relation in declaration.relations:
+                    item = connection.execute(
+                        "SELECT criterion_id FROM task_turn_criterion_items"
+                        " WHERE task_id = ? AND turn_number = ? AND ordinal = ?",
+                        (task_id, turn_number, relation.criterion_ordinal),
+                    ).fetchone()
+                    if item is None:
+                        raise ContinuityInvalid(REASON_RELATION_CURRENT_UNKNOWN)
+                    pairs.append(
+                        (item["criterion_id"], relation.predecessor_criterion_id)
+                    )
+                # Canonical order, so the stored ordinals and the fingerprint
+                # agree with each other and with any other process that computes
+                # them. Submission order is deliberately not preserved: it is not
+                # a fact about the lineage.
+                resolved = tuple(sorted(pairs))
+
+            fingerprint = continuity_fingerprint(
+                state,
+                mode,
+                current_snapshot_id,
+                predecessor_snapshot_id,
+                resolved,
+            )
+            connection.execute(
+                """
+                INSERT INTO task_turn_criteria_continuity
+                    (task_id, turn_number, continuity_state, continuity_id, mode,
+                     current_snapshot_id, predecessor_snapshot_id,
+                     continuity_fingerprint, relation_count, dispatch_state,
+                     recorded_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    turn_number,
+                    state,
+                    new_continuity_id(),
+                    mode,
+                    current_snapshot_id,
+                    predecessor_snapshot_id,
+                    fingerprint,
+                    len(resolved),
+                    DISPATCH_CAPTURED,
+                    recorded_at,
+                ),
+            )
+            for ordinal, (criterion_id, predecessor_criterion_id) in enumerate(
+                resolved, start=1
+            ):
+                connection.execute(
+                    """
+                    INSERT INTO task_turn_criterion_supersessions
+                        (supersession_id, task_id, turn_number, ordinal,
+                         current_criterion_id, predecessor_criterion_id)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        new_supersession_id(),
+                        task_id,
+                        turn_number,
+                        ordinal,
+                        criterion_id,
+                        predecessor_criterion_id,
+                    ),
+                )
+        return turn_number
+
+    def mark_continuity_dispatch_started(self, task_id: str, turn_number: int) -> None:
+        """Freeze the continuity declaration, with the criteria and the baseline.
+
+        Same moment, same reason, same re-enterability from ``dispatch_refused``
+        as :meth:`mark_criteria_dispatch_started`. A declaration edited after a
+        worker began would re-point the lineage a completed turn is measured in.
+        """
+        with self._write() as connection:
+            connection.execute(
+                "UPDATE task_turn_criteria_continuity SET dispatch_state = ?"
+                " WHERE task_id = ? AND turn_number = ? AND dispatch_state IN (?, ?)",
+                (
+                    DISPATCH_STARTED,
+                    task_id,
+                    int(turn_number),
+                    DISPATCH_CAPTURED,
+                    DISPATCH_REFUSED,
+                ),
+            )
+
+    def mark_continuity_dispatch_refused(self, task_id: str, turn_number: int) -> None:
+        """The adapter answered with a refusal, and no turn opened.
+
+        Does not make the declaration replaceable again — the argument is
+        :meth:`mark_criteria_dispatch_refused`'s, unchanged.
+        """
+        with self._write() as connection:
+            connection.execute(
+                "UPDATE task_turn_criteria_continuity SET dispatch_state = ?"
+                " WHERE task_id = ? AND turn_number = ? AND dispatch_state = ?",
+                (DISPATCH_REFUSED, task_id, int(turn_number), DISPATCH_STARTED),
+            )
+
+    def _mark_continuity_turn_opened_locked(
+        self, connection: sqlite3.Connection, task_id: str, turn_number: int
+    ) -> None:
+        """Bind the declaration to the turn it belongs to. Caller holds the lock."""
+        connection.execute(
+            "UPDATE task_turn_criteria_continuity SET dispatch_state = ?"
+            " WHERE task_id = ? AND turn_number = ?",
+            (DISPATCH_TURN_OPENED, task_id, int(turn_number)),
+        )
+
+    def turn_continuity(self, task_id: str, turn_number: int) -> "TurnContinuity":
+        """One turn's continuity fact. **Never ``None``.**
+
+        Three states, exactly as :meth:`turn_criteria` has three, and for the
+        identical reason: a missing row means *this turn predates continuity
+        persistence*, which is a different sentence from *no relationship was
+        declared for this turn*, and a ``None`` return could carry only one of
+        them. The first is
+        :data:`~.continuity.CONTINUITY_LEGACY_UNKNOWN` and it is never stored.
+
+        Internal. There is no route, no bridge Action and no PWA control that
+        reaches this in PR10 — a read surface is its own review.
+        """
+        from .continuity import (
+            CONTINUITY_LEGACY_UNKNOWN,
+            StoredSupersession,
+            TurnContinuity,
+        )
+
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM task_turn_criteria_continuity"
+                " WHERE task_id = ? AND turn_number = ?",
+                (task_id, int(turn_number)),
+            ).fetchone()
+            if row is None:
+                return TurnContinuity(
+                    task_id=task_id,
+                    turn_number=int(turn_number),
+                    state=CONTINUITY_LEGACY_UNKNOWN,
+                )
+            relations = tuple(
+                StoredSupersession(
+                    supersession_id=item["supersession_id"],
+                    ordinal=int(item["ordinal"]),
+                    criterion_id=item["current_criterion_id"],
+                    predecessor_criterion_id=item["predecessor_criterion_id"],
+                )
+                for item in connection.execute(
+                    "SELECT * FROM task_turn_criterion_supersessions"
+                    " WHERE task_id = ? AND turn_number = ? ORDER BY ordinal",
+                    (task_id, int(turn_number)),
+                )
+            )
+        return TurnContinuity(
+            task_id=row["task_id"],
+            turn_number=int(row["turn_number"]),
+            state=row["continuity_state"],
+            mode=row["mode"],
+            continuity_id=row["continuity_id"],
+            current_snapshot_id=row["current_snapshot_id"],
+            predecessor_snapshot_id=row["predecessor_snapshot_id"],
+            continuity_fingerprint=row["continuity_fingerprint"],
+            relation_count=int(row["relation_count"]),
+            dispatch_state=row["dispatch_state"],
+            relations=relations,
+        )
+
+    def turn_continuity_dispatch_state(
+        self, task_id: str, turn_number: int
+    ) -> Optional[str]:
+        """How far the turn this declaration belongs to got. ``None`` if no row."""
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT dispatch_state FROM task_turn_criteria_continuity"
+                " WHERE task_id = ? AND turn_number = ?",
+                (task_id, int(turn_number)),
+            ).fetchone()
+        return None if row is None else row["dispatch_state"]
 
     def turn_criteria(self, task_id: str, turn_number: int) -> "CriteriaSnapshot":
         """The criteria in force for one turn. **Never ``None``.**

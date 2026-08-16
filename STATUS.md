@@ -797,22 +797,74 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
-### M2K PR9 — assessment aggregation and turn-continuity doctrine
+### M2K PR10 — the criterion continuity persistence foundation
 
-On `m2k-pr9-aggregation-doctrine`, from the merged `059fdcb`. **Docs and design only — no schema, no
-route, no runtime aggregation, no code.**
+On `m2k-pr10-criterion-continuity`, from the merged `b2314f0`. **Implemented on a branch, not merged
+and not deployed.**
 
-PR8 finished the evidence-only chain: criteria frozen before dispatch, evaluation frozen after close,
-both published. What it does not do — deliberately — is compose those per-criterion answers into an
-answer to *did this task do what was asked?* PR9 settles that contract before any further
-result-producing mechanism is built, so that the named check runner's results arrive to a consumer
-whose rules already exist. The doctrine is recorded in
-[`docs/AGENT_TASK_CORE.md`](docs/AGENT_TASK_CORE.md) and in D-2026-08-16-2 through D-2026-08-16-6;
-the summary is under *Assessment aggregation doctrine* below.
+PR9 named the one fact standing between Cofferdam and a task-level answer: every turn's requirements
+were stored and **the relationship between them was not**, so neither *accumulate every turn* nor
+*only the latest turn counts* could be correct. PR10 persists that relationship. It does **not**
+compute an aggregate, and there is no code here or downstream that could.
+
+**Schema v9, additive, created empty and never backfilled.**
+`task_turn_criteria_continuity` holds one declaration per turn;
+`task_turn_criterion_supersessions` holds its lineage edges. No v8 table, column or row is touched —
+asserted by comparing a real v8 database before and after the upgrade, table by table and row by row.
+A turn that ran before this table existed gets **no row**, forever, and reads `legacy_unknown`.
+
+**Three read states, and the third is absence.** `declared`, `not_declared` and — for a missing row —
+`legacy_unknown`. The middle one is the point: a turn dispatched with nobody declaring anything gets
+an **explicit durable `not_declared`** rather than no row, because *nobody said* and *we cannot know
+whether anybody said* are different facts and only the first is recoverable. It is emphatically not
+`extend`, not `replace`, not `independent` and not preserve-previous.
+
+**Four modes.** `root` (no predecessor — a structural fact, checked against the database rather than
+believed), `extend` (prior requirements remain, new ones added), `replace` (prior set wholly
+superseded, nothing deleted), and `revise` (prior requirements remain **except** the ones named by
+explicit supersession relations). **`independent` is deliberately absent**: it answers neither
+"prior requirements remain" nor "they do not", so an aggregate reading it would have to guess exactly
+where PR9 refused to.
+
+**Criterion-level supersession, bounded many-to-many.** PR9 concluded a snapshot-level relation alone
+cannot express partial revision, and this is that. One old criterion may be superseded by several new
+ones and several old ones by a single new one — a split and a merge need no special case, and
+forbidding either would have invented a direction the domain does not have. Bounded at **64
+relations**, refused over the bound rather than trimmed.
+
+**Lineage is declared, never inferred.** Identical description, identical fingerprint, identical path
+and identical ordinal are all things two unrelated criteria can share, so none of them is authority.
+Both sides of a relation are durable criterion ids. The predecessor is named by
+`predecessor_snapshot_id` rather than by a turn number worked out at read time, and it is validated
+to exist, to belong to **this** task, and to come from an **earlier** turn.
+
+**Frozen before the worker exists.** Reserved against the same turn number as the criteria snapshot
+and the Git baseline, immediately after the snapshot it describes and before `dispatch_started`. The
+adapter's first instruction asserts, on a separate read-only connection so uncommitted rows cannot
+satisfy it, that all three pre-work facts are already committed and already frozen while `task_turns`
+still has no row. A retry of the same reserved turn, an adapter refusal and a restart all leave the
+original declaration and its fingerprint exactly as they were.
+
+**Nobody but the caller may declare it.** `AdapterOutcome` and `TaskContext` have no continuity
+field; no HTTP route, no bridge Action and no PWA control carries one. Like criteria since PR6, it is
+an **internal `TaskService` argument only**, and every existing caller passes nothing and keeps
+working unchanged.
+
+**`CONTINUITY_MODEL_VERSION = 1`**, bound into a deterministic `continuity_fingerprint` alongside the
+state, mode, both snapshot identities and the relations in canonical order. No clock, no rowid, no
+minted id, no provider or host path reaches it. **There is no `AGGREGATOR_VERSION`** — nothing
+aggregates, and the constant would imply something does.
+
+**Rollback.** v9 is a schema bump, so this is a **pair** — slot A at `7f21fc4` plus a verified pre-v9
+backup — rather than a slot flip. The deployed PR8 runtime was loaded from `git show 059fdcb` and
+handed a real v9 database: it refuses with `StoreUnavailable`, names the newer version in its detail,
+and leaves the main file **byte-identical**, the schema version un-downgraded, both continuity tables
+intact, and integrity and foreign keys clean.
 
 ## M2K records — the evidence foundation (written while each was on its branch)
 
-M2K is **in progress**: PR1 through PR8 are merged and deployed; PR9 is docs-only and on a branch.
+M2K is **in progress**: PR1 through PR8 are merged and deployed; PR9 is merged (`b2314f0`, #54) and
+needed no deployment because it changed only documentation; PR10 is on a branch.
 See *In progress* above for PR9.
 
 ### M2K PR8 — the private read-only assessment surface and PWA panel
@@ -1646,6 +1698,10 @@ at the source rather than worked around in the caller.
 
 ## Assessment aggregation doctrine (M2K PR9 — design only, nothing implemented)
 
+**Merged as `b2314f0` (#54).** Documentation only, so there was no deployment step and production was
+untouched. PR10 then persisted the one prerequisite this doctrine named — criterion continuity — and
+is on a branch; see *In progress* above. Everything below is still design: **no aggregate exists.**
+
 Nothing described in this section exists in code. It is the contract a future aggregate must obey,
 settled deliberately **before** the named check runner adds another mechanism that produces results.
 The decisions are D-2026-08-16-2 through D-2026-08-16-6; the reference text is in
@@ -1704,7 +1760,9 @@ from acceptance. Cofferdam persists no fact saying whether a later snapshot repl
 narrows, supersedes or is independent of an earlier one, so **no task-level rule can be correct
 today**, and inventing one is worse than reporting the gap.
 
-**What continuity will need** (design only, nothing decided into code): continuity must be
+**What continuity will need** (design only when written; **M2K PR10 implements exactly this** —
+explicit modes, snapshot-level predecessor plus criterion-level relations, planner/user authority,
+frozen pre-dispatch, additive schema v9): continuity must be
 **explicit** rather than defaulted, because a wrong default is silently applied to every task;
 `replace` and `extend` are not distinguishable by inspection. It likely wants a snapshot-level
 relation such as `supersedes_snapshot_id` **plus** criterion-level relations, because a later turn

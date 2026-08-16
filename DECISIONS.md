@@ -2446,6 +2446,122 @@ feed a consumer with no defined contract. Its trust boundary is unchanged and st
 project `cwd`, bounded timeout, bounded output, off by default per project, and **neither the caller
 nor the adapter ever supplies command text**.
 
+## D-2026-08-16-7 — Criterion continuity is a stored fact with three states, and absence is one of them (EFE DECISION, ACTIVE)
+
+**Decision.** M2K PR10 persists what a turn's criteria say about the turn before them. Schema **v9**
+adds `task_turn_criteria_continuity` and `task_turn_criterion_supersessions`, additively, created
+empty. It is the prerequisite D-2026-08-16-4 and D-2026-08-16-5 named, and it **computes no
+aggregate** — a lineage edge is not a verdict, and no code in this build could turn one into one.
+
+**Three read states, and the third is a missing row.** `declared` and `not_declared` are stored;
+`legacy_unknown` is what absence means and is never written. This is the exact shape criteria already
+use, for the identical reason.
+
+**An undeclared dispatch writes `not_declared` rather than nothing**, and that is the decision inside
+the decision. Omitting the row would make "nobody declared a relationship for this turn" and "this
+turn ran before Cofferdam could record one" the same observation forever, and only the first is
+recoverable. `not_declared` is **not** `extend`, **not** `replace`, **not** `independent` and **not**
+preserve-previous: it is the absence of an answer, recorded, and it deliberately leaves a future
+task-level aggregate unavailable for that turn rather than quietly guessing.
+
+**Four modes, and `independent` is not one of them.** `root` — no predecessor exists. `extend` — the
+predecessor's active requirements remain and this snapshot adds. `replace` — the prior active set is
+wholly superseded, with nothing deleted and no ceremony enumerating what "all of them" means.
+`revise` — prior requirements remain **except** those named by explicit supersession relations.
+
+`independent` was in the PR9 discussion and does not survive the question a mode must answer: *what
+happens to the requirements that were already live?* It answers neither "they remain" nor "they are
+superseded". If they remain that is `extend` whatever the intent was called; if they do not that is
+`replace`. A third word for the same two outcomes would let a caller say something no aggregate could
+compose, which is precisely the ambiguity this vocabulary exists to remove.
+
+**`root` is recorded mechanically and is still checked.** It is a structural claim — *this task has
+no earlier criteria snapshot* — rather than an inference about intent, which is what makes it safe to
+derive. It is nonetheless verified against the database rather than believed, and refused when an
+earlier snapshot exists. A first turn whose criteria are `not_provided` is still `root`: the mode
+describes lineage, the criteria snapshot already records that nothing was required, and saying
+otherwise here would create a second, contradictory place to look.
+
+**A `not_provided` follow-up proves nothing about continuity.** The absence of structured criteria is
+not evidence that prior requirements were preserved, replaced or unchanged, so such a turn takes the
+ordinary path: `not_declared` unless somebody declared otherwise. Intent is never inferred from an
+empty criteria set.
+
+**No backfill, ever.** Historical turns get no continuity row. Deriving one from a prompt, a title,
+worker prose, a claim, or from "the latest turn wins" would manufacture an intent nobody expressed,
+which is the failure this whole milestone is shaped to prevent.
+
+## D-2026-08-16-8 — Supersession is a bounded many-to-many between durable criterion ids (EFE DECISION, ACTIVE)
+
+**Decision.** Partial revision is expressed by explicit `(current criterion, predecessor criterion)`
+edges, stored in `task_turn_criterion_supersessions`, and required by exactly one mode — `revise`.
+`extend` retires nothing and `replace` retires everything, so in both an edge would contradict the
+mode it was filed under and is refused.
+
+**Many-to-many, with no directional special cases.** One old criterion may be superseded by several
+new ones — a requirement split in two — and several old ones by a single new one — two requirements
+merged. Both are ordinary domain events. Forbidding either would have meant inventing a direction the
+domain does not have, and pair uniqueness is the only structure actually required.
+
+**Both sides are durable ids, and this is the security property.** Matching description, matching
+criteria fingerprint, matching path and matching ordinal are all things two unrelated criteria can
+share; differing text does not disprove lineage either. **Similarity is never authority.** The
+predecessor criterion is additionally validated to belong to the *declared* predecessor snapshot, so
+a declaration cannot retire a requirement from a turn it never claimed to stand on.
+
+**The caller names the current side by ordinal, never by id.** Current criterion ids are minted
+inside the same reservation moments earlier, so a caller that could supply one would be choosing a
+durable identity. It supplies the ordinal it already knows and the store resolves it.
+
+**The predecessor is a snapshot id, not a turn number.** A turn number worked out at read time would
+silently re-point if a reservation were replaced; a snapshot id names one immutable row forever. It
+is validated to exist, to belong to **this task** — lineage never crosses tasks — and to come from a
+**strictly earlier** turn, which makes naming the current or a later turn a cycle rather than a
+lineage.
+
+**Bounded at 64 relations, refused rather than trimmed.** Generous against the 32-criteria limit and
+finite, because an unbounded lineage declaration is an unbounded write a caller controls. A silently
+dropped supersession would leave a requirement live that somebody had retired, which is worse than a
+rejection that says so.
+
+## D-2026-08-16-9 — Continuity freezes with the criteria, and only the declaring caller may set it (EFE DECISION, ACTIVE)
+
+**Decision.** A continuity declaration is committed against the same reserved turn number as the
+criteria snapshot and the Git baseline, immediately after the snapshot it describes — it names that
+snapshot by an identity only that write could mint — and **before `dispatch_started`**. All three
+freeze in the same call and by the same rule: `captured` is the only replaceable state.
+
+**The adapter's first instruction is the assertion point.** A test adapter reads, on a separate
+read-only connection so uncommitted rows cannot satisfy it, that the criteria snapshot, its items,
+the continuity row and the Git baseline are all durable and all already `dispatch_started`, while
+`task_turns` still has no row.
+
+**Retry, refusal and crash all leave it alone.** A retry of the same reserved turn dispatches against
+exactly the lineage the first attempt did, even when it submits a different one. An `AdapterRefusal`
+does not reopen replacement — a refusal is a statement of intent, never a proof the worker was
+untouched — and the argument is if anything stronger here than for criteria: re-pointing a turn's
+lineage after a worker may already have acted would re-parent completed work onto requirements it
+never stood on. A crash after `dispatch_started` leaves the declaration frozen across restart. A
+genuinely new turn may declare afresh, and only that.
+
+**Authority is the user or a future host-owned planner. Never the worker, never the adapter.**
+`AdapterOutcome` and `TaskContext` carry no continuity field and gain none. Worker prose, claims, Git
+evidence, the evaluator and a read of the assessment surface can none of them create an edge. A
+worker that could declare its new criteria supersede its old ones could retire the requirement it had
+just failed.
+
+**No public surface.** Continuity is an internal `TaskService` argument with no HTTP request field,
+no bridge Action and no PWA control — exactly the boundary PR6 drew for criteria and did not widen.
+Every caller that exists passes nothing and is unaffected. A read surface, if one is ever wanted, is
+its own review.
+
+**`CONTINUITY_MODEL_VERSION = 1`**, code-owned and distinct from `SCHEMA_VERSION`,
+`CRITERIA_MODEL_VERSION`, `ASSEMBLER_VERSION` and `EVALUATOR_VERSION`, and bound into a deterministic
+`continuity_fingerprint` over the state, mode, both snapshot identities and the relations in
+canonical order. No clock, no rowid, no minted id, no provider or session identifier and no host path
+reaches it. **There is deliberately no `AGGREGATOR_VERSION`**: nothing aggregates, and the constant
+would imply something does.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

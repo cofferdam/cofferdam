@@ -8,6 +8,32 @@ release.
 
 ### Added
 
+- **M2K PR10 — Cofferdam can now be told how a new request relates to the last one.**
+  Nothing about this is visible yet, and that is deliberate.
+
+  **The problem it fixes.** When you come back to a task and ask for something more, Cofferdam had no
+  way of knowing what you meant about the earlier request. Did the new one replace it? Add to it?
+  Retire one part of it and keep the rest? It stored both lists of requirements and nothing about how
+  they relate — so it could not honestly answer "did this task do what I asked" without guessing, and
+  guessing wrong in either direction gives a confidently wrong answer.
+
+  **What changes.** Before a worker is allowed to start, Cofferdam now records the relationship
+  alongside the requirements themselves: this is the first request, or it adds to the previous one,
+  or it replaces it, or it keeps the previous one except for specific parts it names. Where one
+  requirement retires another, that link is recorded explicitly — pointing at the exact earlier
+  requirement, never by matching words, because two unrelated requirements can be worded identically.
+
+  **What it will not do.** It will not guess. If nobody says how a new request relates to the old one,
+  Cofferdam writes down that nobody said, rather than picking a default and hiding it. Old tasks from
+  before this change get nothing written at all — no reading of their prompts, no assuming the newest
+  request wins. And only you, or a future planner Cofferdam itself owns, can state a relationship; the
+  worker doing the job cannot, because a worker that could retire its own requirements could retire
+  the one it had just failed.
+
+  **What it does not do yet.** It still does not tell you whether a task succeeded. That answer needs
+  rules that were written down separately and are not built, and nothing here computes one. No screen
+  changes, no new button, and the app behaves exactly as it did before.
+
 - **M2K PR9 — Cofferdam writes down the rules for judging a task, before it can judge one.**
   This change is documentation only. No screen changes, no new button, nothing new is saved, and
   the app behaves exactly as it did yesterday.

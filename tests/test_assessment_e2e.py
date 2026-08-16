@@ -129,7 +129,12 @@ class AssessmentEndToEnd(unittest.TestCase):
         from cofferdam.workstation.tasks.evaluation import EVALUATOR_VERSION
         from cofferdam.workstation.tasks.evidence import ASSEMBLER_VERSION
 
-        self.assertEqual(SCHEMA_VERSION, 8, "PR8 is a read surface; the schema stays v8")
+        # PR8 is a read surface and added no table of its own. That was once an
+        # equality against 8; PR10's additive continuity tables moved the shared
+        # constant, so the property is stated as what it always meant — the
+        # assessment path needs nothing newer than the schema PR7 left behind,
+        # and the exact current number is `test_task_core.py`'s to assert.
+        self.assertGreaterEqual(SCHEMA_VERSION, 8)
         self.assertEqual(EVALUATOR_VERSION, 1)
         self.assertEqual(ASSEMBLER_VERSION, 3)
 
