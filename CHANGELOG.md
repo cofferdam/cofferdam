@@ -8,6 +8,31 @@ release.
 
 ### Added
 
+- **M2K PR12 — Cofferdam no longer refuses a sensible way of retiring a requirement.**
+  Nothing about this is visible yet, and that is deliberate.
+
+  **The problem it fixes.** Say you asked for two things, then came back and asked for a third
+  without changing the first two, and then came back again wanting to drop the *first* one. That is
+  an ordinary way to work, and Cofferdam refused it. It would only let you retire a requirement that
+  had been named in the immediately preceding request — not one that was still standing from earlier.
+  The only way through was to point at the older request instead, which quietly discarded everything
+  the middle one had added.
+
+  **What changes.** You can now retire anything that is actually still standing, whenever it was
+  first asked for. Cofferdam works out what is currently required and checks your request against
+  that, which is the same thing it already did when reading the list back.
+
+  **What it will not do.** It still refuses to retire something that is no longer standing — you
+  already dropped it, or a later request replaced everything before it. It still refuses a
+  requirement from a different task, or one that does not exist. And if it cannot work out what was
+  required before, it now says so and refuses the request outright rather than accepting something it
+  cannot make sense of. Any refusal leaves nothing behind: it is all-or-nothing, and the worker is
+  never started.
+
+  **What it does not do yet.** It still does not tell you whether a task succeeded. Nothing new is
+  saved to disk, no stored record changes meaning, no screen changes, and the app behaves exactly as
+  it did before.
+
 - **M2K PR11 — Cofferdam can now work out which of your requirements are still standing.**
   Nothing about this is visible yet, and that is deliberate.
 

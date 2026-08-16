@@ -52,7 +52,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Sequence, Tuple
 
 from ..runtime.identity import now_iso
 from .clarifications import (
@@ -923,9 +923,23 @@ CREATE INDEX IF NOT EXISTS continuity_by_predecessor
 -- Both sides are durable criterion ids, never text. `continuity.py` says at
 -- length why: identical descriptions, fingerprints, paths and ordinals are all
 -- things two unrelated criteria can share, so lineage is declared authority and
--- never inferred similarity. The store additionally checks that the current
--- criterion belongs to THIS snapshot and the predecessor criterion belongs to
--- the DECLARED predecessor snapshot, which is the part a foreign key cannot say.
+-- never inferred similarity.
+--
+-- The row says one thing and only one thing: THIS new criterion retires THAT old
+-- one. It carries no claim about which snapshot the old one is stored in, and the
+-- foreign key deliberately names `task_turn_criterion_items` at large rather than
+-- the predecessor's own items — a requirement introduced three turns ago and
+-- still live is exactly as retirable as one introduced last turn.
+--
+-- The store checks what a foreign key cannot: that the current criterion belongs
+-- to THIS snapshot, and — schema v9, M2K PR12 — that the old criterion is
+-- **actually active in the declared predecessor's resolved active set**. PR10
+-- originally checked the narrower "belongs to the predecessor's own snapshot",
+-- which refused legitimate revisions of inherited requirements; the active set is
+-- a more faithful reading of the rule it was trying to enforce, which is that a
+-- declaration may not retire a requirement from a turn it never claimed to stand
+-- on. A historically real but retired criterion is still refused, and now for the
+-- right reason.
 CREATE TABLE IF NOT EXISTS task_turn_criterion_supersessions (
     supersession_id          TEXT    PRIMARY KEY,
     task_id                  TEXT    NOT NULL,
@@ -2887,12 +2901,22 @@ class TaskStore:
 
         **The lineage checks the database cannot make** are made here, where the
         predecessor can be looked up: that it exists, belongs to *this* task,
-        comes from an *earlier* turn, and that every superseded criterion is
-        actually one of its criteria. A caller may name a predecessor snapshot id
-        because an earlier read published it; it may never name a *current*
-        criterion id, because those are minted moments ago inside this
-        reservation — so relations address the current side by ordinal and the
-        store resolves it.
+        comes from an *earlier* turn, and — for ``revise`` — that every superseded
+        criterion is **actually active** in that predecessor's resolved active
+        set. A caller may name a predecessor snapshot id because an earlier read
+        published it; it may never name a *current* criterion id, because those
+        are minted moments ago inside this reservation — so relations address the
+        current side by ordinal and the store resolves it.
+
+        **M2K PR12 widened that old-side check and tightened its meaning.** PR10
+        required the retired criterion to be stored in the predecessor's own
+        snapshot, which refused a legitimate revision of a requirement the
+        predecessor had merely inherited. It is now the predecessor's resolved
+        active set — computed by the same pure resolver the read path uses, on
+        this connection inside this transaction — so an inherited live
+        requirement may be retired and a stale one still may not. A ``revise``
+        whose predecessor lineage cannot be resolved at all is refused here
+        rather than stored for the reader to reject later.
 
         **Replacement is bounded to the pre-adapter window**, by the same rule and
         the same tuple as criteria and baselines: only ``captured`` may be
@@ -2908,17 +2932,21 @@ class TaskStore:
         from .continuity import (
             CONTINUITY_DECLARED,
             CONTINUITY_NOT_DECLARED,
+            CONTINUITY_REVISE,
             CONTINUITY_ROOT,
             REASON_NOT_FIRST_TURN,
             REASON_PREDECESSOR_FOREIGN_TASK,
+            REASON_PREDECESSOR_LINEAGE_UNAVAILABLE,
             REASON_PREDECESSOR_NOT_EARLIER,
             REASON_PREDECESSOR_UNKNOWN,
             REASON_RELATION_CURRENT_UNKNOWN,
+            REASON_RELATION_PREDECESSOR_NOT_ACTIVE,
             REASON_RELATION_PREDECESSOR_UNKNOWN,
             continuity_fingerprint,
             new_continuity_id,
             new_supersession_id,
         )
+        from .lineage import resolve
 
         with self._write() as connection:
             if connection.execute(
@@ -3002,22 +3030,72 @@ class TaskStore:
                         raise ContinuityInvalid(REASON_PREDECESSOR_NOT_EARLIER)
                     prior_turn = int(prior["turn_number"])
 
+                    active_ids: FrozenSet[str] = frozenset()
+                    if mode == CONTINUITY_REVISE and declaration.relations:
+                        # M2K PR12. A `revise` may retire anything that is
+                        # **actually active** at the predecessor, which is not the
+                        # same set as the criteria the predecessor's own snapshot
+                        # happens to contain.
+                        #
+                        # PR10 checked the narrower thing, and PR11's resolver
+                        # showed why that was wrong: a requirement introduced at
+                        # turn 1 and still live at turn 2 through an `extend` is
+                        # part of what turn 3 stands on, so refusing to let turn 3
+                        # retire it forced the caller to declare turn 1 as the
+                        # predecessor instead — which silently cut turn 2's own
+                        # criteria out of the lineage. The stated reason for the
+                        # old check was that a declaration must not retire a
+                        # requirement from a turn it never claimed to stand on,
+                        # and the active set is a more faithful reading of exactly
+                        # that sentence.
+                        #
+                        # The resolver is reused rather than reimplemented. There
+                        # is one definition of what "active" means, it is the pure
+                        # function PR11 already tests to death, and a second copy
+                        # here could disagree with the read path — which would be
+                        # the worst possible outcome, because the disagreement
+                        # would only surface as a stored relation the reader
+                        # refuses.
+                        #
+                        # The walk happens on **this** connection inside **this**
+                        # write transaction, so the predecessor lineage that was
+                        # validated and the rows that get persisted are one
+                        # database state. No second connection, no read-then-write
+                        # window, and no service-level recursion.
+                        outcome = resolve(
+                            self._lineage_graph_locked(connection, task_id, prior_turn)
+                        )
+                        if not outcome.resolved:
+                            # A revision of a set nobody can name is not a
+                            # revision. Refused before dispatch rather than stored
+                            # for the resolver to refuse later, and emphatically
+                            # not downgraded to `replace`.
+                            raise ContinuityInvalid(
+                                REASON_PREDECESSOR_LINEAGE_UNAVAILABLE
+                            )
+                        active_ids = frozenset(outcome.active_criterion_ids)
+
                     for relation in declaration.relations:
                         prior_item = connection.execute(
                             "SELECT task_id, turn_number FROM task_turn_criterion_items"
                             " WHERE criterion_id = ?",
                             (relation.predecessor_criterion_id,),
                         ).fetchone()
-                        if (
-                            prior_item is None
-                            or prior_item["task_id"] != task_id
-                            or int(prior_item["turn_number"]) != prior_turn
-                        ):
-                            # The superseded criterion must be one of the declared
-                            # predecessor's own. Anything else would let a
-                            # declaration retire a requirement from a turn it never
-                            # claimed to stand on.
+                        if prior_item is None or prior_item["task_id"] != task_id:
+                            # No such criterion, or one belonging to another task.
+                            # Lineage never crosses tasks, and "there is no such
+                            # requirement" is a different mistake from "you may
+                            # not retire that one".
                             raise ContinuityInvalid(REASON_RELATION_PREDECESSOR_UNKNOWN)
+                        if relation.predecessor_criterion_id not in active_ids:
+                            # It exists, and it is this task's — but it is not
+                            # live. Retired by an earlier `revise`, cut away by a
+                            # `replace`, or simply never reached by the declared
+                            # lineage. Historical membership is not active
+                            # membership.
+                            raise ContinuityInvalid(
+                                REASON_RELATION_PREDECESSOR_NOT_ACTIVE
+                            )
 
                 pairs = []
                 for relation in declaration.relations:
@@ -3315,6 +3393,31 @@ class TaskStore:
         Writes nothing, creates nothing, repairs nothing. A row that disagrees
         with itself is returned exactly as stored, for the resolver to refuse.
         """
+        with self._read_snapshot() as connection:
+            return self._lineage_graph_locked(connection, task_id, int(turn_number))
+
+    def _lineage_graph_locked(
+        self, connection: sqlite3.Connection, task_id: str, turn_number: int
+    ) -> "LineageGraph":
+        """The lineage walk itself. **The caller owns the transaction.**
+
+        Split out in M2K PR12 so the two callers that need an active set read the
+        same rows by the same walk. :meth:`lineage_inputs` wraps it in a read
+        transaction; :meth:`reserve_turn_continuity` calls it **inside its own
+        write transaction**, where a `revise` declaration's supersession targets
+        are validated against the predecessor's resolved active set before
+        anything is persisted.
+
+        Calling it from inside the write is deliberately stronger than reading
+        first and writing after: validation and persistence then see one database
+        state, atomically, so a declaration can never be accepted against a
+        predecessor lineage that had already changed by the time the row landed.
+
+        It opens no transaction of its own, which is exactly what lets it nest.
+        The nested :meth:`turn_continuity` and :meth:`turn_criteria` calls take
+        the store's re-entrant lock again and reuse the one cached connection, so
+        every statement here runs in whichever transaction the caller opened.
+        """
         from .continuity import (
             CONTINUITY_DECLARED,
             CONTINUITY_EXTEND,
@@ -3326,51 +3429,50 @@ class TaskStore:
         nodes: Dict[int, "LineageNode"] = {}
         owners: Dict[str, Tuple[str, int]] = {}
 
-        with self._read_snapshot() as connection:
-            earliest_row = connection.execute(
-                "SELECT MIN(turn_number) AS first FROM task_turn_criteria"
-                " WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()
-            earliest = earliest_row["first"] if earliest_row is not None else None
+        earliest_row = connection.execute(
+            "SELECT MIN(turn_number) AS first FROM task_turn_criteria"
+            " WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        earliest = earliest_row["first"] if earliest_row is not None else None
 
-            turn: Optional[int] = target
-            while turn is not None and len(nodes) < MAX_LINEAGE_DEPTH:
-                if turn in nodes:
-                    break
-                continuity = self.turn_continuity(task_id, turn)
-                nodes[turn] = LineageNode(
-                    turn_number=turn,
-                    continuity=continuity,
-                    snapshot=self.turn_criteria(task_id, turn),
-                )
+        turn: Optional[int] = target
+        while turn is not None and len(nodes) < MAX_LINEAGE_DEPTH:
+            if turn in nodes:
+                break
+            continuity = self.turn_continuity(task_id, turn)
+            nodes[turn] = LineageNode(
+                turn_number=turn,
+                continuity=continuity,
+                snapshot=self.turn_criteria(task_id, turn),
+            )
 
-                predecessor = continuity.predecessor_snapshot_id
-                if predecessor is None:
-                    break
-                if predecessor not in owners:
-                    owner = connection.execute(
-                        "SELECT task_id, turn_number FROM task_turn_criteria"
-                        " WHERE snapshot_id = ?",
-                        (predecessor,),
-                    ).fetchone()
-                    if owner is not None:
-                        owners[predecessor] = (
-                            owner["task_id"],
-                            int(owner["turn_number"]),
-                        )
-                located = owners.get(predecessor)
-                traverses = (
-                    continuity.state == CONTINUITY_DECLARED
-                    and continuity.mode in (CONTINUITY_EXTEND, CONTINUITY_REVISE)
-                )
-                if not traverses or located is None or located[0] != task_id:
-                    # A cut point, a predecessor that does not exist, or one that
-                    # belongs to another task. None of the three is walked — the
-                    # last two are refusals the resolver states in its own
-                    # vocabulary.
-                    break
-                turn = located[1]
+            predecessor = continuity.predecessor_snapshot_id
+            if predecessor is None:
+                break
+            if predecessor not in owners:
+                owner = connection.execute(
+                    "SELECT task_id, turn_number FROM task_turn_criteria"
+                    " WHERE snapshot_id = ?",
+                    (predecessor,),
+                ).fetchone()
+                if owner is not None:
+                    owners[predecessor] = (
+                        owner["task_id"],
+                        int(owner["turn_number"]),
+                    )
+            located = owners.get(predecessor)
+            traverses = (
+                continuity.state == CONTINUITY_DECLARED
+                and continuity.mode in (CONTINUITY_EXTEND, CONTINUITY_REVISE)
+            )
+            if not traverses or located is None or located[0] != task_id:
+                # A cut point, a predecessor that does not exist, or one that
+                # belongs to another task. None of the three is walked — the
+                # last two are refusals the resolver states in its own
+                # vocabulary.
+                break
+            turn = located[1]
 
         return LineageGraph(
             task_id=task_id,

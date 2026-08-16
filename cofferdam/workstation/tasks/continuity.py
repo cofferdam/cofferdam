@@ -230,6 +230,26 @@ REASON_RELATION_LIMIT_EXCEEDED = "continuity_relation_limit_exceeded"
 REASON_RELATION_DUPLICATE = "continuity_relation_duplicate"
 REASON_RELATION_CURRENT_UNKNOWN = "continuity_relation_current_unknown"
 REASON_RELATION_PREDECESSOR_UNKNOWN = "continuity_relation_predecessor_unknown"
+
+#: M2K PR12. The named old criterion exists and belongs to this task, but is
+#: **not active** in the predecessor's resolved active set — it was retired by an
+#: earlier `revise`, or cut away by a `replace`, or has not been reached by the
+#: declared lineage at all. Distinct from
+#: :data:`REASON_RELATION_PREDECESSOR_UNKNOWN`, which means the id names no
+#: criterion of this task: "you may not retire that" and "there is no such
+#: requirement" are different mistakes and a caller should be told which it made.
+REASON_RELATION_PREDECESSOR_NOT_ACTIVE = "continuity_relation_predecessor_not_active"
+
+#: M2K PR12. A `revise` was declared, but the predecessor's active set cannot be
+#: resolved at all — its own continuity is `legacy_unknown` or `not_declared`, or
+#: the stored lineage behind it is malformed, cyclic or too deep.
+#:
+#: Refused **before dispatch** rather than stored and left for the resolver to
+#: refuse later. A `revise` is a statement about a set nobody can name, so there
+#: is nothing for it to be a revision *of*; storing it would durably record a
+#: relationship that can never be honoured. It is emphatically not downgraded to
+#: `replace` — that would be Cofferdam declaring something the caller did not.
+REASON_PREDECESSOR_LINEAGE_UNAVAILABLE = "continuity_predecessor_lineage_unavailable"
 REASON_ROOT_HAS_PREDECESSOR = "continuity_root_has_predecessor"
 REASON_NOT_FIRST_TURN = "continuity_root_not_first_turn"
 
@@ -282,8 +302,11 @@ class SupersessionRelation:
     choosing them. The store resolves it to a real ``criterion_id``.
 
     ``predecessor_criterion_id`` is a durable id the caller legitimately knows:
-    it was published by an earlier read of the predecessor snapshot. It is
-    validated to belong to that exact snapshot.
+    it was published by an earlier read of the lineage. Since M2K PR12 the store
+    validates it against the predecessor's **resolved active set** rather than
+    against the predecessor snapshot's own items, so a requirement introduced
+    several turns earlier and still live may be retired — and one that was
+    already retired, or cut away by a ``replace``, still may not.
     """
 
     criterion_ordinal: int
@@ -530,6 +553,7 @@ __all__ = [
     "REASON_NOT_FIRST_TURN",
     "REASON_PREDECESSOR_FOREIGN_TASK",
     "REASON_PREDECESSOR_INVALID",
+    "REASON_PREDECESSOR_LINEAGE_UNAVAILABLE",
     "REASON_PREDECESSOR_NOT_EARLIER",
     "REASON_PREDECESSOR_REQUIRED",
     "REASON_PREDECESSOR_UNEXPECTED",
@@ -538,6 +562,7 @@ __all__ = [
     "REASON_RELATION_DUPLICATE",
     "REASON_RELATION_LIMIT_EXCEEDED",
     "REASON_RELATION_MALFORMED",
+    "REASON_RELATION_PREDECESSOR_NOT_ACTIVE",
     "REASON_RELATION_PREDECESSOR_UNKNOWN",
     "REASON_RELATIONS_REQUIRED",
     "REASON_RELATIONS_UNEXPECTED",

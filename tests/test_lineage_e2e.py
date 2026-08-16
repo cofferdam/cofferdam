@@ -10,13 +10,12 @@ Also asserts the negative space explicitly: no schema change, no persisted
 result, no aggregate, no `AGGREGATOR_VERSION`, no check runner, no command
 execution, and no API, assessment, bridge or PWA widening.
 
-One deviation from the shape the PR11 brief sketched, discovered while building
-this and pinned in :class:`PR10WriteBoundaryTests`: PR10 requires a supersession's
-old-side criterion to belong to the **declared predecessor's own snapshot**, so a
-`revise` cannot retire a criterion it merely *inherited* through an earlier
-`extend` unless it declares that earlier snapshot as its predecessor. The
-resolver does not widen that rule; the walk below uses the shape PR10 actually
-permits, and the refused shape is asserted as a refusal.
+PR11 discovered that PR10's write validation required a supersession's old-side
+criterion to be stored in the **declared predecessor's own snapshot**, which
+refused a legitimate revision of an inherited requirement. **M2K PR12 corrected
+that** — see :class:`InheritedSupersessionTests` — so the old side is now checked
+against the predecessor's *resolved active set*. The walk below keeps the shape it
+was originally written with, which remains valid either way.
 """
 
 from __future__ import annotations
@@ -184,7 +183,8 @@ class LineageEndToEnd(unittest.TestCase):
         self.assertEqual(self.active(2), ["a.py", "b.py", "c.py"])
 
         # 6-7. Turn 3: revise, retiring C — a criterion of the declared
-        # predecessor's own snapshot, which is what PR10 permits.
+        # predecessor's own snapshot. Still valid after PR12, which widened the
+        # rule rather than moving it.
         self.turn(
             ["d"],
             {
@@ -393,35 +393,30 @@ class LineageEndToEnd(unittest.TestCase):
         self.assertEqual(EVALUATOR_VERSION, 1)
 
 
-class PR10WriteBoundaryTests(LineageEndToEnd):
-    """What PR10 permits is the authority, and PR11 does not widen it."""
+class InheritedSupersessionTests(LineageEndToEnd):
+    """M2K PR12 — a revise may retire whatever its predecessor actually stands on."""
 
-    def test_a_revise_cannot_retire_a_criterion_it_only_inherited(self):
-        from cofferdam.workstation.tasks.errors import ContinuityInvalid
-
+    def test_a_revise_may_retire_a_criterion_it_inherited(self):
+        """The case PR10 refused and PR11 recorded as a limitation."""
         self.turn(["a", "b"], {"mode": "root"})
         self.turn(["c"], {"mode": "extend", "predecessor_snapshot_id": self.snap(1)})
-        self.store.reserve_turn_criteria(
-            self.task_id, validate_criteria(self.criteria_for("d")), recorded_at="x"
+        self.turn(
+            ["d"],
+            {
+                "mode": "revise",
+                "predecessor_snapshot_id": self.snap(2),
+                "supersedes": [
+                    {"criterion_ordinal": 1, "predecessor_criterion_id": self.crit(1)[1]}
+                ],
+            },
         )
-        with self.assertRaises(ContinuityInvalid):
-            self.store.reserve_turn_continuity(
-                self.task_id,
-                validate_declaration(
-                    {
-                        "mode": "revise",
-                        "predecessor_snapshot_id": self.snap(2),
-                        "supersedes": [
-                            {"criterion_ordinal": 1,
-                             "predecessor_criterion_id": self.crit(1)[1]}
-                        ],
-                    }
-                ),
-                recorded_at="x",
-            )
+        self.assertEqual(self.active(3), ["a.py", "c.py", "d.py"])
+        result = self.service.resolve_active_criteria(self.task_id, 3)
+        # Nothing was cut to make it work: all three turns are still consumed.
+        self.assertEqual([step.turn_number for step in result.lineage], [1, 2, 3])
 
-    def test_declaring_the_earlier_snapshot_is_the_supported_alternative(self):
-        """It cuts turn 2's own criteria out of the lineage, and says so."""
+    def test_declaring_the_earlier_snapshot_still_works_and_still_cuts(self):
+        """The old workaround remains legal, and still drops turn 2's criteria."""
         self.turn(["a", "b"], {"mode": "root"})
         self.turn(["c"], {"mode": "extend", "predecessor_snapshot_id": self.snap(1)})
         self.turn(

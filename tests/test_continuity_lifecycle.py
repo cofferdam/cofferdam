@@ -40,6 +40,11 @@ from cofferdam.workstation.tasks.errors import ContinuityInvalid
 from cofferdam.workstation.tasks.service import TaskService
 from cofferdam.workstation.tasks.store import TaskStore
 
+#: A resolvable first turn. Since M2K PR12 a `revise` needs its predecessor's
+#: active set, and a predecessor whose own continuity is `not_declared` has
+#: none — so a fixture that means "an ordinary earlier turn" has to say `root`.
+ROOT = {"mode": "root"}
+
 PROJECT_ID = "demo"
 CRITERIA = [
     {"kind": "evidence", "predicate": "path_changed", "path": "src/a.py"},
@@ -285,7 +290,7 @@ class FollowUpModes(ContinuityCase):
         self.assertEqual(2, prior.criterion_count)
 
     def test_revise_stores_the_supersession_relations(self):
-        row = self.start()
+        row = self.start(continuity=ROOT)
         first = self.snapshot_id(row.task_id, 1)
         retired = self.criterion_ids(row.task_id, 1)[0]
         self.seed_turn(row.task_id, 1)
@@ -309,7 +314,7 @@ class FollowUpModes(ContinuityCase):
         )
 
     def test_revise_supports_a_split_one_old_to_many_new(self):
-        row = self.start()
+        row = self.start(continuity=ROOT)
         first = self.snapshot_id(row.task_id, 1)
         retired = self.criterion_ids(row.task_id, 1)[0]
         self.seed_turn(row.task_id, 1)
@@ -327,7 +332,7 @@ class FollowUpModes(ContinuityCase):
         self.assertEqual(2, self.store.turn_continuity(row.task_id, 2).relation_count)
 
     def test_revise_supports_a_merge_many_old_to_one_new(self):
-        row = self.start()
+        row = self.start(continuity=ROOT)
         first = self.snapshot_id(row.task_id, 1)
         retired = self.criterion_ids(row.task_id, 1)
         self.seed_turn(row.task_id, 1)
@@ -346,7 +351,7 @@ class FollowUpModes(ContinuityCase):
 
     def test_relations_are_stored_in_canonical_order(self):
         """Submission order is not a fact, so it is not preserved."""
-        row = self.start()
+        row = self.start(continuity=ROOT)
         first = self.snapshot_id(row.task_id, 1)
         retired = self.criterion_ids(row.task_id, 1)
         self.seed_turn(row.task_id, 1)
@@ -418,9 +423,9 @@ class LineageSecurity(ContinuityCase):
             )
 
     def test_a_superseded_criterion_outside_the_predecessor_is_refused(self):
-        other = self.start()
+        other = self.start(continuity=ROOT)
         foreign_criterion = self.criterion_ids(other.task_id, 1)[0]
-        row = self.start()
+        row = self.start(continuity=ROOT)
         first = self.snapshot_id(row.task_id, 1)
         self.seed_turn(row.task_id, 1)
         with self.assertRaises(ContinuityInvalid):
