@@ -595,8 +595,10 @@ downstream reads from.
     `AGGREGATOR_VERSION`, no task aggregate, no check runner, no command execution**;
     `EVALUATOR_VERSION` stays 1 and `ASSEMBLER_VERSION` stays 3. D-2026-08-16-10 through
     D-2026-08-16-13.
-  - **PR12 — inherited-active supersession validation.** *Implemented on
-    `m2k-pr12-inherited-supersession`, not merged and not deployed.* Closes the one semantic mismatch
+  - **PR12 — inherited-active supersession validation.** *Merged as `2dc4177` (#57) and
+    **deliberately not deployed**, with PR11: neither changes anything a running service does, since
+    no caller supplies a continuity declaration yet. Production stays on the PR10 runtime (slot A
+    `1efd49b`, schema v9).* Closes the one semantic mismatch
     PR11 found between PR10's write-time check and PR11's read-time rule. PR10 required a
     supersession's old side to be **stored in** the declared predecessor's snapshot; the resolver
     requires it to be **active in** the predecessor's resolved active set, and the two disagree for
@@ -617,6 +619,35 @@ downstream reads from.
     tree — running **inside the write transaction**, so validation and persistence see one database
     state. PR11's read-time defences remain, because a restored or imported database can still carry
     a stale relation. D-2026-08-16-12 amended; D-2026-08-16-14.
+  - **PR13 — cross-turn acceptance evidence-binding doctrine.** *Implemented on
+    `m2k-pr13-crossturn-doctrine`, not merged and not deployed; **documentation and design only** —
+    no schema, no route, no runtime, no evaluator change, no `AGGREGATOR_VERSION`.* Settles the
+    question standing between the active-criteria resolver and any aggregate: **what is the current
+    acceptance state of an active criterion that was evaluated at an earlier turn?** The finding is
+    that **every v1 predicate is a turn-change observation, not a final-state assertion** —
+    `path_changed`, `path_operation` and `rename` each consult only observations attributable to the
+    turn being evaluated, and each means *the worker did X this turn*, never *the project now
+    satisfies X*. All three naive answers therefore fail: carrying a stored result forward survives
+    neither regression nor repair; re-evaluating an inherited criterion against the target turn is a
+    **category error** that manufactures a false negative precisely when the work was correct; and
+    continuity is user intent about **requirements**, so it can never certify repository state.
+    **No result value is monotonic** — `met` regresses, `not_met` is repaired, `unverified` becomes
+    decidable — so no stored result may be reused as a current answer without independent current
+    evidence. Cofferdam can sometimes prove a later change happened at a path and can **never** prove
+    one did not: it observes only inside turn windows, both observation domains are **diffs rather
+    than state**, and absence already cannot be read where attribution, boundary or coverage is
+    imperfect. One free check is recorded — a turn's `target_revision` against the next turn's
+    pre-work `head_revision` detects committed inter-turn drift from stored data alone, enough to say
+    `unavailable` honestly and no more. What is required, in order: a **final-state evidence
+    surface**, then **final-state predicates**, then a **cross-turn binding layer** with its own
+    semantic version, derived, carrying per-criterion provenance (*newly evaluated / carried /
+    invalidated / unavailable*). Exact-turn evidence is **not** weakened to get there. `replace` cuts
+    evaluation history exactly where it cuts lineage; `revise` survivors need the cross-turn rule and
+    superseded criteria leave the active set; `manual` stays `unverified` however it is inherited.
+    PR9's aggregation rule remains valid doctrine — its **inputs** are what do not exist. A
+    `root`/`replace`-only aggregate would be sound today and is deliberately **not** taken, because
+    its correctness would depend on a lineage shape the caller does not control.
+    D-2026-08-16-15 through D-2026-08-16-19.
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**

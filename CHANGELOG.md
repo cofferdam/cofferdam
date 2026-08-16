@@ -8,6 +8,34 @@ release.
 
 ### Added
 
+- **M2K PR13 — Cofferdam writes down why it still will not tell you whether a task is done.**
+  This change is documentation only. Nothing is saved, no screen changes, and the app behaves exactly
+  as it did yesterday.
+
+  **The problem it names.** Cofferdam can now work out which of your requirements are still standing.
+  The obvious next step is to say whether they are *met* — and that turned out to be unsafe for a
+  reason worth writing down before building anything.
+
+  Everything Cofferdam currently checks is a question about **what the worker did during one
+  particular turn**: did it change this file, did it create it, did it rename it. None of those is a
+  question about **what your project looks like now**. So when a requirement carries over from an
+  earlier request, there are three tempting ways to judge it and all three are wrong. Reusing the old
+  answer misses both later breakage and later fixes. Re-asking the question about the newest turn is
+  worse than imprecise: a requirement satisfied earlier and correctly left alone since would be
+  reported as *failed*, most often exactly when the work was right. And the fact that you still want
+  something does not prove it is still true.
+
+  **What it decides.** No old answer is ever reused as a current one — not a pass, not a failure, not
+  an "unknown". If Cofferdam cannot establish where a requirement stands right now, it says so
+  instead of guessing in either direction.
+
+  **What it admits.** Cofferdam can sometimes show that something later broke a requirement. It
+  cannot show that nothing did, because it only watches while a worker is running — anything that
+  happens in between is unseen — and because what it records is *changes*, not a picture of the
+  project. Closing that gap needs a genuinely new kind of check: whether a file exists now, rather
+  than whether somebody touched it. That is written down as the next thing to build, and until it
+  exists the honest answer to "is this task done" stays unavailable.
+
 - **M2K PR12 — Cofferdam no longer refuses a sensible way of retiring a requirement.**
   Nothing about this is visible yet, and that is deliberate.
 

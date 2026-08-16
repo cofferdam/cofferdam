@@ -1864,6 +1864,157 @@ mutation.
 
 D-2026-08-16-10 through D-2026-08-16-14.
 
+## Cross-turn acceptance (M2K PR13 — doctrine only)
+
+PR11 answers *which criteria are active at turn N*. This section answers the
+question that has to be settled before anything aggregates them: **what is the
+current acceptance state of an active criterion that was evaluated at an earlier
+turn?**
+
+Nothing here is built. No schema, no route, no runtime, no `AGGREGATOR_VERSION`.
+
+### Every v1 predicate is a change observation
+
+Read from the evaluator rather than from the vocabulary: `_evaluate_path_changed`,
+`_evaluate_path_operation` and `_evaluate_rename` each consult only
+`_attributable_observations(bundle, path)` — observations attributed to *the turn
+being evaluated*. None of them reads repository state.
+
+| predicate | asserts | class | re-evaluable later? |
+|---|---|---|---|
+| `path_changed(P)` | the worker produced a resulting change at P **this turn** | action/change | mechanically yes, semantically no |
+| `path_operation(P, OP)` | the worker performed OP at P **this turn** | action/change | mechanically yes, semantically no |
+| `rename(S, D)` | the worker renamed S→D **this turn** | action/change | mechanically yes, semantically no |
+| `manual` | a person must check | undecidable | no |
+
+So the vocabulary says *"the worker did X"*, never *"the project now satisfies X"*.
+
+### Why the three obvious answers are all wrong
+
+**Carry the old result forward.** A stored `met` does not survive a later
+regression; a stored `not_met` does not survive a later repair.
+
+**Re-evaluate against the target turn.** A **category error**, not an
+approximation. `path_operation(foo.py, created)` asked at turn 2 means "did turn
+2's worker create foo.py". A well-behaved turn 2 that correctly leaves the file
+alone answers *no*, and the evaluator renders that as `not_met` once closure is
+complete. This manufactures a false negative most reliably when the work was
+correct.
+
+**Inherited met stays met unless superseded.** Continuity is **user intent about
+requirements**, authored and frozen before the turn ran. An intent cannot certify
+a state of the world that came after it.
+
+### No result value is monotonic
+
+`met` can be regressed. `not_met` can be repaired — and a stale `not_met` telling
+somebody their completed fix failed is not the "safe" error, it is just the other
+wrong one. `unverified` usually records a limitation of the *observer* (inexact
+attribution, a dirty pre-work boundary, unread coverage), every one of which can
+be gone next turn.
+
+Therefore **no stored per-turn result may be reused as a current answer without
+independent current evidence.** Stored records are not invalidated by this; they
+remain true of their own turns.
+
+### What Cofferdam can and cannot prove
+
+It can sometimes prove a later change **happened** at a path. It can never prove
+one **did not**, for three independent reasons:
+
+1. **Observation only happens inside turn windows.** Between one turn's post-work
+   observation and the next turn's pre-work baseline — and after the last turn,
+   up to the moment of reading — the repository is unobserved.
+2. **Both domains are diffs, not state.** `worktree` records paths differing from
+   HEAD; `committed_range` records paths changed in the range. Neither enumerates
+   what exists, so "does `foo.py` exist now" has no answer in stored evidence.
+3. **Absence already cannot be read inside one window** when attribution is
+   inexact, the pre-work boundary was dirty, or coverage was incomplete.
+
+**One free check exists today.** A turn's `CommittedRangeSummary.target_revision`
+and the next turn's `GitBaseline.head_revision` are both stored, so committed
+drift *between* turns is detectable by comparing two stored strings, and the next
+turn's `working_tree_state` says whether the tree matched HEAD at that instant.
+That proves a gap is non-empty, never what happened in it — enough to answer
+`unavailable` honestly, not enough to certify anything.
+
+### What is required, in dependency order
+
+1. A **final-state evidence surface** — does this path exist at this revision. A
+   different Git question from any this build asks, so a genuinely new evidence
+   primitive.
+2. **Final-state predicates** (`path_exists` / `path_absent` conceptually),
+   re-evaluable at any turn because they describe the project rather than a
+   worker's behaviour.
+3. Only then a **cross-turn binding layer**.
+
+Exact-turn evidence is **not** weakened to get there. `EvidenceBundle` v3 keeps
+its meaning; anything cross-turn is a new derived layer *over* per-turn bundles.
+
+### The missing layer
+
+Per criterion active at the target turn: criterion identity; target turn; origin
+turn and snapshot; a current result of `met`/`not_met`/`unverified`; the identity
+of the evidence or evaluation supporting **that** result; and a provenance marker
+— *newly evaluated*, *carried under an explicit rule*, *invalidated by later
+evidence*, or *unavailable*. The provenance field is the point: an answer that
+cannot say why it believes itself is not auditable.
+
+It gets **its own semantic version** when it is built — not `RESOLVER_VERSION`,
+not `EVALUATOR_VERSION`, not a future `AGGREGATOR_VERSION`. Binding a result to a
+turn across a lineage is a fourth distinct operation.
+
+### Per mode
+
+**`root`** — every active criterion originates here, so PR7's evaluation already
+is a current binding.
+
+**`replace`** — cuts evaluation history exactly where it cuts lineage. Criteria
+before the cut are not active after it, so no cross-turn binding is ever needed
+for them and no evidence traversal crosses that point. The resolver's walk already
+stops there, so the two layers agree by construction.
+
+**`revise`** — survivors need the cross-turn rule; newly added criteria bind
+directly to the target turn; superseded criteria leave the active set and their
+stored evaluations must never contribute to a current answer.
+
+**`extend`** — every inherited criterion needs the cross-turn rule, and today none
+of them can get one.
+
+**`manual`** — unchanged. Inherited or not, `unverified` at every turn it is
+active. Continuity never promotes it, and only a human-answer channel could.
+
+**`not_declared` / `legacy_unknown`** — the resolver already answers *unavailable*,
+so acceptance is unavailable too. No composition through unknown continuity.
+
+### What blocks the aggregate
+
+PR9's ordered rule — any `not_met` dominates, any `unverified` yields
+`incomplete`, only all-met yields `met` — remains valid doctrine. Its **inputs**
+are what do not exist. The aggregate is unblocked when either every active
+criterion originates at the target turn, or final-state predicates make inherited
+criteria answerable.
+
+A narrowing deliberately **not** taken: a `root`/`replace`-only aggregate would be
+sound today, and is a trap — its correctness would depend on a lineage shape the
+caller does not control, and the first `extend` would break it silently.
+
+### Where named checks fit
+
+A host-owned named check ("the tests pass") is inherently a **current-run**
+property: answered by running it now, so final-state by nature and re-evaluable at
+any turn. It solves the cross-turn problem for criteria that use it, and solves
+nothing for path criteria — one of the two roads out, not a detour. Its trust
+boundary is unchanged and still binding (D-2026-08-11-7).
+
+### Safety default
+
+Where the current status of an active criterion cannot be established, the answer
+is **unavailable/unverified**. Never a reused stale `met`, never a reused stale
+`not_met`, never inferred preservation.
+
+D-2026-08-16-15 through D-2026-08-16-19.
+
 ### Why the named check runner comes after this
 
 The runner introduces the first project-scoped command execution authority, a new
