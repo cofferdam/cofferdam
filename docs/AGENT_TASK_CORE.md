@@ -2167,6 +2167,196 @@ caller nor the adapter ever supplies command text**.
 
 ---
 
+## Current-state assessment: identity and storage (M2K PR15 — doctrine only)
+
+PR14 delivered the evidence. This settles **where a result derived from it may
+live and what it must prove**, before any state predicate exists — because the
+first `path_exists` that is written will need somewhere honest to put its answer,
+and the wrong home is very hard to leave later.
+
+### What a PR7 evaluation already means
+
+Read off the merged code, not inferred from names:
+
+> the judgement of **turn N's own criteria snapshot**, against **turn N's own
+> `EvidenceBundle`**, under `EVALUATOR_VERSION` 1.
+
+`_evaluate_one_turn` reads `turn_criteria(task_id, turn_number)` and
+`evidence_bundle(task_id, turn_number)` — the same turn twice.
+`record_evaluation` derives every identity from one `CriteriaSnapshot` and
+refuses unless the result count equals that snapshot's criterion count.
+`evaluation_fingerprint` binds one turn, one snapshot, one bundle. **Origin turn
+and target turn are the same number**, and nothing stored distinguishes them,
+because until PR11 they could not differ.
+
+That meaning is **frozen**. It must never be widened to "all criteria active at
+turn N": every stored row was written under the narrow one, and no reader could
+tell which meaning a given row carries, because nothing recorded would say.
+
+### The exact schema, and what it does *not* constrain
+
+| Table | Identity |
+| --- | --- |
+| `task_turn_evaluations` | PK `evaluation_id`; FK `(task_id, turn_number)` → `task_turns`; FK `criteria_snapshot_id` → `task_turn_criteria`; carries `evaluator_version`, `criteria_state`, `criteria_fingerprint`, `assembler_version`, `evidence_input_fingerprint`, `result_count`, `evaluation_fingerprint`; **`UNIQUE (task_id, turn_number, evaluator_version)`** |
+| `task_turn_criterion_results` | PK `(evaluation_id, criterion_id)`; FK `evaluation_id`; FK `criterion_id` → `task_turn_criterion_items`; `UNIQUE (evaluation_id, ordinal)`; `result IN ('met','not_met','unverified')` |
+
+Two consequences matter more than the columns.
+
+**The results table does not tie a criterion to its evaluation's snapshot or
+turn.** Its foreign key says the criterion exists *somewhere*. Probed against a
+real v10 database, the DDL **permits** turn 1's criterion inside turn 2's
+evaluation, and permits an evaluation whose `turn_number` and
+`criteria_snapshot_id` belong to different turns. Only `record_evaluation`'s
+snapshot-driven API refuses them. So the honest meaning cannot be defended by
+adding rows here — the database would not stop a dishonest one.
+
+**One target turn admits exactly one evaluation per evaluator version.** Two
+evaluation semantics cannot share a turn without overloading `EVALUATOR_VERSION`
+to mean "a different kind of question", which is not what it means.
+
+### Change criteria and state criteria are different questions
+
+| | asks | answered from |
+| --- | --- | --- |
+| `path_operation(P, created)` | did **this turn** create P? | turn-local `EvidenceBundle` |
+| `path_exists(P)` | at this turn's **final-state boundary**, is P there? | PR14 `FinalStateObservation` |
+
+A change criterion is answerable only at its own turn. A state criterion is
+answerable at **any** turn that has an observation — which is exactly what makes
+an inherited requirement assessable, and exactly why the two must not share one
+provenance shape.
+
+### Same turn is not the easy case it looks like
+
+Even when a `path_exists` criterion originates in the turn being assessed, the
+existing record cannot hold its answer honestly: the parent row's only evidence
+identity is `assembler_version` + `evidence_input_fingerprint`, which names the
+`EvidenceBundle`. A result derived from a final-state observation would sit under
+a provenance pointing at an input it did not use. The minimum fix is
+final-state provenance — which is the same change the inherited case needs, so
+there is no cheaper same-turn shortcut.
+
+### The inherited case, and origin vs target
+
+A criterion introduced at turn 1 and still active at turn 4 has **two** identities
+— where it came from, and where it is being assessed. A single `turn_number`
+column can only tell the truth about one. `source_turn_number` and
+`source_snapshot_id` already exist on PR11's `ActiveCriterion`; they are simply
+never persisted. The assessment layer keeps them **beside** the target turn, never
+collapsed into it.
+
+**Every target-turn assessment is retained.** `met` at 1, `met` at 2, `not_met` at
+3, `met` at 4 is four immutable rows — four machine judgements at four world
+boundaries. There is no mutable "current status" row, because overwriting would
+erase the only record that something broke and was fixed. *Current* means **at the
+target turn**, not *latest*.
+
+### What a state result must prove
+
+**Authority** — the result may not exist without all of it: the target turn; the
+criterion id; the **final-state observation fingerprint**; `FINAL_STATE_OBSERVER_VERSION`
+(what `present` *means* is that version's semantics); the **resolved active-lineage
+fingerprint**, proving the criterion was active at the target turn rather than
+merely present in history; and the layer's own semantic version.
+
+**Redundant audit context** — kept for legibility, never relied upon: the origin
+turn and snapshot (derivable from the criterion row), the observation id
+(derivable from the target turn, one observation per turn), and the HEAD anchor
+(already inside the observation).
+
+`EvidenceBundle` v3 is **not** the vehicle. Stuffing a final-state observation into
+it would reinterpret `ASSEMBLER_VERSION` and change what every stored
+`evidence_input_fingerprint` refers to, merging the two evidence meanings PR13 and
+PR14 separated.
+
+### Reading an observation safely
+
+PR14 records a state per **path**, so completeness is a per-path question:
+
+| Observation / path | State result |
+| --- | --- |
+| path row `present` | evaluable (`met` for `path_exists`, `not_met` for `path_absent`) |
+| path row `absent` | evaluable (the mirror) |
+| path row `unavailable`, or no row for that path | `unverified` |
+| observation `unavailable` or `legacy_unknown` | `unverified` |
+
+An `incomplete` observation does **not** poison the paths that were observed: a
+path row reading `present` is individually complete. A missing observation is never
+`not_met`.
+
+### Intended predicate semantics, when they are built
+
+`path_exists(P)` — `met` when P is `present`, `not_met` when `absent`,
+`unverified` otherwise. `path_absent(P)` — the mirror. `path_exists` means **any
+filesystem object** exists at P: PR14 already records kind separately, so folding
+kind into the predicate would ask two questions with one word. **No kind
+predicates**, and none are proposed here.
+
+### Lineage consequences
+
+**`replace`** cuts the active set, so criteria before the cut need no current
+assessment at or after the replace turn — the resolver already stops there.
+**`revise`** removes superseded criteria from the active set (no further
+assessment) and keeps survivors eligible; newly added criteria begin at the
+current turn. **`not_declared` / `legacy_unknown`** resolve to unavailable, so
+current acceptance is **unavailable** — never a latest-snapshot fallback, never an
+accumulation of all historical criteria, never text matching.
+
+### The hard boundary: no semantic conversion
+
+State predicates are **authored**, never derived. `path_operation(P, created)`
+does not become `path_exists(P)`; `path_operation(P, deleted)` does not become
+`path_absent(P)`; and **continuity may not perform this transformation in any
+mode**. A requirement to create a file is silent about whether it must still be
+there nine turns later, and inventing that requirement enforces something nobody
+asked for.
+
+PR14's observation scope does not imply state-evaluability either: it observes
+paths named by whatever criteria are active, which today are all change criteria.
+Observing a path is not permission to answer a change criterion from it.
+
+### Named checks stay possible
+
+A future named check — a bounded host-owned execution, "the tests pass now" — is a
+**third** input domain: neither turn-change evidence nor a path observation. The
+assessment layer therefore carries an explicit **evidence-domain discriminator**
+from the start, so that domain joins as a value rather than as a fourth table.
+Nothing here is implemented.
+
+### Versions
+
+`EVALUATOR_VERSION` keeps its turn-change meaning and does not move.
+`FINAL_STATE_OBSERVER_VERSION` keeps its observation meaning. The mapping from
+*active criterion + evidence domain* to *current result at a target turn* is a
+**fourth distinct operation** and takes its own version. A future
+`AGGREGATOR_VERSION` folding legitimate current results is a fifth. None is
+overloaded to save a constant.
+
+### Persisted or derived
+
+Every input is immutable and versioned — the criterion row, the stored
+observation, and a resolver that is itself pure — so the assessment is a pure
+function and **any version's answer can be recomputed on demand**. Persistence
+therefore buys a cache and a drift tripwire (the role `EvaluationConflict` plays
+for PR7), not correctness. The recommendation is to **derive first**, with the
+identity and fingerprint defined now so persistence can be added later without
+changing what the answer *is*.
+
+### What is still blocked
+
+**Before `path_exists` / `path_absent`:** the criterion vocabulary must admit
+them, and that is **not additive** — `task_turn_criterion_items` pins `predicate`
+in a `CHECK`, SQLite cannot alter a `CHECK`, and the table is referenced by a
+foreign key from `task_turn_criterion_results`. It needs a full table rebuild of
+immutable historical criteria: the first destructive-shape migration this project
+would have performed.
+
+**Before the aggregate:** one legitimate *current* result for every active
+criterion at the target turn. That needs the layer described here, and manual
+criteria remain `unverified` at every turn regardless.
+
+---
+
 ## Limitations of this milestone
 
 Stated in the API payload as well as here, because a client should never have to

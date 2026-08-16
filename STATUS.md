@@ -797,10 +797,83 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2K PR15 — current-state evaluation identity and storage doctrine (documentation only)
+
+On `m2k-pr15-current-state-doctrine`, from the merged `064fe51`. **Documentation and design only** —
+no schema, no route, no runtime, no predicate, no evaluator change, no `AGGREGATOR_VERSION`, nothing
+deployed.
+
+PR14 delivered the evidence. Before the first `path_exists` is written, it needs somewhere honest to
+put its answer — and the wrong home is very hard to leave later. PR15 audits the merged evaluation
+schema against that question and settles it.
+
+**What a PR7 evaluation actually means**, read off the merged code rather than inferred: *turn N's own
+criteria snapshot, against turn N's own `EvidenceBundle`, under `EVALUATOR_VERSION` 1*.
+`_evaluate_one_turn` reads the criteria and the bundle for the same turn; `record_evaluation` derives
+every identity from one snapshot and refuses unless the result count equals that snapshot's criterion
+count. **Origin turn and target turn are the same number, and nothing stored distinguishes them.**
+That meaning is frozen and must never be widened to "all criteria active at turn N" — every existing
+row was written under the narrow one, and nothing recorded would tell a reader which it carries.
+
+**Two findings from probing the real v10 DDL, not from reading names.** First,
+`task_turn_criterion_results` has **no** constraint tying a result's criterion to its evaluation's
+snapshot or turn: the database **permits** turn 1's criterion inside turn 2's evaluation, and permits
+an evaluation whose turn and `criteria_snapshot_id` disagree. Only the snapshot-driven write API
+refuses them — so the honest meaning cannot be defended by adding rows to that table. Second,
+**`UNIQUE (task_id, turn_number, evaluator_version)`** means one target turn admits exactly one
+evaluation per evaluator version, so two evaluation semantics cannot share a turn without overloading
+`EVALUATOR_VERSION` to mean "a different kind of question".
+
+**The decision: a separate immutable current-state assessment layer**, keyed by target turn and
+criterion, leaving PR7's rows untouched. Extending the existing record was assessed and rejected on
+four counts — ambiguous nullability for historical rows, a parent carrying two input fingerprints only
+one of which each child used, the uniqueness key, and the broken `result_count = criterion_count`
+invariant. A generalised evaluation-input framework was assessed and deferred: there is one real
+second domain today, and a framework designed against one real case and two imagined ones is designed
+against imagination. The door is kept open with an explicit **evidence-domain discriminator**, so a
+future named-check result joins as a value rather than a fourth table.
+
+**Origin turn and target turn are separate and never collapsed.** PR11's `ActiveCriterion` already
+carries `source_snapshot_id` and `source_turn_number`; they are simply never persisted. **All
+target-turn assessments are retained** — `met`, `met`, `not_met`, `met` is four immutable rows, not
+one mutable status that overwrites the evidence that something broke and was fixed. *Current* means
+**at the target turn**, not *latest*.
+
+**What a state result must prove**: target turn, criterion id, the final-state observation
+**fingerprint**, `FINAL_STATE_OBSERVER_VERSION`, the resolved **active-lineage fingerprint** (that the
+criterion was active there, not merely historical), and the layer's own version. Origin turn, the
+observation id and the HEAD anchor are redundant audit context, kept for legibility and never relied
+on. `EvidenceBundle` v3 is **not** the vehicle and must not become one.
+
+**Completeness is per path.** PR14 stores a state for every target path, so an `incomplete`
+observation does not poison the paths that were observed: a path row of `present`/`absent` is
+individually authoritative, while an `unavailable` path, a missing path row, an `unavailable`
+observation and a `legacy_unknown` turn all yield `unverified`. **A missing observation is never
+`not_met`.**
+
+**The hard boundary.** State predicates are authored, never derived.
+`path_operation(P, created)` does not become `path_exists(P)`, `path_operation(P, deleted)` does not
+become `path_absent(P)`, and **continuity may not perform that transformation in any mode**.
+
+**The concrete blocker before `path_exists`, and it is not additive.**
+`task_turn_criterion_items` pins `predicate` in a `CHECK`; SQLite cannot alter a `CHECK`; the table is
+referenced by a foreign key from `task_turn_criterion_results`. Admitting a new predicate needs a full
+**table rebuild** of immutable historical criteria — the first destructive-shape migration this
+project would perform, and Tier 2 by construction. Verified by attempting the insert and having
+SQLite refuse it.
+
+**Recommended next implementation:** the state predicates and the assessment layer, **derived rather
+than persisted** to begin with. Every input is immutable and versioned, so the assessment is a pure
+function and any version's answer can be recomputed; persistence would buy a cache and a drift
+tripwire, not correctness. D-2026-08-17-1 through D-2026-08-17-4.
+
 ### M2K PR14 — the final-state path observation foundation
 
-On `m2k-pr14-final-state`, from the merged `8cd8ba3`. **Implemented on a branch, not merged and not
-deployed.**
+**Merged as `064fe51` (#59) and deliberately NOT deployed.** Production remains on the PR10
+runtime — workstation and Actions bridge both from **slot A at `1efd49b`**, live schema **v9**,
+rollback runtime slot B at `059fdcb`. `main` now declares **schema v10**; the live database is still
+v9 and will not move until this batch is deliberately deployed. The record below was written while
+PR14 was on `m2k-pr14-final-state`, from the merged `8cd8ba3`, and is kept as it was written.
 
 PR13 named the gap: every acceptance predicate this build has asks *what the worker did during this
 turn*, and none asks *what the project now is*, so an inherited requirement has no answerable current
@@ -891,9 +964,16 @@ actually running — not PR11 or PR12, which are merged and undeployed.
 
 M2K is **in progress**: PR1 through PR8 are merged and deployed; PR9 is merged (`b2314f0`, #54) and
 needed no deployment because it changed only documentation; PR10 is merged (`1efd49b`, #55) and
-deployed to slot A on schema v9; PR11 (`3bb9a5b`, #56) and PR12 (`2dc4177`, #57) and PR13
-(`8cd8ba3`, #58) are merged and **intentionally not deployed**; PR14 is on a branch.
-See *In progress* above for PR14.
+deployed to slot A on schema v9; PR11 (`3bb9a5b`, #56), PR12 (`2dc4177`, #57), PR13 (`8cd8ba3`, #58)
+and PR14 (`064fe51`, #59) are merged and **intentionally not deployed**; PR15 is on a branch and is
+documentation only. See *In progress* above for PR15.
+
+**`main` is now schema v10; production is still schema v9**, and that gap is the deployment decision
+rather than a lag. PR14 is the change that turns this batch from a slot flip into a schema move, so
+deploying PR11–PR14 is **Tier 2**: a verified pre-v10 backup taken with SQLite's online backup API, a
+migration rehearsal, the old-runtime refusal check that PR14 already proves in CI, and an honest
+rollback **pair** — the slot *and* the restored snapshot — because a flip alone cannot walk a schema
+backwards.
 
 ### M2K PR13 — cross-turn acceptance evidence-binding doctrine (documentation only)
 
