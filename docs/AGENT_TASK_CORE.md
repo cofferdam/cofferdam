@@ -720,6 +720,14 @@ they asked for, so the bridge is refused here exactly as it is on the evidence
 route, and refused because `require_token` has never heard of that credential
 rather than because a check rejects it.
 
+> **This is an intentional security boundary, not an inconsistency to tidy away**
+> (D-2026-08-16-1). Ten neighbouring task routes use `require_task_caller`, so a
+> refactor "unifying" them for consistency looks harmless and would silently widen
+> the assessment surface to the Custom GPT caller class. Do not change this
+> dependency without a scope decision of its own. The tests assert both halves —
+> the bridge credential is refused here **and** still accepted where it belongs —
+> so the refusal can never be mistaken for a broken credential.
+
 **Three criteria states**, published as closed words:
 
 | State | Meaning |
@@ -1462,6 +1470,174 @@ cannot reach — it is guarded by `require_token`, which has never heard of that
 credential. `GET` only, no root or path selector, no policy selector, no artifact
 body. **No verdict of any kind**: no pass, fail, score, confidence or risk level,
 and no field for one.
+
+---
+
+## Assessment aggregation doctrine (M2K PR9 — design only)
+
+**Nothing in this section is implemented.** There is no aggregate in the database,
+in any response, in the serializer or in the PWA, and no code computes one. This
+is the contract a future aggregate must obey, written down **before** the named
+check runner adds another mechanism that produces results — so those results
+arrive to a consumer whose rules already exist rather than defining them by
+accident. Decisions: D-2026-08-16-2 through D-2026-08-16-6.
+
+### Three axes, kept apart
+
+| Axis | Question it answers | Vocabulary |
+| --- | --- | --- |
+| Worker lifecycle | What happened to execution? | `completed`, `failed`, `interrupted`, `cancelled` |
+| Acceptance | What do the recorded criteria and evidence establish? | `met`, `not_met`, `incomplete`, `not_assessable` |
+| Verification reach | How far could Cofferdam see? | the evaluator's reason codes |
+
+**`completed` does not imply `met`**, and the live database is the demonstration:
+ten completed tasks, zero evaluations. A worker that ran to a clean stop has
+described its own control flow and said nothing about whether it did what was
+asked. **`failed` does not imply `not_met`** either — a turn can fail after
+satisfying every criterion recorded for it.
+
+This separation is the load-bearing rule. Everything M2K built — criteria frozen
+before dispatch, evidence assembled from machine observation, evaluation frozen
+after close — exists to stop a worker's account of its work from being the verdict
+on it. An aggregate that read lifecycle as acceptance would undo all of it in one
+line. Acceptance therefore never uses the words `success`, `failed` or `passed`:
+those belong to lifecycle, and a reader who sees one cannot tell which domain it
+came from.
+
+### Per turn: two dimensions, not one enum
+
+**Availability**, derived from the criteria state alone:
+
+| Criteria state | Availability | Reason |
+| --- | --- | --- |
+| `present` | `assessable` | — |
+| `not_provided` | `not_assessable` | `no_structured_criteria` |
+| `legacy_unknown` | `not_assessable` | `historical_criteria_unknown` |
+
+Neither absent case may ever be rendered `met`, `success`, `passed` or an empty
+pass. `not_provided` means *Cofferdam knows none were supplied*; `legacy_unknown`
+means *Cofferdam does not possess the question*. The reasons stay distinct —
+collapsing them would merge "we never asked" with "we cannot know what we asked".
+
+**Acceptance outcome**, which exists **only** when criteria are `present`:
+
+| Outcome | Rule |
+| --- | --- |
+| `not_met` | at least one criterion result is a deterministic `not_met` |
+| `incomplete` | no `not_met`, and at least one `unverified` |
+| `met` | every criterion result is `met` |
+
+Evaluated in that order. One known unmet requirement is already sufficient to know
+the turn's recorded requirements were not all established, however many others are
+unverified — and that is an **acceptance** result, never a lifecycle failure.
+Otherwise any `unverified` yields `incomplete` and **never** `not_met`, preserving
+the doctrine the evaluator was built on: an evidence limitation is not a finding
+about the work. Known failure dominates, uncertainty blocks `met`, and nothing
+else reaches `met`.
+
+**What `met` means exactly:** *the acceptance criteria recorded for this turn are
+all established as met by the current assessment model.* It does **not** mean the
+task succeeded, the worker succeeded, the user's full intent was captured, or that
+a later turn cannot regress it.
+
+### Manual criteria cap the outcome
+
+A `manual` criterion always evaluates to `unverified`, because no human-answer
+channel exists. **Any `present` snapshot containing one therefore cannot currently
+reach `met`** — it is capped at `incomplete`. That is the honest state and it is
+recorded rather than worked around. Manual completion is never inferred from
+worker prose, a PWA interaction, a claim, or a model judgement. A human-answer
+channel is new authority and new state, and needs its own reviewed design.
+
+### Blockers are context, not a competing outcome
+
+`requires_human` must not become a fourth aggregate value. When a turn has both an
+unanswerable manual criterion and an incomplete machine observation, a single
+value has to suppress one of them:
+
+```
+evidence criterion -> unverified because the Git boundary was incomplete
+manual criterion   -> unverified because human judgement is required
+```
+
+The recommended shape is orthogonal context beside the outcome — `requires_human`,
+`machine_verification_incomplete` — so the turn says `incomplete` **and** says
+exactly why, and a caller composes both instead of guessing which was hidden.
+
+`claim_conflict` is **excluded from aggregation entirely**. It is a disagreement
+between an adapter's record and the machine's: not a criterion result, not a task
+failure, not a blocker. It stays on the evidence surface as audit context.
+
+### Task level: unavailable, and that is the decision
+
+Per-turn acceptance is well defined. **Task-level acceptance across turns is
+unavailable** until criterion continuity semantics exist. Both obvious rules are
+demonstrably wrong:
+
+*Accumulate all turns.* Turn 1 requires `foo.py` created; turn 2 requires it
+removed. Held simultaneously active, the task's own requirements contradict each
+other and no outcome is correct — when in fact the second turn was a legitimate
+change of mind.
+
+*Latest turn only.* Turn 1 requires feature X and tests; turn 2 adds logging.
+Honouring only turn 2 silently drops X and the tests, and the task can report
+`met` while its original requirements were never established.
+
+The missing fact is the same in both: every turn may carry its own immutable
+criteria snapshot, and Cofferdam persists **nothing** about whether a later
+snapshot replaces, extends, narrows, supersedes one specific criterion, reverses
+one, or is an independent concern. Reporting "per-turn acceptance is available;
+task-level acceptance is not yet defined" is a true sentence a caller can act on.
+A confidently wrong task verdict is not.
+
+### What continuity will require
+
+Design constraints, none of them built:
+
+* **Explicit, never defaulted** — `replace` and `extend` are indistinguishable by
+  inspecting the criteria, and a wrong default applies silently to every task.
+* **Snapshot-level relation plus criterion-level relations** — a later turn
+  routinely supersedes one requirement while its siblings stay live, which
+  `supersedes_snapshot_id` alone cannot express.
+* **Fingerprints are not lineage** — identical text does not prove it, differing
+  text does not disprove it. An aid, never the authority.
+* **The planner or the user is the authority; the worker is not and the adapter
+  never is.** A worker that could declare its new criteria supersede its old ones
+  could retire the requirement it had just failed.
+* **Frozen pre-dispatch**, alongside the criteria snapshot — a boundary a worker
+  can move after seeing its results is not a boundary.
+* **An additive schema version**, and a hard prerequisite for any runtime
+  task-level aggregate.
+
+### Versioning and derivation
+
+A future aggregate carries its own code-owned `AGGREGATOR_VERSION`, distinct from
+the schema version, `ASSEMBLER_VERSION`, the criteria model version and
+`EVALUATOR_VERSION`. Composition doctrine changes for its own reasons, and a
+change of doctrine must not silently reinterpret answers recorded under the old
+one.
+
+It should be **derived on read, not persisted**. A per-turn aggregate is a pure
+deterministic function of an immutable `EvaluationRecord` and its criteria
+snapshot, so persisting it stores nothing that cannot be recomputed while adding a
+write path to a surface whose central property is that reading it mutates nothing.
+Deriving it makes a doctrine change a re-render rather than a migration. If
+historical audit later needs *what did we say at the time*, that argues for
+recording the aggregator version beside the answer — its own decision, when a real
+need appears.
+
+### Why the named check runner comes after this
+
+The runner introduces the first project-scoped command execution authority, a new
+recorded result type, probably a new criterion kind and a `check_id`, invocation
+and result persistence, timeout and output policy, and an evaluator semantic
+expansion that would move `EVALUATOR_VERSION`. Built first, every one of those
+results would feed a consumer with no defined contract.
+
+Its trust boundary is unchanged and still binding (D-2026-08-11-7): host-owned
+definitions by stable id, literal `argv`, `shell=False`, validated project `cwd`,
+bounded timeout, bounded output, off by default per project, and **neither the
+caller nor the adapter ever supplies command text**.
 
 ---
 

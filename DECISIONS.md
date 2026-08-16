@@ -2252,6 +2252,200 @@ on it may say "the worker did this" in those words.
 **Still no evaluator**, no verdict, no confidence, no risk level, no acceptance criteria and no
 check runner.
 
+## D-2026-08-16-1 — The assessment route refuses the Actions bridge credential, on purpose (EFE DECISION, ACTIVE)
+
+**Decision.** `GET /api/tasks/{task_id}/turns/{turn_number}/assessment` is guarded by
+**`require_token`** and must **not** be changed to `require_task_caller`. This is recorded as a
+decision precisely because the two dependencies look interchangeable at a glance and ten neighbouring
+task routes use the other one — a future refactor that "unifies" them for consistency would silently
+widen the assessment surface to a caller class it was deliberately kept from.
+
+**What the distinction actually is.** `require_task_caller` accepts *two* credentials: the device
+token and the Actions bridge's own. `require_token` accepts only the device token and has never heard
+of the bridge credential, so a bridge request arrives as an ordinary unauthenticated one and is
+refused with 401. That is a **stronger guarantee than an explicit rejection check**, which a later
+edit could delete without any test noticing the class of caller it used to exclude.
+
+**Why an assessment is further from the bridge than a task is.** The bridge is a private Custom GPT
+surface. It may create a task, ask what happened to one, answer a question and finish it — the
+operational verbs. An assessment is Cofferdam's judgement about somebody's work measured against what
+they asked for, which is a different kind of statement about a person's private working life. The
+`EvidenceBundle` route set this precedent for the same reason; PR8 follows it for a stronger version
+of it, because an assessment is the evidence *plus a machine's reading of it*.
+
+**Both halves are asserted.** The tests prove the bridge credential is refused here **and** still
+accepted where it belongs, so the refusal can never be mistaken for a broken credential. Verified
+again live at the PR8 deployment: with one bridge credential, `/assessment` returned 401 while
+`/api/tasks/{id}`, `/result` and `/clarifications` all returned 200.
+
+**Not a consistency defect.** If a future change genuinely needs the bridge to read assessments, that
+is a scope decision with its own review, not a refactor. Changing the dependency is the change; the
+route text staying the same does not make it a small one.
+
+## D-2026-08-16-2 — Lifecycle, acceptance and verification reach are three axes, and collapsing any two is the failure (EFE DECISION, ACTIVE)
+
+**Decision.** Cofferdam keeps three questions structurally and semantically separate, and no future
+aggregate may merge them:
+
+- **Worker lifecycle** — *what happened to execution?* (`completed`, `failed`, `interrupted`,
+  `cancelled`.)
+- **Acceptance** — *what do the recorded criteria and evidence establish?*
+- **Verification reach** — *how far could Cofferdam see?*
+
+**`completed` does not imply `met`.** The live database is the demonstration: 10 completed tasks and
+zero evaluations. A worker that ran to a clean stop has told you about its own control flow and
+nothing about whether it did what was asked. **`failed` does not imply `not_met`** either — a turn
+can fail after satisfying every criterion recorded for it, and reporting that as unmet would be a
+false negative invented by the aggregate.
+
+**Why this is the load-bearing rule of the whole milestone.** Every other guarantee M2K built —
+criteria frozen before dispatch, evidence assembled from machine observation, evaluation frozen after
+close — exists to stop a worker's own account of its work from being the verdict on it. An aggregate
+that read lifecycle as acceptance would reintroduce exactly that, in one line, at the end.
+
+**Vocabulary follows from it.** Acceptance never uses `success`, `failed` or `passed`: those words
+already belong to lifecycle, and a reader who sees one cannot tell which domain it came from. The
+acceptance words are `met`, `not_met`, `incomplete` and `not_assessable`.
+
+## D-2026-08-16-3 — Per-turn assessment has two dimensions, and known failure dominates uncertainty (EFE DECISION, ACTIVE)
+
+**Decision.** A future per-turn aggregate publishes **two dimensions**, not one overloaded enum.
+
+**Availability**, derived from the criteria state alone:
+
+| criteria state | availability | reason |
+| --- | --- | --- |
+| `present` | `assessable` | — |
+| `not_provided` | `not_assessable` | `no_structured_criteria` |
+| `legacy_unknown` | `not_assessable` | `historical_criteria_unknown` |
+
+Neither absent case may ever be rendered as `met`, `success`, `passed`, or an empty pass.
+`not_provided` means *Cofferdam knows none were supplied*; `legacy_unknown` means *Cofferdam does not
+possess the question*. They are different facts and their reasons stay distinct — collapsing them
+would turn "we never asked" and "we cannot know what we asked" into one sentence.
+
+**Acceptance outcome**, which exists **only** when criteria are `present`, with the closed V1
+vocabulary `met` / `not_met` / `incomplete` and this ordered rule:
+
+1. **Any deterministic `not_met` ⇒ `not_met`.** One known unmet required criterion is already
+   sufficient to know the turn's recorded requirements were not all established, regardless of how
+   many others are unverified. This is an *acceptance* result and explicitly **not** a lifecycle
+   failure.
+2. **Otherwise any `unverified` ⇒ `incomplete`.** Never `not_met`. This preserves the doctrine the
+   evaluator was built on: an evidence limitation is not a finding about the work.
+3. **Only every-criterion-`met` ⇒ `met`.**
+
+**The order is the point.** Known failure dominates, uncertainty blocks `met`, and nothing else
+reaches `met` — monotonic and conservative in the direction that cannot manufacture good news.
+
+**What `met` means, exactly.** *The acceptance criteria recorded for this turn are all established as
+met by the current assessment model.* It does **not** mean the task succeeded, the worker succeeded,
+the user's full intent was captured, or that a later turn cannot regress it.
+
+**Manual criteria cap the outcome.** A `manual` criterion always evaluates to `unverified`, because
+no human-answer channel exists, so **any `present` snapshot containing one cannot currently reach
+`met`** — it is capped at `incomplete`. This is recorded rather than worked around. Manual completion
+must never be inferred from worker prose, a PWA interaction, a claim, or a model judgement; a
+human-answer channel is new authority and new state and deserves its own reviewed design.
+
+**Blockers are orthogonal context, not a fourth outcome.** `requires_human` must not become a
+competing aggregate value: when a turn has both an unanswerable manual criterion and an incomplete
+machine observation, a single value has to suppress one of them. Boolean context beside the outcome —
+`requires_human`, `machine_verification_incomplete` — lets the turn say `incomplete` and say exactly
+why, and is what a caller can actually compose.
+
+**`claim_conflict` is excluded from aggregation entirely.** It is a disagreement between an adapter's
+record and the machine's. It is not a criterion result, not a task failure and not an aggregate
+blocker, and placing it near an outcome is precisely how a reader would come to treat it as one. It
+stays on the evidence surface as audit context.
+
+## D-2026-08-16-4 — There is no task-level acceptance, because criterion continuity does not exist yet (EFE DECISION, ACTIVE)
+
+**Decision.** Per-turn acceptance is well defined (D-2026-08-16-3). **Task-level acceptance across
+multiple turns is unavailable**, and Cofferdam will report it as unavailable rather than invent a
+rule. This is the deliberate answer, not a deferral for lack of time.
+
+**Both obvious rules are demonstrably wrong.**
+
+*Accumulate all turns* — turn 1 requires `foo.py` created; turn 2 requires `foo.py` removed. Treated
+as simultaneously active, the task's own requirements contradict each other, and no outcome is
+correct. The second turn was a legitimate change of mind, and an aggregate that cannot represent that
+reports a fault that does not exist.
+
+*Latest turn only* — turn 1 requires feature X and tests; turn 2 adds logging. Honouring only turn 2
+silently drops X and the tests from acceptance, and the task can report `met` while its original
+requirements were never established. A later turn routinely **extends** earlier intent without
+restating it.
+
+**The missing fact is the same in both.** Every turn may carry its own immutable criteria snapshot,
+and Cofferdam persists **nothing** about the relationship between snapshots: whether a later one
+replaces, extends, narrows, supersedes one specific criterion, reverses one, or is an independent
+follow-up concern. Without that, no composition across turns can be correct, and picking one anyway
+would encode a guess as a verdict.
+
+**Reporting the gap is the safe behaviour.** "Per-turn acceptance is available; task-level acceptance
+is not yet defined" is a true sentence a caller can act on. A confidently wrong task verdict is not.
+
+## D-2026-08-16-5 — Criterion continuity is explicit, pre-dispatch, and never authored by the worker (EFE DECISION, ACTIVE)
+
+**Decision.** The prerequisite for any task-level aggregate is a durable representation of criterion
+continuity, and its shape is constrained now even though none of it is built.
+
+**Explicit, never defaulted.** A new turn must state its continuity mode rather than inherit one.
+`replace` and `extend` are not distinguishable by inspecting the criteria, and a wrong default is
+applied silently to every task that never thinks about it.
+
+**Snapshot-level relation plus criterion-level relations.** A `supersedes_snapshot_id` alone cannot
+express the common case — a later turn superseding one requirement while its siblings stay live — so
+per-criterion relations are needed as well. Snapshot-level alone forces an all-or-nothing choice that
+matches neither of the two failure examples in D-2026-08-16-4.
+
+**Content fingerprints are not lineage.** Identical criterion text does not prove semantic lineage —
+two turns can require the same file changed for unrelated reasons — and differing text does not
+disprove it. Fingerprint matching may be an aid; it may never be the authority.
+
+**The planner or the user is the authority. The worker is not, and the adapter never is.** A worker
+that could declare its new criteria supersede its old ones could retire the requirement it had just
+failed, which is the self-grading this milestone exists to prevent. Adapters are excluded absolutely,
+on the same footing as every other adapter-supplied fact in Task Core.
+
+**Frozen pre-dispatch, alongside the criteria snapshot.** For the same reason the criteria and the
+Git baseline are: a boundary a worker can move after seeing its own results is not a boundary.
+
+**It requires an additive schema version**, and it is a **hard prerequisite** for a runtime
+task-level aggregate — that aggregate is not to be attempted before this exists.
+
+## D-2026-08-16-6 — A future aggregate is versioned separately and derived on read (EFE DECISION, ACTIVE)
+
+**Decision, two parts.**
+
+**Independent version.** A future aggregate carries its own code-owned semantic version —
+`AGGREGATOR_VERSION` or equivalent — distinct from the schema version, `ASSEMBLER_VERSION`, the
+criteria model version and `EVALUATOR_VERSION`. Composition doctrine changes for its own reasons, and
+a change from one doctrine to another must never silently reinterpret answers produced under the old
+one. Cofferdam already keeps four such versions apart for exactly this reason; a fifth concern gets a
+fifth version rather than borrowing the nearest.
+
+**Derived on read, not persisted.** A per-turn aggregate is a pure deterministic function of an
+immutable `EvaluationRecord` and its criteria snapshot. Persisting it would store nothing that cannot
+be recomputed, while adding a write path to a surface whose central property — asserted repeatedly in
+PR8 — is that reading it mutates nothing. Deriving it keeps that intact and makes a doctrine change a
+re-render rather than a data migration.
+
+**The counter-argument, and its answer.** Historical audit may later want *what did Cofferdam say at
+the time*. That is an argument for recording the **aggregator version beside the answer**, not for
+persisting the answer alone, and it should be taken as its own decision when a real need appears
+rather than pre-emptively.
+
+**Ordering: this doctrine precedes the named check runner.** The runner introduces the first
+project-scoped command execution authority, a new recorded result type, probably a new criterion kind
+and a `check_id`, invocation and result persistence, timeout and output policy, and an evaluator
+semantic expansion that would move `EVALUATOR_VERSION`. Built first, every one of those results would
+feed a consumer with no defined contract. Its trust boundary is unchanged and still binding
+(D-2026-08-11-7): host-owned definitions by stable id, literal `argv`, `shell=False`, validated
+project `cwd`, bounded timeout, bounded output, off by default per project, and **neither the caller
+nor the adapter ever supplies command text**.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

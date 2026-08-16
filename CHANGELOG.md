@@ -8,6 +8,37 @@ release.
 
 ### Added
 
+- **M2K PR9 — Cofferdam writes down the rules for judging a task, before it can judge one.**
+  This change is documentation only. No screen changes, no new button, nothing new is saved, and
+  the app behaves exactly as it did yesterday.
+
+  **The problem it addresses.** Cofferdam can now answer, for a single turn, whether each individual
+  requirement was met, not met, or could not be verified. What it still cannot answer is the question
+  people actually ask: *did this task do what I asked?* Turning a list of individual answers into one
+  overall answer sounds like arithmetic and is not — it is a series of judgement calls about what
+  counts as good enough, and every one of them can be got wrong in a way that reads as success.
+
+  **What it settles.** That a worker finishing cleanly is not the same as the work being acceptable.
+  That one clearly unmet requirement is enough to say the requirements were not met, but that
+  *uncertainty* — Cofferdam being unable to check something — must never be reported as failure, and
+  must always block a clean pass. That a requirement only a person can judge keeps the answer
+  incomplete until a person actually judges it, and is never quietly marked done on a worker's say-so.
+  That "no requirements were given" and "this task is too old for us to know what was asked" are two
+  different sentences and neither one means success.
+
+  **What it deliberately refuses to decide.** Whether a whole task — across several rounds of
+  back-and-forth — succeeded. If a later round changed its mind and asked for a file to be removed
+  that an earlier round asked for, treating both as live makes the task contradict itself. If only
+  the newest round counts, the original feature quietly stops mattering. Cofferdam does not currently
+  record whether a later request replaces, extends or is unrelated to an earlier one, so it says the
+  task-level answer is unavailable rather than inventing one. Saying "I don't know yet" is the
+  feature here.
+
+  **Why now, before the next piece of work.** The next milestone lets Cofferdam run project checks —
+  the first time it will run a command inside somebody's project. Those checks produce more results,
+  and results need a consumer. Writing the rules first means the checks are built against a contract
+  that already exists, instead of the contract being decided by whatever the checks happened to do.
+
 - **M2K PR4 — Cofferdam now writes down where a project stood before a worker touched it.**
   Nothing about this is visible yet, and that is deliberate.
 

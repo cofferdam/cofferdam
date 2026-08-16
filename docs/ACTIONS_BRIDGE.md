@@ -146,6 +146,19 @@ provider session id, no Remote Control.
 These are not disabled endpoints. They are absent, which is a stronger statement
 than one that refuses.
 
+**No evidence bundle and no assessment**, and the mechanism is worth stating
+because it is not an absent endpoint this time. Both routes exist on the
+workstation daemon and are guarded by `require_token`, which — unlike
+`require_task_caller`, the dependency behind the bridge's own task routes — has
+never heard of the bridge credential. A bridge request therefore arrives as an
+ordinary unauthenticated one and is refused with 401. An assessment is Cofferdam's
+judgement about somebody's work measured against what they asked for, and that is
+further from this surface's business than the operational verbs it does carry.
+
+This asymmetry is **intentional** (D-2026-08-16-1). It will look like an
+inconsistency to anyone tidying dependencies for uniformity; changing it is a
+scope decision with its own review, not a refactor.
+
 ## Response normalization
 
 Every response is **constructed** in
