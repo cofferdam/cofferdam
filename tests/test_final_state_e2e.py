@@ -183,7 +183,8 @@ class FinalStateEndToEnd(unittest.TestCase):
 
     def test_the_whole_walk(self):
         # 1. The schema moved, additively, and only for this.
-        self.assertEqual(SCHEMA_VERSION, 10)
+        # PR14 arrived at v10; v11 is PR17's criteria vocabulary widening.
+        self.assertGreaterEqual(SCHEMA_VERSION, 10)
 
         # 2-4. Turn 1: a root criterion naming `a.txt`; the worker creates it and
         # commits nothing.
@@ -321,8 +322,10 @@ class FinalStateEndToEnd(unittest.TestCase):
         )
 
         self.assertEqual(tuple(CRITERION_KINDS), ("evidence", "manual"))
+        from cofferdam.workstation.tasks.criteria import CHANGE_PREDICATES
+
         self.assertEqual(
-            tuple(EVIDENCE_PREDICATES),
+            tuple(CHANGE_PREDICATES),
             ("path_changed", "path_operation", "rename"),
         )
         self.assertEqual(EVALUATOR_VERSION, 1)
@@ -369,22 +372,33 @@ class NegativeSpaceTests(unittest.TestCase):
             )
             self.assertNotIn("AGGREGATOR_VERSION", self.declared_names(text))
 
-    def test_no_module_defines_a_state_predicate_yet(self):
-        """`path_exists` / `path_absent` are PR13's plan, not PR14's delivery."""
-        for path, text in self.python_sources():
-            declared = self.declared_names(text)
-            for forbidden in (
-                "PREDICATE_PATH_EXISTS",
-                "PREDICATE_PATH_ABSENT",
-                "PREDICATE_CURRENT_STATE",
-            ):
-                self.assertNotIn(forbidden, declared, "%s: %s" % (path, forbidden))
+    def test_no_state_predicate_is_evaluated(self):
+        """PR17 made them representable. PR14 still does not interpret them.
 
-    def test_the_evidence_predicate_vocabulary_is_unchanged(self):
-        from cofferdam.workstation.tasks.criteria import EVIDENCE_PREDICATES
+        Originally this asserted the constants did not exist at all, which PR17
+        legitimately changed. What survives is the property PR14 actually needs:
+        the observer knows nothing about predicates, and nothing evaluates a
+        state one.
+        """
+        from cofferdam.workstation.tasks import evaluation, finalstate
+
+        for predicate in ("path_exists", "path_absent"):
+            self.assertNotIn(predicate, evaluation._PREDICATES)
+        observer = self.python_sources_for(finalstate)
+        for predicate in ("path_exists", "path_absent"):
+            self.assertNotIn(predicate, observer)
+
+    def python_sources_for(self, module):
+        from pathlib import Path
+
+        return Path(module.__file__).read_text(encoding="utf-8")
+
+    def test_the_change_predicate_vocabulary_is_unchanged(self):
+        """PR17 added state predicates beside these; it changed none of them."""
+        from cofferdam.workstation.tasks.criteria import CHANGE_PREDICATES
 
         self.assertEqual(
-            tuple(EVIDENCE_PREDICATES), ("path_changed", "path_operation", "rename")
+            tuple(CHANGE_PREDICATES), ("path_changed", "path_operation", "rename")
         )
 
     def test_no_aggregate_or_runner_appeared(self):

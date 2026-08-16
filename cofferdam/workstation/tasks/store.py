@@ -258,7 +258,19 @@ from .turns import (
 #: no content, no digest, no evaluation, no predicate, no aggregate.
 #: ``EVALUATOR_VERSION`` stays at 1, ``ASSEMBLER_VERSION`` stays at 3, and there
 #: is still no ``AGGREGATOR_VERSION``.
-SCHEMA_VERSION = 10
+#:
+#: **v11** is PR17's criteria vocabulary widening, and it is the **first
+#: destructive-shape migration this project has performed**. Every version before
+#: it was a pure ``CREATE TABLE IF NOT EXISTS``; this one rebuilds
+#: ``task_turn_criterion_items`` because SQLite cannot alter a ``CHECK``
+#: constraint in place and the predicate list is enumerated in one. The single
+#: intentional difference is that the list now admits ``path_exists`` and
+#: ``path_absent``; every historical row, every criterion id, every index and
+#: every other constraint is carried across unchanged. **Representation only** —
+#: nothing evaluates the new predicates, so ``EVALUATOR_VERSION`` stays 1,
+#: ``CURRENT_ASSESSMENT_VERSION`` stays 1, ``FINAL_STATE_OBSERVER_VERSION`` stays
+#: 1, and there is still no ``AGGREGATOR_VERSION``.
+SCHEMA_VERSION = 11
 
 #: Where the database lives, under COFFERDAM_HOME. Its own directory so the file
 #: and its WAL/shm siblings stay together and can be permissioned as a unit.
@@ -800,8 +812,21 @@ CREATE TABLE IF NOT EXISTS task_turn_criterion_items (
     -- evaluator that branched on the column instead of the kind.
     CHECK ((kind = 'evidence') = (predicate IS NOT NULL)),
     CHECK ((kind = 'evidence') = (path IS NOT NULL)),
+    -- Widened in schema v11 to admit the two **state** predicates. The three
+    -- turn-change predicates ask what a worker did during one turn;
+    -- `path_exists` and `path_absent` ask what the project is at a turn's
+    -- final-state boundary. Nothing converts one into the other, and no
+    -- historical row was rewritten to use the new words.
+    --
+    -- The structural CHECKs below already constrain the new predicates
+    -- correctly and needed no change: a state predicate is not
+    -- `path_operation`, so `operation` must be NULL; it is not `rename`, so
+    -- `to_path` must be NULL; and it is an evidence kind, so `path` is
+    -- required. That is why the intentional delta of the v11 rebuild is exactly
+    -- this one clause.
     CHECK (predicate IS NULL
-           OR predicate IN ('path_changed', 'path_operation', 'rename')),
+           OR predicate IN ('path_changed', 'path_operation', 'rename',
+                            'path_exists', 'path_absent')),
     -- An operation belongs to exactly one predicate, and must be present for it.
     -- `renamed` is absent from the operation list on purpose: a rename is a
     -- two-path fact and this column carries one path, so it has its own
@@ -1645,6 +1670,12 @@ class TaskStore:
         connection.execute("PRAGMA synchronous=FULL")
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=" + str(BUSY_TIMEOUT_MS))
+        # Before the schema script, not after. The script is
+        # `CREATE TABLE IF NOT EXISTS` throughout, so it would leave a v10
+        # criterion-items table exactly as it found it; running the rebuild first
+        # means the script then recreates the table's index for free, from the
+        # same single source of truth that a fresh database uses.
+        self._migrate_criterion_items(connection)
         connection.executescript(_SCHEMA)
         self._apply_schema_version(connection)
         self._restrict_files()
@@ -1672,6 +1703,191 @@ class TaskStore:
             except OSError:  # pragma: no cover - absent, or a platform without modes
                 continue
 
+    # -- the v10 -> v11 criterion-items rebuild -------------------------------
+
+    #: The column list carried across, in stored order. Written out rather than
+    #: `SELECT *` so a future column cannot join the copy silently, and so the
+    #: copy is a **representation change** rather than anything that could be
+    #: mistaken for a data rewrite: no serializer runs, no id is minted, no path
+    #: is normalized, no value is reinterpreted.
+    _CRITERION_ITEM_COLUMNS = (
+        "criterion_id",
+        "task_id",
+        "turn_number",
+        "ordinal",
+        "kind",
+        "predicate",
+        "path",
+        "to_path",
+        "operation",
+        "description",
+    )
+
+    _REBUILD_TABLE = "task_turn_criterion_items_v11"
+
+    @staticmethod
+    def _criterion_items_ddl(name: str) -> str:
+        """The shipped criterion-items table definition, under another name.
+
+        Extracted from :data:`_SCHEMA` rather than written twice, because the one
+        property this migration must have above all others is that a **migrated**
+        v11 database is indistinguishable from a **fresh** one. Two copies of a
+        table definition drift, and the drift would be invisible until something
+        that only holds on one of them broke.
+
+        Depth is counted over the statement with ``--`` comments removed, so a
+        parenthesis inside a comment cannot end the scan early; the text returned
+        is the original, comments and all.
+        """
+        marker = "CREATE TABLE IF NOT EXISTS task_turn_criterion_items ("
+        start = _SCHEMA.index(marker)
+        depth = 0
+        index = start + len(marker) - 1
+        while index < len(_SCHEMA):
+            line_end = _SCHEMA.find("\n", index)
+            if line_end == -1:
+                line_end = len(_SCHEMA)
+            comment = _SCHEMA.find("--", index)
+            stop = line_end if comment == -1 or comment > line_end else comment
+            for position in range(index, stop):
+                character = _SCHEMA[position]
+                if character == "(":
+                    depth += 1
+                elif character == ")":
+                    depth -= 1
+                    if depth == 0:
+                        statement = _SCHEMA[start : position + 1]
+                        return statement.replace(
+                            "task_turn_criterion_items", name, 1
+                        )
+            index = line_end + 1
+        raise StoreUnavailable("the criterion items table definition is unreadable")
+
+    def _migrate_criterion_items(self, connection: sqlite3.Connection) -> bool:
+        """Rebuild ``task_turn_criterion_items`` so it admits state predicates.
+
+        **The first destructive-shape migration in this project**, and it is one
+        only because SQLite has no way to widen a ``CHECK``: there is no
+        ``ALTER TABLE ... DROP CONSTRAINT``, so the enumerated predicate list can
+        only change by building a new table and moving the rows. Everything else
+        about the table — every column, the primary key, the uniqueness
+        constraint, the outgoing foreign key, the index and all eleven other
+        checks — is carried across unchanged.
+
+        **Detected from the stored DDL, not from the version number.** If the
+        process dies after the rename but before the version row is updated, the
+        next open finds a table that already admits the new predicates and does
+        nothing. That makes the migration idempotent across exactly the interrupt
+        that a version-number check would get wrong.
+
+        Foreign keys, and why they are switched off
+        -------------------------------------------
+
+        Three foreign keys point at this table: ``task_turn_criterion_results``
+        (``CASCADE``) and both sides of ``task_turn_criterion_supersessions``
+        (``CASCADE`` and ``RESTRICT``). With enforcement on, ``DROP TABLE`` is
+        refused outright by the ``RESTRICT`` side — and if it were not, the
+        ``CASCADE`` sides would silently delete stored evaluation results and
+        lineage edges. Neither outcome is acceptable, so enforcement is disabled
+        for the rebuild exactly as SQLite's own documented procedure requires.
+
+        It is disabled **outside** the transaction, because ``PRAGMA
+        foreign_keys`` is a no-op inside one — that is not a stylistic choice,
+        it is the only ordering that works, and it is asserted rather than
+        assumed. It is restored in a ``finally``, and the restoration is
+        verified: a connection that silently continued with enforcement off would
+        be a far worse outcome than a failed migration.
+
+        ``PRAGMA foreign_key_check`` runs **inside** the transaction, before the
+        commit, so a rebuild that orphaned anything rolls back instead of
+        committing. Nothing here reads the filesystem, runs Git, or touches a
+        provider: it is a schema change.
+
+        Why build-aside-and-rename rather than rename-aside-and-build
+        ------------------------------------------------------------
+
+        The new table is created under a temporary name and renamed into place,
+        which is SQLite's preferred order and is chosen for one specific reason:
+        modern SQLite **rewrites ``REFERENCES`` clauses in other tables** when a
+        table is renamed. Renaming the *old* table out of the way would therefore
+        silently repoint the three foreign keys at the doomed table — repairable
+        only with ``PRAGMA legacy_alter_table``, another connection-level switch
+        with a subtle failure mode. Renaming the *new* table in is inert instead,
+        because nothing references its temporary name; the tests assert that no
+        other table's DDL moves.
+
+        The one visible artifact is cosmetic and worth naming so it is not later
+        mistaken for drift: ``ALTER TABLE ... RENAME TO`` stores the table name
+        **quoted**, so a migrated database records
+        ``CREATE TABLE "task_turn_criterion_items"`` where a fresh one records it
+        unquoted. Quoting an identifier is semantically inert in SQLite, and a
+        test asserts that the quoting is the *only* difference between the two —
+        every column, constraint, check and index is byte-identical.
+        """
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master"
+            " WHERE type = 'table' AND name = 'task_turn_criterion_items'"
+        ).fetchone()
+        if row is None:
+            # A fresh database. The schema script is about to create the table
+            # in its v11 shape, and there is nothing to move.
+            return False
+        stored = row["sql"] or ""
+        if "'path_exists'" in stored:
+            return False
+
+        columns = ", ".join(self._CRITERION_ITEM_COLUMNS)
+        connection.execute("PRAGMA foreign_keys=OFF")
+        if connection.execute("PRAGMA foreign_keys").fetchone()[0]:  # pragma: no cover
+            raise StoreUnavailable(
+                "foreign key enforcement could not be suspended for the migration"
+            )
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    "DROP TABLE IF EXISTS %s" % (self._REBUILD_TABLE,)
+                )
+                connection.execute(self._criterion_items_ddl(self._REBUILD_TABLE))
+                connection.execute(
+                    "INSERT INTO %s (%s) SELECT %s FROM task_turn_criterion_items"
+                    % (self._REBUILD_TABLE, columns, columns)
+                )
+                moved = connection.execute(
+                    "SELECT COUNT(*) FROM %s" % (self._REBUILD_TABLE,)
+                ).fetchone()[0]
+                original = connection.execute(
+                    "SELECT COUNT(*) FROM task_turn_criterion_items"
+                ).fetchone()[0]
+                if moved != original:  # pragma: no cover - defensive
+                    raise StoreUnavailable(
+                        "the criteria migration would have lost rows"
+                    )
+                connection.execute("DROP TABLE task_turn_criterion_items")
+                connection.execute(
+                    "ALTER TABLE %s RENAME TO task_turn_criterion_items"
+                    % (self._REBUILD_TABLE,)
+                )
+                violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+                if violations:
+                    raise StoreUnavailable(
+                        "the criteria migration left %d unresolved reference(s)"
+                        % len(violations)
+                    )
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
+            connection.execute("COMMIT")
+        finally:
+            connection.execute("PRAGMA foreign_keys=ON")
+            if not connection.execute("PRAGMA foreign_keys").fetchone()[0]:
+                # Refusing to hand back a connection that would accept an orphan
+                # row is the whole point of checking.
+                raise StoreUnavailable(
+                    "foreign key enforcement could not be restored after the migration"
+                )
+        return True
+
     def _apply_schema_version(self, connection: sqlite3.Connection) -> None:
         row = connection.execute(
             "SELECT value FROM schema_meta WHERE key = 'schema_version'"
@@ -1694,13 +1910,19 @@ class TaskStore:
                 "the task database was written by a newer version of Cofferdam"
             )
         if found < SCHEMA_VERSION:
-            # The upgrade already happened: the schema script above runs
+            # The upgrade already happened, and by this point it has happened in
+            # both of the ways this project now has. The schema script above runs
             # ``CREATE TABLE IF NOT EXISTS`` on every start, so an older database
-            # gained the new tables a moment ago. All this does is record that it
-            # did, so the next start does not think it is still on the old
-            # version. Nothing is altered, dropped or rewritten — an additive
-            # schema is the only kind this line is correct for, and
-            # :data:`SCHEMA_VERSION` says so.
+            # gained any new tables a moment ago; and
+            # :meth:`_migrate_criterion_items` ran before it, so a v10 database
+            # has already had its criterion-items table rebuilt.
+            #
+            # All this line does is record that, so the next start does not think
+            # it is still on the old version. It is deliberately the **last**
+            # step: a crash before it leaves a database whose shape is already
+            # correct and whose version says otherwise, and every migration here
+            # is written to detect its own completion from the schema rather than
+            # from this number, so that ordering is safe in exactly that case.
             connection.execute(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
                 (str(SCHEMA_VERSION),),

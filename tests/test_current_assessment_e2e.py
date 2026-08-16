@@ -175,8 +175,8 @@ class CurrentAssessmentEndToEnd(unittest.TestCase):
     # -- the walk -----------------------------------------------------------
 
     def test_the_whole_walk(self):
-        # 1. Schema does not move: this PR is pure derivation.
-        self.assertEqual(10, SCHEMA_VERSION)
+        # 1. PR16 adds no schema of its own; v11 is PR17's.
+        self.assertGreaterEqual(SCHEMA_VERSION, 10)
 
         # 2-3. Turn 1, root: one change criterion and one manual one.
         first = self.turn([self.change("a"), self.manual()], {"mode": "root"})
@@ -349,22 +349,32 @@ class NegativeSpaceTests(unittest.TestCase):
                 names.add(node.value)
         return names
 
-    def test_no_state_predicate_exists(self):
-        self.assertEqual(
-            ("path_changed", "path_operation", "rename"), tuple(EVIDENCE_PREDICATES)
-        )
-        for path, text in self.python_sources():
-            declared = self.vocabulary(text)
-            for forbidden in ("path_exists", "path_absent"):
-                self.assertNotIn(forbidden, declared, "%s: %s" % (path, forbidden))
+    def test_no_state_predicate_is_evaluated(self):
+        """M2K PR17 made them representable; nothing decides them.
+
+        The original form of this test asserted the vocabulary held only the
+        three change predicates. PR17 legitimately widened it, so what is
+        asserted here is the invariant that actually survives: the binder binds
+        change predicates only, and the evaluator has no handler for a state one.
+        """
+        from cofferdam.workstation.tasks import evaluation
+        from cofferdam.workstation.tasks.binding import CHANGE_PREDICATES
+        from cofferdam.workstation.tasks.criteria import STATE_PREDICATES
+
+        self.assertEqual(("path_changed", "path_operation", "rename"), CHANGE_PREDICATES)
+        self.assertEqual(("path_exists", "path_absent"), STATE_PREDICATES)
+        for predicate in STATE_PREDICATES:
+            self.assertNotIn(predicate, CHANGE_PREDICATES)
+            self.assertNotIn(predicate, evaluation._PREDICATES)
 
     def test_the_criteria_predicate_constraint_is_unchanged(self):
         from cofferdam.workstation.tasks import store as store_module
 
         self.assertIn(
-            "predicate IN ('path_changed', 'path_operation', 'rename')",
+            "predicate IN ('path_changed', 'path_operation', 'rename',",
             store_module._SCHEMA,
         )
+        self.assertIn("'path_exists', 'path_absent')", store_module._SCHEMA)
 
     def test_no_module_defines_an_aggregator_version(self):
         import re
@@ -388,7 +398,7 @@ class NegativeSpaceTests(unittest.TestCase):
     def test_the_binder_adds_no_table(self):
         from cofferdam.workstation.tasks import store as store_module
 
-        self.assertEqual(10, store_module.SCHEMA_VERSION)
+        self.assertGreaterEqual(store_module.SCHEMA_VERSION, 10)
         for forbidden in ("current_assessment", "criterion_assessment", "binding"):
             self.assertNotIn(forbidden, store_module._SCHEMA)
 

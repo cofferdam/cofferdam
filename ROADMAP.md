@@ -706,8 +706,8 @@ downstream reads from.
     historical criteria — the first destructive-shape migration here. Recommends the next layer be
     **derived rather than persisted**, since every input is immutable and versioned.
     D-2026-08-17-1 through D-2026-08-17-4.
-  - **PR16 — the derived current criterion assessment foundation.** *Implemented on
-    `m2k-pr16-current-assessment`, not merged and not deployed.* The layer PR13 named and PR15
+  - **PR16 — the derived current criterion assessment foundation.** *Merged as `c1d6f1d` (#61),
+    **not deployed**.* The layer PR13 named and PR15
     designed, built on the predicates that exist today: **for every criterion active at turn N, what
     current result can Cofferdam legitimately establish there?** One rule decides it — *evidence must
     match the criterion's semantics*. A change criterion that **originated at the target turn** binds
@@ -731,6 +731,29 @@ downstream reads from.
     bounded recovery. Internal only: no route, no bridge Action, no PWA control, PR8 unchanged,
     `EVALUATOR_VERSION` unchanged, **no aggregate and no `AGGREGATOR_VERSION`**.
     D-2026-08-17-5 and D-2026-08-17-6.
+  - **PR17 — the criteria vocabulary v11 migration foundation.** *Implemented on
+    `m2k-pr17-criteria-v11`, not merged and not deployed.* Does one thing: makes `path_exists` and
+    `path_absent` **representable**, without evaluating them. **The first destructive-shape migration
+    this project has performed** — SQLite has no `ALTER TABLE ... DROP CONSTRAINT` and the predicate
+    list lives in a `CHECK`, both verified rather than assumed, so `task_turn_criterion_items` is
+    rebuilt. The intentional delta is **exactly one clause**: the other eleven checks already
+    constrain the new predicates correctly. **Foreign keys were the risk** — three point at the table,
+    and with enforcement on `DROP TABLE` is *refused* by the `RESTRICT` side while with it off the
+    child rows survive, so enforcement is suspended **outside** the transaction (it is a no-op inside
+    one), restored in a `finally`, and the restoration **verified**;
+    `PRAGMA foreign_key_check` runs before the commit. **Build-aside-and-rename**, because renaming
+    the old table out of the way would make SQLite repoint all three foreign keys at the doomed table;
+    the resulting quoted table name is cosmetic and a test proves it is the *only* difference between
+    fresh and migrated. Interrupted at **every step**, the database is still v10 and whole, and a
+    retry succeeds; completion is detected from the stored DDL rather than the version number, so a
+    crash between the rename and the bump is a no-op. **Representable before evaluatable is safe by
+    prior design**: PR7's evaluator and PR16's binder were both built total, returning
+    `unsupported_capability` and `unsupported_predicate` respectively, so a state criterion runs the
+    whole lifecycle with no crash, no dropped criterion and **no `met` or `not_met`**. PR14
+    contributes the criterion's path to its bounded observation scope, which is target selection
+    rather than interpretation. **No conversion, ever**, and no version moved but the schema.
+    Rollback is a **pair**, and stops being lossless the moment a v11-only criterion is written.
+    D-2026-08-17-7 and D-2026-08-17-8.
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**

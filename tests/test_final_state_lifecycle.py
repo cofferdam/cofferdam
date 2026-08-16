@@ -700,8 +700,9 @@ class NoSemanticConversionTests(FinalStateCase):
                 0,
             )
 
-    def test_the_schema_version_is_ten(self):
-        self.assertEqual(SCHEMA_VERSION, 10)
+    def test_the_schema_version_is_at_least_ten(self):
+        # PR14 arrived at v10; v11 is PR17's.
+        self.assertGreaterEqual(SCHEMA_VERSION, 10)
 
 
 if __name__ == "__main__":  # pragma: no cover

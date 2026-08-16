@@ -797,10 +797,75 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2K PR17 — the criteria vocabulary v11 migration foundation
+
+On `m2k-pr17-criteria-v11`, from the merged `c1d6f1d`. **Implemented on a branch, not merged and not
+deployed.**
+
+Does one thing: makes `path_exists` and `path_absent` **representable**. It does not evaluate them.
+
+**The first destructive-shape migration this project has performed.** Every schema step before it was
+a pure `CREATE TABLE IF NOT EXISTS`; this one rebuilds `task_turn_criterion_items`, because SQLite has
+no `ALTER TABLE ... DROP CONSTRAINT` and the predicate list lives in a `CHECK`. Verified rather than
+assumed: both `ALTER TABLE` constraint forms are a syntax error and the v10 `CHECK` refuses the
+insert.
+
+**The intentional delta is exactly one clause.** The other eleven checks already constrain the new
+predicates correctly — a state predicate is not `path_operation` so `operation` must be NULL, not
+`rename` so `to_path` must be NULL, and is an evidence kind so `path` is required.
+
+**Foreign keys were the load-bearing risk.** Three point at the table: evaluation results
+(`CASCADE`) and both sides of supersessions (`CASCADE` and `RESTRICT`). Measured: with enforcement on
+`DROP TABLE` is **refused** by the `RESTRICT` side; with it off the child rows survive untouched. So
+enforcement is suspended for the rebuild **outside** the transaction — `PRAGMA foreign_keys` is a
+no-op inside one, confirmed empirically — restored in a `finally`, and the restoration **verified**,
+because a connection silently running without enforcement would be worse than a failed migration.
+`PRAGMA foreign_key_check` runs inside the transaction before the commit.
+
+**Build-aside-and-rename**, because modern SQLite rewrites `REFERENCES` clauses in *other* tables when
+a table is renamed — renaming the old table out of the way would repoint all three foreign keys at
+the doomed table. The one artifact is cosmetic and recorded so it is never mistaken for drift:
+`RENAME TO` stores the name quoted, and a test asserts that quoting is the **only** difference between
+a fresh v11 database and a migrated one.
+
+**Interrupted at every step** — before the new table, during the copy, before the drop, during the
+rename, at the foreign-key check, at the commit, at the transaction start — and each time the
+database is still v10, whole, with every row, no half-built table, clean integrity and foreign keys,
+and a retry that then succeeds. Completion is detected from the **stored DDL, not the version
+number**, so a crash between the rename and the version bump is a no-op rather than a second rebuild.
+
+**Representable before evaluatable, and safe by prior design.** This was the gate that could have
+stopped the PR. It resolves because both deciding layers were already total: PR7's evaluator returns
+`unverified` / `unsupported_capability` for a predicate it has no handler for, and PR16's binder
+returns `unverified` / `unsupported_predicate` — a branch written and tested with `path_exists`
+literally, before the predicate existed. Verified end to end rather than argued: the turn evaluates,
+the record is complete and valid, the turn closes, the assessment resolves, and **no `met` or
+`not_met` appears anywhere**.
+
+**PR14 picks the path up and that means nothing.** A state criterion contributes its `path` to the
+bounded observation scope exactly as a change criterion does, so the observer may record
+`present`/`absent`/`unavailable`. That is how targets are selected, not an interpretation — the
+observer never sees a predicate.
+
+**No conversion, ever.** `path_operation(P, created)` does not become `path_exists(P)`; no historical
+row was rewritten; continuity performs no such transformation, and a state predicate does not
+automatically supersede the change predicate it resembles.
+
+**Only the schema moved.** `EVALUATOR_VERSION` 1, `CURRENT_ASSESSMENT_VERSION` 1,
+`FINAL_STATE_OBSERVER_VERSION` 1, `CRITERIA_MODEL_VERSION` 1 — the existing criteria fingerprint
+already binds predicate and path honestly, so no new fingerprint version was needed.
+
+**Rollback is a pair and stops being clean once v11 is written to.** A slot flip cannot walk a schema
+backwards. Before any v11-only criterion exists, restoring a pre-v11 backup is a clean point-in-time
+downgrade; **after** a `path_exists` criterion has been stored, restoring it destroys requirements a
+user actually stated, because the old schema cannot represent them.
+D-2026-08-17-7 and D-2026-08-17-8.
+
 ### M2K PR16 — the derived current criterion assessment foundation
 
-On `m2k-pr16-current-assessment`, from the merged `12e64cd`. **Implemented on a branch, not merged
-and not deployed.**
+**Merged as `c1d6f1d` (#61) and deliberately NOT deployed.** Production remains on the PR10 runtime —
+workstation and Actions bridge both from **slot A at `1efd49b`**, live schema **v9**. The record below
+was written while PR16 was on `m2k-pr16-current-assessment`, from the merged `12e64cd`.
 
 The layer PR13 said was missing and PR15 designed. PR11 answers *which criteria are in force at turn
 N*; PR7 answers *what did the worker do during turn N*. Neither answers the question an aggregate
@@ -1035,16 +1100,18 @@ actually running — not PR11 or PR12, which are merged and undeployed.
 M2K is **in progress**: PR1 through PR8 are merged and deployed; PR9 is merged (`b2314f0`, #54) and
 needed no deployment because it changed only documentation; PR10 is merged (`1efd49b`, #55) and
 deployed to slot A on schema v9; PR11 (`3bb9a5b`, #56), PR12 (`2dc4177`, #57), PR13 (`8cd8ba3`, #58),
-PR14 (`064fe51`, #59) and PR15 (`12e64cd`, #60) are merged and **intentionally not deployed**; PR16
-is on a branch. See *In progress* above for PR16.
+PR14 (`064fe51`, #59), PR15 (`12e64cd`, #60) and PR16 (`c1d6f1d`, #61) are merged and **intentionally
+not deployed**; PR17 is on a branch. See *In progress* above for PR17.
 
 **`main` is now schema v10; production is still schema v9**, and that gap is the deployment decision
 rather than a lag. PR14 is the change that turns this batch from a slot flip into a schema move, so
-deploying PR11–PR16 is **Tier 2**: a verified pre-v10 backup taken with SQLite's online backup API, a
+deploying PR11–PR17 is **Tier 2**: a verified pre-v10 backup taken with SQLite's online backup API, a
 migration rehearsal, the old-runtime refusal check that PR14 already proves in CI, and an honest
 rollback **pair** — the slot *and* the restored snapshot — because a flip alone cannot walk a schema
 backwards. PR15 and PR16 add nothing to that cost: PR15 is documentation, and PR16 is derived read
-logic with no schema of its own and no caller yet.
+logic with no schema of its own and no caller yet. **PR17 raises it**: it takes the database to v11
+through the first destructive-shape migration here, so the eventual deployment rehearses that rebuild
+on a copy of the real database and the rollback backup must be taken **before** it runs.
 
 **A/B remains deployment machinery, not feature-development machinery.** Work is developed in
 isolated feature worktrees and merged to `main`; a slot is never a workbench; and a deployment happens

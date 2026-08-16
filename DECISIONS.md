@@ -3248,6 +3248,87 @@ evaluation read after it would describe a database state that never existed.
 unchanged. **No aggregate**, no verdict, no `AGGREGATOR_VERSION`: this produces the legitimate
 per-criterion inputs an aggregate would need and stops there.
 
+## D-2026-08-17-7 — The criteria vocabulary is widened by rebuilding the table, and that is the first destructive migration here (EFE DECISION, ACTIVE)
+
+**Decision.** Schema **v11** admits two state predicates — `path_exists` and `path_absent` — into
+`task_turn_criterion_items`. Because SQLite has no `ALTER TABLE ... DROP CONSTRAINT` and the
+predicate list is enumerated in a `CHECK`, the only way to widen it is to build a new table and move
+the rows. Verified rather than assumed: both `ALTER TABLE ... ADD/DROP CONSTRAINT` forms are a syntax
+error, and the v10 `CHECK` refuses the insert.
+
+**The intentional delta is exactly one clause.** The eleven other checks already constrain the new
+predicates correctly and needed no change: a state predicate is not `path_operation`, so `operation`
+must be NULL; it is not `rename`, so `to_path` must be NULL; it is an evidence kind, so `path` is
+required. Nothing else about the table moves.
+
+**Foreign keys are the load-bearing risk, and they are disabled deliberately.** Three keys point at
+this table: `task_turn_criterion_results` (`CASCADE`) and both sides of
+`task_turn_criterion_supersessions` (`CASCADE` and `RESTRICT`). Measured, not reasoned about: with
+enforcement on, `DROP TABLE` is **refused** by the `RESTRICT` side; with it off, the child rows
+survive untouched. Enforcement is therefore suspended for the rebuild, **outside** the transaction —
+`PRAGMA foreign_keys` is a no-op inside one, which was confirmed empirically rather than trusted —
+restored in a `finally`, and the restoration is **verified**, because a connection silently running
+without enforcement would be a worse outcome than a failed migration.
+`PRAGMA foreign_key_check` runs inside the transaction before the commit, so a rebuild that orphaned
+anything rolls back instead of committing.
+
+**Build-aside-and-rename, not rename-aside-and-build.** Modern SQLite rewrites `REFERENCES` clauses
+in other tables when a table is renamed, so renaming the *old* table out of the way would repoint all
+three foreign keys at the doomed table. Renaming the *new* table in is inert, because nothing
+references its temporary name. The one artifact is cosmetic and is recorded so it is never mistaken
+for drift: `ALTER TABLE ... RENAME TO` stores the name **quoted**, so a migrated database reads
+`CREATE TABLE "task_turn_criterion_items"` where a fresh one reads it unquoted. A test asserts that
+the quoting is the *only* difference between fresh and migrated — every column, constraint and index
+is byte-identical.
+
+**Completion is detected from the stored DDL, not the version number.** A crash after the rename but
+before the version row is updated leaves a database whose shape is already correct; detecting by DDL
+makes the next open a no-op rather than a second rebuild. The version bump is deliberately the last
+step for the same reason.
+
+**No backfill and no conversion, ever.** `path_operation(P, created)` remains exactly that; no row
+was rewritten to use the new words, and none ever will be. Pinned by a test that reads the historical
+predicates back after migration.
+
+## D-2026-08-17-8 — State predicates are representable before they are evaluatable, and that is safe by prior design (EFE DECISION, ACTIVE)
+
+**Decision.** PR17 ships the vocabulary without any evaluation of it. A `path_exists` criterion can be
+authored, validated, stored, fingerprinted, resolved, inherited and superseded, and **nothing decides
+it**.
+
+**This was the gate that could have stopped the PR, and it resolves affirmatively because both
+deciding layers were already built total.** PR7's evaluator dispatches on a predicate table and
+returns `unverified` with `unsupported_capability` for anything absent from it — the seat its author
+described as "where a future capability will sit". PR16's binder returns `unverified` with
+`unsupported_predicate` for any predicate outside its change set; that branch was written and tested
+with `path_exists` literally, before the predicate existed. So the lifecycle was verified end to end
+rather than argued: the turn evaluates, the record is complete and valid with the right result count,
+the turn closes normally, and the current assessment resolves — with no crash, no dropped criterion,
+no invalid `EvaluationRecord`, and **no `met` or `not_met` anywhere**.
+
+Had either layer been partial rather than total, the correct answer would have been to merge the
+vocabulary and the final-state binder atomically. It was not necessary, and forcing them together
+would have made the first destructive migration land in the same PR as new evaluation semantics.
+
+**PR14 picks the path up, and that means nothing about acceptance.** A state criterion contributes
+its `path` to the bounded final-state observation scope exactly as a change criterion does, so the
+observer may record `present` / `absent` / `unavailable` for it. That is a *representation*
+consequence of how targets are selected, not an interpretation: the observer never sees a predicate,
+and no acceptance result is produced from what it records.
+
+**No version moved but the schema.** `EVALUATOR_VERSION` stays 1, `CURRENT_ASSESSMENT_VERSION` stays
+1, `FINAL_STATE_OBSERVER_VERSION` stays 1, `CRITERIA_MODEL_VERSION` stays 1 — the existing criteria
+fingerprint already binds predicate and path honestly, so `path_exists(foo.py)` and
+`path_absent(foo.py)` hash differently without any new fingerprint version, and neither hashes like
+the `path_operation` criterion it superficially resembles.
+
+**Rollback is a pair, and it stops being clean the moment v11 is written to.** A slot flip alone
+cannot walk a schema backwards, so a rollback needs the old runtime **and** a verified pre-v11
+backup. Before any v11-only criterion exists, restoring that backup is a clean point-in-time
+downgrade. **After** a `path_exists` or `path_absent` criterion has been written, restoring it
+destroys requirements a user actually stated — the old schema cannot represent them, so there is no
+lossless path. Those two cases must never both be described as "simple rollback".
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

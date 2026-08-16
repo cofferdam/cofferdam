@@ -173,13 +173,13 @@ class MigrationCase(unittest.TestCase):
 
 
 class TheUpgrade(MigrationCase):
-    def test_the_build_declares_version_ten(self):
-        self.assertEqual(10, SCHEMA_VERSION)
+    def test_the_build_declares_at_least_version_ten(self):
+        self.assertGreaterEqual(SCHEMA_VERSION, 10)
 
     def test_opening_a_v9_database_records_version_ten(self):
         self.assertEqual(9, self.schema_version())
         self.open_v10()
-        self.assertEqual(10, self.schema_version())
+        self.assertEqual(SCHEMA_VERSION, self.schema_version())
 
     def test_every_v9_table_survives(self):
         before = snapshot(self.database)
@@ -283,9 +283,9 @@ class TheUpgrade(MigrationCase):
         store.turns("task_hist")
         store.close()
         self.assertEqual(after_first, snapshot(self.database))
-        self.assertEqual(10, self.schema_version())
+        self.assertEqual(SCHEMA_VERSION, self.schema_version())
 
-    def test_a_fresh_database_arrives_at_version_ten(self):
+    def test_a_fresh_database_arrives_at_the_current_version(self):
         fresh = tempfile.TemporaryDirectory()
         self.addCleanup(fresh.cleanup)
         config = load_config(Path(fresh.name))
@@ -298,7 +298,7 @@ class TheUpgrade(MigrationCase):
         connection = sqlite3.connect("file:%s?mode=ro" % database, uri=True)
         try:
             self.assertEqual(
-                "10",
+                str(SCHEMA_VERSION),
                 connection.execute(
                     "SELECT value FROM schema_meta WHERE key = 'schema_version'"
                 ).fetchone()[0],
@@ -323,7 +323,7 @@ class TheUpgradeRunsNothing(MigrationCase):
             self.open_v10()
         finally:
             subprocess.run = original
-        self.assertEqual(10, self.schema_version())
+        self.assertEqual(SCHEMA_VERSION, self.schema_version())
 
     def test_the_upgrade_reads_no_repository(self):
         """No Git, no working tree, no project root — it is a schema change."""
