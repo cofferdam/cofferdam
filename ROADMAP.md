@@ -680,8 +680,8 @@ downstream reads from.
     failure **never** converts a completed worker into a failed task. Rollback is a **pair** — the
     deployed PR10 runtime at `1efd49b` refuses a v10 database cleanly and leaves it byte-identical.
     D-2026-08-16-20 and D-2026-08-16-21.
-  - **PR15 — current-state evaluation identity and storage doctrine.** *Implemented on
-    `m2k-pr15-current-state-doctrine`, not merged and not deployed; **documentation and design only**
+  - **PR15 — current-state evaluation identity and storage doctrine.** *Merged as `12e64cd` (#60),
+    **not deployed**; **documentation and design only**
     — no schema, no predicate, no runtime, no evaluator change, no `AGGREGATOR_VERSION`.* Answers the
     representation question standing between PR14's evidence and the first state predicate: **can the
     existing `EvaluationRecord` honestly hold a result derived from a `FinalStateObservation`,
@@ -706,6 +706,31 @@ downstream reads from.
     historical criteria — the first destructive-shape migration here. Recommends the next layer be
     **derived rather than persisted**, since every input is immutable and versioned.
     D-2026-08-17-1 through D-2026-08-17-4.
+  - **PR16 — the derived current criterion assessment foundation.** *Implemented on
+    `m2k-pr16-current-assessment`, not merged and not deployed.* The layer PR13 named and PR15
+    designed, built on the predicates that exist today: **for every criterion active at turn N, what
+    current result can Cofferdam legitimately establish there?** One rule decides it — *evidence must
+    match the criterion's semantics*. A change criterion that **originated at the target turn** binds
+    to PR7's stored judgement for that turn, read and never recomputed, carrying its
+    `evaluation_fingerprint` as provenance. A change criterion **inherited from an earlier turn** is
+    `unverified`: its old result is not carried forward, it is not re-evaluated against the target
+    turn, and PR14's final state is not consulted — pinned so hard that an origin `met`, `not_met` and
+    `unverified` yield **identical assessment fingerprints**. A **manual** criterion is `unverified`
+    wherever it came from. Only PR11's resolved active set is assessed, so superseded criteria and
+    those cut by a `replace` are **absent** rather than unverified, and unresolvable lineage makes the
+    whole set unavailable rather than partial. **Origin turn and target turn stay separate columns**
+    and both are fingerprinted. Four refusals are kept apart because only some change by waiting —
+    `turn_not_closed`, `lineage_unavailable`, the **operational** `evaluation_not_recorded`, and
+    `evaluation_inconsistent` / `unsupported_evaluator_version`; a missing evaluation is never
+    `not_met`. Stored PR7 rows are **validated rather than trusted**, since PR15 proved the DDL admits
+    dishonest ones, and a corrupt row fails closed and is never repaired on read.
+    **`CURRENT_ASSESSMENT_VERSION = 1`**, with an evidence-domain discriminator so a future
+    `final_state` or `named_check` answer cannot hash equal to a V1 one. **Derived, never stored** —
+    no table, no schema change (**v10** stands), no write or recovery path — read from **one pinned
+    snapshot** because an evaluation row, unlike criteria and continuity, is written after dispatch by
+    bounded recovery. Internal only: no route, no bridge Action, no PWA control, PR8 unchanged,
+    `EVALUATOR_VERSION` unchanged, **no aggregate and no `AGGREGATOR_VERSION`**.
+    D-2026-08-17-5 and D-2026-08-17-6.
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**

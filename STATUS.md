@@ -797,11 +797,81 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2K PR16 — the derived current criterion assessment foundation
+
+On `m2k-pr16-current-assessment`, from the merged `12e64cd`. **Implemented on a branch, not merged
+and not deployed.**
+
+The layer PR13 said was missing and PR15 designed. PR11 answers *which criteria are in force at turn
+N*; PR7 answers *what did the worker do during turn N*. Neither answers the question an aggregate
+would have to ask: **for every criterion active at turn N, what current result can Cofferdam
+legitimately establish there?**
+
+**One rule decides everything: evidence must match the criterion's semantics.** Every machine
+predicate in this build is a *turn-change* observation, so it is answerable at its own turn and
+nowhere else. An active criterion therefore gets its answer from exactly one of three places:
+
+| Case | Current result |
+| --- | --- |
+| change predicate, **originated at the target turn** | PR7's stored judgement for that turn, read and never recomputed, carrying its `evaluation_fingerprint` as provenance |
+| change predicate, **inherited from an earlier turn** | `unverified`, reason `inherited_change_not_current_state_evaluable` |
+| **manual**, wherever it came from | `unverified`, reason `manual_criterion_no_machine_authority` |
+
+**Why the inherited case is `unverified`, and why that is accurate rather than lazy.** Carrying the
+old result forward reuses a statement about turn 1 as a statement about turn 4 — missing later
+breakage when it was `met` and later repair when it was `not_met`. Re-evaluating against the target
+turn asks "did *this* turn create `foo.py`?" of a requirement satisfied earlier and correctly left
+alone since, whose honest answer is *no* — failing work precisely when it was right. Reading PR14's
+final state is the semantic conversion this milestone forbids. Pinned in all three directions: an
+origin `met`, `not_met` and `unverified` produce **identical assessment fingerprints**, so the origin
+cannot be recovered from the current answer at all.
+
+**PR14's observations exist on main and this layer does not read them.** Asserted from the syntax
+tree, not promised: `binding.py` does not import `finalstate`, and no state predicate exists yet.
+
+**Origin turn and target turn are separate throughout.** Every assessment carries
+`source_snapshot_id`, `source_turn_number` and `target_turn_number`, and both turn numbers are bound
+into its fingerprint — the same criterion assessed at a different turn is a different fact.
+
+**Only the resolved active set is assessed.** Superseded criteria and criteria cut by a `replace` are
+**absent** rather than present-and-unverified. Unresolvable lineage makes the whole set unavailable,
+never partial.
+
+**Four refusals, kept apart because only some change by waiting**: `turn_not_closed`,
+`lineage_unavailable`, `evaluation_not_recorded` (**operational** — the recovery pass simply has not
+run, and reporting it as a set of `unverified` criteria would file a gap in Cofferdam's pipeline as a
+statement about the user's work), and `evaluation_inconsistent` / `unsupported_evaluator_version`. A
+missing evaluation is **never** `not_met`. A turn whose active set is entirely inherited or manual
+needs no evaluation at all and does not wait for one.
+
+**Stored PR7 rows are validated rather than trusted**, because PR15 proved the DDL permits dishonest
+combinations: task, turn, snapshot identity, declared count against carried results, duplicate
+answers, and that every same-turn criterion was genuinely answered. **Fails closed, repairs nothing** —
+exercised with raw-SQL corruption fixtures that satisfy every constraint the database can express.
+
+**`CURRENT_ASSESSMENT_VERSION = 1`**, distinct from the seven versions around it, bound into a
+domain-separated fingerprint over the assessment version, criterion identity **and origin**, target
+turn, kind and predicate, evidence domain, result, reason, and the exact PR7 judgement identity where
+one exists. No clock, no minted `evaluation_id`, no rowid, no host path. An evidence-domain
+discriminator (`turn_change` / `not_applicable`) is carried from the start so a future `final_state`
+or `named_check` answer cannot hash equal to a V1 one.
+
+**Derived, never stored.** No table, no schema change — schema stays **v10** — no write path and no
+recovery path. **One pinned read snapshot** for the turn's lifecycle, its lineage and its evaluation,
+which matters more than it did for PR11 because an evaluation row is *not* frozen at dispatch; a
+discriminating test commits an evaluation from a second connection mid-read and proves the two states
+cannot be mixed.
+
+**Internal only.** No HTTP route, no bridge Action, no PWA control; PR8's assessment response is
+unchanged; `EVALUATOR_VERSION`, `ASSEMBLER_VERSION` and `FINAL_STATE_OBSERVER_VERSION` all stay put.
+**No aggregate, no verdict, no `AGGREGATOR_VERSION`** — this produces the legitimate inputs an
+aggregate would need and stops. D-2026-08-17-5 and D-2026-08-17-6.
+
 ### M2K PR15 — current-state evaluation identity and storage doctrine (documentation only)
 
-On `m2k-pr15-current-state-doctrine`, from the merged `064fe51`. **Documentation and design only** —
-no schema, no route, no runtime, no predicate, no evaluator change, no `AGGREGATOR_VERSION`, nothing
-deployed.
+**Merged as `12e64cd` (#60).** Documentation and design only, so there was no deployment step and
+nothing to deploy. The record below was written while it was on
+`m2k-pr15-current-state-doctrine`, from the merged `064fe51`.
 
 PR14 delivered the evidence. Before the first `path_exists` is written, it needs somewhere honest to
 put its answer — and the wrong home is very hard to leave later. PR15 audits the merged evaluation
@@ -964,16 +1034,22 @@ actually running — not PR11 or PR12, which are merged and undeployed.
 
 M2K is **in progress**: PR1 through PR8 are merged and deployed; PR9 is merged (`b2314f0`, #54) and
 needed no deployment because it changed only documentation; PR10 is merged (`1efd49b`, #55) and
-deployed to slot A on schema v9; PR11 (`3bb9a5b`, #56), PR12 (`2dc4177`, #57), PR13 (`8cd8ba3`, #58)
-and PR14 (`064fe51`, #59) are merged and **intentionally not deployed**; PR15 is on a branch and is
-documentation only. See *In progress* above for PR15.
+deployed to slot A on schema v9; PR11 (`3bb9a5b`, #56), PR12 (`2dc4177`, #57), PR13 (`8cd8ba3`, #58),
+PR14 (`064fe51`, #59) and PR15 (`12e64cd`, #60) are merged and **intentionally not deployed**; PR16
+is on a branch. See *In progress* above for PR16.
 
 **`main` is now schema v10; production is still schema v9**, and that gap is the deployment decision
 rather than a lag. PR14 is the change that turns this batch from a slot flip into a schema move, so
-deploying PR11–PR14 is **Tier 2**: a verified pre-v10 backup taken with SQLite's online backup API, a
+deploying PR11–PR16 is **Tier 2**: a verified pre-v10 backup taken with SQLite's online backup API, a
 migration rehearsal, the old-runtime refusal check that PR14 already proves in CI, and an honest
 rollback **pair** — the slot *and* the restored snapshot — because a flip alone cannot walk a schema
-backwards.
+backwards. PR15 and PR16 add nothing to that cost: PR15 is documentation, and PR16 is derived read
+logic with no schema of its own and no caller yet.
+
+**A/B remains deployment machinery, not feature-development machinery.** Work is developed in
+isolated feature worktrees and merged to `main`; a slot is never a workbench; and a deployment happens
+when a running service actually needs the change. Six merged PRs sitting ahead of production is the
+policy working, not drift.
 
 ### M2K PR13 — cross-turn acceptance evidence-binding doctrine (documentation only)
 

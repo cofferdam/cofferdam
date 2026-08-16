@@ -3163,6 +3163,91 @@ holding immutable historical criteria and referenced by a foreign key from
 `CREATE TABLE IF NOT EXISTS`; this would be the first destructive-shape migration, and it must be
 treated as one — rehearsed, backed up, and rolled back as a pair.
 
+## D-2026-08-17-5 — An inherited change criterion is `unverified`, and that is the accurate answer (EFE DECISION, ACTIVE)
+
+**Decision.** At target turn N, an active criterion whose predicate is
+`path_changed`, `path_operation` or `rename` and whose **origin turn is earlier than N** is
+`unverified`, with the closed reason `inherited_change_not_current_state_evaluable`. The origin
+turn's stored result is not reused, no re-evaluation is attempted, and PR14's final-state
+observation is not consulted.
+
+**All three alternatives are wrong, and PR13 showed why.** *Carrying the old result forward* reuses a
+statement about turn 1 as a statement about turn 4: it misses later breakage when it was `met` and
+later repair when it was `not_met`, and the record cannot say which happened. *Re-evaluating against
+the target turn's evidence* asks "did **this** turn create `foo.py`?" of a requirement satisfied three
+turns ago and correctly left alone since — the honest answer is *no*, and reporting it as `not_met`
+would fail work precisely when it was right. *Reading final state* — `foo.py` is present, so
+`created` is met — is the semantic conversion D-2026-08-17-4 forbids.
+
+**So `unverified` is not a placeholder.** It is the accurate answer: Cofferdam has no evidence of the
+right kind at this boundary, and says so. Pinned in all three directions — an origin `met`, an origin
+`not_met` and an origin `unverified` produce not merely equal results but **identical assessment
+fingerprints**, so the origin cannot be recovered from the current answer by any consumer.
+
+**Contrast, and it is the whole shape of V1.** A criterion whose origin turn **is** the target turn
+and whose predicate is a change predicate binds to PR7's stored judgement for that turn — read, never
+recomputed, with the PR7 `evaluation_fingerprint` carried as provenance. A **manual** criterion is
+`unverified` wherever it came from, under its own reason, because no machine authority exists for it
+at any turn and this build has no human-answer channel.
+
+**Only PR11's resolved active set is assessed.** Never all historical criteria, never the latest
+snapshot, never an accumulation. Superseded criteria and criteria cut by a `replace` are **absent**
+from the answer rather than present-and-unverified, because they are not required here. Where the
+lineage is unavailable the whole set is unavailable; there is no partial answer, which a caller would
+have every incentive to use.
+
+## D-2026-08-17-6 — The current assessment is derived, and its refusals are separated by kind (EFE DECISION, ACTIVE)
+
+**Decision.** The layer adds **no table and no schema change**; schema stays at v10. Every input —
+the criterion row, the continuity declaration, the PR7 evaluation — is immutable and versioned, so
+the answer is a pure function that re-derives identically forever. Persisting it would add a write
+path, a recovery path, and a second place for the truth to live that could disagree with the first.
+
+**`CURRENT_ASSESSMENT_VERSION = 1`**, code-owned and distinct from `SCHEMA_VERSION`,
+`CRITERIA_MODEL_VERSION`, `CONTINUITY_MODEL_VERSION`, `ASSEMBLER_VERSION`, `EVALUATOR_VERSION`,
+`RESOLVER_VERSION`, `FINAL_STATE_OBSERVER_VERSION` and the future aggregate version. It owns exactly
+the mapping *active criterion + evidence domain → current result at a target turn*, and nothing about
+how any underlying judgement was reached.
+
+**Four refusals, deliberately not collapsed into one**, because they are different kinds of silence
+and only some of them change by waiting:
+
+| Refusal | Means |
+| --- | --- |
+| `turn_not_closed` | the target is not a completed boundary; a current assessment of a running turn describes a moment that has not happened |
+| `lineage_unavailable` | PR11 cannot determine the active set; there is no requirement set to assess |
+| `evaluation_not_recorded` | **operational** — the turn is closed and PR7 simply has not run yet |
+| `evaluation_inconsistent` / `unsupported_evaluator_version` | a stored row violates the service-owned invariants, or was written by evaluator semantics this binder does not know |
+
+**`evaluation_not_recorded` is set-level on purpose.** Reporting a pending recovery pass as a set of
+`unverified` criteria would file a gap in Cofferdam's own pipeline as a statement about the user's
+work. It is also never `not_met`: absence of evidence is not evidence of absence, here as everywhere.
+
+**A turn needing no PR7 record does not wait for one.** If every active criterion is inherited or
+manual, nothing at the target turn could be answered by an evaluation, and demanding one would make a
+complete answer wait on a record nothing would read.
+
+**Stored PR7 rows are validated, not trusted.** D-2026-08-17-1 established that the DDL permits
+several dishonest combinations — a result naming a criterion outside its snapshot, an evaluation whose
+turn and snapshot disagree. The binder checks task, turn, snapshot identity, declared count against
+carried results, duplicate answers, and that every same-turn criterion was actually answered. It
+**fails closed and repairs nothing**: a read that fixed a row would destroy the evidence that
+something wrote it.
+
+**Supported evaluator versions are enumerated, not assumed.** A future `EVALUATOR_VERSION` 2 may
+decide criteria differently, and binding its results as though they meant version 1's thing is exactly
+the silent reinterpretation this layer exists to prevent — so an unrecognised version is refused
+under its own reason, distinct from "no evaluation".
+
+**One pinned read snapshot.** Lineage and the evaluation are fetched inside a single deferred read
+transaction. This matters more than it did for PR11: an evaluation row is **not** frozen at dispatch —
+bounded recovery writes it later — so an active set read before that commit combined with an
+evaluation read after it would describe a database state that never existed.
+
+**Internal only.** No HTTP route, no bridge Action, no PWA control, and PR8's assessment response is
+unchanged. **No aggregate**, no verdict, no `AGGREGATOR_VERSION`: this produces the legitimate
+per-criterion inputs an aggregate would need and stops there.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when
