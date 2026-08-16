@@ -619,8 +619,8 @@ downstream reads from.
     tree — running **inside the write transaction**, so validation and persistence see one database
     state. PR11's read-time defences remain, because a restored or imported database can still carry
     a stale relation. D-2026-08-16-12 amended; D-2026-08-16-14.
-  - **PR13 — cross-turn acceptance evidence-binding doctrine.** *Implemented on
-    `m2k-pr13-crossturn-doctrine`, not merged and not deployed; **documentation and design only** —
+  - **PR13 — cross-turn acceptance evidence-binding doctrine.** *Merged as `8cd8ba3` (#58);
+    **documentation and design only** —
     no schema, no route, no runtime, no evaluator change, no `AGGREGATOR_VERSION`.* Settles the
     question standing between the active-criteria resolver and any aggregate: **what is the current
     acceptance state of an active criterion that was evaluated at an earlier turn?** The finding is
@@ -648,6 +648,37 @@ downstream reads from.
     `root`/`replace`-only aggregate would be sound today and is deliberately **not** taken, because
     its correctness would depend on a lineage shape the caller does not control.
     D-2026-08-16-15 through D-2026-08-16-19.
+  - **PR14 — the final-state path observation foundation.** *Implemented on
+    `m2k-pr14-final-state`, not merged and not deployed.* The first primitive PR13 said was
+    missing: an immutable observation of **effective post-worker repository state**, so that a
+    requirement inherited across turns can one day have an answerable current status. It is only the
+    evidence — **no predicate, no binding layer, no aggregate, no `AGGREGATOR_VERSION`**;
+    `EVALUATOR_VERSION` stays 1, `ASSEMBLER_VERSION` stays 3 and `EvidenceBundle` v3 is untouched.
+    **The working tree is the authority**, deliberately not HEAD (a worker that deletes a file
+    without committing has left it gone) and not the index (`git rm --cached` is a staging intention);
+    HEAD is stored as an **audit anchor** and a worktree result that disagrees with it is not a
+    contradiction. **Path state only** — `present` / `absent` / `unavailable`, with a bounded kind of
+    `file` / `directory` / `symlink` / `other` — and **no content, digest, size, mtime, permissions or
+    listing**. `absent` is a *positive* observation, so an IO error, a permission refusal and a
+    refused symlink traversal are all `unavailable` with a closed reason: collapsing "we could not
+    look" into "it is not there" is the failure a future acceptance layer would read as proof.
+    **Containment is the kernel's** — the verified root, then each component relative to the
+    descriptor above it with `O_NOFOLLOW` — and an intermediate symlink is refused **even when it
+    points inside the project**, because a link that is safe today can be repointed tomorrow; a
+    *final*-component symlink is observed as itself, so a broken symlink is `present`/`symlink`.
+    **Targets come from the PR11-resolved active criteria**, `path` and `to_path`, deduplicated by
+    exact equality only; unavailable lineage yields an explicit refusal rather than the current
+    snapshot, and an empty active set is a complete observation of nothing. **Taken after the worker
+    and before the turn is durably closed**, inside the dispatch lock, and **stored** — a read never
+    probes the world, so deleting the project changes no stored answer. **Schema v10**, additive,
+    created empty and **never backfilled**: `task_turn_final_state` and
+    `task_turn_final_state_paths`, the parent keyed to `task_turns` because this is a post-worker
+    fact. `FINAL_STATE_OBSERVER_VERSION = 1`, bound into a deterministic observation fingerprint.
+    Bounded at 256 target paths, refused rather than truncated; a two-pass stability check with
+    bounded retries and `observation_unstable` rather than an optimistic answer. An observation
+    failure **never** converts a completed worker into a failed task. Rollback is a **pair** — the
+    deployed PR10 runtime at `1efd49b` refuses a v10 database cleanly and leaves it byte-identical.
+    D-2026-08-16-20 and D-2026-08-16-21.
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**

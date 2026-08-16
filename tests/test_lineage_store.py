@@ -204,7 +204,6 @@ class ReadOnlyTests(LineageStoreCase):
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             ).fetchone()[0]
         self.assertEqual(int(version), SCHEMA_VERSION)
-        self.assertEqual(SCHEMA_VERSION, 9)
 
     def test_resolving_creates_no_table(self):
         before = self.tables()

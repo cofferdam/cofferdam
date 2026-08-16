@@ -1,7 +1,7 @@
-"""M2K PR10 — what the shipped PR8 runtime does when handed a v9 database.
+"""M2K PR14 — what the DEPLOYED PR10 runtime does when handed a v10 database.
 
 This is the rollback question, and it is not answered by "the schema is
-additive". The deployed build declares ``SCHEMA_VERSION = 8`` and its store
+additive". The deployed build declares ``SCHEMA_VERSION = 9`` and its store
 refuses anything higher, so the property to prove is that the refusal is
 **clean**: the old runtime must not write to, migrate, or otherwise disturb a
 database written by the newer one before it declines to use it.
@@ -28,12 +28,13 @@ import types
 import unittest
 from pathlib import Path
 
-from cofferdam.workstation.tasks.store import SCHEMA_VERSION
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-#: The commit deployed to both runtime slots when PR10 was written: M2K PR8.
-DEPLOYED_COMMIT = "059fdcbed8a768c5c72ddd296d05694e476cfbe3"
+#: The commit **actually running in production** when PR14 was written: M2K PR10
+#: in slot A. Not PR11 and not PR12 — both are merged and deliberately
+#: undeployed, so testing either as the rollback runtime would measure a build
+#: no service is running. This is the one whose refusal matters.
+DEPLOYED_COMMIT = "1efd49b13fe6041c4bc4b22c9a07975f7f4738fe"
 
 
 def deployed_store_source():
@@ -58,7 +59,7 @@ def digest(path: Path) -> str:
 
 
 class ForwardSchemaCase(unittest.TestCase):
-    """A real v9 database, offered to the real v8 store."""
+    """A real v10 database, offered to the real deployed v9 store."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -81,8 +82,8 @@ class ForwardSchemaCase(unittest.TestCase):
         self.database = self.home / "state" / "tasks" / "tasks.sqlite3"
         self.database.parent.mkdir(parents=True, exist_ok=True)
 
-        # Build a genuine v9 database with the current build, and put a task in
-        # it so there is history for the old runtime to fail to touch.
+        # Build a genuine v10 database with the current build, and put a task in
+        # it so there is history for the deployed runtime to fail to touch.
         store = TaskStore(self.config)
         store.turns("nothing")
         store.close()
@@ -91,7 +92,7 @@ class ForwardSchemaCase(unittest.TestCase):
             db.execute(
                 "INSERT INTO tasks (task_id, correlation_id, origin, adapter_id,"
                 " project_id, state, lifecycle_revision, created_at, updated_at,"
-                " prompt) VALUES ('task_v9', 'corr', 'pwa', 'validation', 'demo',"
+                " prompt) VALUES ('task_v10', 'corr', 'pwa', 'validation', 'demo',"
                 " 'completed', 1, '2026-08-16T00:00:00Z', '2026-08-16T00:00:01Z','p')"
             )
         # Checkpoint the WAL so the comparison below is against settled files.
@@ -134,16 +135,16 @@ class ForwardSchemaCase(unittest.TestCase):
         return out
 
 
-class TheOldRuntimeRefusesCleanly(ForwardSchemaCase):
-    def test_the_deployed_build_declares_version_eight(self):
+class TheDeployedRuntimeRefusesCleanly(ForwardSchemaCase):
+    def test_the_deployed_build_declares_version_nine(self):
         module = self.old_store_module()
-        self.assertEqual(8, module.SCHEMA_VERSION)
+        self.assertEqual(9, module.SCHEMA_VERSION)
 
-    def test_the_database_really_is_version_nine(self):
+    def test_the_database_really_is_version_ten(self):
         connection = sqlite3.connect("file:%s?mode=ro" % self.database, uri=True)
         try:
             self.assertEqual(
-                str(SCHEMA_VERSION),
+                "10",
                 connection.execute(
                     "SELECT value FROM schema_meta WHERE key='schema_version'"
                 ).fetchone()[0],
@@ -151,33 +152,33 @@ class TheOldRuntimeRefusesCleanly(ForwardSchemaCase):
         finally:
             connection.close()
 
-    def test_the_old_store_refuses_to_open_it(self):
+    def test_the_deployed_store_refuses_to_open_it(self):
         module = self.old_store_module()
         store = module.TaskStore(self.config)
         self.addCleanup(store.close)
         with self.assertRaises(module.StoreUnavailable):
-            store.turns("task_v9")
+            store.turns("task_v10")
 
     def test_the_refusal_names_the_newer_version(self):
         module = self.old_store_module()
         store = module.TaskStore(self.config)
         self.addCleanup(store.close)
         try:
-            store.turns("task_v9")
+            store.turns("task_v10")
         except module.StoreUnavailable as refusal:
             # The reason is the `detail`; the message is the generic store one.
             self.assertIn("newer", (refusal.detail or "").lower())
             self.assertIn("task database", (refusal.detail or "").lower())
         else:  # pragma: no cover
-            self.fail("the old runtime accepted a v9 database")
+            self.fail("the deployed runtime accepted a v10 database")
 
     def test_a_representative_read_also_refuses(self):
         module = self.old_store_module()
         store = module.TaskStore(self.config)
         self.addCleanup(store.close)
         for call in (
-            lambda: store.turns("task_v9"),
-            lambda: store.turn_criteria("task_v9", 1),
+            lambda: store.turns("task_v10"),
+            lambda: store.turn_criteria("task_v10", 1),
             lambda: store.list_tasks(limit=5),
         ):
             with self.assertRaises(module.StoreUnavailable):
@@ -189,7 +190,7 @@ class TheOldRuntimeRefusesCleanly(ForwardSchemaCase):
         store = module.TaskStore(self.config)
         self.addCleanup(store.close)
         with self.assertRaises(module.StoreUnavailable):
-            store.turns("task_v9")
+            store.turns("task_v10")
         store.close()
         self.assertEqual(before["rows"], self.snapshot()["rows"])
 
@@ -199,7 +200,7 @@ class TheOldRuntimeRefusesCleanly(ForwardSchemaCase):
         store = module.TaskStore(self.config)
         self.addCleanup(store.close)
         with self.assertRaises(module.StoreUnavailable):
-            store.turns("task_v9")
+            store.turns("task_v10")
         store.close()
         after = self.snapshot()
         self.assertEqual(before["objects"], after["objects"])
@@ -209,7 +210,7 @@ class TheOldRuntimeRefusesCleanly(ForwardSchemaCase):
         store = module.TaskStore(self.config)
         self.addCleanup(store.close)
         with self.assertRaises(module.StoreUnavailable):
-            store.turns("task_v9")
+            store.turns("task_v10")
         store.close()
         names = {name for kind, name, _ in self.snapshot()["objects"] if kind == "table"}
         self.assertIn("task_turn_criteria_continuity", names)
@@ -221,12 +222,12 @@ class TheOldRuntimeRefusesCleanly(ForwardSchemaCase):
         store = module.TaskStore(self.config)
         self.addCleanup(store.close)
         with self.assertRaises(module.StoreUnavailable):
-            store.turns("task_v9")
+            store.turns("task_v10")
         store.close()
         connection = sqlite3.connect("file:%s?mode=ro" % self.database, uri=True)
         try:
             self.assertEqual(
-                str(SCHEMA_VERSION),
+                "10",
                 connection.execute(
                     "SELECT value FROM schema_meta WHERE key='schema_version'"
                 ).fetchone()[0],
@@ -240,7 +241,7 @@ class TheOldRuntimeRefusesCleanly(ForwardSchemaCase):
         store = module.TaskStore(self.config)
         self.addCleanup(store.close)
         with self.assertRaises(module.StoreUnavailable):
-            store.turns("task_v9")
+            store.turns("task_v10")
         store.close()
         self.assertEqual(before, digest(self.database))
 
@@ -249,7 +250,7 @@ class TheOldRuntimeRefusesCleanly(ForwardSchemaCase):
         store = module.TaskStore(self.config)
         self.addCleanup(store.close)
         with self.assertRaises(module.StoreUnavailable):
-            store.turns("task_v9")
+            store.turns("task_v10")
         store.close()
         connection = sqlite3.connect("file:%s?mode=ro" % self.database, uri=True)
         try:
@@ -267,16 +268,16 @@ class TheOldRuntimeRefusesCleanly(ForwardSchemaCase):
         module = self.old_store_module()
         store = module.TaskStore(self.config)
         with self.assertRaises(module.StoreUnavailable):
-            store.turns("task_v9")
+            store.turns("task_v10")
         store.close()
 
         from cofferdam.workstation.tasks.store import TaskStore
 
         current = TaskStore(self.config)
         self.addCleanup(current.close)
-        self.assertEqual([], current.turns("task_v9"))
+        self.assertEqual([], current.turns("task_v10"))
         self.assertEqual(
-            "legacy_unknown", current.turn_continuity("task_v9", 1).state
+            "legacy_unknown", current.turn_continuity("task_v10", 1).state
         )
 
 

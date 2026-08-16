@@ -873,6 +873,135 @@ assembler and evaluator versions, and bound into a deterministic
 relations in canonical order. No clock, rowid, minted id, provider identifier or
 host path reaches it.
 
+### Effective post-worker path state (M2K PR14, schema v10)
+
+The first of the three layers PR13 said were missing, and **only** the first. It
+is evidence, not an answer: no predicate, no binding layer, no aggregate, no
+`AGGREGATOR_VERSION`. `EVALUATOR_VERSION` stays 1, `ASSEMBLER_VERSION` stays 3,
+and `EvidenceBundle` v3 does not carry final state.
+
+Two additive tables, created empty and **never backfilled**:
+
+| Table | What it holds |
+| --- | --- |
+| `task_turn_final_state` | one observation per turn: state, limitation reason, the lineage fingerprint that selected the targets, the HEAD anchor, a path count, an observation fingerprint |
+| `task_turn_final_state_paths` | one row per target path: ordinal, path, path state, kind, reason |
+
+**Final state means the working tree.** Not the committed HEAD tree: a worker
+that deletes `foo.py` without committing has left a project in which `foo.py` is
+gone, and a HEAD-only probe would call it present; one that creates `bar.py`
+without committing has left it there, and a HEAD-only probe would call it absent.
+The mistake runs in both directions, so nothing downstream repairs it. Not the
+index either — `git rm --cached foo.py` empties the index and leaves the file on
+disk, and *does this path exist in the effective workspace* is answered by the
+filesystem. `head_revision` **is** stored, as an **audit anchor** saying which
+committed revision the observation sat alongside; a worktree result that
+disagrees with it is not a contradiction, because the two describe different
+things.
+
+**Three path states, and `absent` is a positive observation:**
+
+| State | Meaning |
+| --- | --- |
+| `present` | an object exists at this path; `kind` says what sort |
+| `absent` | the safe anchored lookup **completed** and determined nothing is there |
+| `unavailable` | the lookup could not be completed safely; a closed reason says why |
+
+An IO error, a permission refusal and a refused symlink traversal are therefore
+`unavailable`, never `absent`. Collapsing *we could not look* into *it is not
+there* is the single most damaging thing this surface could do, because a future
+acceptance layer would read the second as evidence.
+
+**Four kinds** for a present path — `file`, `directory`, `symlink`, `other` — and
+**no content of any sort**: no bytes, digest, size, mtime, permissions, owner,
+inode or directory listing. A path-state row carrying content would be a second
+artifact surface arriving without its own review.
+
+**Containment is the kernel's.** The verified root is opened, then every
+intermediate component relative to the descriptor above it with `O_NOFOLLOW` —
+the same discipline PR1's artifact observer uses — so an intermediate symlink is
+refused by the kernel rather than by a comparison made afterwards, and
+`repo/external -> /home/user/secrets` cannot be walked through to reach
+`external/private.txt`. One detail is load-bearing: with `O_NOFOLLOW` an
+intermediate **directory symlink** reports `ENOTDIR`, not `ELOOP`, which is
+indistinguishable from *a regular file where a directory was expected* — so the
+blocked component is `lstat`-ed to tell the two apart. Without that step an
+escape attempt would have been recorded as `absent`, which is exactly the false
+negative above. Traversal is refused **even when the link points inside the
+project**, because a link that is safe today can be repointed tomorrow. A
+*final*-component symlink is observed as itself without being followed, so a
+broken symlink is `present`/`symlink` rather than absent.
+
+**Targets are the PR11-resolved active criteria's paths** — `path` and `to_path`,
+in the resolver's deterministic order, deduplicated by **exact equality only**.
+Never the whole repository, which would be an unbounded read of somebody's
+project at every turn boundary. Where lineage is unavailable (`not_declared`,
+`legacy_unknown`, an unresolvable chain) there is no defensible target set and the
+observation records `lineage_unavailable`; substituting the current snapshot would
+be a guessed requirement set wearing an observation's clothes. A resolved
+**empty** active set is a complete observation of nothing, and means nothing about
+acceptance. A `manual` criterion contributes no path, which is not a gap.
+
+**Three stored observation states, plus absence:**
+
+| State | Meaning |
+| --- | --- |
+| `complete` | every target path was observed as present or absent |
+| `incomplete` | at least one path could not be observed; the rest **are** stored, and no consumer may read it as whole |
+| `unavailable` | no defensible path set existed; carries no paths at all |
+| `legacy_unknown` | no row: the turn predates PR14, or the process died before the boundary |
+
+The last two causes are deliberately **not** distinguished, because they mean the
+same thing to every consumer: nothing was recorded, so nothing may be assumed.
+
+**Taken at the boundary, never on read.** After the worker returns, after PR5's
+committed-range observation, and **before the turn is durably closed**, all inside
+the dispatch lock. A read returns the stored row and touches nothing — no
+repository, no Git, no `stat`, no observer. If reading meant *go and look now*,
+repository drift would silently rewrite historical answers, an audit could not be
+reproduced, and a remote read would become a live probe of somebody's filesystem.
+Deleting the project after capture changes no stored answer. **Write-once**: an
+existing observation is never replaced, because it describes a moment that has
+already happened.
+
+**Boundary loss is never repaired.** No recovery path, and no migration, may
+reconstruct a historical observation by looking at the filesystem now — that
+would be a statement about today wearing yesterday's timestamp.
+
+**The foreign key names `task_turns`**, unlike the pre-work facts of v6, v7 and
+v9 which name `tasks`. Those must be durable *before* the turn row exists; this
+one is taken after the worker returns, so a final state for a turn that never
+happened is unrepresentable rather than merely unwritten.
+
+**Bounded, and honest about stability.** At most **256 target paths** — chosen for
+filesystem work at a turn boundary, deliberately not derived from PR6's
+32-per-snapshot bound because an active set accumulates across turns — and
+**refused over the bound rather than truncated**. The path set is read twice and
+retried up to three times if it moves, then refused as `observation_unstable`
+rather than reported optimistically. The limitation is stated rather than implied:
+v1 observes existence and kind, so a file whose *contents* changed between passes
+looks identical to both.
+
+**An observation failure never rewrites the task.** A project that could not be
+read is a gap in Cofferdam's evidence, not a fault in the user's work; a completed
+worker stays completed and the gap is recorded as an explicitly unavailable
+observation — the rule the Git baseline and committed range already follow.
+
+**Nothing is reinterpreted.** `path_operation(foo.py, created)` asks what the
+worker did; observing that `foo.py` is present does not satisfy it. No predicate
+joins them, and a state predicate is its own PR.
+
+**`FINAL_STATE_OBSERVER_VERSION = 1`**, distinct from the schema, criteria model,
+continuity model, assembler, evaluator and resolver versions, and bound into a
+domain-separated observation fingerprint over the observer version, the target,
+the state and limitation, the lineage fingerprint, the HEAD anchor and every path
+result in stored order. No clock, minted id, rowid or host path reaches it.
+
+**Internal only.** `TaskService.turn_final_state(task_id, turn_number)` and the
+store method beneath it. No HTTP route, no bridge Action, no Custom GPT Action, no
+PWA control, and the PR8 assessment response is unchanged — a read surface is its
+own review.
+
 ### Change claims and artifacts (M2K PR1, schema v4)
 
 Two tables carry the **claim** side of evidence, which Task Core did not have. They are additive:
@@ -1927,7 +2056,10 @@ one **did not**, for three independent reasons:
    up to the moment of reading — the repository is unobserved.
 2. **Both domains are diffs, not state.** `worktree` records paths differing from
    HEAD; `committed_range` records paths changed in the range. Neither enumerates
-   what exists, so "does `foo.py` exist now" has no answer in stored evidence.
+   what exists. *Narrowed by PR14*: a turn observed under schema v10 now has a
+   stored answer to "did `foo.py` exist **at that turn's boundary**" for the paths
+   its active criteria named. That does not lift reason 1 — the gaps between
+   boundaries remain unobserved — and it is evidence, not a predicate.
 3. **Absence already cannot be read inside one window** when attribution is
    inexact, the pre-work boundary was dirty, or coverage was incomplete.
 
@@ -1940,12 +2072,17 @@ That proves a gap is non-empty, never what happened in it — enough to answer
 
 ### What is required, in dependency order
 
-1. A **final-state evidence surface** — does this path exist at this revision. A
-   different Git question from any this build asks, so a genuinely new evidence
-   primitive.
+1. A **final-state evidence surface** — does this path exist. A genuinely new
+   evidence primitive, since every existing one is a diff. **Delivered by PR14**,
+   with one refinement to the phrasing above: *at this revision* was the wrong
+   frame. The authority is the **working tree** at the post-worker boundary, not a
+   committed revision, because a worker that deletes a file without committing has
+   changed what the project is. See *Effective post-worker path state* under
+   **Persistence**.
 2. **Final-state predicates** (`path_exists` / `path_absent` conceptually),
    re-evaluable at any turn because they describe the project rather than a
-   worker's behaviour.
+   worker's behaviour. **Not built.** PR14 stores the observation and stops there;
+   adding a predicate moves `EVALUATOR_VERSION` and is its own review.
 3. Only then a **cross-turn binding layer**.
 
 Exact-turn evidence is **not** weakened to get there. `EvidenceBundle` v3 keeps

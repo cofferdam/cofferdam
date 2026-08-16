@@ -913,7 +913,8 @@ class InheritedSupersessionEndToEnd(SupersessionCase):
         )
 
         # 1. No schema movement.
-        self.assertEqual(SCHEMA_VERSION, 9)
+        # PR11/PR12 add no schema of their own; v10 is PR14's.
+        self.assertEqual(SCHEMA_VERSION, 10)
 
         # 2-4. root A,B then extend C. Predecessor active = A,B,C.
         self.turn(["a", "b"], {"mode": "root"})
@@ -995,7 +996,7 @@ class InheritedSupersessionEndToEnd(SupersessionCase):
         # 19-20. No schema change, no new table.
         with self.sql() as connection:
             self.assertEqual(
-                9,
+                SCHEMA_VERSION,
                 int(
                     connection.execute(
                         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
@@ -1099,7 +1100,8 @@ class OneAlgorithmTests(unittest.TestCase):
 
 class NegativeSpaceTests(unittest.TestCase):
     def test_the_schema_version_did_not_move(self):
-        self.assertEqual(SCHEMA_VERSION, 9)
+        # PR11/PR12 add no schema of their own; v10 is PR14's.
+        self.assertEqual(SCHEMA_VERSION, 10)
 
     def test_no_semantic_version_moved(self):
         from cofferdam.workstation.tasks.criteria import CRITERIA_MODEL_VERSION

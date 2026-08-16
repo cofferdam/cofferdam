@@ -134,7 +134,7 @@ class ContinuityEndToEnd(unittest.TestCase):
 
     def test_the_walk(self):
         # 1. schema and the versions that must NOT have moved
-        self.assertEqual(9, SCHEMA_VERSION, "PR10 adds continuity at v9")
+        self.assertGreaterEqual(SCHEMA_VERSION, 9, "PR10 added continuity at v9")
         self.assertEqual(1, EVALUATOR_VERSION, "PR10 does not touch the evaluator")
         self.assertEqual(3, ASSEMBLER_VERSION, "PR10 does not touch the assembler")
         self.assertEqual(1, CONTINUITY_MODEL_VERSION)

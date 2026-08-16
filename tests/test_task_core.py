@@ -603,7 +603,7 @@ class TransactionalStorage(TaskTestCase):
         # `test_change_claims_store.py`, `test_turn_bounds_migration.py`,
         # `test_git_baseline_migration.py`, `test_criteria_migration.py` and
         # `test_evaluation_migration.py` and `test_continuity_migration.py`.
-        self.assertEqual(store_module.SCHEMA_VERSION, 9)
+        self.assertEqual(store_module.SCHEMA_VERSION, 10)
 
     def test_an_older_database_gains_the_new_tables_and_records_the_version(self):
         """M2I PR2's upgrade, which is additive and therefore a create-if-absent.

@@ -797,10 +797,108 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2K PR14 — the final-state path observation foundation
+
+On `m2k-pr14-final-state`, from the merged `8cd8ba3`. **Implemented on a branch, not merged and not
+deployed.**
+
+PR13 named the gap: every acceptance predicate this build has asks *what the worker did during this
+turn*, and none asks *what the project now is*, so an inherited requirement has no answerable current
+status. The missing primitive was an immutable observation of **effective post-worker repository
+state**. PR14 is that primitive, and only that — no predicate, no binding layer, no aggregate.
+
+**Final state means the working tree, and that is the whole decision.** Not HEAD: a worker that
+deletes `foo.py` without committing has left a project in which `foo.py` is gone, and a HEAD-only
+probe would call it present. Not the index either: `git rm --cached` is a staging intention, not a
+state of the project. The HEAD revision **is** stored as an audit anchor — which committed revision
+the observation sat alongside — and a worktree result that disagrees with it is not a contradiction,
+because the two describe different things. Both directions are pinned by tests, including the
+`git rm --cached` divergence.
+
+**Path state only.** `present` / `absent` / `unavailable`, and for a present path a bounded kind of
+`file` / `directory` / `symlink` / `other`. No content, no digest, no size, no mtime, no permissions,
+no directory listing — asserted from the syntax tree, not promised.
+
+**`absent` is a positive observation**: the safe anchored lookup completed and found nothing. That is
+why an IO error, a permission refusal and a refused symlink traversal are all `unavailable` with a
+closed reason instead. Collapsing "we could not look" into "it is not there" is the single most
+damaging mistake this surface could make, because a future acceptance layer would read the second as
+proof.
+
+**Containment is the kernel's.** The verified root is opened, then every intermediate component
+relative to the descriptor above it with `O_NOFOLLOW` — the same discipline PR1's artifact observer
+uses. `repo/external -> /home/user/secrets` cannot be walked through. A **finding worth recording**:
+with `O_NOFOLLOW` an intermediate directory-symlink reports `ENOTDIR`, not `ELOOP`, which is
+indistinguishable from "a regular file where a directory was expected" — so the blocked component is
+`lstat`-ed to tell the two apart. Without that step an escape attempt would have been recorded as
+`absent`, which is exactly the false negative above. An intermediate symlink is refused **even when it
+points inside the project**: the rule is about traversal, because a link that is safe today can be
+repointed tomorrow. A *final*-component symlink is observed as itself without being followed, so a
+broken symlink is a `present` `symlink` rather than an absent path.
+
+**Which paths.** The active criteria for the turn, resolved by PR11, and the paths they name —
+`path` and `to_path`, deduplicated by exact equality only, in the resolver's deterministic order.
+Never the whole repository, which would be an unbounded read of somebody's project at every turn
+boundary. Where the lineage is unavailable there is no defensible target set, and the observation says
+so rather than substituting the current snapshot, which is not the active requirement set.
+
+**Taken at the boundary, never on read.** After the worker returns, after PR5's committed-range
+observation, and **before the turn is durably closed** — all inside the dispatch lock, pinned by a
+test that records the turn row's state from inside the write and by one that asserts the call order.
+A later read returns the stored row and touches nothing: deleting the project changes no answer, and
+the read path is proven not to invoke the observer at all. If reading meant *go and look now*, drift
+would silently rewrite history and an audit could not be reproduced.
+
+**Schema v10**, additive, created empty and never backfilled: `task_turn_final_state` and
+`task_turn_final_state_paths`. The parent names `task_turns` — unlike the pre-dispatch facts of v6,
+v7 and v9, this is taken after the worker returns, so a final state for a turn that never happened is
+unrepresentable rather than merely unwritten. A turn with no row reads `legacy_unknown`, which covers
+both "predates PR14" and "the process died before the boundary" — deliberately not distinguished,
+because they mean the same thing to every consumer, and because the third option (looking now and
+filing the answer under an old turn) is the one that must never happen.
+
+**`FINAL_STATE_OBSERVER_VERSION = 1`**, distinct from the six versions around it, bound into a
+domain-separated observation fingerprint over the observer version, the target, the observation state
+and limitation, the lineage fingerprint that selected the paths, the HEAD anchor, and every path
+result in stored order. No clock, no minted id, no rowid, no host path.
+
+**Complete, incomplete, unavailable.** One unobservable path makes the whole observation
+`incomplete` — the paths that *were* observed are still stored, because they are real facts worth
+auditing, but no consumer may read it as whole. `unavailable` carries no paths at all.
+
+**Bounded and honest about stability.** At most 256 target paths, refused rather than truncated over
+the bound. The path set is read twice and retried up to three times if it moves, then refused as
+`observation_unstable` — never an optimistic answer after detected instability. The limitation is
+stated rather than implied: v1 observes existence and kind, so a file whose *contents* changed
+between passes looks identical to both.
+
+**Failure never rewrites the task.** A project that could not be read is a gap in Cofferdam's
+evidence, not a fault in the user's work; a completed worker stays completed and the gap is recorded
+as an explicitly unavailable observation.
+
+**Nothing is reinterpreted.** `path_operation(foo.py, created)` is still a question about what the
+worker did, and observing that `foo.py` is present does not satisfy it. No new predicate,
+`EVALUATOR_VERSION` stays 1, `ASSEMBLER_VERSION` stays 3, `EvidenceBundle` v3 is untouched and does
+not carry final state, the PR8 assessment response is unchanged, and there is still no
+`AGGREGATOR_VERSION`, no binding layer and no aggregate.
+
+**Rollback is a pair.** v10 is a schema bump, so the deployed PR10 runtime at `1efd49b` was loaded
+from `git show` and handed a real v10 database: it refuses cleanly, names the newer version, and
+leaves the file byte-identical with the version un-downgraded. That is the runtime production is
+actually running — not PR11 or PR12, which are merged and undeployed.
+
+## M2K records — the evidence foundation (written while each was on its branch)
+
+M2K is **in progress**: PR1 through PR8 are merged and deployed; PR9 is merged (`b2314f0`, #54) and
+needed no deployment because it changed only documentation; PR10 is merged (`1efd49b`, #55) and
+deployed to slot A on schema v9; PR11 (`3bb9a5b`, #56) and PR12 (`2dc4177`, #57) and PR13
+(`8cd8ba3`, #58) are merged and **intentionally not deployed**; PR14 is on a branch.
+See *In progress* above for PR14.
+
 ### M2K PR13 — cross-turn acceptance evidence-binding doctrine (documentation only)
 
-On `m2k-pr13-crossturn-doctrine`, from the merged `2dc4177`. **Documentation and design only** — no
-schema, no route, no runtime, no evaluator change, no `AGGREGATOR_VERSION`, nothing deployed.
+**Merged as `8cd8ba3` (#58).** Documentation and design only, so there was no deployment step and
+nothing to deploy. The record below was written while it was on `m2k-pr13-crossturn-doctrine`.
 
 PR11 and PR12 answered *which criteria are active at turn N*. Before an aggregate can be built on
 that, a second question has to be answered and it turns out to be much harder: **what is the current
@@ -873,21 +971,24 @@ is `unverified` at every turn it is active, and continuity can never promote it.
 cannot be established, the answer is `unavailable`/`unverified`. Never a reused stale `met`, never a
 reused stale `not_met`, never inferred preservation.
 
-## M2K records — the evidence foundation (written while each was on its branch)
-
-M2K is **in progress**: PR1 through PR8 are merged and deployed; PR9 is merged (`b2314f0`, #54) and
-needed no deployment because it changed only documentation; PR10 is merged (`1efd49b`, #55) and
-deployed to slot A on schema v9; PR11 (`3bb9a5b`, #56) and PR12 (`2dc4177`, #57) are merged and
-**intentionally not deployed**; PR13 is on a branch and is documentation only.
-See *In progress* above for PR13.
 
 **Merged is not deployed, and here that is a decision rather than a lag.** Production runs the PR10
 runtime from slot A at `1efd49b`. PR11 adds a pure read-only resolver and PR12 corrects a write-time
 validation that no caller in this build can reach — neither changes anything a running service does,
 because nothing supplies a continuity declaration yet. Spending a slot flip on zero observable change
-would be ceremony. The A/B slots are **deployment machinery, not feature-development machinery**: work
-is developed on branches and merged to `main`, and a deployment happens when a running service
-actually needs the change. PR11 and PR12 will go out together with the first change that does.
+would be ceremony. PR13 is documentation and has nothing to deploy at all. The A/B slots are
+**deployment machinery, not feature-development machinery**: work is developed in isolated feature
+worktrees and merged to `main`, a slot is never used as a workbench, and a deployment happens when a
+running service actually needs the change. So **merged is routinely ahead of deployed, on purpose**,
+and several low-risk changes may accumulate on `main` while production stays on an older stable
+runtime.
+
+PR11 through PR13 will therefore go out together with the first change that genuinely needs a
+deployment — and PR14 is the change that will make that batch a schema move rather than a slot flip,
+since it takes the database from v9 to v10. That deployment is Tier 2 and needs the full discipline:
+a verified pre-v10 backup, a migration rehearsal, the old-runtime refusal check, and an honest
+rollback **pair** (the slot *and* the restored snapshot), because a slot flip alone cannot walk a
+schema backwards. None of it is part of PR14's implementation.
 
 ### M2K PR12 — inherited-active supersession validation
 
