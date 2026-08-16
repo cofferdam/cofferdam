@@ -8,6 +8,46 @@ release.
 
 ### Added
 
+- **M2K PR16 — Cofferdam can now say where each of your standing requirements stands, including
+  "I don't know".** Nothing is visible yet and nothing new is saved — no screen changes, and nothing
+  exposed to your phone or to a connected assistant.
+
+  **What it adds.** Cofferdam could already work out which of your requirements are still standing at
+  any point in a task. It can now go one step further and say, for each of them, what it can honestly
+  report *at that point* — and, just as importantly, when it cannot report anything.
+
+  **When it can answer.** If you asked for something in the same message that the worker then acted
+  on, Cofferdam already checked it at the time, and that existing answer is reused exactly as it was
+  recorded. It is not re-checked or recalculated — the original finding is simply pointed at.
+
+  **When it says "I don't know", and why that is the right answer.** If a requirement carried over
+  from an earlier message, Cofferdam reports it as unknown. This is deliberate. Everything it checks
+  is of the form *did the worker do this during this piece of work* — so re-asking that question
+  later would report a file that was correctly left alone as a failure, and reusing the old answer
+  would miss anything that broke or got fixed since. Rather than guess in either direction, it says
+  it does not know. Requirements you marked for a person to check are also always unknown, because
+  nobody has told Cofferdam what a human decided.
+
+  **It will not quietly reuse an old verdict.** A requirement that passed three messages ago does not
+  count as passing now, and one that failed then does not count as failing now. Cofferdam is built so
+  that the old answer cannot even be worked out from the new one.
+
+  **Things you dropped stay dropped.** If you retired or replaced a requirement, it does not show up
+  at all — not as unknown, not as anything.
+
+  **"Cannot check yet" is kept separate from "checked and unknown".** If Cofferdam has not finished
+  its own bookkeeping for a piece of work, it says so plainly instead of reporting your requirements
+  as unknown. A missing check is never reported as a failure. And if its own stored records ever
+  disagree with themselves, it stops and says so rather than guessing or quietly fixing them.
+
+  **Nothing is stored.** All of this is worked out fresh from records that never change, so the same
+  question always gets the same answer — even after the project folder is moved or deleted. Asking
+  changes nothing on disk.
+
+  **What it still does not do.** It does not tell you whether a task succeeded overall. That needs a
+  kind of check Cofferdam cannot make yet — whether something is true *now*, rather than whether
+  somebody touched it — which is the next thing to build.
+
 - **M2K PR15 — Cofferdam works out where a "is this still true?" answer would have to be filed.**
   This change is documentation only. Nothing is saved, no screen changes, and the app behaves exactly
   as it did yesterday.

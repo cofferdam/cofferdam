@@ -3614,6 +3614,59 @@ class TaskStore:
             earliest_snapshot_turn=None if earliest is None else int(earliest),
         )
 
+    # -- current criterion assessment inputs (M2K PR16, no schema) ------------
+
+    def current_assessment_inputs(
+        self, task_id: str, turn_number: int
+    ) -> "AssessmentInputs":
+        """Every immutable row one current assessment may look at. **A read.**
+
+        M2K PR16. Returns the closed input set :func:`~.binding.bind` runs on —
+        after :func:`~.lineage.resolve` has turned the graph into an active set —
+        and decides nothing itself. Keeping the fetch out of the judgement is
+        what makes "the same stored rows always assess the same way" checkable
+        rather than promised.
+
+        **One coherent snapshot, and here it matters more than it did for PR11.**
+        A lineage read walks immutable rows, so mixing database states could only
+        hurt it in exotic ways. This read additionally consults the target turn's
+        PR7 evaluation, and that row is **not** frozen at dispatch: it is written
+        later by a bounded recovery pass. So between an autocommit lineage walk
+        and an autocommit evaluation read, an evaluation can legitimately appear —
+        and an answer assembled from an active set read before it and an
+        evaluation read after it would describe a database state that never
+        existed. :meth:`_read_snapshot` pins one view for all of it.
+
+        Writes nothing, creates nothing, repairs nothing, and never runs an
+        evaluation. A turn awaiting one is reported as awaiting one.
+        """
+        from .binding import AssessmentInputs
+        from .evaluation import EVALUATOR_VERSION
+
+        with self._read_snapshot() as connection:
+            turn = connection.execute(
+                "SELECT completed_at FROM task_turns"
+                " WHERE task_id = ? AND turn_number = ?",
+                (task_id, int(turn_number)),
+            ).fetchone()
+            closed = turn is not None and turn["completed_at"] is not None
+            graph = self._lineage_graph_locked(connection, task_id, int(turn_number))
+            # The supported version first; failing that, whatever is stored.
+            # A record written by a newer evaluator must **reach** the binder so
+            # it can refuse it as unsupported, because "evaluated by semantics I
+            # do not know" and "not evaluated at all" are different facts and
+            # only one of them is going to change by waiting.
+            evaluation = self._evaluation_locked(
+                connection, task_id, int(turn_number), evaluator_version=EVALUATOR_VERSION
+            )
+            if evaluation is None:
+                evaluation = self._evaluation_locked(
+                    connection, task_id, int(turn_number), evaluator_version=None
+                )
+        return AssessmentInputs(
+            graph=graph, evaluation=evaluation, turn_closed=closed
+        )
+
     # -- effective post-worker path state (schema v10) ------------------------
 
     def record_final_state(
@@ -3854,24 +3907,56 @@ class TaskStore:
         a question; a turn evaluated by a future version 2 has none *for version
         1* and that is a real distinction the uniqueness constraint preserves.
         """
-        from .evaluation import EVALUATOR_VERSION, CriterionResult, EvaluationRecord
+        from .evaluation import EVALUATOR_VERSION
 
         version = EVALUATOR_VERSION if evaluator_version is None else int(evaluator_version)
         with self._read() as connection:
+            return self._evaluation_locked(
+                connection, task_id, int(turn_number), evaluator_version=version
+            )
+
+    def _evaluation_locked(
+        self,
+        connection: sqlite3.Connection,
+        task_id: str,
+        turn_number: int,
+        *,
+        evaluator_version: Optional[int],
+    ) -> Optional["EvaluationRecord"]:
+        """The evaluation read itself. **The caller owns the transaction.**
+
+        Split out in M2K PR16 so the current-assessment read can take the turn's
+        lifecycle, its lineage and its evaluation from one pinned snapshot.
+
+        ``evaluator_version=None`` means **any stored version**, highest first,
+        and exists for exactly one caller: the binder must be able to tell "no
+        evaluation" from "an evaluation whose semantics I do not understand", and
+        filtering the second out at the SQL level would make the two identical.
+        """
+        from .evaluation import CriterionResult, EvaluationRecord
+
+        if evaluator_version is None:
+            row = connection.execute(
+                "SELECT * FROM task_turn_evaluations"
+                " WHERE task_id = ? AND turn_number = ?"
+                " ORDER BY evaluator_version DESC LIMIT 1",
+                (task_id, int(turn_number)),
+            ).fetchone()
+        else:
             row = connection.execute(
                 "SELECT * FROM task_turn_evaluations"
                 " WHERE task_id = ? AND turn_number = ? AND evaluator_version = ?",
-                (task_id, int(turn_number), version),
+                (task_id, int(turn_number), int(evaluator_version)),
             ).fetchone()
-            if row is None:
-                return None
-            # ORDER BY the stored ordinal, never rowid: a VACUUM may reorder the
-            # table and a judgement's order is a fact it recorded.
-            items = connection.execute(
-                "SELECT * FROM task_turn_criterion_results"
-                " WHERE evaluation_id = ? ORDER BY ordinal ASC",
-                (row["evaluation_id"],),
-            ).fetchall()
+        if row is None:
+            return None
+        # ORDER BY the stored ordinal, never rowid: a VACUUM may reorder the
+        # table and a judgement's order is a fact it recorded.
+        items = connection.execute(
+            "SELECT * FROM task_turn_criterion_results"
+            " WHERE evaluation_id = ? ORDER BY ordinal ASC",
+            (row["evaluation_id"],),
+        ).fetchall()
         return EvaluationRecord(
             evaluation_id=row["evaluation_id"],
             task_id=row["task_id"],

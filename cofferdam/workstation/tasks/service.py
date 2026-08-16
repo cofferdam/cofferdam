@@ -1924,6 +1924,54 @@ class TaskService:
         row = self.get_task(task_id)
         return resolve(self._store.lineage_inputs(row.task_id, int(turn_number)))
 
+    def current_criterion_assessment(self, task_id: object, turn_number: object):
+        """What can honestly be said about each active criterion at one turn.
+
+        M2K PR16, and the layer PR13 identified and PR15 designed. Returns a
+        :class:`~.binding.CurrentAssessment` — never ``None``, never a partial
+        set, and never an exception for stored data it dislikes.
+
+        **Three components, and each stays in its own job.** The store fetches
+        every immutable input in one pinned read snapshot; PR11's resolver — the
+        same one, not a copy — turns the graph into an active set; PR16's pure
+        binder decides what each active criterion can honestly be said to be.
+        Nothing here evaluates anything.
+
+        **The rule it enforces.** A change criterion that originated at this turn
+        binds to PR7's stored judgement for this turn, read and never recomputed.
+        A change criterion inherited from an earlier turn is ``unverified``,
+        because it asks what a worker did at *its* turn and no evidence in this
+        build answers that here — the old result is not carried forward, no
+        re-evaluation is attempted, and PR14's final state is not consulted.
+        Manual is ``unverified`` wherever it came from.
+
+        **Derived, never stored.** Every input is immutable and versioned, so the
+        answer is recomputed rather than cached. Schema stays at v10, no table is
+        added, and there is no write path or recovery path to get wrong.
+
+        **Internal**, exactly as PR6's criteria, PR10's continuity, PR11's active
+        set and PR14's final state are. No HTTP route, no Actions Bridge
+        operation, no PWA control, and :meth:`turn_assessment` is unchanged.
+
+        **Not an aggregate and unable to become one.** It contains no verdict, no
+        outcome and no count of what was met. A resolved *empty* set means the
+        declared requirement set is empty — never that the task passed.
+
+        ``get_task`` rather than ``refresh_task``, for the same reason as above:
+        asking where requirements stand must not move the task's state by being
+        asked. Calling it a thousand times leaves the database byte-identical.
+        """
+        from .binding import bind
+        from .lineage import resolve
+
+        row = self.get_task(task_id)
+        inputs = self._store.current_assessment_inputs(row.task_id, int(turn_number))
+        return bind(
+            resolve(inputs.graph),
+            inputs.evaluation,
+            turn_closed=inputs.turn_closed,
+        )
+
     def turn_assessment(self, task_id: object, turn_number: object):
         """One turn's published assessment, or ``None`` for no such turn.
 
