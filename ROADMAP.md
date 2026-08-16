@@ -648,8 +648,9 @@ downstream reads from.
     `root`/`replace`-only aggregate would be sound today and is deliberately **not** taken, because
     its correctness would depend on a lineage shape the caller does not control.
     D-2026-08-16-15 through D-2026-08-16-19.
-  - **PR14 — the final-state path observation foundation.** *Implemented on
-    `m2k-pr14-final-state`, not merged and not deployed.* The first primitive PR13 said was
+  - **PR14 — the final-state path observation foundation.** *Merged as `064fe51` (#59), **not
+    deployed**; `main` is now schema v10 while production stays on PR10 and schema v9.* The first
+    primitive PR13 said was
     missing: an immutable observation of **effective post-worker repository state**, so that a
     requirement inherited across turns can one day have an answerable current status. It is only the
     evidence — **no predicate, no binding layer, no aggregate, no `AGGREGATOR_VERSION`**;
@@ -679,6 +680,32 @@ downstream reads from.
     failure **never** converts a completed worker into a failed task. Rollback is a **pair** — the
     deployed PR10 runtime at `1efd49b` refuses a v10 database cleanly and leaves it byte-identical.
     D-2026-08-16-20 and D-2026-08-16-21.
+  - **PR15 — current-state evaluation identity and storage doctrine.** *Implemented on
+    `m2k-pr15-current-state-doctrine`, not merged and not deployed; **documentation and design only**
+    — no schema, no predicate, no runtime, no evaluator change, no `AGGREGATOR_VERSION`.* Answers the
+    representation question standing between PR14's evidence and the first state predicate: **can the
+    existing `EvaluationRecord` honestly hold a result derived from a `FinalStateObservation`,
+    including for a criterion inherited from an earlier turn?** Audited against the merged DDL and
+    probed against a real v10 database. **No.** A PR7 evaluation means *turn N's own snapshot against
+    turn N's own bundle*, with origin and target turn collapsed into one number; that meaning is
+    frozen. The results table has **no** constraint tying a criterion to its evaluation's snapshot or
+    turn — the DDL permits turn 1's criterion inside turn 2's evaluation — so honesty there rests
+    entirely on the write API. And `UNIQUE (task_id, turn_number, evaluator_version)` lets one target
+    turn hold only one evaluation per evaluator version, so two evaluation semantics cannot share a
+    turn. The decision is a **separate immutable current-state assessment layer** keyed by target turn
+    and criterion, with **origin turn and target turn as distinct columns**, **every target-turn
+    assessment retained** rather than a mutable status row, and an **evidence-domain discriminator** so
+    a future named-check result joins as a value rather than a fourth table. A state result binds the
+    final-state observation **fingerprint**, `FINAL_STATE_OBSERVER_VERSION` and the resolved
+    **active-lineage fingerprint** as authority; `EvidenceBundle` v3 is not the vehicle. Completeness
+    is read **per path**, so an `incomplete` observation still yields answers for the paths it did
+    observe, and a missing observation is never `not_met`. State predicates are **authored, never
+    derived** — no `path_operation(P, created)` → `path_exists(P)`, and continuity may not perform
+    that transformation either. The concrete blocker before the predicates: `predicate` is pinned by a
+    `CHECK` that SQLite cannot alter, so admitting one needs a **table rebuild** of immutable
+    historical criteria — the first destructive-shape migration here. Recommends the next layer be
+    **derived rather than persisted**, since every input is immutable and versioned.
+    D-2026-08-17-1 through D-2026-08-17-4.
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**

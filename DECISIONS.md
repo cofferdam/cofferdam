@@ -3023,6 +3023,146 @@ observation fingerprint over the observer version, the target, the state and lim
 fingerprint that selected the paths, the HEAD anchor and every path result in stored order — and not
 over any clock, minted id, rowid or host path.
 
+## D-2026-08-17-1 — A PR7 evaluation means one turn's own snapshot against that turn's own bundle, and that meaning is frozen (EFE DECISION, ACTIVE)
+
+**Decision.** A stored `task_turn_evaluations` row means exactly:
+
+> the judgement of **turn N's own immutable criteria snapshot**, against **turn N's own exact
+> `EvidenceBundle`**, under `EVALUATOR_VERSION` 1.
+
+This was verified against the merged code rather than assumed. `_evaluate_one_turn` reads
+`turn_criteria(task_id, turn_number)` and `evidence_bundle(task_id, turn_number)` — the same turn
+both times. `record_evaluation` takes a single `CriteriaSnapshot` and derives `task_id`,
+`turn_number`, `criteria_snapshot_id` and `criteria_fingerprint` from it, and refuses unless the
+result count equals that snapshot's criterion count. `evaluation_fingerprint` binds one turn
+identity, one snapshot identity and one bundle identity. **Origin turn and target turn are the same
+number, and nothing in the row distinguishes them** — because until now they could not differ.
+
+**This identity must never be silently widened to "all criteria active at turn N".** Every stored
+row was written under the narrow meaning. Widening it would not add information; it would retroactively
+change what thousands of existing rows claim, and no reader could tell which meaning any given row
+was written under, because nothing is stored that would say. A widened reading also cannot be
+reconciled with the `result_count = criterion_count` invariant, which is what stops "no criteria"
+from ever totalling up as "everything passed".
+
+**The schema does not defend this meaning — the write path does.** Probed directly against a real
+v10 database: `task_turn_criterion_results` has a foreign key to `task_turn_criterion_items`
+(criterion exists *somewhere*) and **no** constraint tying a result's criterion to its evaluation's
+`criteria_snapshot_id` or turn. Inserting turn 1's criterion into turn 2's evaluation is **permitted
+by the DDL**, as is an evaluation whose `turn_number` and `criteria_snapshot_id` belong to different
+turns. Both are refused only by `record_evaluation`'s snapshot-driven API. That is not a bug to fix
+here, but it is the reason the honest meaning cannot be preserved by adding rows to this table: the
+database would not stop a dishonest one.
+
+**`UNIQUE (task_id, turn_number, evaluator_version)` is the binding structural fact.** One target
+turn admits exactly **one** evaluation per evaluator version. Two evaluation semantics — turn-change
+and current-state — therefore cannot coexist for one turn without either bumping `EVALUATOR_VERSION`
+to mean "a different kind of question" (which it does not mean) or storing them apart.
+
+## D-2026-08-17-2 — Current-state assessment is a separate layer with its own identity, not an extension of the EvaluationRecord (EFE DECISION, ACTIVE)
+
+**Decision.** Results derived from a PR14 `FinalStateObservation` are recorded in their **own**
+layer, keyed by target turn and criterion. `task_turn_evaluations` and
+`task_turn_criterion_results` keep their PR7 meaning unchanged, forever.
+
+**Why not extend the existing record (Option A).** It fails on four counts, in ascending order of
+seriousness. Historical rows would need a nullable evidence-domain column whose `NULL` silently means
+"change" — the ambiguous nullability that makes a schema unreadable. The parent row would carry two
+input fingerprints, only one of which any given child used, so provenance would have to be restated
+per result anyway. The uniqueness key admits one evaluation per turn per evaluator version, so the
+two domains would share a parent whose `criteria_snapshot_id` and `criteria_fingerprint` could only
+describe one of them. And an inherited criterion answered inside a turn's evaluation would break the
+`result_count = criterion_count` invariant, which is load-bearing. Extending is not cheaper; it is
+the same work done where it cannot be constrained.
+
+**Why not a generalised `EvaluationInput` framework (Option C), yet.** There is exactly **one** real
+second domain today. A general input model designed against one real case and two imagined ones
+would be designed against imagination, and this milestone has refused that at every step. But the
+door is left open deliberately: the new layer carries an explicit **evidence-domain discriminator**,
+so a future named-check result — a bounded host-owned execution, which is neither turn-change
+evidence nor a path observation — joins as a third domain value rather than a fourth table.
+
+**Result vocabulary is reused unchanged**: `met`, `not_met`, `unverified`. No confidence, no score,
+no probability, no task verdict. An inability to obtain a trustworthy current answer is
+`unverified` with a closed reason, never `not_met`.
+
+**Origin turn and target turn are separate columns and must never be collapsed.** A criterion
+introduced at turn 1 and assessed at turn 4 has two honest identities, and a single `turn_number`
+could only lie about one of them. PR11's `ActiveCriterion` already carries `source_snapshot_id` and
+`source_turn_number`; the layer persists both alongside the target turn, and the pair
+`(target_turn, criterion_id)` is the natural key.
+
+**Every target-turn assessment is retained.** A criterion assessed `met` at turn 1, `met` at 2,
+`not_met` at 3 and `met` at 4 leaves four immutable rows, because those are four machine judgements
+made at four different world boundaries. There is **no** mutable "current status" row: overwriting
+would destroy the only evidence that something broke and was fixed, which is precisely the history an
+audit exists to show. "Current" means *at the target turn*, not *latest*.
+
+## D-2026-08-17-3 — A state result may not exist without the exact immutable observation it came from (EFE DECISION, ACTIVE)
+
+**Decision.** A current-state result must bind, as **authority**:
+
+* the **target turn**, and the **criterion id**;
+* the **final-state observation fingerprint** — the content identity of the exact observation read;
+* `FINAL_STATE_OBSERVER_VERSION` — because *what `present` means* is that version's semantics, and a
+  version 2 with a different authority or symlink rule would make the same word a different claim;
+* the **resolved active-lineage fingerprint**, which proves the criterion was **active** at the
+  target turn rather than merely existing in history;
+* the **current-assessment semantic version**, which maps the two together.
+
+And as **redundant audit context**, denormalised for legibility but never relied on: the criterion's
+origin turn and snapshot (derivable from the criterion row), the observation id (derivable from the
+target turn, since the observation is keyed one-per-turn), and the HEAD anchor (already inside the
+observation).
+
+**The lineage fingerprint is bound explicitly even though PR14's observation already carries one.**
+They are the same value today, and binding both is nearly free; but the observation's copy answers
+*why those paths were looked at*, while the assessment's answers *why this criterion counts here*.
+Deriving one from the other would tie two questions together that a later change could separate.
+
+**`EvidenceBundle` v3 is not the vehicle, and must not become one.** Stuffing a `FinalStateObservation`
+into the bundle to reuse the existing record would reinterpret `ASSEMBLER_VERSION`, change what every
+stored `evidence_input_fingerprint` refers to, and merge two evidence meanings — turn-local change
+and effective resulting state — that PR13 and PR14 spent two PRs separating. If a composite input
+object is ever wanted, it is a new layer with a new version, not a widened bundle.
+
+**Observation completeness maps to results per path, not per observation.** PR14 stores a state for
+every target path, so `incomplete` does not poison the paths that *were* observed: a path row reading
+`present` or `absent` is individually complete and authoritative. The rule is therefore *per path*:
+a path row of `present`/`absent` is usable; a path row of `unavailable`, a path with no row, an
+`unavailable` observation and a `legacy_unknown` turn all yield **`unverified`**. A missing
+observation is never `not_met` — absence of evidence is the one thing this whole milestone refuses to
+read as evidence of absence.
+
+## D-2026-08-17-4 — State predicates are authored explicitly and never derived from action criteria (EFE DECISION, ACTIVE)
+
+**Decision.** `path_exists(P)` and `path_absent(P)` — when they exist — are written by whoever states
+the requirement. Cofferdam never manufactures one.
+
+**Never**: `path_operation(P, created)` does not become `path_exists(P)`, and
+`path_operation(P, deleted)` does not become `path_absent(P)`. The first asks what a worker did in one
+turn; the second asks what is true at a boundary. A requirement to *create* a file is satisfied by
+creating it, and is silent about whether it must still be there in nine turns' time — inventing that
+second requirement would enforce something nobody asked for. **Continuity may not perform this
+transformation either**, in any mode: a lineage relation carries requirements forward as they were
+written, and a mode that rewrote a predicate on the way through would be inferring intent, which is
+the thing declared lineage exists to avoid.
+
+**PR14's observation scope does not imply state-evaluability.** PR14 selects target paths from the
+active criteria's `path`/`to_path`, which today are all change criteria. That is sound as machine
+evidence — the paths are worth observing regardless. It does **not** mean those change criteria can
+be answered from the observation, and the future state evaluator must select by **predicate
+semantics**, never by "a path was observed".
+
+**Adding the predicates is not additive, and this is the concrete blocker.** `task_turn_criterion_items`
+constrains `predicate` with `CHECK (predicate IS NULL OR predicate IN ('path_changed',
+'path_operation', 'rename'))` — verified by attempting the insert, which SQLite refuses. SQLite cannot
+alter a CHECK constraint, so admitting a new predicate requires a **full table rebuild** of a table
+holding immutable historical criteria and referenced by a foreign key from
+`task_turn_criterion_results`. Every schema step in this project so far has been a pure
+`CREATE TABLE IF NOT EXISTS`; this would be the first destructive-shape migration, and it must be
+treated as one — rehearsed, backed up, and rolled back as a pair.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

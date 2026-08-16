@@ -8,6 +8,45 @@ release.
 
 ### Added
 
+- **M2K PR15 — Cofferdam works out where a "is this still true?" answer would have to be filed.**
+  This change is documentation only. Nothing is saved, no screen changes, and the app behaves exactly
+  as it did yesterday.
+
+  **The question it settles.** Cofferdam can now see what is actually in your project when a worker
+  finishes. The obvious next step is to use that to say whether a standing requirement is currently
+  satisfied. Before writing any of that, one boring-sounding question had to be answered: when
+  Cofferdam decides "yes, that file is there", **where does it write that down, and what does it have
+  to keep alongside it so the answer can be trusted later?**
+
+  **What it found.** The place Cofferdam already keeps its judgements turns out not to fit. Those
+  records mean something quite specific — *this is what we thought about the requirements you gave us
+  for this one piece of work, based on what the worker did during it*. They have no way to say "this
+  requirement came from a request you made three messages ago", and they only have room for one
+  verdict per piece of work, so a second kind of judgement cannot sit beside the first without
+  muddling both. Some of that turned out to rest on habit rather than on anything the database
+  enforces, which was worth knowing.
+
+  **What it decides.** New-style answers get their own place, and the existing records keep their old
+  meaning untouched — nothing already written gets quietly reinterpreted. Each new answer records both
+  *when you first asked for this* and *when we checked it*, which are genuinely different things, and
+  it points at the exact observation it was based on so it can be re-checked rather than taken on
+  faith.
+
+  **History is kept.** If a requirement is satisfied, then broken, then fixed, Cofferdam keeps all
+  four answers rather than a single running status that overwrites itself. The record of something
+  breaking and being fixed is usually the useful part.
+
+  **What it refuses.** Cofferdam will not turn "please create this file" into "this file must exist
+  forever". Those are different requests, and only you can make the second one — so requirements about
+  what must currently be true have to be written as such, and nothing will convert one into the other
+  behind your back. And if it could not check something, it says so; it never reports a requirement as
+  failed just because it was unable to look.
+
+  **What it does not do.** No new checks, no new requirement types, and it still does not tell you
+  whether a task succeeded. It also writes down the one obstacle in the way: accepting a new kind of
+  requirement means rebuilding a table that holds history, which is a riskier change than anything
+  this project has done so far and gets planned as one.
+
 - **M2K PR14 — Cofferdam now writes down what was actually there when a worker finished.**
   Nothing about this is visible yet, and that is deliberate. No screen changes and nothing new is
   exposed to your phone or to a connected assistant.
