@@ -494,8 +494,10 @@ downstream reads from.
     record; `not_provided` produces a zero-result record the schema forbids from ever reading as a
     pass. Internal only — no route, no request field, no bridge Action — and `assembler_version`
     stays **3**.
-  - **PR8 — the private read-only assessment surface and PWA panel.** *Implemented on a branch and
-    not deployed; see [`STATUS.md`](STATUS.md).* Everything M2K has stored since PR6 has been
+  - **PR8 — the private read-only assessment surface and PWA panel.** *Merged as `059fdcb` (#53) and
+    deployed — workstation and Actions bridge both run it from slot B, the live database is unchanged
+    at schema v8, and the rollback is an exact slot flip to slot A at `7f21fc4` against that same
+    database; see [`STATUS.md`](STATUS.md).* Everything M2K has stored since PR6 has been
     invisible; this publishes it and computes nothing. **No schema change (still v8), no evaluator
     change, no new stored fact.** One turn-qualified route —
     `GET /api/tasks/{task_id}/turns/{turn_number}/assessment` — returns criteria and evaluation
@@ -513,7 +515,30 @@ downstream reads from.
     neutral tone** from `not_met`, because one is a finding about the work and the other is a
     statement about Cofferdam's reach. Evidence is **named** by `assembler_version` and
     `evidence_input_fingerprint`, never copied, and `claim_conflict` is absent entirely. No bridge
-    Action, no public exposure.
+    Action, no public exposure. The `require_token` choice is an **intentional security boundary**,
+    not an inconsistency to be tidied away — D-2026-08-16-1.
+  - **PR9 — assessment aggregation and turn-continuity doctrine.** *Docs and design only; on
+    `m2k-pr9-aggregation-doctrine`.* **No schema, no route, no runtime aggregation, no code** — it
+    settles the contract before the named check runner adds another mechanism that produces results.
+    Three axes stay separate: **worker lifecycle**, **acceptance** and **verification reach**;
+    `completed` never implies `met`, and `failed` never implies `not_met`. Per turn there are two
+    dimensions rather than one enum: *availability* (`assessable` / `not_assessable`, with
+    `not_provided` → `no_structured_criteria` and `legacy_unknown` → `historical_criteria_unknown`,
+    neither ever a pass) and, only when criteria are `present`, an *acceptance outcome* of
+    `met` / `not_met` / `incomplete`. The rule is ordered: a deterministic `not_met` dominates; any
+    `unverified` yields `incomplete` and never `not_met`; only all-met yields `met`. A `manual`
+    criterion is always `unverified` today, so any snapshot containing one is **capped at
+    `incomplete`** — and manual completion is never inferred from prose, a tap, a claim or a model.
+    `requires_human` stays orthogonal context rather than a competing outcome, so it cannot hide
+    machine incompleteness. `claim_conflict` is excluded from aggregation entirely. **No task-level
+    aggregate exists**: *accumulate-all* makes a task that created then deleted a file contradict
+    itself, and *latest-turn-only* silently drops turn 1's feature and tests when turn 2 adds
+    logging — so task acceptance stays **unavailable** until criterion continuity/supersession
+    semantics exist, which is a prerequisite, must be explicit, must be frozen pre-dispatch, is
+    authored by the planner or user and **never** by the worker or adapter, and needs an additive
+    schema version. A future aggregate carries its own `AGGREGATOR_VERSION`, and is **derived on
+    read** rather than persisted. Vocabulary avoids `success`/`failed`/`passed`, which already belong
+    to lifecycle. D-2026-08-16-2 through D-2026-08-16-6.
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**

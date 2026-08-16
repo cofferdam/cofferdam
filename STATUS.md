@@ -69,11 +69,26 @@ PR7 — deterministic criterion evaluation and the immutable `EvaluationRecord` 
 `7f21fc4`) and deployed**: workstation and Actions bridge both run it from slot A, and the live task
 database is migrated to **schema v8**. Because the PR6 runtime refuses a v8 database, the rollback is
 a **pair** — slot B at `cd11232` plus the verified pre-v8 schema-v7 backup — rather than a slot flip.
-PR8 — the private read-only assessment surface and PWA panel — is **implemented on a branch and not
-deployed**; see *In progress* below. It changes **no schema** (still v8), no evaluator and no stored
-fact: it publishes what PR6 and PR7 already froze. Every one of these still holds: **no task verdict,
+PR8 — the private read-only assessment surface and PWA panel — is **merged (#53, `059fdcb`) and
+deployed**: workstation and Actions bridge both run it from slot B, and the live task database is
+**unchanged at schema v8**. It changes no schema, no evaluator and no stored fact: it publishes what
+PR6 and PR7 already froze. Because there is no schema change, no new stored fact and no DB-format
+change, the immediate rollback is an **exact slot flip** back to slot A at `7f21fc4` against the
+**same live schema-v8 database** — no backup restore is required, and that was proven by running the
+slot A runtime against a consistent copy of the live v8 database before the flip was relied on.
+The workstation declared route count is **80** (79 `APIRoute` plus the one WebSocket; the static PWA
+mount is not counted), the one addition being
+`GET /api/tasks/{task_id}/turns/{turn_number}/assessment`. That route is guarded by
+**`require_token`, deliberately not `require_task_caller`**, so the **Actions bridge credential is
+refused** on it — see D-2026-08-16-1. The bridge itself is unchanged at **10 routes / 9 authenticated
+operations** with `artifacts_supported` false. Every one of these still holds: **no task verdict,
 no pass/fail, no aggregate, no risk levels, no confidence, no model, no check runner, no planner**,
 and none of PR3 through PR8 adds any of them.
+
+PR9 — the assessment aggregation and turn-continuity doctrine — is **docs/design only**: it adds no
+schema, no route, no runtime aggregation and no code at all. It settles what a future aggregate may
+and may not say, so that the named check runner's results arrive to a consumer whose contract already
+exists. See *Assessment aggregation doctrine* below and D-2026-08-16-2 through D-2026-08-16-6.
 
 **M2H is complete and merged**, closing the M1 post-reboot gate;
 M2F Agent Task Core and M2G the Claude Code adapter merged; the isolated Custom GPT Actions mobile
@@ -782,10 +797,34 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2K PR9 — assessment aggregation and turn-continuity doctrine
+
+On `m2k-pr9-aggregation-doctrine`, from the merged `059fdcb`. **Docs and design only — no schema, no
+route, no runtime aggregation, no code.**
+
+PR8 finished the evidence-only chain: criteria frozen before dispatch, evaluation frozen after close,
+both published. What it does not do — deliberately — is compose those per-criterion answers into an
+answer to *did this task do what was asked?* PR9 settles that contract before any further
+result-producing mechanism is built, so that the named check runner's results arrive to a consumer
+whose rules already exist. The doctrine is recorded in
+[`docs/AGENT_TASK_CORE.md`](docs/AGENT_TASK_CORE.md) and in D-2026-08-16-2 through D-2026-08-16-6;
+the summary is under *Assessment aggregation doctrine* below.
+
+## M2K records — the evidence foundation (written while each was on its branch)
+
+M2K is **in progress**: PR1 through PR8 are merged and deployed; PR9 is docs-only and on a branch.
+See *In progress* above for PR9.
+
 ### M2K PR8 — the private read-only assessment surface and PWA panel
 
-On `m2k-pr8-assessment-surface`, from the merged `7f21fc4`. **Implemented on a branch, not merged and
-not deployed.**
+**Merged as `059fdcb` (#53) and deployed**: workstation and Actions bridge both run it from slot B,
+and the live task database is **unchanged at schema v8**. Because PR8 changes no schema, adds no
+stored fact and alters no on-disk format, the rollback is an **exact slot flip** to slot A at
+`7f21fc4` against the same live schema-v8 database — proven before the flip was relied on by running
+the slot A runtime against a consistent copy of the live v8 database, where it opened without
+migrating, served its routes, answered 404 for `/assessment`, and mutated nothing. The record below
+was written while it was still on `m2k-pr8-assessment-surface`, from the merged `7f21fc4`, and is
+kept as it was written.
 
 PR6 froze the criteria and PR7 froze the evaluation, and both have been durable and **completely
 invisible** — no route, no panel, no way to see either without opening the database. PR8 publishes
@@ -847,11 +886,6 @@ criterion went unmet, and placing it beside a result is how a reader would come 
 
 **No bridge exposure.** Ten bridge routes, nine authenticated, no assessment Action,
 `artifacts_supported` still `false`, `getProjectContext` untouched.
-
-## M2K records — the evidence foundation (written while each was on its branch)
-
-M2K is **in progress**: PR1 through PR7 are merged and deployed; PR8 is on a branch. See *In
-progress* above for PR8.
 
 ### M2K PR7 — deterministic criterion evaluation and the immutable `EvaluationRecord`
 
@@ -1609,6 +1643,100 @@ prose parsed into invented claims.
 `O_NONBLOCK`, which **blocks forever on a named pipe** — harmless while every path came from
 host-owned configuration, and reachable once the same resolver took an adapter-claimed path. Fixed
 at the source rather than worked around in the caller.
+
+## Assessment aggregation doctrine (M2K PR9 — design only, nothing implemented)
+
+Nothing described in this section exists in code. It is the contract a future aggregate must obey,
+settled deliberately **before** the named check runner adds another mechanism that produces results.
+The decisions are D-2026-08-16-2 through D-2026-08-16-6; the reference text is in
+[`docs/AGENT_TASK_CORE.md`](docs/AGENT_TASK_CORE.md).
+
+**Three axes stay separate, and this is the load-bearing rule.** *Worker lifecycle* answers **what
+happened to execution** (`completed`, `failed`, `interrupted`, `cancelled`). *Acceptance* answers
+**what the recorded criteria and evidence establish**. *Verification reach* answers **how far
+Cofferdam could see**. A task whose lifecycle is `completed` has not thereby met its criteria — the
+live database is the proof, with 10 completed tasks and zero evaluations — and a task whose lifecycle
+is `failed` may still have met every criterion recorded for its turn. Merging these would let a
+compliant worker declare its own success, which is the single failure this whole milestone exists to
+prevent.
+
+**Two dimensions per turn, not one overloaded enum.** *Availability* is `assessable` or
+`not_assessable`, derived from the criteria state alone: `present` → assessable; `not_provided` →
+not assessable, reason `no_structured_criteria`; `legacy_unknown` → not assessable, reason
+`historical_criteria_unknown`. Neither absent case is ever `met`, `success`, `passed` or an empty
+pass. *Acceptance outcome* exists **only** when criteria are `present`, and its closed V1 vocabulary
+is `met` / `not_met` / `incomplete`.
+
+**The composition rule, in precedence order.** Any deterministic `not_met` ⇒ **`not_met`**, because
+one known unmet requirement is already enough to know the turn's recorded requirements were not all
+established. Otherwise any `unverified` ⇒ **`incomplete`**, never `not_met` — this preserves the
+existing doctrine that evidence limitation is not failure. Only when every criterion is `met` ⇒
+**`met`**. Known failure dominates; uncertainty blocks `met`; nothing else yields `met`.
+
+**`met` is narrow on purpose.** It means *the acceptance criteria recorded for this turn are all
+established as met by the current assessment model.* It does not mean the task succeeded, the worker
+succeeded, the user's full intent was captured, or that a later turn cannot regress it.
+
+**Manual criteria cannot currently reach `met`.** A `manual` criterion always evaluates to
+`unverified` because no human-answer channel exists, so **any `present` snapshot containing one is
+capped at `incomplete`**. That is the honest state and it is not to be worked around: manual
+completion must never be inferred from worker prose, a PWA interaction, a claim, or a model
+judgement. A human-answer channel is new authority and new state, and needs its own reviewed design.
+
+**Blockers are context, not a competing outcome.** `requires_human` must not become a fourth
+aggregate value — doing so would hide machine incompleteness behind human incompleteness whenever
+both are true. The recommended shape is orthogonal boolean context beside the outcome
+(`requires_human`, `machine_verification_incomplete`), so a turn can say `incomplete` *and* say
+exactly why, and a caller can compose the two without guessing which one was suppressed.
+
+**`claim_conflict` stays out of aggregation entirely.** It is a disagreement between an adapter's
+record and the machine's, not a criterion result, not a task failure and not an aggregate blocker.
+It remains evidence and audit context on the evidence surface, where a person looks at it.
+
+**There is no task-level aggregate, and that is the decision.** Per-turn acceptance is well defined
+by the above. Task-level acceptance across multiple turns is **unavailable** until criterion
+continuity semantics exist, because both obvious rules are demonstrably wrong. *Accumulate all turns*
+is unsafe: turn 1 requires `foo.py` created, turn 2 requires it removed, and treating both as
+simultaneously active makes the task's own requirements contradictory when the second was simply a
+deliberate change of mind. *Latest turn only* is unsafe in the opposite direction: turn 1 requires
+feature X plus tests, turn 2 adds logging, and honouring only turn 2 silently drops X and the tests
+from acceptance. Cofferdam persists no fact saying whether a later snapshot replaces, extends,
+narrows, supersedes or is independent of an earlier one, so **no task-level rule can be correct
+today**, and inventing one is worse than reporting the gap.
+
+**What continuity will need** (design only, nothing decided into code): continuity must be
+**explicit** rather than defaulted, because a wrong default is silently applied to every task;
+`replace` and `extend` are not distinguishable by inspection. It likely wants a snapshot-level
+relation such as `supersedes_snapshot_id` **plus** criterion-level relations, because a later turn
+routinely supersedes one requirement while leaving its siblings live. Content fingerprint matching is
+**not** sufficient — identical text does not prove lineage, and differing text does not disprove it.
+The authority is the **planner or the user**, never the worker and **never the adapter**: a worker
+that could declare its new criteria supersede its old ones could retire the requirement it just
+failed. Continuity must be frozen **pre-dispatch alongside the criteria snapshot**, for the same
+reason the criteria are: a boundary a worker can move after seeing its own results is not a boundary.
+It would require an additive schema version. It is a **prerequisite** for any runtime task-level
+aggregate.
+
+**A future aggregate carries its own version.** `AGGREGATOR_VERSION` (or equivalent) must be
+code-owned and independent of the schema, assembler, criteria-model and evaluator versions, because
+a change of composition doctrine must not silently reinterpret aggregates recorded under the old one.
+
+**Derived on read, not persisted — recommended.** A per-turn aggregate is a pure deterministic
+function of an immutable `EvaluationRecord` and its criteria snapshot, so persisting it stores
+nothing that cannot be recomputed, while adding a write path to a surface whose central property is
+that reading it mutates nothing. Deriving it keeps the no-mutation-on-GET doctrine intact and makes a
+doctrine change a re-render rather than a migration. If historical audit later requires "what did we
+say at the time", that is an argument for persisting the *aggregator version alongside the answer*,
+not for persisting the answer alone — and it should be taken as its own decision.
+
+**Ordering: doctrine first, runner second.** The named check runner introduces the first
+project-scoped command execution authority, a new recorded result type, probably a new criterion kind
+and `check_id`, invocation and result persistence, timeout and output policy, and an evaluator
+semantic expansion that would move `EVALUATOR_VERSION`. Built before this doctrine, all of that would
+produce results feeding an undefined consumer. Its trust boundary is unchanged and still binding
+(D-2026-08-11-7): host-owned definitions by stable id, literal `argv`, `shell=False`, validated
+project `cwd`, bounded timeout, bounded output, off by default per project, and **neither the caller
+nor the adapter ever supplies command text**.
 
 ## M2J records — the egress boundary and the read surface (written while each was on its branch)
 
