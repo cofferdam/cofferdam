@@ -485,7 +485,9 @@ class ContinuityInvalid(TaskError):
     :func:`~.continuity.validate_declaration`, and the relational one in
     :meth:`~.store.TaskStore.reserve_turn_continuity` that needs the database to
     decide — an unknown predecessor, one belonging to another task or a later
-    turn, or a superseded criterion that is not in the predecessor snapshot.
+    turn, a superseded criterion that is not **active** in the predecessor's
+    resolved active set, or a ``revise`` whose predecessor lineage cannot be
+    resolved at all.
 
     The detail is a closed reason code. The submitted value never travels back
     out, exactly as :class:`CriteriaInvalid` keeps criteria text out of a refusal.

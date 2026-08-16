@@ -565,8 +565,10 @@ downstream reads from.
     deployed PR8 runtime refuses a v9 database; that refusal was measured against the real deployed
     source and leaves the file byte-identical. The rollback pair is **slot B at `059fdcb`** plus the
     verified pre-v9 schema-v8 backup.
-  - **PR11 — the pure continuity lineage resolver.** *Implemented on `m2k-pr11-lineage-resolver`,
-    not merged and not deployed.* Derives **which criteria are active at a given turn** from PR6's
+  - **PR11 — the pure continuity lineage resolver.** *Merged as `3bb9a5b` (#56) and **deliberately
+    not deployed**: it adds no schema, no write path and no external surface, so production stays on
+    the PR10 runtime (slot A `1efd49b`, schema v9) until a later deliberate deployment point carries
+    it with PR12.* Derives **which criteria are active at a given turn** from PR6's
     immutable snapshots and PR10's immutable declarations. **No schema change — v9 stays**, because
     the resolver is pure read logic and the answer is **derived on read, never persisted**: the
     sources are immutable and the function is deterministic, so persisting it would only add a write
@@ -593,6 +595,28 @@ downstream reads from.
     `AGGREGATOR_VERSION`, no task aggregate, no check runner, no command execution**;
     `EVALUATOR_VERSION` stays 1 and `ASSEMBLER_VERSION` stays 3. D-2026-08-16-10 through
     D-2026-08-16-13.
+  - **PR12 — inherited-active supersession validation.** *Implemented on
+    `m2k-pr12-inherited-supersession`, not merged and not deployed.* Closes the one semantic mismatch
+    PR11 found between PR10's write-time check and PR11's read-time rule. PR10 required a
+    supersession's old side to be **stored in** the declared predecessor's snapshot; the resolver
+    requires it to be **active in** the predecessor's resolved active set, and the two disagree for
+    any inherited requirement. **The write now uses the read's rule**: allowed old-side ids are
+    exactly the criterion ids in the predecessor's resolved active set, so a criterion introduced at
+    turn 1 and still live at turn 2 through an `extend` may be retired at turn 3 — previously only
+    possible by declaring turn 1 as predecessor, which silently cut turn 2's criteria out of the
+    lineage. **Still refused, atomically and before dispatch:** a criterion an earlier `revise`
+    retired, one a `replace` cut away, one from another task, a nonexistent id, and a *current*
+    snapshot criterion used as an old side. **New:** a `revise` whose predecessor lineage cannot be
+    resolved at all — `not_declared`, `legacy_unknown` or malformed — is refused
+    (`continuity_predecessor_lineage_unavailable`) rather than stored for the reader to reject, and
+    is never downgraded to `replace`. **`replace` stays a cut point** and `extend`/`root` are
+    untouched. **No schema change (v9), and no version moved**: the relation already meant what it
+    now permits, `continuity_fingerprint` is byte-identical for the same declaration, and no stored
+    row is reinterpreted, rewritten or revalidated. **One active-set algorithm** — validation calls
+    PR11's pure resolver over the shared `_lineage_graph_locked` fetch, asserted from the syntax
+    tree — running **inside the write transaction**, so validation and persistence see one database
+    state. PR11's read-time defences remain, because a restored or imported database can still carry
+    a stale relation. D-2026-08-16-12 amended; D-2026-08-16-14.
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**

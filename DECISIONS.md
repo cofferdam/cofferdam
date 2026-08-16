@@ -2506,8 +2506,11 @@ domain does not have, and pair uniqueness is the only structure actually require
 **Both sides are durable ids, and this is the security property.** Matching description, matching
 criteria fingerprint, matching path and matching ordinal are all things two unrelated criteria can
 share; differing text does not disprove lineage either. **Similarity is never authority.** The
-predecessor criterion is additionally validated to belong to the *declared* predecessor snapshot, so
-a declaration cannot retire a requirement from a turn it never claimed to stand on.
+predecessor criterion is additionally validated so that a declaration cannot retire a requirement
+from a turn it never claimed to stand on. *(M2K PR12 corrected how that is checked: originally
+"belongs to the declared predecessor snapshot", now "is active in the declared predecessor's resolved
+active set". See D-2026-08-16-14 — the rule this sentence states is unchanged; the mechanism was too
+narrow to enforce it faithfully.)*
 
 **The caller names the current side by ordinal, never by id.** Current criterion ids are minted
 inside the same reservation moments earlier, so a caller that could supply one would be choosing a
@@ -2638,12 +2641,14 @@ to trust it. The same doctrine covers a snapshot mismatch, a cross-task or later
 impossible `root`, a mode disagreeing with its relations, a duplicate active criterion id, a cycle,
 and a chain past `MAX_LINEAGE_DEPTH`. **Nothing is repaired on read.**
 
-**A known PR10 limitation, recorded rather than widened.** Because the old side must belong to the
-*declared* predecessor's own snapshot, a `revise` cannot retire a criterion it merely **inherited**
-through an earlier `extend` unless it declares that earlier snapshot as its predecessor — which then
-cuts the intervening turn's own criteria out of the lineage. PR11 does not loosen PR10's rule to make
-this convenient; loosening a write-time validation from inside a read would be the wrong direction.
-Revisit it in PR10's own terms if it proves limiting in practice.
+**A known PR10 limitation, recorded rather than widened — and since RESOLVED by D-2026-08-16-14.**
+As written, PR10 required the old side to belong to the *declared* predecessor's own snapshot, so a
+`revise` could not retire a criterion it merely **inherited** through an earlier `extend` unless it
+declared that earlier snapshot as its predecessor — which then cut the intervening turn's own
+criteria out of the lineage. PR11 deliberately did not loosen that from inside a read; **M2K PR12
+loosened it at the write, where it belonged**, so the write-time rule is now this decision's
+active-set rule. Everything else in this decision stands unchanged, including that a stale target
+fails closed at read time.
 
 ## D-2026-08-16-13 — Lineage order is submission order, and lineage is read under one snapshot (EFE DECISION, ACTIVE)
 
@@ -2674,6 +2679,61 @@ resolution describes what was declared and frozen rather than what the world loo
 **Bounded, because "impossible" is not a termination proof.** `MAX_LINEAGE_DEPTH = 256` and a visited
 set of turns. PR10's strictly-earlier rule should make a cycle unreachable; a read that runs at
 start-up must still **answer** rather than hang if it meets one.
+
+## D-2026-08-16-14 — A revise may retire whatever its predecessor actually stands on (EFE DECISION, ACTIVE)
+
+**Decision.** For `revise`, the allowed old-side criterion ids are exactly **the criterion ids in the
+resolved active set of the declared predecessor**. Not the ids the predecessor's snapshot physically
+owns. Supersedes the mechanism — not the intent — of the corresponding sentence in D-2026-08-16-8,
+and resolves the limitation recorded in D-2026-08-16-12.
+
+**Why the old check was wrong.** Its stated purpose was that a declaration must not retire a
+requirement from a turn it never claimed to stand on. A requirement introduced at turn 1 and still
+live at turn 2 through an `extend` **is** something turn 2 stands on, so refusing turn 3 permission
+to retire it enforced something narrower than the sentence meant. The only workaround was to declare
+turn 1 as the predecessor, which silently dropped turn 2's own criteria from the lineage — a worse
+outcome reached by following the rules.
+
+**What is still refused, and this is the substance.** A criterion an earlier `revise` retired; one a
+`replace` cut away; one belonging to another task; an id naming no criterion; a criterion of the
+*current* snapshot used as an old side. Historical existence has never been authority and still is
+not. Each refusal is atomic: a declaration with one valid relation and one invalid one persists
+nothing, so there is no partial lineage to clean up.
+
+**A `revise` over an unresolvable predecessor is refused before dispatch.** `not_declared`,
+`legacy_unknown`, malformed, cyclic or over-deep — in all of them there is no set for the revision to
+be a revision *of*. Storing it and leaving the reader to reject it later would durably record a
+relationship that can never be honoured. It is **never** downgraded to `replace`: inventing a
+declaration the caller did not make is the one thing this whole vocabulary exists to prevent. This
+narrows what PR10 accepted, deliberately, and it is the only narrowing here.
+
+**`replace` is untouched and remains a cut point.** It validates its predecessor's identity and does
+not require its active set, so D-2026-08-16-11's recovery property is intact: an unknown segment
+followed by an explicit `replace` still resolves. `extend` carries no relations and gains no check.
+
+**No version moves, and this is the crux.** `CONTINUITY_MODEL_VERSION` stays 1 and `RESOLVER_VERSION`
+stays 1, because **what a stored relation means is unchanged**. The row always said *this new
+criterion retires that old one* and never carried a claim about which snapshot the old one sat in;
+the foreign key names `task_turn_criterion_items` at large, which is why schema stays **v9** and why
+PR11's resolver already interpreted an inherited relation correctly. `continuity_fingerprint` is
+byte-identical for the same declaration, no existing row is rewritten, and nothing is revalidated or
+backfilled at start-up. What changed is which declarations are *accepted*.
+
+**The resolver-version dependency, stated explicitly.** Write-time validation now depends on the
+current code-owned active-set semantics, so a future `RESOLVER_VERSION = 2` could in principle
+change which *new* declarations are accepted. The persisted fact remains the explicit declaration,
+so already-stored relations are unaffected either way. The rule adopted here is **(A): a future
+resolver change must preserve acceptance of relations that were valid when written.** A change that
+would not — one that shrinks what counts as active — is a continuity-model concern rather than a
+resolver-only one, and must go through a `CONTINUITY_MODEL_VERSION` review at that point. No schema
+or version is added now to speculate about it.
+
+**One implementation.** Validation calls the pure resolver over the shared lineage fetch rather than
+reimplementing the fold, and it runs **inside the write transaction** so validation and persistence
+observe one database state. A second copy of the algorithm could disagree with the read path, and the
+disagreement would surface only as a stored relation the reader refuses — the worst possible place to
+discover it. **PR11's read-time checks are kept regardless**: write-time prevention is an additional
+guarantee, and a restored, imported or future-buggy database can still present a stale relation.
 
 ## OPEN QUESTIONS
 

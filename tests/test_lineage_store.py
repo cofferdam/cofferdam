@@ -495,42 +495,72 @@ class CorruptedRowTests(LineageStoreCase):
         self.assertEqual(self.digest(), before)
 
 
-class PR10BoundaryTests(LineageStoreCase):
-    """What PR10's write validation does and does not permit. Not loosened here."""
+class WriteBoundaryTests(LineageStoreCase):
+    """Which declarations the store accepts, and which it refuses. **M2K PR12.**
 
-    def test_revise_may_only_retire_the_declared_predecessors_own_criteria(self):
-        """An inherited criterion cannot be retired by a revise that skips its turn.
+    The class this replaces pinned the opposite of the first test below: PR10
+    required a retired criterion to be stored in the declared predecessor's own
+    snapshot, and PR11 recorded that as a limitation to revisit. PR12 revisits it.
+    """
 
-        Turn 1 introduces ``b``; turn 2 extends. Turn 3 cannot declare turn 2 as
-        its predecessor and retire ``b``, because PR10 requires the old side to
-        belong to the declared predecessor's own snapshot. The resolver does not
-        widen that — it is the store's refusal, before anything is written.
+    def test_revise_may_retire_a_criterion_the_predecessor_only_inherited(self):
+        """The boundary PR11 discovered, now the right way round.
+
+        Turn 1 introduces ``b``; turn 2 extends without touching it, so ``b`` is
+        still active at turn 2. Turn 3 declares turn 2 as its predecessor and
+        retires ``b`` — a requirement turn 2 genuinely stands on, even though
+        turn 2's own snapshot does not contain it.
         """
-        from cofferdam.workstation.tasks.errors import ContinuityInvalid
-
         self.turn(["a", "b"], {"mode": "root"})
         self.turn(["c"], {"mode": "extend",
                           "predecessor_snapshot_id": self.snapshot_id(1)})
-        self.store.reserve_turn_criteria(
-            TASK, validate_criteria(self.criteria_for("d")), recorded_at="x"
+        self.assertEqual(self.paths(2), ["a.py", "b.py", "c.py"])
+        self.turn(
+            ["d"],
+            {
+                "mode": "revise",
+                "predecessor_snapshot_id": self.snapshot_id(2),
+                "supersedes": [
+                    {"criterion_ordinal": 1,
+                     "predecessor_criterion_id": self.criterion_ids(1)[1]}
+                ],
+            },
         )
-        with self.assertRaises(ContinuityInvalid):
+        self.assertEqual(self.paths(3), ["a.py", "c.py", "d.py"])
+        # The whole chain is still consumed, so nothing was cut to make this work.
+        result = self.resolved(3)
+        self.assertEqual([step.turn_number for step in result.lineage], [1, 2, 3])
+
+    def test_a_criterion_this_task_never_had_is_still_unknown(self):
+        from cofferdam.workstation.tasks.errors import ContinuityInvalid
+
+        self.make_task(OTHER_TASK)
+        self.turn(["foreign"], {"mode": "root"}, task_id=OTHER_TASK)
+        self.turn(["a"], {"mode": "root"})
+        self.store.reserve_turn_criteria(
+            TASK, validate_criteria(self.criteria_for("b")), recorded_at="x"
+        )
+        with self.assertRaises(ContinuityInvalid) as caught:
             self.store.reserve_turn_continuity(
                 TASK,
                 validate_declaration(
                     {
                         "mode": "revise",
-                        "predecessor_snapshot_id": self.snapshot_id(2),
+                        "predecessor_snapshot_id": self.snapshot_id(1),
                         "supersedes": [
                             {"criterion_ordinal": 1,
-                             "predecessor_criterion_id": self.criterion_ids(1)[1]}
+                             "predecessor_criterion_id":
+                                 self.criterion_ids(1, OTHER_TASK)[0]}
                         ],
                     }
                 ),
                 recorded_at="x",
             )
+        self.assertEqual(
+            caught.exception.detail, "continuity_relation_predecessor_unknown"
+        )
 
-    def test_revise_with_an_empty_current_snapshot_is_refused_by_pr10(self):
+    def test_revise_with_an_empty_current_snapshot_is_refused(self):
         """A relation's new side must be a criterion of the current snapshot."""
         from cofferdam.workstation.tasks.errors import ContinuityInvalid
 

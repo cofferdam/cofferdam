@@ -1799,25 +1799,50 @@ A **resolved** result with zero active criteria is different, and means *the
 declared requirement set is empty*. It does not mean the task passed, acceptance
 was met, or anything succeeded.
 
-### A supersession must name an *active* criterion
+### A supersession must name an *active* criterion (M2K PR12)
 
 A relation is valid only if its old-side criterion is active in the resolved
 predecessor set. Historical membership is not active membership: a criterion
-retired two turns ago cannot be retired again, and the stale edge is **refused**
-rather than skipped — skipping it would leave the resolver asserting a set no
-declaration produces.
+retired two turns ago cannot be retired again.
 
-PR10's write validation already requires the old side to belong to the declared
-predecessor's own snapshot, so a valid write cannot produce a stale edge. This is a
-**read-time invariant against corrupted state**, alongside snapshot mismatch,
+**This is now the rule at both ends.** PR10 originally validated the old side
+against the criteria *stored in* the declared predecessor's snapshot, which is a
+narrower thing and refused a legitimate revision of an inherited requirement — a
+criterion introduced at turn 1 and still live at turn 2 through an `extend` is
+part of what turn 2 stands on, but it is not one of turn 2's rows. The only
+workaround was to declare turn 1 as the predecessor, which silently cut turn 2's
+own criteria out of the lineage. PR12 replaced the check with the active-set rule
+the resolver already used.
+
+Allowed old sides are therefore: the predecessor snapshot's own criteria, anything
+it inherited through `extend`, and anything that survived an earlier `revise`.
+Still refused: a criterion an earlier `revise` retired, one a `replace` cut away,
+one from another task, a nonexistent id, and a criterion of the *current* snapshot.
+Refusals are **atomic** — one bad relation and the whole declaration writes nothing.
+
+**A `revise` whose predecessor lineage cannot be resolved is refused before
+dispatch** with `continuity_predecessor_lineage_unavailable`: `not_declared`,
+`legacy_unknown` or malformed all mean there is no set for the revision to be a
+revision *of*. It is never downgraded to `replace`.
+
+**Write-time prevention does not retire the read-time check.** A restored
+database, an imported fixture or a future bug can still present a stale relation,
+so `supersession_target_not_active` remains, alongside snapshot mismatch,
 cross-task and later-turn predecessors, impossible roots, mode/relation
 disagreement, duplicate active ids, cycles and over-deep chains. Nothing is
 repaired on read.
 
-A consequence of PR10's rule worth stating: a `revise` cannot retire a criterion it
-merely **inherited** through an earlier `extend` unless it declares that earlier
-snapshot as its predecessor — which then cuts the intervening turn's own criteria
-out of the lineage. PR11 does not loosen that.
+**One algorithm, one transaction.** Validation calls the same pure resolver over
+the same lineage fetch the read path uses, inside the write transaction that
+persists the declaration — so validation and persistence see one database state,
+and a second copy of the fold cannot drift from the first.
+
+**No version moved.** Schema stays v9, `CONTINUITY_MODEL_VERSION` stays 1 and
+`RESOLVER_VERSION` stays 1. A stored relation always meant *this new criterion
+retires that old one* and never carried a claim about which snapshot the old one
+sat in, so nothing is reinterpreted, rewritten or revalidated —
+`continuity_fingerprint` is byte-identical for the same declaration. What changed
+is which declarations are accepted.
 
 ### Derived, versioned, bounded, pure
 
@@ -1837,7 +1862,7 @@ fetch, so a lineage can never be half-old and half-new. **Pure resolver**: no
 SQLite, filesystem, Git, subprocess, socket, provider, environment or clock, and no
 mutation.
 
-D-2026-08-16-10 through D-2026-08-16-13.
+D-2026-08-16-10 through D-2026-08-16-14.
 
 ### Why the named check runner comes after this
 

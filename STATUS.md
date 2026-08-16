@@ -797,10 +797,82 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2K PR12 — inherited-active supersession validation
+
+On `m2k-pr12-inherited-supersession`, from the merged `3bb9a5b`. **Implemented on a branch, not
+merged and not deployed.**
+
+Corrects the one semantic mismatch PR11 discovered between PR10's write-time validation and PR11's
+read-time resolution, and closes it in the direction that makes the write agree with the read.
+
+**The mismatch.** PR10 required a supersession's old-side criterion to be **stored in** the declared
+predecessor's own snapshot. PR11's resolver requires it to be **active in** the predecessor's
+resolved active set. The two disagree the moment a requirement is inherited: a criterion introduced
+at turn 1 and still live at turn 2 through an `extend` is part of what turn 3 stands on, but it is
+not one of turn 2's rows. PR10 therefore refused a legitimate revision, and the only workaround —
+declaring turn 1 as the predecessor instead — silently cut turn 2's own criteria out of the lineage.
+
+**The rule now.** For `revise`, the allowed old-side criterion ids are exactly *the criterion ids in
+the resolved active set of the declared predecessor*. Not the ids the predecessor snapshot physically
+owns. The stated reason for the old check was that a declaration must not retire a requirement from a
+turn it never claimed to stand on, and the active set is a more faithful reading of that sentence.
+
+**What stays refused, and this is most of the work.** A criterion an earlier `revise` already
+retired; one a `replace` cut away; one belonging to another task; a nonexistent id; a criterion of
+the *current* snapshot used as an old side. Each has its own closed reason, and each refusal is
+atomic — a declaration with one good relation and one bad one writes nothing at all.
+
+**A `revise` whose predecessor lineage cannot be resolved is now refused before dispatch.** If the
+predecessor's own continuity is `not_declared` or `legacy_unknown`, or the lineage behind it is
+malformed, there is no set for the revision to be a revision *of*. New reason
+`continuity_predecessor_lineage_unavailable`. It is **not** downgraded to `replace` — that would be
+Cofferdam declaring something the caller did not. This is the one place PR12 *narrows* what PR10
+accepted, and it is deliberate.
+
+**`replace` is untouched.** It still validates its predecessor's identity and still does not require
+its active set, so the PR11 recovery property holds exactly: `legacy_unknown` → `not_declared` → an
+explicit `replace` still resolves. `extend` carries no relations and gains no new check; `root` is
+unchanged.
+
+**No schema change, and no version moved.** Schema stays **v9**. The supersession row already meant
+*this new criterion retires that old one* and never carried a claim about which snapshot the old one
+sat in — the foreign key deliberately names `task_turn_criterion_items` at large. `continuity_fingerprint`
+is byte-identical for the same declaration, `CONTINUITY_MODEL_VERSION` stays 1 and `RESOLVER_VERSION`
+stays 1: PR12 changes which declarations are *accepted*, not what a stored one *means*, and no
+existing row is reinterpreted, rewritten or revalidated.
+
+**One active-set algorithm.** Write-time validation calls PR11's pure resolver over the shared
+lineage fetch, now extracted as `TaskStore._lineage_graph_locked`, rather than reimplementing the
+root/extend/replace/revise fold. A second copy could disagree with the read path, and the
+disagreement would only ever surface as a stored relation the reader refuses — the worst place to
+find it. Asserted from the syntax tree.
+
+**Validation and persistence are one transaction.** The walk runs on the write connection inside the
+`BEGIN IMMEDIATE` that will persist the declaration, so there is no read-then-write window in which
+the predecessor lineage could move. Asserted by observing `in_transaction` during the walk, which is
+`True` under `_write()` and `False` under the plain read helper.
+
+**PR11's read-time checks stay.** Write-time prevention is an *additional* guarantee, not a
+replacement: a restored database, an imported fixture or a future bug can still present a stale
+relation, and `supersession_target_not_active` must still catch it on read.
+
+## M2K records — the evidence foundation (written while each was on its branch)
+
+M2K is **in progress**: PR1 through PR8 are merged and deployed; PR9 is merged (`b2314f0`, #54) and
+needed no deployment because it changed only documentation; PR10 is merged (`1efd49b`, #55) and
+deployed to slot A on schema v9; PR11 is merged (`3bb9a5b`, #56) and **intentionally not deployed**;
+PR12 is on a branch.
+See *In progress* above for PR12.
+
 ### M2K PR11 — the pure continuity lineage resolver
 
-On `m2k-pr11-lineage-resolver`, from the merged `1efd49b`. **Implemented on a branch, not merged and
-not deployed.**
+**Merged as `3bb9a5b` (#56) and deliberately NOT deployed.** Production remains on the PR10 runtime —
+workstation and Actions bridge both from **slot A at `1efd49b`**, live schema **v9**, rollback runtime
+slot B at `059fdcb`. PR11 adds no schema, no write path and no external surface, so *merged* and
+*deployed* were separated on purpose rather than by omission: there is nothing in it a running
+service needs, and the next deployment can carry it together with PR12. Do not read the merge as a
+deployment. The record below was written while PR11 was still on `m2k-pr11-lineage-resolver`, from
+the merged `1efd49b`, and is kept as it was written.
 
 PR6 froze **what each turn required**. PR10 froze **what each turn said about the turn before it**.
 Neither answers the question anything downstream has to ask first: *given those immutable
@@ -897,12 +969,6 @@ retire a criterion it merely *inherited* through an earlier `extend` unless it d
 snapshot as its predecessor — which then cuts the intervening turn's own criteria out of the lineage.
 The resolver does not loosen the rule; both the refusal and the supported alternative are asserted.
 
-## M2K records — the evidence foundation (written while each was on its branch)
-
-M2K is **in progress**: PR1 through PR8 are merged and deployed; PR9 is merged (`b2314f0`, #54) and
-needed no deployment because it changed only documentation; PR10 is merged (`1efd49b`, #55) and
-deployed to slot A on schema v9; PR11 is on a branch.
-See *In progress* above for PR11.
 
 ### M2K PR10 — the criterion continuity persistence foundation
 
