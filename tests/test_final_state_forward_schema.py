@@ -245,6 +245,25 @@ class TheDeployedRuntimeRefusesCleanly(ForwardSchemaCase):
         store.close()
         self.assertEqual(before, digest(self.database))
 
+    def test_the_wal_and_shm_sidecars_are_untouched_too(self):
+        """Not even a journal write escapes the refusal.
+
+        The main file being byte-identical would still be satisfied by a runtime
+        that wrote into the WAL and simply never checkpointed — a rollback would
+        then carry that write forward the next time anything opened the database.
+        So the sidecars are measured as well, and the WAL stays empty: the old
+        build reads `schema_meta`, sees a version it does not know, and declines
+        before it opens a write transaction.
+        """
+        before = self.files()
+        module = self.old_store_module()
+        store = module.TaskStore(self.config)
+        self.addCleanup(store.close)
+        with self.assertRaises(module.StoreUnavailable):
+            store.turns("task_v10")
+        store.close()
+        self.assertEqual(before, self.files())
+
     def test_integrity_and_foreign_keys_survive_the_refusal(self):
         module = self.old_store_module()
         store = module.TaskStore(self.config)
