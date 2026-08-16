@@ -773,6 +773,106 @@ mark it done. Fingerprints sit in a collapsed *Audit identifiers* section: they
 are deterministic identities, not a trust score. There is no re-run control and no
 check-runner control.
 
+### Criterion continuity (M2K PR10, schema v9)
+
+The fact PR9 identified as missing and refused to guess at. Every turn's
+requirements were already stored; the **relationship** between two turns'
+requirements was not, so neither *accumulate every turn* nor *only the latest
+turn counts* could be correct and a task-level answer stayed unavailable.
+
+Two additive tables, created empty and **never backfilled**:
+
+| Table | What it holds |
+| --- | --- |
+| `task_turn_criteria_continuity` | one declaration per reserved turn: state, mode, both snapshot identities, a fingerprint, a relation count and a dispatch state |
+| `task_turn_criterion_supersessions` | the lineage edges a partial revision names |
+
+**It computes nothing.** No aggregate, no task verdict, no
+`AGGREGATOR_VERSION`. A lineage edge is not a judgement.
+
+**Three read states**, the same three-way shape criteria use:
+
+| State | Meaning |
+| --- | --- |
+| `declared` | somebody stated a relationship; `mode` says which |
+| `not_declared` | the turn was dispatched and **nobody stated one** — recorded on purpose |
+| `legacy_unknown` | no row: the turn predates continuity persistence |
+
+`not_declared` is the one that matters. Omitting the row would make "nobody
+declared a relationship" and "we cannot know whether anybody did" the same
+observation forever, and only the first is recoverable. It is **not** `extend`,
+`replace`, `independent` or preserve-previous — it is the absence of an answer,
+recorded, and it leaves a future aggregate honestly unavailable for that turn.
+
+**Four modes**, and each answers the only question an aggregate has to ask —
+*what happens to the requirements that were already live?*
+
+| Mode | Predecessor | Relations | Meaning |
+| --- | --- | --- | --- |
+| `root` | none | none | no earlier snapshot exists for this task |
+| `extend` | required | none | prior active requirements remain; this snapshot adds |
+| `replace` | required | none | the prior active set is wholly superseded |
+| `revise` | required | **at least one** | prior requirements remain **except** those explicitly superseded |
+
+**`independent` is deliberately absent.** It answers neither "they remain" nor
+"they are superseded", so an aggregate would have to pick one — the ambiguity
+this vocabulary exists to remove. If prior requirements remain that is `extend`;
+if they do not that is `replace`.
+
+**`root` is derived but still checked.** It is a structural claim — *this task
+has no earlier criteria snapshot* — not an inference about intent, which is what
+makes deriving it safe. It is verified against the database and refused if an
+earlier snapshot exists. A first turn whose criteria are `not_provided` is still
+`root`: the mode describes lineage, and the criteria snapshot already records
+that nothing was required.
+
+**A `not_provided` follow-up proves nothing about continuity.** An empty criteria
+set is not evidence that prior requirements were preserved, replaced or
+unchanged, so such a turn is `not_declared` unless somebody declared otherwise.
+
+**Supersession is a bounded many-to-many.** One old criterion may be superseded
+by several new ones (a requirement split) and several old ones by a single new
+one (a merge); neither needed a special case. Capped at **64 relations** and
+**refused over the cap rather than trimmed**, because a silently dropped edge
+would leave a requirement live that somebody had retired.
+
+**Lineage is declared, never inferred.** Identical description, identical
+criteria fingerprint, identical path and identical ordinal are all things two
+unrelated criteria can share, and differing text does not disprove lineage
+either. Both sides of an edge are durable criterion ids; the predecessor
+criterion must belong to the **declared** predecessor snapshot. The caller names
+the current side by **ordinal**, never by id, because current ids are minted
+inside the same reservation moments earlier.
+
+**The predecessor is a snapshot id**, not a turn number worked out at read time,
+and it is validated to exist, to belong to **this task** — lineage never crosses
+tasks — and to come from a **strictly earlier** turn.
+
+**Frozen before the worker exists.** Reserved against the same turn number as the
+criteria snapshot and the Git baseline, immediately after the snapshot it
+describes, and frozen with both at `dispatch_started`. The adapter's first
+instruction can observe all three as durable on a separate read-only connection
+while `task_turns` still has no row. A retry of the same reserved turn, an
+`AdapterRefusal` and a restart all leave the original declaration and its
+fingerprint untouched; only a genuinely new turn may declare afresh.
+
+**The foreign keys name `tasks` and `task_turn_criteria`, never `task_turns`** —
+the same choice PR4's baseline and PR6's criteria made, because this is a
+pre-work fact committed before the turn row exists.
+
+**Authority is the user or a future host-owned planner.** Never the worker and
+never the adapter: `AdapterOutcome` and `TaskContext` have no continuity field,
+and worker prose, claims, Git evidence, the evaluator and the assessment route
+can none of them create an edge. Like criteria since PR6, it is an **internal
+`TaskService` argument** with no HTTP request field, no bridge Action and no PWA
+control.
+
+**`CONTINUITY_MODEL_VERSION = 1`**, distinct from the schema, criteria model,
+assembler and evaluator versions, and bound into a deterministic
+`continuity_fingerprint` over the state, mode, both snapshot identities and the
+relations in canonical order. No clock, rowid, minted id, provider identifier or
+host path reaches it.
+
 ### Change claims and artifacts (M2K PR1, schema v4)
 
 Two tables carry the **claim** side of evidence, which Task Core did not have. They are additive:

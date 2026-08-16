@@ -62,6 +62,7 @@ from .clarifications import (
     supersede,
     valid_question_id,
 )
+from .continuity import ContinuitySubmissionInvalid, validate_declaration
 from .criteria import (
     AcceptanceCriterion,
     CriteriaSnapshot,
@@ -83,6 +84,8 @@ from .errors import (
     ClarificationUnknown,
     ClarificationUnsupported,
     CriteriaInvalid,
+    ContinuityInvalid,
+    ContinuityUnrecorded,
     CriteriaUnrecorded,
     EvaluationConflict,
     FollowupInFlight,
@@ -402,6 +405,7 @@ class TaskService:
         origin: str = ORIGIN_PWA,
         title: object = None,
         criteria: object = None,
+        continuity: object = None,
     ) -> Tuple[TaskRow, bool]:
         """Create a task and run its adapter's start. Returns ``(task, created)``.
 
@@ -428,6 +432,7 @@ class TaskService:
         request_key = self._valid_request_id(client_request_id)
         label = bounded_line(title, MAX_LABEL_CHARS)
         wanted = self._valid_criteria(criteria)
+        lineage = self._valid_continuity(continuity)
 
         # Re-verified now, not at load: a directory can be deleted or replaced
         # between service start and this moment, and the check that matters is
@@ -477,7 +482,7 @@ class TaskService:
             project_id=row.project_id,
             correlation_id=row.correlation_id,
         )
-        return self._start(row, adapter, root, wanted), True
+        return self._start(row, adapter, root, wanted, lineage), True
 
     def _start(
         self,
@@ -485,6 +490,7 @@ class TaskService:
         adapter: TaskAdapter,
         root: Path,
         criteria: Sequence[AcceptanceCriterion] = (),
+        continuity: object = None,
     ) -> TaskRow:
         """Queue, start, and apply whatever the adapter reports.
 
@@ -538,6 +544,19 @@ class TaskService:
                     "the acceptance criteria for this task could not be recorded",
                     error.code,
                 )
+            # M2K PR10. After the snapshot, because it names the snapshot the line
+            # above minted; before the adapter, because lineage a worker could
+            # influence is not lineage. On turn one this is `root` when a
+            # declaration was made and `not_declared` otherwise — never a guess.
+            try:
+                continuity_turn = self._record_pre_work_continuity(row, continuity)
+            except TaskError as error:
+                return self._fail(
+                    row,
+                    ContinuityUnrecorded().code,
+                    "the criteria continuity for this task could not be recorded",
+                    error.code,
+                )
             # Turn one's pre-work Git boundary, captured and made durable here —
             # the last Cofferdam-controlled instruction before the worker exists.
             # See :meth:`_record_pre_work_baseline`.
@@ -551,10 +570,13 @@ class TaskService:
             # while a worker runs would be a criteria set a retry could legally
             # replace *after* the work happened.
             dispatch_turn = turn_number if turn_number is not None else criteria_turn
+            if dispatch_turn is None:
+                dispatch_turn = continuity_turn
 
             context = self._context(row, root, adapter)
             # Committed before the call, never after: from here on Cofferdam
-            # cannot prove the worker did nothing, so both pre-work facts freeze.
+            # cannot prove the worker did nothing, so all three pre-work facts
+            # freeze.
             self._mark_dispatch_started(row, dispatch_turn)
             try:
                 outcome = adapter.start(context)
@@ -689,6 +711,37 @@ class TaskService:
                 raise
             return None
 
+    def _record_pre_work_continuity(
+        self, row: TaskRow, declaration: object
+    ) -> Optional[int]:
+        """Persist what this turn's criteria say about the turn before them.
+
+        M2K PR10, and it runs immediately after :meth:`_record_pre_work_criteria`
+        for a reason that is not stylistic: continuity is *about* the snapshot
+        that method just wrote, and names it by the identity only that write
+        could mint. It is still before ``_mark_dispatch_started``, so the lineage
+        is durable before any worker or provider process can observe — let alone
+        influence — what this turn is claimed to build on.
+
+        **``declaration`` is ``None`` for every caller in this build**, and that
+        is deliberate rather than unfinished. No HTTP field carries continuity,
+        no bridge Action carries it and no adapter can supply it; the only way in
+        is this internal argument, which today only tests use. A ``None`` writes a
+        durable ``not_declared``, which keeps every existing caller working
+        unchanged and keeps a future task-level aggregate honestly unavailable
+        rather than quietly guessing.
+
+        **Failure is not swallowed**, for the same reason it is not swallowed for
+        criteria: a worker running against lineage Cofferdam could not record is
+        the silent disappearance of the thing this table exists to make
+        impossible. The caller is told and the dispatch stops. A declaration that
+        cannot be *validated* also raises, before anything is written and before
+        the adapter is reached.
+        """
+        return self._store.reserve_turn_continuity(
+            row.task_id, declaration, recorded_at=now_iso()
+        )
+
     def _mark_dispatch_started(self, row: TaskRow, turn_number: Optional[int]) -> None:
         """Freeze both pre-work facts, durably, immediately before the adapter call.
 
@@ -719,6 +772,13 @@ class TaskService:
         try:
             self._store.mark_criteria_dispatch_started(row.task_id, turn_number)
         except TaskError:  # pragma: no cover - defensive
+            pass
+        # And the v9 continuity declaration, frozen with the other two. A lineage
+        # a retry could re-point after the worker ran would let a completed turn
+        # be re-parented onto requirements it never stood on.
+        try:
+            self._store.mark_continuity_dispatch_started(row.task_id, turn_number)
+        except TaskError:  # pragma: no cover - defensive
             return
 
     def _mark_dispatch_refused(self, row: TaskRow, turn_number: Optional[int]) -> None:
@@ -741,6 +801,10 @@ class TaskService:
             pass
         try:
             self._store.mark_criteria_dispatch_refused(row.task_id, turn_number)
+        except TaskError:  # pragma: no cover - defensive
+            pass
+        try:
+            self._store.mark_continuity_dispatch_refused(row.task_id, turn_number)
         except TaskError:  # pragma: no cover - defensive
             return
 
@@ -881,6 +945,7 @@ class TaskService:
         client_request_id: object = None,
         source: str = SOURCE_WORKSTATION_PWA,
         criteria: object = None,
+        continuity: object = None,
     ) -> TaskRow:
         """Deliver one more user turn to the session this task already owns.
 
@@ -924,6 +989,7 @@ class TaskService:
         adapter = self._adapters.get(row.adapter_id)
         request_key = self._valid_request_id(client_request_id)
         wanted = self._valid_criteria(criteria)
+        lineage = self._valid_continuity(continuity)
 
         if source not in ACCEPTED_FOLLOWUP_SOURCES:
             # `future_gpt_bridge` is in the vocabulary and not in this set, and
@@ -1048,6 +1114,7 @@ class TaskService:
             # already being measured from, nor restate what it was asked to do.
             turn_number = None
             criteria_turn = None
+            continuity_turn = None
             if starts_new_turn:
                 try:
                     criteria_turn = self._record_pre_work_criteria(row, wanted)
@@ -1056,11 +1123,25 @@ class TaskService:
                     # sent to the session and nothing is written.
                     self._reject(row, "followup", "criteria could not be recorded")
                     raise CriteriaUnrecorded()
+                # M2K PR10. This is the turn continuity was invented for: a
+                # follow-up is exactly where a later criteria set may preserve,
+                # extend, replace or partially supersede an earlier one, and
+                # exactly where Cofferdam previously had no way to know which.
+                # Only when a new turn actually opens — a message that resumes a
+                # turn blocked on a question declares no new lineage, because it
+                # states no new requirements.
+                try:
+                    continuity_turn = self._record_pre_work_continuity(row, lineage)
+                except TaskError:
+                    self._reject(row, "followup", "continuity could not be recorded")
+                    raise ContinuityUnrecorded()
                 turn_number = self._record_pre_work_baseline(row, root)
             # See `_start`: either reservation's number is the right one, and the
             # fallback covers a Git capture that could not be persisted while the
             # criteria snapshot was.
             dispatch_turn = turn_number if turn_number is not None else criteria_turn
+            if dispatch_turn is None:
+                dispatch_turn = continuity_turn
 
             context = self._context(row, root, adapter, followup=text)
             # The adapter is asked **before** anything is written. A follow-up
@@ -2325,6 +2406,26 @@ class TaskService:
             if invalid.ordinal is not None:
                 detail += " (criterion " + str(invalid.ordinal) + ")"
             raise CriteriaInvalid(detail) from None
+
+    def _valid_continuity(self, value: object) -> object:
+        """A continuity declaration, validated into stored shape — or a refusal.
+
+        ``None`` passes straight through and is not an error: it means *no
+        declaration was made*, which becomes a durable ``not_declared`` row. Every
+        caller in this build supplies ``None``.
+
+        Structural validation only. Whether the named predecessor exists, belongs
+        to this task and comes from an earlier turn needs the database, and is
+        decided in :meth:`TaskStore.reserve_turn_continuity` — still before the
+        adapter is reached, so a refusal there also leaves no worker running.
+
+        The refusal detail is a closed reason code. The submitted value never
+        travels back out.
+        """
+        try:
+            return validate_declaration(value)
+        except ContinuitySubmissionInvalid as invalid:
+            raise ContinuityInvalid(invalid.reason) from None
 
     def _valid_request_id(self, value: object) -> Optional[str]:
         """A client's own retry key. Opaque, bounded, and never authority.

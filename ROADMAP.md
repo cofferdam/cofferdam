@@ -517,8 +517,8 @@ downstream reads from.
     `evidence_input_fingerprint`, never copied, and `claim_conflict` is absent entirely. No bridge
     Action, no public exposure. The `require_token` choice is an **intentional security boundary**,
     not an inconsistency to be tidied away — D-2026-08-16-1.
-  - **PR9 — assessment aggregation and turn-continuity doctrine.** *Docs and design only; on
-    `m2k-pr9-aggregation-doctrine`.* **No schema, no route, no runtime aggregation, no code** — it
+  - **PR9 — assessment aggregation and turn-continuity doctrine.** *Merged as `b2314f0` (#54);
+    documentation only, so there was no deployment step.* **No schema, no route, no runtime aggregation, no code** — it
     settles the contract before the named check runner adds another mechanism that produces results.
     Three axes stay separate: **worker lifecycle**, **acceptance** and **verification reach**;
     `completed` never implies `met`, and `failed` never implies `not_met`. Per turn there are two
@@ -539,6 +539,30 @@ downstream reads from.
     schema version. A future aggregate carries its own `AGGREGATOR_VERSION`, and is **derived on
     read** rather than persisted. Vocabulary avoids `success`/`failed`/`passed`, which already belong
     to lifecycle. D-2026-08-16-2 through D-2026-08-16-6.
+  - **PR10 — the criterion continuity persistence foundation.** *Implemented on
+    `m2k-pr10-criterion-continuity`, not merged and not deployed.* Persists the prerequisite PR9
+    named, and **computes no aggregate**. **Schema v9**, additive:
+    `task_turn_criteria_continuity` and `task_turn_criterion_supersessions`, created **empty** with
+    **no backfill** — a turn that predates them has no row and reads `legacy_unknown`, forever.
+    Three read states — `declared`, `not_declared`, `legacy_unknown` — where an undeclared dispatch
+    writes an **explicit durable `not_declared`** rather than nothing, because "nobody said" and "we
+    cannot know" must stay distinguishable. Four modes: `root` (no predecessor, checked against the
+    database), `extend`, `replace`, `revise`. **`independent` is deliberately absent** — it answers
+    neither "prior requirements remain" nor "they do not", so it would leave an aggregate guessing.
+    Criterion-level supersession is a **bounded many-to-many** so a requirement may legitimately
+    split or merge, capped at 64 relations and **refused over the cap rather than trimmed**. Lineage
+    is **declared, never inferred**: matching description, fingerprint, path or ordinal is never
+    authority, and the predecessor is bound by `predecessor_snapshot_id`, validated to exist, to
+    belong to the same task and to come from an earlier turn. Frozen **pre-dispatch** with the
+    criteria snapshot and the Git baseline, and immutable across retry, refusal and restart.
+    Authority is the user or a future host-owned planner — **never the worker, never the adapter**:
+    `AdapterOutcome` and `TaskContext` have no continuity field, and there is **no HTTP, bridge or
+    PWA surface**, exactly as PR6 kept criteria internal. `CONTINUITY_MODEL_VERSION = 1` is bound
+    into a deterministic `continuity_fingerprint`. **No `AGGREGATOR_VERSION`, no task verdict, no
+    check runner, no command execution**; `EVALUATOR_VERSION` stays 1 and `ASSEMBLER_VERSION` stays
+    3. Rollback is a **pair** — slot A at `7f21fc4` plus a verified pre-v9 backup — because the
+    deployed PR8 runtime refuses a v9 database; that refusal was measured against the real deployed
+    source and leaves the file byte-identical.
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**

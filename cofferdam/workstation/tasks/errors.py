@@ -92,6 +92,8 @@ CODE_CRITERIA_INVALID = "task_criteria_invalid"
 #: Criteria were supplied, could not be made durable, and the dispatch stopped
 #: rather than running a worker against requirements nobody recorded.
 CODE_CRITERIA_UNRECORDED = "task_criteria_unrecorded"
+CODE_CONTINUITY_UNRECORDED = "task_continuity_unrecorded"
+CODE_CONTINUITY_INVALID = "task_continuity_invalid"
 #: A second evaluation of one turn disagreed with the stored one (M2K PR7).
 CODE_EVALUATION_CONFLICT = "task_evaluation_conflict"
 
@@ -474,6 +476,57 @@ class CriteriaUnrecorded(TaskError):
         )
 
 
+class ContinuityInvalid(TaskError):
+    """A continuity declaration Cofferdam will not store, with a closed reason.
+
+    Raised before anything durable is written and before the adapter is reached,
+    so a refused declaration never leaves a worker running against lineage that
+    was rejected. Covers both halves of the check: the structural one in
+    :func:`~.continuity.validate_declaration`, and the relational one in
+    :meth:`~.store.TaskStore.reserve_turn_continuity` that needs the database to
+    decide — an unknown predecessor, one belonging to another task or a later
+    turn, or a superseded criterion that is not in the predecessor snapshot.
+
+    The detail is a closed reason code. The submitted value never travels back
+    out, exactly as :class:`CriteriaInvalid` keeps criteria text out of a refusal.
+    """
+
+    def __init__(self, detail: Optional[str] = None) -> None:
+        super().__init__(
+            CODE_CONTINUITY_INVALID,
+            "that criteria continuity declaration cannot be accepted",
+            detail,
+        )
+
+
+class ContinuityUnrecorded(TaskError):
+    """A turn's criteria continuity could not be made durable before dispatch.
+
+    Fatal for the same reason :class:`CriteriaUnrecorded` is, and the reasoning
+    transfers without weakening. A worker dispatched against unrecorded lineage
+    produces a turn whose relationship to every earlier turn is unknowable
+    afterwards — and unlike a missing Git baseline, nothing can reconstruct it,
+    because the fact was an intent rather than an observation.
+
+    It is also raised when a declaration is **refused**: an unknown predecessor,
+    a predecessor from another task or a later turn, a superseded criterion that
+    is not in the predecessor snapshot, more relations than the bound allows.
+    Every one of those is decided before the adapter is reached, so a refused
+    declaration never leaves a worker running.
+
+    A turn for which **no** declaration was made does not take this path. That is
+    an ordinary durable ``not_declared`` row, which is the state nearly every
+    turn in this build will legitimately have.
+    """
+
+    def __init__(self, detail: Optional[str] = None) -> None:
+        super().__init__(
+            CODE_CONTINUITY_UNRECORDED,
+            "the criteria continuity for this turn could not be recorded",
+            detail or "nothing was dispatched; the task was not started",
+        )
+
+
 class EvaluationConflict(TaskError):
     """A second evaluation of one turn and version disagreed with the stored one.
 
@@ -526,6 +579,8 @@ __all__ = [
     "CODE_CLARIFICATION_UNKNOWN",
     "CODE_CLARIFICATION_UNSUPPORTED",
     "CODE_CRITERIA_INVALID",
+    "CODE_CONTINUITY_INVALID",
+    "CODE_CONTINUITY_UNRECORDED",
     "CODE_CRITERIA_UNRECORDED",
     "CODE_EVALUATION_CONFLICT",
     "CODE_FOLLOWUP_INVALID",
@@ -556,6 +611,8 @@ __all__ = [
     "ClarificationUnknown",
     "ClarificationUnsupported",
     "CriteriaInvalid",
+    "ContinuityInvalid",
+    "ContinuityUnrecorded",
     "CriteriaUnrecorded",
     "EvaluationConflict",
     "FollowupInFlight",

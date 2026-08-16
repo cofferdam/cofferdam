@@ -169,7 +169,10 @@ class EvaluationEndToEnd(TaskTestCase):
 
     def test_the_walk(self):
         # 1. schema outcome
-        self.assertEqual(SCHEMA_VERSION, 8)
+        # PR7's own tables arrived at v8. Later additive versions move the
+        # shared constant without touching them, so this asserts the floor rather
+        # than re-pinning a number this module does not own.
+        self.assertGreaterEqual(SCHEMA_VERSION, 8)
         self.assertEqual(ASSEMBLER_VERSION, 3, "PR7 does not move the assembler")
 
         criteria = [
