@@ -1703,6 +1703,41 @@ class TaskService:
         row = self.get_task(task_id)
         return self._store.turn_criteria(row.task_id, int(turn_number))
 
+    def resolve_active_criteria(self, task_id: object, turn_number: object):
+        """Which criteria are in force at one turn, or why that is unknown.
+
+        M2K PR11, and the narrow internal seam a future task-level view would
+        need. Returns :class:`~.lineage.ResolvedActiveCriteria` or
+        :class:`~.lineage.LineageUnavailable` — never a partial set, and never an
+        exception for stored data it dislikes.
+
+        **Derived, never stored.** The sources are immutable and
+        :func:`~.lineage.resolve` is a deterministic, versioned pure function, so
+        the answer is recomputed rather than cached. Persisting it would add a
+        write path and a recovery path, and give the truth a second place to live
+        that could disagree with the first. Schema stays at v9.
+
+        **Internal, exactly as PR6's criteria and PR10's continuity are.** No
+        HTTP route reaches this, no Actions Bridge operation exposes it, no PWA
+        control calls it, and :meth:`turn_assessment` is unchanged — an active-set
+        read surface is its own review, and publishing one as a side effect of
+        building the resolver is how an internal shape becomes a contract.
+
+        **It is not an aggregate and cannot become one.** A resolved set says what
+        is currently required; it contains no verdict, no acceptance outcome and
+        no count of what was met. A resolved *empty* set means the declared
+        requirement set is empty — never that the task passed.
+
+        ``get_task`` rather than ``refresh_task``, for :meth:`turn_assessment`'s
+        reason: asking what a turn requires must not be able to move the task's
+        state by being asked. Calling this a thousand times leaves the database
+        byte-identical.
+        """
+        from .lineage import resolve
+
+        row = self.get_task(task_id)
+        return resolve(self._store.lineage_inputs(row.task_id, int(turn_number)))
+
     def turn_assessment(self, task_id: object, turn_number: object):
         """One turn's published assessment, or ``None`` for no such turn.
 

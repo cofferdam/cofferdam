@@ -8,6 +8,34 @@ release.
 
 ### Added
 
+- **M2K PR11 — Cofferdam can now work out which of your requirements are still standing.**
+  Nothing about this is visible yet, and that is deliberate.
+
+  **The problem it fixes.** Cofferdam already stored what you asked for on each turn, and — since the
+  last change — how each new request related to the one before it. What it could not do was put the
+  two together and say *so what is actually required right now*. Anything that wanted to answer
+  "is this task done" had to work that out for itself, which is exactly where a system starts
+  guessing.
+
+  **What changes.** Cofferdam can now answer it. If your latest request adds to the previous one, the
+  earlier requirements are still standing and the new ones join them, in the order you wrote them. If
+  it replaces the previous one, only the new ones stand. If it retires specific earlier requirements
+  and keeps the rest, the retired ones drop out and everything else stays exactly where it was.
+
+  **What it will not do.** It will not guess. If nobody ever said how one request related to the one
+  before — or if the turn is old enough to predate that being recorded — Cofferdam says *unknown*
+  rather than picking something plausible. It never gives a partial answer: half an answer is the one
+  thing more dangerous than none.
+
+  **One thing worth knowing.** An unknown patch of history is no longer permanent. The moment you
+  state that a new request *replaces* what came before, the requirements are knowable again, because
+  "replaces" does not depend on knowing what it replaced.
+
+  **What it does not do yet.** It still does not tell you whether a task succeeded, and an empty list
+  of requirements does not mean it passed — it means nothing is currently required. Nothing is saved
+  to disk by any of this; the answer is worked out fresh each time from records that cannot change.
+  No screen changes, no new button, and the app behaves exactly as it did before.
+
 - **M2K PR10 — Cofferdam can now be told how a new request relates to the last one.**
   Nothing about this is visible yet, and that is deliberate.
 

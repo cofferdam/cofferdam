@@ -1595,6 +1595,40 @@ class TaskStore:
         with self._lock:
             yield self._connect()
 
+    @contextmanager
+    def _read_snapshot(self) -> Iterator[sqlite3.Connection]:
+        """Many reads, one coherent view of the database. Writes nothing.
+
+        :meth:`_read` holds this process's lock, which is enough for the reads
+        that already use it: no writer *here* can interleave. A read that walks a
+        chain of rows wants slightly more than that, because between two
+        autocommit ``SELECT``s another **process** — a second workstation
+        instance, a maintenance script, a shell — may legitimately commit, and a
+        lineage assembled half from before that commit and half from after would
+        describe a graph that never existed.
+
+        So this opens an explicit deferred transaction as well. In WAL mode
+        SQLite pins the read snapshot at the first statement and holds it until
+        the commit, which closes that window without blocking any writer. It is
+        deferred rather than ``IMMEDIATE`` on purpose: a reader must never take
+        the write lock.
+
+        ``_connect`` is called **before** ``BEGIN``, because a first connection
+        runs the schema script and DDL cannot open inside a transaction.
+
+        Never nested inside :meth:`_write`, and there is no caller that could:
+        the only user is the lineage read, which no writer calls.
+        """
+        with self._lock:
+            connection = self._connect()
+            connection.execute("BEGIN")
+            try:
+                yield connection
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
+            connection.execute("COMMIT")
+
     def close(self) -> None:
         with self._lock:
             if self._connection is not None:
@@ -3247,6 +3281,104 @@ class TaskStore:
                 (task_id, int(turn_number)),
             ).fetchone()
         return None if row is None else row["dispatch_state"]
+
+    # -- pure continuity lineage (no schema change) ---------------------------
+
+    def lineage_inputs(self, task_id: str, turn_number: int) -> "LineageGraph":
+        """Every immutable row one lineage resolution may look at. **A read.**
+
+        M2K PR11. Returns the closed input graph
+        :func:`~.lineage.resolve` runs on, and does no resolving itself: the
+        judgement is a pure function of these rows, and keeping the fetch out of
+        it is what makes "the same stored graph always resolves the same way"
+        checkable rather than promised.
+
+        **One coherent snapshot, and this is load-bearing.** A resolution walks
+        several turns' criteria and declarations, so it is exactly the read that
+        could otherwise mix database states — inheriting an active set from
+        before a commit and superseding against rows from after it. All of it
+        happens inside a single :meth:`_read_snapshot` transaction.
+
+        **The walk follows only the links a resolution follows.** ``extend`` and
+        ``revise`` are statements about the prior active set, so their
+        predecessor is fetched. ``root`` has none, and ``replace`` cuts the chain
+        — its predecessor's *identity* is still looked up, because a malformed
+        declaration must still be refused, but its own predecessor is not. That
+        keeps the graph honest: what is in it is what the answer stood on.
+
+        Bounded by :data:`~.lineage.MAX_LINEAGE_DEPTH` turns and by a visited
+        set, so a corrupted row cannot make a start-up read walk forever. Running
+        past either simply stops fetching; the resolver, which owns the
+        vocabulary, is what calls it :data:`~.lineage.REASON_DEPTH_EXCEEDED` or
+        :data:`~.lineage.REASON_CYCLE_DETECTED`.
+
+        Writes nothing, creates nothing, repairs nothing. A row that disagrees
+        with itself is returned exactly as stored, for the resolver to refuse.
+        """
+        from .continuity import (
+            CONTINUITY_DECLARED,
+            CONTINUITY_EXTEND,
+            CONTINUITY_REVISE,
+        )
+        from .lineage import MAX_LINEAGE_DEPTH, LineageGraph, LineageNode
+
+        target = int(turn_number)
+        nodes: Dict[int, "LineageNode"] = {}
+        owners: Dict[str, Tuple[str, int]] = {}
+
+        with self._read_snapshot() as connection:
+            earliest_row = connection.execute(
+                "SELECT MIN(turn_number) AS first FROM task_turn_criteria"
+                " WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            earliest = earliest_row["first"] if earliest_row is not None else None
+
+            turn: Optional[int] = target
+            while turn is not None and len(nodes) < MAX_LINEAGE_DEPTH:
+                if turn in nodes:
+                    break
+                continuity = self.turn_continuity(task_id, turn)
+                nodes[turn] = LineageNode(
+                    turn_number=turn,
+                    continuity=continuity,
+                    snapshot=self.turn_criteria(task_id, turn),
+                )
+
+                predecessor = continuity.predecessor_snapshot_id
+                if predecessor is None:
+                    break
+                if predecessor not in owners:
+                    owner = connection.execute(
+                        "SELECT task_id, turn_number FROM task_turn_criteria"
+                        " WHERE snapshot_id = ?",
+                        (predecessor,),
+                    ).fetchone()
+                    if owner is not None:
+                        owners[predecessor] = (
+                            owner["task_id"],
+                            int(owner["turn_number"]),
+                        )
+                located = owners.get(predecessor)
+                traverses = (
+                    continuity.state == CONTINUITY_DECLARED
+                    and continuity.mode in (CONTINUITY_EXTEND, CONTINUITY_REVISE)
+                )
+                if not traverses or located is None or located[0] != task_id:
+                    # A cut point, a predecessor that does not exist, or one that
+                    # belongs to another task. None of the three is walked — the
+                    # last two are refusals the resolver states in its own
+                    # vocabulary.
+                    break
+                turn = located[1]
+
+        return LineageGraph(
+            task_id=task_id,
+            target_turn_number=target,
+            nodes=nodes,
+            snapshot_owners=owners,
+            earliest_snapshot_turn=None if earliest is None else int(earliest),
+        )
 
     # -- deterministic criterion evaluation (schema v8) -----------------------
 

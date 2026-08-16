@@ -1692,7 +1692,10 @@ A confidently wrong task verdict is not.
 
 ### What continuity will require
 
-Design constraints, none of them built:
+Design constraints, written before any of it existed. **M2K PR10 built the
+persistence and M2K PR11 built the resolver** — see *Active criteria at a turn*
+below for what shipped; the constraints are kept as written because they are what
+the implementation was held to:
 
 * **Explicit, never defaulted** — `replace` and `extend` are indistinguishable by
   inspecting the criteria, and a wrong default applies silently to every task.
@@ -1725,6 +1728,116 @@ Deriving it makes a doctrine change a re-render rather than a migration. If
 historical audit later needs *what did we say at the time*, that argues for
 recording the aggregator version beside the answer — its own decision, when a real
 need appears.
+
+## Active criteria at a turn (M2K PR11)
+
+PR6 stores what each turn required. PR10 stores what each turn said about the turn
+before it. PR11 composes the two into the question anything downstream asks first:
+**given those immutable declarations, which immutable criteria are in force at
+this turn?**
+
+It computes no aggregate. There is no `AGGREGATOR_VERSION`, no task verdict, and
+no code here that could produce one. A resolved active set says *what is currently
+required*; whether any of it happened is the per-criterion evaluator's question,
+and what a mixture of those results means remains unavailable by design.
+
+`TaskService.resolve_active_criteria(task_id, turn_number)` is the entire surface.
+**Internal only** — no HTTP route, no Actions Bridge operation, no PWA control,
+and the assessment response is unchanged.
+
+### The four modes
+
+| mode | active set |
+|---|---|
+| `root` | this snapshot's criteria; no predecessor is traversed |
+| `extend` | the predecessor's resolved active set, then this snapshot's criteria |
+| `replace` | this snapshot's criteria; the predecessor's active set is **not required** |
+| `revise` | the predecessor's resolved set minus every explicitly superseded criterion, in place, then this snapshot's criteria |
+
+Nothing is deduplicated by description, path or fingerprint. Criterion ids are the
+only identity — two turns may legitimately require the same-looking thing for
+different reasons, which is the whole reason lineage is declared rather than
+inferred.
+
+### `replace` is a cut point
+
+An unknown predecessor makes `extend` and `revise` **unavailable**: both are
+statements *about* the prior active set, so they cannot be answered without it. It
+does **not** block `replace`, which says the prior set is gone whatever it was.
+
+That is what lets a task recover. A turn that predates continuity
+(`legacy_unknown`), or one nobody declared anything for (`not_declared`), no
+longer poisons every later turn forever — the moment somebody declares `replace`,
+the requirement set is knowable again.
+
+The predecessor's *identity* is still validated for `replace`: it must exist,
+belong to this task, and come from an earlier turn. Only the traversal is skipped.
+A malformed `root` is never reinterpreted as `replace`.
+
+### Ordering
+
+Inheritance first, and stable. Surviving inherited entries keep their relative
+order; superseded entries are removed **in place** with nothing promoted into the
+hole; this turn's own criteria follow in stored `ordinal` order. Never sorted by
+criterion id, description, path or fingerprint — the order somebody submitted
+requirements in is a fact about the requirements.
+
+### Unavailable is an answer, and so is empty
+
+Unavailable results carry a closed code-owned reason and **no partial active
+set** — a caller given half an answer would use it. The vocabulary:
+`continuity_legacy_unknown`, `continuity_not_declared`, `predecessor_unavailable`
+(carrying the underlying cause and the turn it broke at), `predecessor_missing`,
+`predecessor_foreign_task`, `predecessor_not_earlier`, `criteria_snapshot_missing`,
+`continuity_snapshot_mismatch`, `root_has_predecessor`, `root_not_first_snapshot`,
+`relations_mode_mismatch`, `supersession_target_not_active`,
+`supersession_predecessor_unknown`, `supersession_current_unknown`,
+`duplicate_active_criterion`, `malformed_lineage`, `lineage_depth_exceeded`,
+`cycle_detected`.
+
+A **resolved** result with zero active criteria is different, and means *the
+declared requirement set is empty*. It does not mean the task passed, acceptance
+was met, or anything succeeded.
+
+### A supersession must name an *active* criterion
+
+A relation is valid only if its old-side criterion is active in the resolved
+predecessor set. Historical membership is not active membership: a criterion
+retired two turns ago cannot be retired again, and the stale edge is **refused**
+rather than skipped — skipping it would leave the resolver asserting a set no
+declaration produces.
+
+PR10's write validation already requires the old side to belong to the declared
+predecessor's own snapshot, so a valid write cannot produce a stale edge. This is a
+**read-time invariant against corrupted state**, alongside snapshot mismatch,
+cross-task and later-turn predecessors, impossible roots, mode/relation
+disagreement, duplicate active ids, cycles and over-deep chains. Nothing is
+repaired on read.
+
+A consequence of PR10's rule worth stating: a `revise` cannot retire a criterion it
+merely **inherited** through an earlier `extend` unless it declares that earlier
+snapshot as its predecessor — which then cuts the intervening turn's own criteria
+out of the lineage. PR11 does not loosen that.
+
+### Derived, versioned, bounded, pure
+
+**Derived on read, never persisted.** No schema change; v9 stays. The sources are
+immutable and the function is deterministic, so persisting the answer would add a
+write path, a recovery path and a second place for the truth to live.
+
+**`RESOLVER_VERSION = 1`**, distinct from `SCHEMA_VERSION`,
+`CRITERIA_MODEL_VERSION`, `CONTINUITY_MODEL_VERSION`, `ASSEMBLER_VERSION` and
+`EVALUATOR_VERSION`, and bound into a domain-separated resolved fingerprint over
+the target, the ordered active set and every consumed lineage step. A `replace`'s
+untraversed predecessor is deliberately **not** bound.
+
+**Bounded** at `MAX_LINEAGE_DEPTH = 256` with a visited set, so a corrupted row
+answers rather than hangs. **One deferred read transaction** across the whole
+fetch, so a lineage can never be half-old and half-new. **Pure resolver**: no
+SQLite, filesystem, Git, subprocess, socket, provider, environment or clock, and no
+mutation.
+
+D-2026-08-16-10 through D-2026-08-16-13.
 
 ### Why the named check runner comes after this
 

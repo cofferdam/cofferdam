@@ -797,10 +797,122 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2K PR11 — the pure continuity lineage resolver
+
+On `m2k-pr11-lineage-resolver`, from the merged `1efd49b`. **Implemented on a branch, not merged and
+not deployed.**
+
+PR6 froze **what each turn required**. PR10 froze **what each turn said about the turn before it**.
+Neither answers the question anything downstream has to ask first: *given those immutable
+declarations, which immutable criteria are in force at this turn?* PR11 answers exactly that and
+nothing beyond it. It is **not** an aggregate, there is no `AGGREGATOR_VERSION`, no task verdict, and
+no code here or downstream that could produce one.
+
+**No schema change. Schema stays at v9.** The resolver is pure read logic over rows PR6 and PR10
+already persist, so there is nothing new to store — asserted by comparing the database byte-for-byte
+across repeated resolutions and by checking no table name contains `active`, `lineage` or `resolv`.
+
+**Derived on read, never persisted.** The sources are immutable and the function is deterministic and
+versioned, so an answer can always be recomputed. Persisting it would add a write path, a recovery
+path and a second place for the truth to live that could disagree with the first.
+
+**`RESOLVER_VERSION = 1`**, distinct from `SCHEMA_VERSION`, `CRITERIA_MODEL_VERSION`,
+`CONTINUITY_MODEL_VERSION`, `ASSEMBLER_VERSION` and `EVALUATOR_VERSION`. All six move for reasons of
+their own, and a future version 2 that resolved the same rows differently must be **visibly**
+different rather than silently reinterpreting a stored identity.
+
+**The four modes, exactly.** `root` → this snapshot's criteria, no traversal. `extend` → the
+predecessor's resolved active set, then this snapshot's criteria, with **no** deduplication by text,
+path or fingerprint. `replace` → this snapshot's criteria, and the predecessor's active set is *not
+required*. `revise` → the predecessor's resolved active set minus every criterion an explicit
+relation retires, in place, then this snapshot's criteria.
+
+**`replace` is a lineage cut point, and that is load-bearing.** An unknown predecessor blocks
+`extend` and `revise` — both are statements *about* the prior active set — but it does **not** block
+`replace`, which says the prior set is gone whatever it was. That is what lets a task recover: a turn
+that predates continuity (`legacy_unknown`), or one nobody declared anything for (`not_declared`), no
+longer poisons every later turn forever. The predecessor's *identity* is still validated — it must
+exist, belong to this task and come from an earlier turn — because cutting a dependency is not the
+same as believing a malformed declaration.
+
+**A stale supersession target fails closed.** A relation is valid only if its old-side criterion is
+**actually active** in the resolved predecessor set. Historical membership is not active membership:
+a criterion retired two turns ago cannot be retired again, and the stale edge is refused rather than
+skipped, because skipping it would leave the resolver asserting a set no declaration produces.
+
+**Deterministic ordering, and nothing is sorted.** Surviving inherited entries keep their relative
+order, removals happen in place, and this turn's own criteria follow in stored `ordinal` order. Never
+by criterion id, text, path or fingerprint — the order somebody submitted requirements in is a fact
+about the requirements.
+
+**Closed unavailable vocabulary**, code-owned and never exception prose: `continuity_legacy_unknown`,
+`continuity_not_declared`, `predecessor_unavailable` (carrying the underlying cause and the turn it
+broke at), `predecessor_missing`, `predecessor_foreign_task`, `predecessor_not_earlier`,
+`criteria_snapshot_missing`, `continuity_snapshot_mismatch`, `root_has_predecessor`,
+`root_not_first_snapshot`, `relations_mode_mismatch`, `supersession_target_not_active`,
+`supersession_predecessor_unknown`, `supersession_current_unknown`, `duplicate_active_criterion`,
+`malformed_lineage`, `lineage_depth_exceeded`, `cycle_detected`. An unavailable result carries **no**
+partial active set, because a caller given one would use it.
+
+**A resolved empty active set is an answer, not a success.** A `root` or `replace` whose snapshot is
+`not_provided` resolves to zero active criteria, which means *the declared requirement set is empty*.
+It does not mean the task passed, and there is deliberately no vocabulary in the module a reader
+could mistake for one.
+
+**Read-time validation, and no repairs.** PR10 validates at write time; PR11 still refuses a
+snapshot mismatch, a cross-task or later-turn predecessor, an impossible `root`, a mode disagreeing
+with its relations, a missing snapshot or criterion, a duplicate active id, a cycle and an
+over-deep chain — each proven against a real database corrupted through raw SQL, including one
+shape only reachable with `PRAGMA ignore_check_constraints`. A corrupted row is returned exactly as
+stored; nothing is rewritten on read.
+
+**Bounded and terminating.** `MAX_LINEAGE_DEPTH = 256` and a visited set, so a hand-edited row cannot
+make a start-up read walk forever. Over the bound is *unavailable*, never a truncated set.
+
+**One coherent read snapshot.** A resolution walks several turns' rows, so it is exactly the read
+that could otherwise mix database states. `TaskStore.lineage_inputs` holds a single deferred read
+transaction across the whole fetch, which in WAL mode pins the snapshot without blocking any writer.
+A differential test forces a second connection to commit mid-walk and asserts the criterion it adds
+is **not** observed — the same test fails on the previous `_read()` helper, which is what makes the
+transaction load-bearing rather than decorative.
+
+**Pure resolver.** `resolve()` takes a frozen input graph and returns a result. No SQLite, no
+filesystem, no Git, no subprocess, no socket, no provider, no clock, no mutation — asserted from the
+syntax tree, again at runtime with those callables poisoned, and again by deleting the project
+repository and getting a byte-identical fingerprint.
+
+**Resolved fingerprint.** Domain-separated SHA-256 over the resolver version, the exact target, the
+active set as *ordered* `(source snapshot id, criterion id)` pairs, and every consumed lineage step's
+turn, snapshot id, mode, criteria fingerprint and continuity fingerprint. A `replace`'s predecessor
+is deliberately **not** bound: the resolution never traversed it, and a hash claiming otherwise would
+assert a dependency the answer did not have.
+
+**Internal only.** `TaskService.resolve_active_criteria(task_id, turn_number)` and nothing else. No
+HTTP route, no Actions Bridge operation, no PWA control, and the PR8 assessment response is
+**unchanged** — a lineage read surface is its own review.
+
+**One PR10 boundary discovered and pinned rather than widened.** PR10 requires a supersession's
+old-side criterion to belong to the **declared predecessor's own snapshot**, so a `revise` cannot
+retire a criterion it merely *inherited* through an earlier `extend` unless it declares that earlier
+snapshot as its predecessor — which then cuts the intervening turn's own criteria out of the lineage.
+The resolver does not loosen the rule; both the refusal and the supported alternative are asserted.
+
+## M2K records — the evidence foundation (written while each was on its branch)
+
+M2K is **in progress**: PR1 through PR8 are merged and deployed; PR9 is merged (`b2314f0`, #54) and
+needed no deployment because it changed only documentation; PR10 is merged (`1efd49b`, #55) and
+deployed to slot A on schema v9; PR11 is on a branch.
+See *In progress* above for PR11.
+
 ### M2K PR10 — the criterion continuity persistence foundation
 
-On `m2k-pr10-criterion-continuity`, from the merged `b2314f0`. **Implemented on a branch, not merged
-and not deployed.**
+**Merged as `1efd49b` (#55) and deployed**: workstation and Actions bridge both run it from **slot
+A**, and the live task database migrated to **schema v9** with both continuity tables created empty —
+0 declarations and 0 supersessions on the 25 historical tasks, 473 events and 3 turns, exactly as a
+no-backfill design requires. Because v9 is a schema bump, the rollback is a **pair** rather than a
+slot flip: the PR8 runtime in **slot B at `059fdcb`** plus the verified pre-v9 schema-v8 backup taken
+before the migration. The record below was written while PR10 was still on
+`m2k-pr10-criterion-continuity`, from the merged `b2314f0`, and is kept as it was written.
 
 PR9 named the one fact standing between Cofferdam and a task-level answer: every turn's requirements
 were stored and **the relationship between them was not**, so neither *accumulate every turn* nor
@@ -861,11 +973,6 @@ handed a real v9 database: it refuses with `StoreUnavailable`, names the newer v
 and leaves the main file **byte-identical**, the schema version un-downgraded, both continuity tables
 intact, and integrity and foreign keys clean.
 
-## M2K records — the evidence foundation (written while each was on its branch)
-
-M2K is **in progress**: PR1 through PR8 are merged and deployed; PR9 is merged (`b2314f0`, #54) and
-needed no deployment because it changed only documentation; PR10 is on a branch.
-See *In progress* above for PR9.
 
 ### M2K PR8 — the private read-only assessment surface and PWA panel
 
