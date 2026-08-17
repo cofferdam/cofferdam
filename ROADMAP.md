@@ -921,9 +921,8 @@ downstream reads from.
     stay four, the composer survives one, and nothing is retried under a weaker authority. Three
     earlier "the PWA has no such control" guards are updated rather than deleted.
     D-2026-08-17-25 and D-2026-08-17-26.
-  - **PR25 — terminal-bound final-state observation.** *Implemented on
-    `m2k-pr25-terminal-bound-final-state`, not merged and not deployed. **Blocks the deployment
-    retry.*** The first Tier-2 deployment of PR11–PR24 went out on 2026-08-17, succeeded
+  - **PR25 — terminal-bound final-state observation.** *Merged as `778837d` (#70) on 2026-08-17.
+    Not deployed: the retry is blocked on PR26 below.* The first Tier-2 deployment of PR11–PR24 went out on 2026-08-17, succeeded
     mechanically, and its production smoke found a real authority defect — which is exactly what a
     smoke is for. A person declared `path_exists("deploy-smoke.txt")` from the new PR24 form; the
     file was created; acceptance said the requirement was not met. The deployment was deliberately
@@ -989,6 +988,61 @@ downstream reads from.
     exists. Observer mechanics — descriptor-relative `O_NOFOLLOW`, symlink doctrine, normalization,
     the kind vocabulary, the bounded path scope, two-pass stability — are untouched.
     D-2026-08-17-27 … D-2026-08-17-30.
+  - **PR26 — terminal-bound committed-range evidence.** *Implemented on
+    `m2k-pr26-terminal-bound-committed-range`, not merged and not deployed. **Blocks the deployment
+    retry.*** The second asynchronous boundary defect, found by auditing PR25's own reasoning rather
+    than by another failed smoke — and it was the more damaging of the two.
+
+    **PR25's argument covered one half of a two-revision fact.** It left PR5's capture on the
+    dispatch path because "the baseline revision was frozen before dispatch". The baseline is. The
+    **target** is `HEAD`, and an asynchronous `start` returns before the worker has committed to it,
+    so the recorded range was `baseline == target`: ancestry `identical`, coverage `complete`, no
+    paths. True about two equal revisions, false about the turn.
+
+    **Why it was worse than PR14's.** PR14's premature row said `absent`; PR5's said
+    **`coverage = complete`**, a claim that the committed domain had been fully examined. A negative
+    conclusion requires both domains closed, and this closed one on a reading never taken. The
+    worktree domain could not compensate, and the reason is exact: `git status` compares against the
+    current `HEAD`, so **committing is precisely what blinds it** — and precisely what the
+    dispatch-bound range could not see. Both domains went blind at the same instant.
+
+    **Proved before it was fixed, as a Stop Gate.** Against merged `778837d`, a deterministic
+    asynchronous worker that committed its work produced `not_met` /
+    `complete_resulting_change_absent` for `path_changed` and for `path_operation`
+    (created/modified/deleted), and `not_met` / `complete_rename_not_observed` for `rename` — the
+    strongest wrong answer PR7 can give, about work that was done and committed. Two controls stayed
+    correct on both builds, which is what distinguishes a defect from a threshold: a worker that
+    committed nothing still answers `not_met`, and a worker that changed a file **without** committing
+    is still answered by the worktree domain.
+
+    **One owner, joined rather than duplicated.** `_record_committed_range` moves off both dispatch
+    paths into `_capture_terminal_boundary` — PR25's owner — in a pinned order: committed range, then
+    final state. No second async timing mechanism was created. The **domains stay separate**: the
+    range is immutable event evidence, the final state is a write-once row, and sharing a lifecycle
+    moment is not a reason to share a persistence model. The order is pinned even though both are
+    read-only and it cannot affect semantics, so that a crash between them loses the same half on
+    every host; it is also the relative order PR5 and PR14 always had.
+
+    **The boundaries this settles**, all inherited from PR25 rather than re-derived: `waiting_for_user`
+    finalizes nothing and the resumed turn is measured at its true terminal closure; a refused
+    dispatch fabricates no range, structurally, because it closes no turn; a terminal **failure or
+    cancellation still measures**, because a commit is in the object database and reachable from
+    `HEAD` whatever word the lifecycle ends on; and **restart recovery deliberately does not**, so
+    interrupted turns answer `unverified` rather than from a pre-work measurement.
+
+    **No version moves, and that is the decision.** `SCHEMA_VERSION` 11, `ASSEMBLER_VERSION` 3,
+    `EVALUATOR_VERSION` 1, `AGGREGATOR_VERSION` 1, and PR25's `FINAL_STATE_OBSERVER_VERSION` 2 and
+    `CURRENT_ASSESSMENT_VERSION` 4 untouched. Old dispatch-bound and new terminal-bound observations
+    are **not distinguishable** by any stored field, and no committed-range observer version is
+    introduced: it would be load-bearing only if the evaluator read it, and an evaluator that reads it
+    is an evaluator that moved — which would re-select every historical closed turn for re-evaluation
+    against the same immutable bundle while making existing records unreadable to the binder. What
+    makes the absence safe is that no stored range is false; only the inference was, and it now has
+    the right target. Historical `EvaluationRecord`s are not re-evaluated, overwritten or backfilled,
+    and no compatibility refusal is defined because the population is empty — the live v9 database
+    holds zero committed-range events, zero turn criteria and zero evaluations, so the defect is
+    pre-production. An upgrade mid-turn is handled by the existing write-once guard, which keeps the
+    weaker range rather than measuring a second time. D-2026-08-18-1, D-2026-08-18-2.
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**

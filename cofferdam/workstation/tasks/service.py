@@ -646,21 +646,22 @@ class TaskService:
             #
             # Its source is the task's own origin rather than a follow-up
             # source: nobody sent a follow-up to open it, the prompt did.
-            opened = self._open_first_turn(row)
-            # M2K PR5. Here, and not one line later: `_apply` is the only code
-            # that can close this turn, so this is the last host-owned moment at
-            # which the turn is *guaranteed* open — which is what makes the
-            # event's sequence fall inside the turn's own bounds.
-            self._record_committed_range(row, root, opened)
-            # **No final-state observation here — M2K PR25.** PR14 took it on
-            # this line, one instruction after PR5's, and the symmetry was the
-            # mistake: PR5 measures a boundary that is genuinely fixed by now
-            # (the baseline revision was frozen before dispatch), while PR14
-            # measures the *worker's* effect and the worker may not have had one
-            # yet. `adapter.start()` returning is not `worker finished`; for an
-            # asynchronous adapter it means the opposite. See
-            # :meth:`_capture_terminal_boundary`, which owns this observation
-            # now, and the version note on `FINAL_STATE_OBSERVER_VERSION`.
+            self._open_first_turn(row)
+            # **No machine evidence is captured on this line — M2K PR25 and
+            # PR26.** PR5 stood here and PR14 one instruction below it, and both
+            # were wrong for the same reason with the same excuse: the adapter
+            # had returned, so the work looked finished.
+            #
+            # PR25 moved the final state. PR26 finished the argument, because
+            # PR5's half of it did not survive contact with the counterexample:
+            # the baseline revision really is frozen by now, but a range has two
+            # revisions and the *target* is HEAD, which for an asynchronous
+            # adapter is still the pre-work HEAD. That range says
+            # ``identical`` / ``complete`` / nothing committed — a true statement
+            # about two equal revisions, and a false one about the turn.
+            #
+            # Both observations are taken by :meth:`_capture_terminal_boundary`,
+            # at the transition that closes this turn.
             return self._apply(row, outcome)
 
     def _record_pre_work_baseline(self, row: TaskRow, root: Path) -> Optional[int]:
@@ -882,7 +883,11 @@ class TaskService:
     # -- the committed range (M2K PR5) ---------------------------------------
 
     def _capture_terminal_boundary(self, row: TaskRow, close) -> None:
-        """The one owner of final-state capture. **M2K PR25.**
+        """The one owner of terminal machine evidence. **M2K PR25 and PR26.**
+
+        PR25 gave this method the final-state observation. **PR26 gave it the
+        committed range**, which had the identical defect for the identical
+        reason and was left behind because its baseline half looked settled.
 
         Called immediately before a transition that will durably close a turn,
         by the two methods that can perform one — :meth:`_apply` and
@@ -921,7 +926,30 @@ class TaskService:
         turn closes with no observation and every state criterion on it stays
         ``unverified``. Failing closed is the honest answer, and it is also
         strictly better than V1's, which would have left a pre-work observation
-        behind and called it the boundary.
+        behind and called it the boundary. **PR26 inherits that rule unchanged**:
+        an interrupted turn now gets no committed range either, so its change
+        criteria answer ``unverified`` where they used to answer from a range
+        measured before the worker ran.
+
+        **One boundary, two domains, still separate.** The two observations share
+        this lifecycle moment and nothing else. The range is immutable evidence
+        on a ``committed_range_observed`` event; the final state is a write-once
+        row in ``task_turn_final_state``. They keep their own persistence models,
+        their own completeness vocabularies and their own versions — sharing a
+        moment is not a reason to share a record, and merging them would put one
+        domain's unavailability in a position to speak for the other's.
+
+        **The order is pinned: committed range, then final state.** Both are
+        read-only — the range runs ``rev-parse``, ``merge-base --is-ancestor``
+        and ``diff --name-status``, and the final state runs ``lstat`` — so
+        neither can alter the repository and neither can alter the other's
+        answer. The order therefore does not affect semantics, which is exactly
+        why it has to be written down rather than left to chance: it is the
+        relative order PR5 and PR14 already had, and it makes a crash between the
+        two deterministic. Crashing there leaves the range recorded and no final
+        state, every time, on every host — a turn whose change criteria are
+        answerable and whose state criteria are ``unverified``. A pair that could
+        crash either way round would make that gap a coin toss.
         """
         if close is None:
             return
@@ -939,6 +967,7 @@ class TaskService:
             root = verify_root(self._projects.get(row.project_id).root)
         except TaskError:
             root = None
+        self._record_committed_range(row, root, open_turn.turn_number)
         self._record_final_state(row, root, open_turn.turn_number)
 
     def _record_final_state(
@@ -1112,27 +1141,64 @@ class TaskService:
             )
 
     def _record_committed_range(
-        self, row: TaskRow, root: Path, turn_number: Optional[int]
+        self, row: TaskRow, root: Optional[Path], turn_number: Optional[int]
     ) -> None:
         """Observe what this turn committed, while the turn is still open.
 
-        **Where this sits is the whole argument.** Both dispatch paths call it
-        after the adapter has returned and a real turn has been written, and
-        before :meth:`_apply` — the only method that can close a turn — is
-        reached. Both calls are inside ``self._lock``, so nothing can close the
-        turn in between. The event therefore gets an ordinary Task Core sequence
-        while the turn is open, and the v5 bound rule ``opened_after < sequence
-        <= closed_through`` attributes it to this turn and to no other. Capturing
-        after the close and attaching the result backwards would be a fact
-        assigned to a window by a later decision, which is the shape this
-        milestone exists to refuse.
+        M2K PR5 wrote this; **M2K PR26 moved its caller and kept its body**, for
+        the reason and by the route PR25 had already established for the final
+        state. The probe was never the defect. Asked after the work it answers
+        with the worker's commits in it; asked at dispatch it answers about a
+        HEAD the worker has not touched yet.
+
+        **Where this sits is the whole argument, and PR5 got it wrong.** PR5
+        called it from both dispatch paths, immediately after the adapter
+        returned, on the grounds that the turn was provably open there. That is
+        true and it is not the property that matters. A range has two revisions:
+        the baseline, which PR4 froze before dispatch and which really is settled
+        by then, and the **target**, which is HEAD. For a synchronous adapter
+        ``start`` returning means the work is done and HEAD is the post-work
+        HEAD. For an asynchronous one it means the opposite, and the recorded
+        range was ``baseline == target``: ancestry ``identical``, coverage
+        ``complete``, nothing committed. Every field of that observation is a
+        true statement about the two revisions it names and the whole of it is a
+        false statement about the turn — and because the coverage said
+        ``complete``, PR7 read it as a domain that had been fully examined and
+        was entitled to conclude ``not_met``.
+
+        That is not a cosmetic misdating. A worker that commits its work leaves a
+        clean tree, so PR3's worktree domain sees nothing either — committing is
+        precisely what blinds the other domain. The two domains went blind at the
+        same instant and for the same reason, so the doctrine that one domain may
+        be incomplete while another still holds authority had nothing left to
+        stand on, and the honest ``unverified`` collapsed into a confident and
+        wrong ``not_met``.
+
+        **The only caller is now** :meth:`_capture_terminal_boundary`, invoked
+        when the worker has reached the terminal result that closes this turn and
+        before the closing write, with ``self._lock`` held throughout. The turn is
+        still open, so the event takes an ordinary Task Core sequence and the v5
+        bound rule ``opened_after < sequence <= closed_through`` attributes it to
+        this turn and to no other. Nothing is captured after a close and attached
+        backwards, which is the shape this milestone exists to refuse — the fix
+        is *when* the window's far edge is read, not *how* the event is attributed.
 
         **Only for a turn that exists.** ``dispatch_state`` must say
         ``turn_opened``, which the store writes in the same transaction as the
         turn row. A dispatch that was refused, or one that started and never
         produced a turn, is left exactly as PR4 recorded it: an explicitly
-        uncertain attempt. PR5 does not invent a turn for either, and does not
-        record a range against one.
+        uncertain attempt. No worker ever held authority over the repository, so
+        no terminal committed-range evidence is fabricated for one. PR5 did not
+        invent a turn for either and PR26 does not invent a range; a refused
+        first dispatch does not even reach here, because it closes no turn.
+
+        **``root`` may be ``None``** now that the caller is the closing
+        transition rather than the dispatch that just verified the project. A
+        project folder that went away between dispatch and this moment produces
+        an explicitly unavailable observation from
+        :func:`~.gitrange.capture_committed_range`'s own ``root`` check, never a
+        silent skip — the same answer, from the same function, that every other
+        wall the probe hits already produces.
 
         **Both revisions are machine-owned.** The baseline is the revision PR4
         stored before the worker existed; the target is resolved by
@@ -1197,6 +1263,18 @@ class TaskService:
         the observation kind are the identity; the revisions are inside the
         event, and because this build takes exactly one canonical observation per
         turn there is nothing a second one could say that the first did not.
+
+        **M2K PR26 gave this a second job, and it needed no change to do it.**
+        A turn dispatched by a pre-PR26 build and closed by a post-PR26 one — a
+        daemon upgraded while a turn was in flight — already carries a
+        dispatch-bound range, and the terminal capture finds it here and appends
+        nothing. That is the conservative answer and the correct one: the first
+        observation is a durable record of what two named revisions differed by,
+        the repository has moved since, and a second measurement taken now would
+        be a *new* historical claim about a window whose evidence is already
+        written. No overwrite, no second measurement, no repair. The turn keeps
+        the weaker range it was given, which is a known limit of that upgrade
+        and not a licence to rewrite history.
         """
         bound = self._store.turn_bound(task_id, turn_number)
         if bound is None:  # pragma: no cover - v6 turns always have one
@@ -1488,21 +1566,16 @@ class TaskService:
             except TurnLimitReached:
                 self._reject(row, "followup", "turn limit reached")
                 raise
-            if starts_new_turn:
-                # M2K PR5, at the same point in the lifecycle as the first turn's:
-                # the turn is written, `_apply` has not run, and the lock has not
-                # been released since. A follow-up that *resumed* a turn opened
-                # none, so there is no new range to take — the turn it resumed is
-                # still being measured from its own boundary.
-                opened = self._store.current_turn(row.task_id)
-                self._record_committed_range(
-                    row, root, opened.turn_number if opened is not None else None
-                )
-                # **No final-state observation here — M2K PR25**, for the reason
-                # the first-turn path gives at length. A follow-up dispatch knows
-                # even less than a first one about whether work has happened:
-                # `send_followup` returning means the session accepted the
-                # message, which is not a statement about the worktree at all.
+            # **No machine evidence is captured on this path — M2K PR25 and
+            # PR26**, for the reason the first-turn path gives at length. A
+            # follow-up dispatch knows even less than a first one about whether
+            # work has happened: `send_followup` returning means the session
+            # accepted the message, which is not a statement about the
+            # repository at all — neither about its worktree nor about its HEAD.
+            #
+            # A follow-up that *resumed* a turn opened none, and one that opened
+            # a new turn will have both observations taken when that turn closes.
+            # Either way the boundary is the turn's, not this call's.
             self._audit(
                 "task_followup",
                 OUTCOME_ACCEPTED,

@@ -2964,6 +2964,32 @@ function run() {
     });
   }
 
+  if (scenario === "authoring-state-and-change-smoke-request") {
+    /* M2K PR26. The deployment-retry smoke model: one criterion from each
+       evidence domain, declared together in a single human-authored snapshot.
+
+       `path_exists` is answered by PR25's final-state observation and
+       `path_changed` by PR5's committed range, and the two used to fail at the
+       same boundary for the same reason. Declaring them in one request is what
+       makes the retry smoke discriminating: an asynchronous worker creates one
+       file and *commits* the other, so a build that fixed only one boundary
+       still gets one of them wrong. */
+    return createScenario(function () {
+      chooseMode(CREATE, "Root");
+      const rows = [
+        ["evidence:path_exists", { Path: "state-smoke.txt" }],
+        ["evidence:path_changed", { Path: "change-smoke.txt" }]
+      ];
+      rows.forEach(function (entry, index) {
+        addRow(CREATE);
+        setRowType(CREATE, index, entry[0]);
+        Object.keys(entry[1]).forEach(function (name) {
+          setRowText(CREATE, index, name, entry[1][name]);
+        });
+      });
+    });
+  }
+
   if (scenario === "authoring-create-root-with-no-criteria") {
     /* Explicit `root`, empty composer. The declaration is real and the criteria
        set is genuinely empty — which the server records as `not_provided`, and

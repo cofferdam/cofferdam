@@ -4202,6 +4202,100 @@ tell a client nothing about whether it still knows how to parse the body.
 distinction PR25 needs is already durable, so there is nothing to migrate — and a migration would
 have been the mechanism by which historical rows got silently reinterpreted.
 
+## D-2026-08-18-1 — The committed range is bound to the worker's terminal result, and PR5's dispatch capture was a correctness defect (EFE DECISION, ACTIVE)
+
+**Decision.** `_record_committed_range` moves off both dispatch paths and joins
+`_capture_terminal_boundary`, the owner D-2026-08-17-27 created for the final state. Both
+observations are taken immediately before the transition that durably closes a turn, under the
+lifecycle lock, in a pinned order: **committed range, then final state**.
+
+**Why PR25's argument did not cover it, in its own words.** PR25 left this capture where it was on
+the reasoning that "PR5 measures a boundary that is genuinely fixed by now (the baseline revision was
+frozen before dispatch)". The baseline is. A range has two revisions, and the **target** is `HEAD` —
+which for an asynchronous adapter is still the pre-work `HEAD` when `start` returns. The recorded
+range was `baseline == target`: ancestry `identical`, coverage `complete`, no paths. Every field is a
+true statement about two equal revisions and the whole is a false statement about the turn.
+
+**Why it was worse than the defect PR25 fixed.** PR14's premature observation said `absent`, which
+made a state criterion wrong. PR5's said **`coverage = complete`**, which is a claim that the
+committed domain was *fully examined* — and a negative conclusion requires both domains closed. It
+closed one on a reading that had not been taken.
+
+**Why the two-domain doctrine could not rescue it.** The standing rule is that one evidence domain
+may be incomplete while another still provides legitimate authority. That rule holds everywhere
+except here, and the exception is exact: `git status` compares against the current `HEAD`, so **a
+worker that commits leaves a clean tree and is invisible to the worktree domain**. Committing is
+precisely the act that blinds the other domain, and precisely the act the dispatch-bound range could
+not see. Both went blind at the same instant, for the same reason, on the same turn.
+
+**Proven, not assumed.** All three change predicates were driven end to end against a deterministic
+asynchronous worker that committed its work, on merged `778837d`:
+
+| Criterion | Before | After |
+| --- | --- | --- |
+| `path_changed` | `not_met` / `complete_resulting_change_absent` | `met` |
+| `path_operation` (created, modified, deleted) | `not_met` / `complete_resulting_change_absent` | `met` |
+| `rename` | `not_met` / `complete_rename_not_observed` | `met` |
+
+The two controls stayed correct on both builds, which is what makes those five a defect rather than a
+threshold: a worker that genuinely committed nothing still answers `not_met`, and a worker that
+changed a file **without** committing is still answered by the worktree domain.
+
+**Failure and cancellation still measure.** A worker that committed and then failed, or was cancelled
+after committing, has its range recorded. A commit is in the object database and reachable from
+`HEAD`; deleting it from the record to make the evidence agree with a status word would be the
+observer grading the work. **Restart recovery still does not**, inheriting D-2026-08-17-27's rule
+unchanged — those turns close as `interrupted` with no range, and their change criteria answer
+`unverified` rather than from a pre-work measurement.
+
+**The order is pinned even though it cannot matter.** Both observations are read-only — `rev-parse`,
+`merge-base --is-ancestor`, `diff --name-status`, and `lstat` — so neither can alter the repository or
+the other's answer. It is fixed so a crash between them loses the same half on every host, and it is
+the relative order PR5 and PR14 always had.
+
+## D-2026-08-18-2 — No version moves for PR26, and the indistinguishability of old observations is safe (EFE DECISION, ACTIVE)
+
+**Decision.** `SCHEMA_VERSION` stays 11, `ASSEMBLER_VERSION` stays 3, `EVALUATOR_VERSION` stays 1,
+`AGGREGATOR_VERSION` stays 1. D-2026-08-17-28 and D-2026-08-17-29 are untouched:
+`FINAL_STATE_OBSERVER_VERSION` stays 2 and `CURRENT_ASSESSMENT_VERSION` stays 4. **No
+committed-range observer version is introduced.**
+
+**Old and new observations are not distinguishable**, and that is stated rather than glossed. The
+event carries no version field and gains none, so a dispatch-bound range and a terminal-bound one are
+identical in shape.
+
+**Why that is safe.** No stored range is false. It names two revisions and states what differed
+between them, which is true whenever it was taken. What was wrong was never the row; it was the
+inference that the named range was the turn's, and that inference now has the right target.
+
+**Why each bump was rejected on its own terms.** `ASSEMBLER_VERSION` answers *were these the same
+assembly rules*, and assembly reads a stored range exactly as before — the inputs moved, and the
+fingerprint already binds inputs. `EVALUATOR_VERSION` is the load-bearing refusal: PR26 changes no
+evaluator logic, and bumping it would re-select every historical closed turn for re-evaluation
+against the same immutable bundle — the same answer under a new number — while simultaneously making
+every existing V1 record unreadable to the binder, which fails closed on an evaluator it does not
+know. That is churn plus a regression. `CURRENT_ASSESSMENT_VERSION` and `AGGREGATOR_VERSION` consume
+records whose shape did not change.
+
+**A committed-range observer version was considered and rejected**, which is the decision this entry
+exists to record. It would be load-bearing only if the evaluator read it, and an evaluator that reads
+it is an evaluator that moved — so it collapses into the `EVALUATOR_VERSION` bump already rejected.
+Adding an inert field would move every new turn's fingerprint for no semantic gain.
+
+**Historical `EvaluationRecord`s are left exactly as they are.** Not re-evaluated on GET, not
+overwritten, not backfilled from the current repository — which would be a statement about today
+wearing yesterday's timestamp. No compatibility refusal is defined, because the population it would
+protect is empty: the live production database at schema v9 holds **zero** `committed_range_observed`
+events, **zero** turn criteria and **zero** evaluations, so no stored judgement anywhere was produced
+from a dispatch-bound range. The defect is pre-production, which is the cleanest compatibility story
+available and the reason a refusal would have been ceremony.
+
+**The one upgrade case is handled by an existing guard.** A turn dispatched by a pre-PR26 build and
+closed by a post-PR26 one already carries a dispatch-bound range, and `_range_already_recorded` finds
+it and appends nothing. That is deliberate: the repository has moved since, so a second measurement
+now would be a new historical claim about a window whose evidence is already durable. The turn keeps
+the weaker range — a known limit of that upgrade, not a licence to rewrite history.
+
 ## D-2026-08-17-30 — The first Tier-2 deployment was rolled back on a smoke finding, and the fix blocks the retry (EFE DECISION, ACTIVE)
 
 **Decision.** The 2026-08-17 deployment of PR11–PR24 was deliberately rolled back as a **pair** —
@@ -4229,11 +4323,21 @@ only a hand-built equivalent. A hand-built V1 row proves the rule; the artifact 
 covers reality.
 
 **Deployment retry prerequisites**, all of which must hold together: PR25 merged with green
-final-head CI; the pair rehearsed again (slot + v9 backup) before any migration; and a repeat of the
-same smoke — an explicit `path_exists` requirement authored from the PWA against an asynchronous
-adapter — reaching `assessable` / `met` **in production**. Two pre-existing items stay explicitly out
+final-head CI; **PR26 merged with green final-head CI** — the second boundary defect, found while
+auditing PR25's own reasoning and proved to make acceptance dishonest for every change predicate (see
+[D-2026-08-18-1](#d-2026-08-18-1--the-committed-range-is-bound-to-the-workers-terminal-result-and-pr5s-dispatch-capture-was-a-correctness-defect));
+the pair rehearsed again (slot + v9 backup) before any migration; and a repeat of the smoke,
+**widened to both evidence domains** because a one-domain smoke is what let PR5's defect through —
+an explicit `path_exists` *and* an explicit `path_changed` requirement authored from the PWA against
+an asynchronous worker that creates one file and commits a change to the other, both reaching
+`assessable` / `met` **in production**. Two pre-existing items stay explicitly out
 of scope and out of the retry's critical path: the tunnel unit was already failed before the attempt
 and remains unrelated operational debt, and the sanitizer timing-test flake remains separate.
+
+**Why the smoke had to widen.** PR25's end-to-end proof passes on merged main and always would have:
+a `path_exists` criterion never consults the committed range, so no amount of re-running it could
+have found the second defect. The retry smoke now uses one criterion from each domain against one
+worker, so a build that fixed only one boundary fails it.
 
 **PR24B stays deferred** until a deployment succeeds. It is further authoring surface on a stack whose
 evidence authority has just been shown to have a boundary defect, and widening what a person can

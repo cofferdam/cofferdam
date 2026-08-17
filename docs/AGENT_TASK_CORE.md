@@ -432,11 +432,61 @@ target, coverage, limitation — because a truncated path list is still a usable
 observation that says so, while a range whose revisions and history relation were
 not recorded is not interpretable at all.
 
-**Captured while the turn is open.** Both dispatch paths capture after the adapter
-returns and the turn row exists, and before `_apply` — the only method that can
-close a turn — under the same lock. The event therefore takes an ordinary sequence
-inside the turn's own v5 bounds, so attribution is arithmetic rather than a later
-decision. Nothing is captured after a close and attached backwards.
+**Captured at the terminal worker boundary, while the turn is still open (M2K
+PR26).** The single owner is `_capture_terminal_boundary`, called by the two
+methods that can durably close a turn, immediately before the closing write and
+under the same lock. The event therefore takes an ordinary sequence inside the
+turn's own v5 bounds, so attribution is arithmetic rather than a later decision.
+Nothing is captured after a close and attached backwards.
+
+PR5 captured on the dispatch path instead — after the adapter returned — and that
+was wrong for every asynchronous adapter. The argument that survived until PR26
+was that a range's baseline is frozen before dispatch, which is true and is not
+the property that matters: the **target** is HEAD, and an asynchronous `start`
+returns before the worker has committed to it. The recorded range was
+`baseline == target`, ancestry `identical`, coverage **`complete`** — a true
+statement about two equal revisions and a false one about the turn.
+
+The coverage word is why this was a correctness defect rather than untidy
+evidence. A negative conclusion needs both domains closed, and `complete` closed
+the committed domain on a reading that had not been taken. Worse, the other
+domain could not compensate: `git status` cannot see committed work, so
+**committing is precisely what blinds the worktree domain**, and it is precisely
+what the dispatch-bound range could not see. Both domains went blind at the same
+instant, and `path_changed`, `path_operation` and `rename` each answered
+`not_met` — *we looked everywhere and it was not done* — about work that had been
+done and committed.
+
+**The order at that boundary is pinned: committed range, then final state.** Both
+are read-only, so order cannot affect semantics; it is fixed so that a crash
+between them loses the same half on every host. It is also the relative order PR5
+and PR14 always had.
+
+**Restart recovery captures neither**, for the reason PR14's no-fallback doctrine
+gives: a daemon that comes back up never observed the worker end, so HEAD is a
+fact about now. Those turns close as `interrupted` with no range, and their change
+criteria answer `unverified` rather than from a pre-work measurement.
+
+**No version moved, and that is a decision rather than an omission.** PR26 moves
+a capture site; it changes no stored shape and no reading rule. The assembler
+reads a range exactly as before, so `assembler_version` stays 3. The evaluator is
+untouched, and bumping `EVALUATOR_VERSION` would re-select every historical
+closed turn for re-evaluation against the same immutable bundle — the same answer
+under a new number — while making every existing record unreadable to the binder,
+which fails closed on an evaluator it does not know. `CURRENT_ASSESSMENT_VERSION`
+and `AGGREGATOR_VERSION` consume records whose shape did not change.
+
+A committed-range observer version was considered and rejected. **Old
+dispatch-bound and new terminal-bound observations are not distinguishable by any
+stored field**, and adding one would be load-bearing only if the evaluator read
+it — and an evaluator that reads it is an evaluator that moved. What makes the
+absence safe is that no stored range is false: it names two revisions and states
+what differed between them, which is true whenever it was taken. The unsafe part
+was always the inference that the named range was the turn's, and that inference
+now has the right target. Historical `EvaluationRecord`s are immutable and are
+left exactly as they are: not re-evaluated, not overwritten, and never backfilled
+from the current repository, which would be a statement about today wearing
+yesterday's timestamp.
 
 **Only for a turn that exists.** `dispatch_state` must say `turn_opened`. A
 refused dispatch, and one that started and never produced a turn, stay the
@@ -954,9 +1004,11 @@ acceptance. A `manual` criterion contributes no path, which is not a gap.
 The last two causes are deliberately **not** distinguished, because they mean the
 same thing to every consumer: nothing was recorded, so nothing may be assumed.
 
-**Taken at the boundary, never on read.** After the worker returns, after PR5's
-committed-range observation, and **before the turn is durably closed**, all inside
-the dispatch lock. A read returns the stored row and touches nothing — no
+**Taken at the boundary, never on read.** At the terminal worker report, after
+PR5's committed-range observation, and **before the turn is durably closed**, all
+inside the lifecycle lock — see *Committed-work observations* above for the one
+owner both share and why the order between them is pinned. A read returns the
+stored row and touches nothing — no
 repository, no Git, no `stat`, no observer. If reading meant *go and look now*,
 repository drift would silently rewrite historical answers, an audit could not be
 reproduced, and a remote read would become a live probe of somebody's filesystem.
@@ -991,7 +1043,10 @@ observation — the rule the Git baseline and committed range already follow.
 worker did; observing that `foo.py` is present does not satisfy it. No predicate
 joins them, and a state predicate is its own PR.
 
-**`FINAL_STATE_OBSERVER_VERSION = 1`**, distinct from the schema, criteria model,
+**`FINAL_STATE_OBSERVER_VERSION = 2`** — PR25 moved it from 1 when it moved the
+capture boundary, because a V1 row was taken at dispatch and cannot be trusted as
+post-worker state; V1 rows are refused as current-state authority rather than
+reinterpreted. It is distinct from the schema, criteria model,
 continuity model, assembler, evaluator and resolver versions, and bound into a
 domain-separated observation fingerprint over the observer version, the target,
 the state and limitation, the lineage fingerprint, the HEAD anchor and every path
