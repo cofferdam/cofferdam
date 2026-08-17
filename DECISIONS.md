@@ -3970,6 +3970,95 @@ pre-dispatch behaviour, not something this PR introduces — and the snapshot is
 replaceable state, so a corrected retry replaces it. What matters, and is tested, is that no worker
 was told anything either way.
 
+## D-2026-08-17-25 — The PWA is the first human author, and `not declared` is what a form starts in (EFE DECISION, ACTIVE)
+
+**Decision.** The workstation PWA gains a bounded requirement-authoring form on the two dispatching
+surfaces it already has — the new-task composer and the follow-up box. It sends `criteria` and
+`continuity` through the single PR23 request, on the device credential, and adds no backend surface,
+no new route and no bridge capability.
+
+**The default is the whole design.** A continuity control has to have *some* initial state, and the
+one it has is `not declared` — visible, labelled, and carrying the sentence that says what it means.
+That is safe for exactly one reason: it is the **backwards-compatible non-authoritative** state.
+Choosing it produces byte-for-byte the request this panel sent before PR24, with neither key present.
+
+Preselecting `root` on a first turn, or `extend` on a follow-up, would have been the same defect
+`D-2026-08-17-23` refused at the HTTP layer, wearing a client's hat. Both look like helpfulness and
+both manufacture a durable claim out of somebody not having looked at a control. The modes are not
+distinguishable by looking at the criteria — that is why PR10 made the declaration explicit — so a
+client guess is not a better-informed one than a server guess. It is the same guess, further from the
+data, and invisible to every backend test.
+
+**A visible default a person can see and change is not a hidden server default.** The difference is
+not the word; it is whether the state is on screen with its consequence beside it before submit.
+
+**Explicit empty is not omission, and the wire keeps them apart.** An explicit `root` with an empty
+composer sends `criteria: []`. The store records `not_provided` against a real declaration, and
+acceptance reads `no_structured_criteria` — *you declared a lineage and required nothing structured*
+— rather than `continuity_not_declared`, which is *nobody said anything*. Both are true statements
+about different situations and a person who deliberately started a lineage deserves the first.
+
+The two fields stay independent: requirements without a declaration send `criteria` alone, and the
+panel invents no `root` to carry them.
+
+**The composer is closed, and closed the same way the model is.** Five evidence predicates and the
+manual kind, each row drawing only the fields its own predicate owns — so a destination on a
+`path_exists`, an operation on a `rename`, or a path on a manual criterion is not something a person
+can produce, which is stronger than validating it away afterwards. No expression box, no JSON field,
+no command, no check name. Order is insertion order and is sent as authored, because ordinal is
+positional and part of the stored fingerprint.
+
+**Nothing is converted.** An authored `path_operation` with `created` is sent as exactly that. It is
+not turned into `path_exists`, and `deleted` is not turned into `path_absent`. An action is not a
+state; somebody who wants the state predicate chooses the state predicate.
+
+**Inherited requirements are never copied into the composer.** For `extend` they survive through
+continuity. Copying them forward would mint fresh criterion identities for requirements that already
+have them, and the lineage would be destroyed while the screen looked complete.
+
+## D-2026-08-17-26 — `revise` is absent rather than approximated, and the anchor is read rather than typed (EFE DECISION, ACTIVE)
+
+**Decision.** PR24 ships `not declared`, `root`, `extend` and `replace`. It does **not** ship
+`revise`. The capability is deferred to its own PR with its own authority decision, and the absence
+is said out loud on the form rather than left as a gap a reader takes for an oversight.
+
+**Why it could not ship here.** A `revise` relation names a `predecessor_criterion_id`, and the store
+validates it against the predecessor's **resolved active set** — which criteria are still live at that
+boundary after every earlier extend, replace and supersession. No read surface publishes that set.
+The assessment route publishes one turn's *own* snapshot, which is not the same thing the moment a
+lineage has more than one link in it.
+
+That leaves exactly three ways to offer the control, and each is refused:
+
+1. **Ask a person for a criterion id.** That is not a user interface. A raw `acr_…` handle typed into
+   a box is a way to be wrong silently.
+2. **Guess the active set on the client** by walking per-turn snapshots and re-implementing the
+   resolver. Continuity modes and relations are not published either, so the walk would be a guess on
+   top of a guess — and its failure mode is offering somebody a requirement that was retired three
+   turns ago as though it were live. That is the exact thing
+   `continuity_relation_predecessor_not_active` exists to catch, arriving as a UI affordance.
+3. **Add a bounded active-criteria read surface.** Legitimate, and the right answer — but it is a new
+   private route publishing lineage identity that nothing publishes today. It needs its own authority
+   boundary, its own staleness semantics, its own size bound and its own review. Bolting it onto a
+   client PR to keep four modes together would be making a PR large for symmetry.
+
+**The anchor, by contrast, needed nothing new.** `extend` and `replace` name a
+`predecessor_snapshot_id`, and that *is* reachable: the result route says how many turns there have
+been and the assessment route says which snapshot the latest one recorded. Both already existed and
+both already answered the device token. So the identifier reaches the request without a person typing
+one, and it is read when the mode is chosen so that what the declaration is anchored to is visible
+before it is sent.
+
+A turn with no snapshot — `legacy_unknown`, predating criteria persistence — cannot be continued
+from, and the panel says so rather than sending a declaration with a missing field.
+
+**Staleness stays the server's to refuse.** A form can be displayed and another caller can create a
+turn before it is submitted. The refusal is rendered as *this task moved on*, distinctly from *your
+requirement was wrong*, and the composer is kept so the person can correct it. **The declaration is
+never re-pointed at whatever the latest turn turned out to be**, and no refusal is ever retried under
+a different authority: a rejected `revise` does not become an `extend`, and a rejected `root` does not
+become an omission. An authority change requires another human action.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

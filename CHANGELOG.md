@@ -8,6 +8,44 @@ release.
 
 ### Added
 
+- **M2K PR24 — there is now a screen for saying what a piece of work has to achieve.** PR23 opened the
+  door; this walks through it. Until now the only way to declare requirements was to make the HTTP
+  request by hand.
+
+  **What you can do.** Starting a task, or sending a follow-up, you can now add requirements — a file
+  that must change, a file that must exist or be gone, a rename, a specific create/modify/delete, or a
+  note describing something only a person can check. And you say plainly how this turn's requirements
+  relate to the last: they are a fresh start, they add to what is already there, or they replace it.
+
+  **It starts at "not declared", on purpose.** The control is on the form with its meaning next to it,
+  and until you choose something Cofferdam records that you chose nothing — which is exactly what it
+  did before this screen existed. It does not assume a first task starts a fresh set of requirements,
+  and it does not assume a follow-up adds to the last one. Those are different intentions that look
+  identical from outside, and picking one for you would put words in your mouth about what your work
+  is judged against.
+
+  **You never type an internal identifier.** Continuing from a previous turn needs Cofferdam's own
+  handle for that turn's requirements; the app reads it for you and shows you which turn you are
+  continuing from before you send.
+
+  **Requirements already in force are not re-typed.** If you add to the previous set, you write only
+  what is new — the earlier ones carry forward on their own, keeping their identity and their history.
+
+  **A refusal tells you which thing was refused.** A requirement it cannot accept, a tracking choice
+  it cannot accept, and "this task moved on while you had the form open" are three different messages
+  pointing at three different fixes. Your half-written requirements stay on screen so you can correct
+  them, and nothing is quietly re-sent under a weaker choice.
+
+  **What is deliberately not here.** Retiring one specific inherited requirement while keeping the
+  rest — the fourth kind of relationship — is not offered yet, and the form says so. Doing it safely
+  means showing you exactly which requirements are still live at that point, and nothing Cofferdam
+  publishes today can answer that without guessing. A control that guessed could offer you a
+  requirement that was retired three turns ago as though it still counted. There is also no suggested
+  or auto-written requirement anywhere: everything here is yours.
+
+  **Unchanged.** The connected-assistant credential still cannot set any of this, its request format is
+  untouched, and no new endpoint was added — the screen uses the request that already existed.
+
 - **M2K PR23 — you can now tell Cofferdam what a piece of work has to achieve, and how it relates to
   what you asked for before.** This is what makes the whole acceptance feature actually usable.
 

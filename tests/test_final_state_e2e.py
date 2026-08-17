@@ -515,15 +515,28 @@ class NegativeSpaceTests(unittest.TestCase):
         # phrasings legitimately name the lineage and final-state reason codes
         # PR20 fought to preserve. So this asserts what it always meant — no
         # **control** — rather than banning the vocabulary.
+        # M2K PR24 made the PWA the first human author of requirements, so
+        # "the panel has no continuity control" is no longer the property to
+        # hold — it authors one, deliberately, through the single dispatch
+        # request PR23 opened to the device caller. What this guard now asserts
+        # is the boundary that *did* survive: the declaration travels with the
+        # turn it belongs to and nowhere else. There is no second authoring
+        # route, no post-dispatch edit, and no supersession vocabulary at all —
+        # `revise` needs the predecessor's resolved active set, no read surface
+        # publishes it, and the mode is therefore absent rather than guessed.
         for forbidden in (
-            'method: "POST"', 'method: "PUT"', 'method: "PATCH"',
-            'method: "DELETE"', "/continuity", "/lineage", "/final-state",
-            "/acceptance", "supersedes", "criterion_ordinal",
-            "predecessor_snapshot_id", "resolve_active_criteria",
+            'method: "PUT"', 'method: "PATCH"', 'method: "DELETE"',
+            "/continuity", "/lineage", "/final-state", "/acceptance",
+            "supersedes", "criterion_ordinal", "resolve_active_criteria",
         ):
             self.assertNotIn(forbidden, tasks_js, forbidden)
-        # The one assessment request the panel makes is a GET.
-        self.assertIn("/assessment", tasks_js)
+        # Nothing the panel authors is a final-state control. It can compose
+        # `path_exists` and `path_absent`, which are *requirements about* a
+        # boundary, and it has no way to ask for one to be observed: the
+        # `final_state_*` names it does carry are PR22's reason codes, rendered
+        # as human phrasings in the read-only acceptance section.
+        self.assertNotIn("observe_final_state", tasks_js)
+        self.assertNotIn("finalStateRequest", tasks_js)
         self.assertNotIn("assessment\", {", tasks_js)
 
     def test_the_assessment_response_is_unchanged(self):

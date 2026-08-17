@@ -21,6 +21,7 @@ risk, no re-run control and no check-runner control anywhere on the screen.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import unittest
@@ -145,8 +146,20 @@ class ForbiddenVocabulary(unittest.TestCase):
     def test_the_source_has_no_rerun_request(self):
         code = tasks_code()
         self.assertNotIn("rerun", code.lower())
-        # The only assessment request the panel can make is a GET of the view.
-        self.assertEqual(code.count("/assessment"), 1)
+        # Every assessment request the panel can make is a GET of the view.
+        #
+        # This counted the occurrences until M2K PR24, which gave the panel a
+        # second, different reason to read the route: an `extend` or `replace`
+        # declaration names the predecessor's criteria snapshot id, and reading
+        # it is what stops a person being asked to type one. Both are reads of
+        # the same immutable view. So the guard moves from "there is one call"
+        # to the property it was standing in for — no call anywhere passes an
+        # options object, which is what `deps.api` turns into a write.
+        self.assertGreaterEqual(code.count("/assessment"), 1)
+        self.assertNotIn('assessment", {', code)
+        self.assertNotIn('/assessment", {', code)
+        for match in re.finditer(r'"/assessment"[^;]{0,40}', code):
+            self.assertNotIn("body", match.group(0))
 
 
 class ManualCriterion(unittest.TestCase):

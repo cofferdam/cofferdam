@@ -876,8 +876,8 @@ downstream reads from.
     supplies none, and no caller supplies one today — so every task created through a real surface is
     `not_assessable / continuity_not_declared`, and acceptance is not meaningfully consumable until a
     caller declares continuity. D-2026-08-17-21 and D-2026-08-17-22.
-  - **PR23 — explicit criteria / continuity authoring authority.** *Implemented on
-    `m2k-pr23-authoring-authority`, not merged and not deployed.* The first real caller path for
+  - **PR23 — explicit criteria / continuity authoring authority.** *Merged as `a1dfd23` (#68), not
+    deployed.* The first real caller path for
     acceptance: `POST /api/tasks` and `POST /api/tasks/{id}/followups` accept `criteria` and
     `continuity` through the existing internal contract, so no second representation was created.
     **The authority boundary was the real risk and not where it looks**: `require_task_caller`
@@ -898,6 +898,28 @@ downstream reads from.
     No PWA editor was built — that is a product subsystem, and the private contract is the caller
     while PWA/planner authoring is named as the next integration.
     D-2026-08-17-23 and D-2026-08-17-24.
+  - **PR24 — PWA explicit requirement authoring.** *Implemented on `m2k-pr24-pwa-authoring`, not
+    merged and not deployed.* The integration PR23 named, and the first **human** caller of the
+    acceptance stack: the new-task composer and the follow-up box gain a bounded requirement form
+    that sends `criteria` and `continuity` through the single PR23 request on the device credential.
+    **No backend file changed**, asserted from the diff rather than claimed. **The default is the
+    design**: the continuity control starts at `not declared`, visible and with its consequence
+    beside it, because that is the backwards-compatible non-authoritative state and produces
+    byte-for-byte the pre-PR24 request — preselecting `root` on a first turn or `extend` on a
+    follow-up would be PR23's refused inference wearing a client's hat. **Explicit empty is not
+    omission**: an explicit `root` with an empty composer sends `criteria: []`, which reads as
+    `no_structured_criteria` rather than `continuity_not_declared`. **The anchor is read, never
+    typed** — `predecessor_snapshot_id` comes from the existing result and assessment routes, so no
+    person types an internal id and no read surface was added. **`revise` is absent rather than
+    approximated**: its relation is validated against the predecessor's resolved active set, nothing
+    publishes that set, and the three ways to fake it — asking for a raw id, re-implementing the
+    resolver on the client, or bolting a new lineage route onto a client PR — are each refused, with
+    the gap said out loud on the form. **The composer is closed the way the model is**: five evidence
+    predicates plus the manual kind, each row drawing only its own fields, insertion order sent as
+    authored, no predicate conversion, and no inherited criterion ever copied forward. Four refusals
+    stay four, the composer survives one, and nothing is retried under a weaker authority. Three
+    earlier "the PWA has no such control" guards are updated rather than deleted.
+    D-2026-08-17-25 and D-2026-08-17-26.
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**

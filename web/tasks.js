@@ -51,6 +51,120 @@
   var MAX_PROMPT_CHARS = 8000;
   var MAX_FOLLOWUP_CHARS = 4000;
 
+  /* --------------------------------------------------- requirement authoring
+   *
+   * M2K PR24. Until now nothing a person could reach could say what a turn was
+   * *required* to achieve. The whole acceptance stack — criteria, evaluator,
+   * lineage resolver, aggregate, and the acceptance section this panel already
+   * renders — has been complete since PR21 and inert, because its input had no
+   * author. PR23 opened the private HTTP contract to the device caller and
+   * deliberately refused it to the Actions bridge. This is the first human
+   * caller of that contract.
+   *
+   * **The one rule the whole design serves: omission is never inference.** A
+   * first turn with no declaration is `not_declared`, never a manufactured
+   * `root`; a follow-up with no declaration is `not_declared`, never an inferred
+   * `extend`. The server refuses to guess — that is PR10's entire point, because
+   * the modes are not distinguishable by looking at the criteria — and a client
+   * that guessed on its behalf would destroy the property from the other end
+   * while looking like a usability improvement. So the control below has a
+   * visible "not declared" state, it is what a form starts in, and no code path
+   * anywhere in this file turns an absent choice into a mode.
+   *
+   * A visible default a person can see and change is not the same thing as a
+   * hidden server default. What makes `not_declared` safe to preselect is that
+   * it is the *backwards-compatible non-authoritative* state: choosing it
+   * produces exactly the request this panel sent yesterday. Preselecting `root`
+   * on a first turn, or `extend` on a follow-up, would manufacture authority out
+   * of a person not having looked at the control — which is the same defect as
+   * a server-side default wearing a different hat.
+   */
+
+  /* The UI's own sentinel for "no declaration". It is deliberately **not** a
+     member of the backend's mode vocabulary and is never sent: it is the
+     absence of a `continuity` key, and the difference matters all the way to
+     the stored lineage row. */
+  var CONTINUITY_NOT_DECLARED = "";
+
+  /* Mirrored from `continuity.CONTINUITY_MODES`. The API values are machine
+     names and stay exact; the sentences beside them on screen are this panel's. */
+  var CONTINUITY_ROOT = "root";
+  var CONTINUITY_EXTEND = "extend";
+  var CONTINUITY_REPLACE = "replace";
+
+  /* `revise` is a real backend mode and is deliberately **not** offered here.
+     Superseding an individual inherited requirement needs the predecessor's
+     *resolved active set* — which criteria are still live at that boundary after
+     every earlier extend, replace and supersession — and no read surface
+     publishes it. The only ways to offer the control without one are to make a
+     person paste a raw criterion id, or to guess the active set on the client by
+     re-implementing the lineage resolver against per-turn snapshots. The first
+     is not a user interface and the second would eventually offer somebody a
+     requirement that was retired three turns ago as though it were live.
+     Neither is acceptable, so the mode is absent rather than approximated, and
+     the absence is said out loud on the form. */
+
+  /* Mirrored from `criteria.CRITERION_KINDS`. */
+  var KIND_EVIDENCE = "evidence";
+  var KIND_MANUAL = "manual";
+
+  /* Mirrored from `criteria.CRITERION_OPERATIONS`. `renamed` is deliberately not
+     here, exactly as it is deliberately not there: a rename is a two-path fact
+     and `path_operation` carries one path. */
+  var CRITERION_OPERATIONS = ["created", "modified", "deleted"];
+
+  /* The six predicates this build can express, each with the fields that are
+     valid for it and nothing else. A row renders from this table, so a control
+     for a field a predicate does not own cannot be drawn at all — which is a
+     stronger guarantee than validating one away after the fact.
+
+     `label` is this panel's wording and `predicate` is the persisted machine
+     name. Nothing here converts between them in the other direction: choosing
+     "Path operation / created" sends `path_operation` with `created`, and
+     choosing "Path exists" sends `path_exists`. An action is not a state, and a
+     UI that quietly turned one into the other would be answering a question
+     nobody asked. */
+  var PREDICATES = [
+    { predicate: "path_changed", label: "Path changed", path: true },
+    { predicate: "path_operation", label: "Path operation", path: true, operation: true },
+    { predicate: "rename", label: "Rename", path: true, toPath: true },
+    { predicate: "path_exists", label: "Path exists", path: true },
+    { predicate: "path_absent", label: "Path absent", path: true }
+  ];
+
+  /* Server-owned bounds, mirrored here for usability exactly as
+     `MAX_PROMPT_CHARS` mirrors the prompt bound — and for the same reason it is
+     only a mirror. `criteria.validate_criteria` is the authority and refuses
+     rather than truncates; a client that trimmed a criteria set would be the
+     silent-reduction failure the backend went to some trouble to make
+     impossible. These stop somebody typing past a bound, they do not enforce
+     one. */
+  var MAX_CRITERIA_PER_TURN = 32;
+  var MAX_CRITERION_PATH_CHARS = 512;
+  var MAX_CRITERION_DESCRIPTION_CHARS = 500;
+
+  /* The refusal codes this panel tells apart. `failureOf` already carries a
+     stable code and a closed reason detail; these decide which sentence is shown
+     above the form, so an invalid requirement does not read as an invalid
+     lineage declaration and neither reads as "the network failed". */
+  var CODE_CRITERIA_INVALID = "task_criteria_invalid";
+  var CODE_CONTINUITY_INVALID = "task_continuity_invalid";
+  var CODE_CRITERIA_UNRECORDED = "task_criteria_unrecorded";
+  var CODE_CONTINUITY_UNRECORDED = "task_continuity_unrecorded";
+
+  /* Continuity reason codes that mean *the anchor moved under you*: the turn
+     this declaration was built against is no longer the one the server sees.
+     A person can display a form, another caller can create a turn, and the
+     declaration goes stale between the two. The server refuses honestly and this
+     panel says so and keeps the composer — it never rewrites the declaration
+     against whatever the latest turn turned out to be. */
+  var STALE_CONTINUITY_REASONS = [
+    "continuity_predecessor_unknown",
+    "continuity_predecessor_foreign_task",
+    "continuity_predecessor_not_earlier",
+    "continuity_predecessor_lineage_unavailable"
+  ];
+
   /* The two things a person can be asked to write about an existing task, named
      as a closed set because everything below is keyed by one of them.
 
@@ -101,6 +215,22 @@
   var composerOpen = false;
   var draft = { projectId: null, adapterId: null, prompt: "" };
   var formError = null;
+
+  /* One requirement declaration per form, held in module state rather than read
+     off the DOM at submit time.
+
+     The DOM is destroyed by every render that changes anything, so a set of
+     requirement rows built before a poll would be a set lost by it — the same
+     defect the draft store exists to fix, in a control that cannot hold its own
+     text. Holding it here is also what lets the composer survive a refusal: the
+     rows are still there to correct, which is the whole point of a form that can
+     be refused. */
+  var authoring = { create: newDeclaration(), followup: newDeclaration() };
+
+  /* Which task `authoring.followup` was built for. A declaration is anchored to
+     one task's lineage and carrying it into another task's form would offer
+     somebody a predecessor from a different history. */
+  var authoringTaskId = null;
 
   var timer = null;
   var timerInterval = null;
@@ -540,6 +670,747 @@
     return html;
   }
 
+  /* ------------------------------------------------- requirement authoring
+   *
+   * Two forms use everything below — the new-task composer and the follow-up
+   * box — and they differ in exactly one thing: which continuity modes are
+   * offerable. Everything else (the criteria composer, the request shape, the
+   * refusal wording, the idempotency keying) is one implementation, because
+   * there is one wire contract and a second PWA-specific representation of it
+   * would be a second thing to keep correct.
+   */
+
+  function newDeclaration() {
+    return {
+      /* The visible, human-controlled state a form starts in. Not a mode. */
+      mode: CONTINUITY_NOT_DECLARED,
+      rows: [],
+      /* The predecessor this declaration is anchored to, once a mode that needs
+         one has been chosen and the anchor has actually been read from the
+         server. Never guessed, never remembered across tasks. */
+      predecessor: null,
+      predecessorError: null
+    };
+  }
+
+  function declarationFor(scope) {
+    return authoring[scope];
+  }
+
+  function predicateSpec(predicate) {
+    for (var index = 0; index < PREDICATES.length; index += 1) {
+      if (PREDICATES[index].predicate === predicate) { return PREDICATES[index]; }
+    }
+    return null;
+  }
+
+  /* A new row starts as the simplest evidence predicate. That is a *criterion*
+     default, not a continuity one, and the two are not the same kind of thing: a
+     row exists only because somebody pressed "Add requirement", the predicate
+     select is right there showing what it is, and every field is empty so
+     nothing can be submitted by accident. No equivalent is true of a continuity
+     mode, which is why that control has no preselected authority. */
+  function newRow() {
+    return {
+      kind: KIND_EVIDENCE,
+      predicate: "path_changed",
+      path: "",
+      to_path: "",
+      operation: CRITERION_OPERATIONS[0],
+      description: ""
+    };
+  }
+
+  /* -- what a mode means, in words -------------------------------------------
+   *
+   * Said on the form, before submit, in the panel's own voice. A person choosing
+   * between these is choosing what their work will be measured against, and a
+   * control whose options are four machine words is a control that gets chosen
+   * by position. The API values stay exact; these sentences are the client's. */
+  var MODE_SENTENCES = {};
+  MODE_SENTENCES[CONTINUITY_NOT_DECLARED] =
+    "Cofferdam will not infer requirement continuity for this turn. " +
+    "Acceptance for the turn may therefore be not assessable.";
+  MODE_SENTENCES[CONTINUITY_ROOT] =
+    "Start an explicit requirement lineage here.";
+  MODE_SENTENCES[CONTINUITY_EXTEND] =
+    "Keep the requirements already active and add these.";
+  MODE_SENTENCES[CONTINUITY_REPLACE] =
+    "Replace the active requirement set with this turn's set.";
+
+  var MODE_LABELS = {};
+  MODE_LABELS[CONTINUITY_NOT_DECLARED] = "Not declared";
+  MODE_LABELS[CONTINUITY_ROOT] = "Start a requirement lineage";
+  MODE_LABELS[CONTINUITY_EXTEND] = "Add to the active requirements";
+  MODE_LABELS[CONTINUITY_REPLACE] = "Replace the active requirements";
+
+  /* The element id fragment for one mode, so a handler can recover the mode from
+     the control that was operated rather than from a `value` attribute a stub
+     might not carry. */
+  var MODE_IDS = {};
+  MODE_IDS[CONTINUITY_NOT_DECLARED] = "NotDeclared";
+  MODE_IDS[CONTINUITY_ROOT] = "Root";
+  MODE_IDS[CONTINUITY_EXTEND] = "Extend";
+  MODE_IDS[CONTINUITY_REPLACE] = "Replace";
+
+  function scopePrefix(scope) {
+    return scope === "create" ? "taskAuthCreate" : "taskAuthFollowup";
+  }
+
+  /* Which modes each form may offer.
+
+     A first turn has no predecessor, so `extend`, `replace` and `revise` are not
+     merely unlikely there — `validate_declaration` refuses every one of them
+     without a `predecessor_snapshot_id`, and there is no snapshot to name. A
+     control that offered them would offer a button whose only outcome is a
+     refusal, which this panel does not do anywhere else either. */
+  function offerableModes(scope) {
+    if (scope === "create") {
+      return [CONTINUITY_NOT_DECLARED, CONTINUITY_ROOT];
+    }
+    return [CONTINUITY_NOT_DECLARED, CONTINUITY_EXTEND, CONTINUITY_REPLACE];
+  }
+
+  function modeNeedsPredecessor(mode) {
+    return mode === CONTINUITY_EXTEND || mode === CONTINUITY_REPLACE;
+  }
+
+  /* -- the continuity control ------------------------------------------------ */
+
+  function continuityControl(scope) {
+    var state = declarationFor(scope);
+    var prefix = scopePrefix(scope);
+    var html = '<fieldset class="task-continuity">' +
+      '<legend class="field-label">Requirement tracking</legend>';
+
+    html += offerableModes(scope).map(function (mode) {
+      var checked = state.mode === mode ? " checked" : "";
+      return '<label class="task-continuity-mode">' +
+        '<input type="radio" name="' + prefix + 'Mode"' +
+        ' id="' + prefix + MODE_IDS[mode] + '"' +
+        ' class="task-continuity-input"' + checked +
+        (locked() ? " disabled" : "") + ">" +
+        '<span class="task-continuity-label">' + esc(MODE_LABELS[mode]) + "</span>" +
+        '<span class="muted task-continuity-note">' + esc(MODE_SENTENCES[mode]) +
+        "</span></label>";
+    }).join("");
+
+    /* The mode this build cannot express, named rather than left as a gap
+       somebody assumes is an oversight. */
+    if (scope !== "create") {
+      html += '<p class="muted hint task-continuity-absent">' +
+        "Superseding individual active requirements is not available here yet. " +
+        "Replace exchanges the whole active set; add keeps it and adds to it.</p>";
+    }
+
+    html += predecessorNote(scope);
+    html += "</fieldset>";
+    return html;
+  }
+
+  /* What this declaration is anchored to, on screen, before submit.
+
+     `extend` and `replace` both name a `predecessor_snapshot_id`, and this is
+     the only place a person can see which turn that is. It is read from the
+     server rather than assumed: the panel's own turn arithmetic is a browse
+     control for the assessment section and is explicitly allowed to be behind. */
+  function predecessorNote(scope) {
+    var state = declarationFor(scope);
+    if (!modeNeedsPredecessor(state.mode)) { return ""; }
+    if (state.predecessorError) {
+      return '<p class="media-note warn task-continuity-anchor">' +
+        esc(state.predecessorError) + "</p>";
+    }
+    if (busy("predecessor")) {
+      return '<p class="muted hint task-continuity-anchor">' +
+        "Reading which turn this would continue from…</p>";
+    }
+    if (!state.predecessor) {
+      return '<p class="muted hint task-continuity-anchor">' +
+        "Cofferdam has not read the turn this would continue from yet.</p>";
+    }
+    var recorded = state.predecessor.criterion_count;
+    return '<p class="muted hint task-continuity-anchor">' +
+      "Continuing from turn " + esc(String(state.predecessor.turn_number)) + ". " +
+      /* Precisely what was read, and not a word more. This is that turn's **own**
+         recorded requirement set, which is not the same thing as the set active
+         at that boundary — earlier turns can contribute through continuity, and
+         nothing this panel can read says which of those are still live. Calling
+         it "active" would be a claim nobody made. */
+      "That turn recorded " + esc(String(recorded)) +
+      (recorded === 1 ? " requirement" : " requirements") + " of its own; " +
+      "earlier turns may contribute more.</p>";
+  }
+
+  /* -- the criteria composer ------------------------------------------------- */
+
+  /* One row's type selector: the five evidence predicates and the manual kind.
+
+     `manual` is a *kind*, not a predicate, exactly as the model has it — a
+     manual criterion carries a description and no structured field at all, and
+     the backend refuses one that arrives carrying a path. Flattening the two
+     into one list here is a presentation choice; the request keeps them apart. */
+  function rowTypeOptions(row) {
+    var options = PREDICATES.map(function (spec) {
+      var selected = row.kind === KIND_EVIDENCE && row.predicate === spec.predicate
+        ? " selected" : "";
+      return '<option value="evidence:' + esc(spec.predicate) + '"' + selected + ">" +
+        esc(spec.label) + "</option>";
+    });
+    options.push(
+      '<option value="manual"' + (row.kind === KIND_MANUAL ? " selected" : "") +
+      ">Manual requirement</option>"
+    );
+    return options.join("");
+  }
+
+  function operationOptions(row) {
+    return CRITERION_OPERATIONS.map(function (operation) {
+      return '<option value="' + esc(operation) + '"' +
+        (row.operation === operation ? " selected" : "") + ">" +
+        esc(operation) + "</option>";
+    }).join("");
+  }
+
+  function textField(id, label, value, maxChars, placeholder) {
+    return '<label class="field task-criterion-field">' +
+      '<span class="field-label">' + esc(label) + "</span>" +
+      '<input type="text" id="' + id + '" value="' + esc(value) + '"' +
+      ' maxlength="' + maxChars + '"' +
+      (placeholder ? ' placeholder="' + esc(placeholder) + '"' : "") +
+      (locked() ? " disabled" : "") + "></label>";
+  }
+
+  /* One requirement row. Only the fields the chosen predicate owns are drawn,
+     so an invalid combination — a rename with no destination, a manual criterion
+     carrying a path, an operation on a predicate that has none — cannot be
+     produced through these controls at all. The server still validates; this is
+     what stops somebody being offered the mistake in the first place. */
+  function criterionRow(scope, row, index) {
+    var prefix = scopePrefix(scope) + "";
+    var suffix = String(index);
+    var spec = row.kind === KIND_EVIDENCE ? predicateSpec(row.predicate) : null;
+    var html = '<li class="task-criterion" data-criterion="' + esc(suffix) + '">' +
+      '<div class="task-criterion-head">' +
+      '<span class="task-criterion-ordinal">' + esc(String(index + 1)) + ".</span>" +
+      '<label class="field task-criterion-kind">' +
+      '<span class="field-label">Requirement</span>' +
+      '<select id="' + prefix + "Kind" + suffix + '"' +
+      (locked() ? " disabled" : "") + ">" + rowTypeOptions(row) + "</select></label>" +
+      '<button id="' + prefix + "Remove" + suffix + '" class="ghost task-criterion-remove"' +
+      (locked() ? " disabled" : "") + ">Remove</button></div>";
+
+    if (row.kind === KIND_MANUAL) {
+      /* Required for a manual criterion, and said so. A manual row with no
+         description is a row that says "a person must check something" and never
+         says what. */
+      html += textField(
+        prefix + "Desc" + suffix, "What must be true",
+        row.description, MAX_CRITERION_DESCRIPTION_CHARS,
+        "Describe what someone has to check."
+      );
+      html += '<p class="muted hint">Cofferdam cannot decide this one from ' +
+        "evidence. It is recorded as needing a person, and never counted as met " +
+        "or not met on its own.</p>";
+      return html + "</li>";
+    }
+
+    if (spec && spec.path) {
+      html += textField(
+        prefix + "Path" + suffix, spec.toPath ? "From path" : "Path",
+        row.path, MAX_CRITERION_PATH_CHARS, "src/example.py"
+      );
+    }
+    if (spec && spec.toPath) {
+      html += textField(
+        prefix + "To" + suffix, "To path",
+        row.to_path, MAX_CRITERION_PATH_CHARS, "src/renamed.py"
+      );
+    }
+    if (spec && spec.operation) {
+      html += '<label class="field task-criterion-field">' +
+        '<span class="field-label">Operation</span>' +
+        '<select id="' + prefix + "Op" + suffix + '"' +
+        (locked() ? " disabled" : "") + ">" + operationOptions(row) +
+        "</select></label>";
+    }
+    html += textField(
+      prefix + "Desc" + suffix, "Note (optional)",
+      row.description, MAX_CRITERION_DESCRIPTION_CHARS,
+      "Why this matters, for whoever reads the audit."
+    );
+    return html + "</li>";
+  }
+
+  function criteriaComposer(scope) {
+    var state = declarationFor(scope);
+    var prefix = scopePrefix(scope);
+    var full = state.rows.length >= MAX_CRITERIA_PER_TURN;
+    var html = '<div class="task-criteria">' +
+      '<span class="field-label">Requirements for this turn</span>';
+
+    if (!state.rows.length) {
+      html += '<p class="muted hint task-criteria-empty">No structured ' +
+        "requirements. Cofferdam will record that none were given, which is a " +
+        "different fact from not having been asked.</p>";
+    } else {
+      /* Order is persisted: the server assigns each criterion an ordinal from
+         its position in this list, and that ordinal is part of the snapshot's
+         fingerprint. So the order on screen is the order sent — nothing here
+         sorts by predicate, path or label on the way out. */
+      html += '<ol class="task-criteria-list">' +
+        state.rows.map(function (row, index) {
+          return criterionRow(scope, row, index);
+        }).join("") + "</ol>";
+    }
+
+    html += '<div class="task-criteria-actions">' +
+      '<button id="' + prefix + 'Add" class="ghost"' +
+      (locked() || full ? " disabled" : "") + ">Add requirement</button>" +
+      '<span class="muted hint">' + esc(String(state.rows.length)) + " / " +
+      MAX_CRITERIA_PER_TURN + "</span></div></div>";
+    return html;
+  }
+
+  /* The whole authoring block for one form. */
+  function authoringBlock(scope) {
+    return '<div class="task-authoring">' + continuityControl(scope) +
+      criteriaComposer(scope) + "</div>";
+  }
+
+  /* -- the request ----------------------------------------------------------- */
+
+  function trimmed(value) {
+    return String(value === undefined || value === null ? "" : value).trim();
+  }
+
+  /* One row, in the exact shape `criteria.validate_criteria` reads.
+
+     Fields a predicate does not own are **omitted** rather than sent as null or
+     empty. That is not tidiness: the backend refuses `to_path` on anything but a
+     rename and `operation` on anything but a `path_operation`, and sending an
+     empty string would be sending a value. Nothing is converted on the way out —
+     an authored `path_operation` stays a `path_operation`, and a `path_exists`
+     stays a `path_exists`. */
+  function criterionPayload(row) {
+    if (row.kind === KIND_MANUAL) {
+      return { kind: KIND_MANUAL, description: trimmed(row.description) };
+    }
+    var spec = predicateSpec(row.predicate);
+    var body = { kind: KIND_EVIDENCE, predicate: row.predicate, path: trimmed(row.path) };
+    if (spec && spec.toPath) { body.to_path = trimmed(row.to_path); }
+    if (spec && spec.operation) { body.operation = row.operation; }
+    var description = trimmed(row.description);
+    /* Optional for an evidence criterion, so an empty note is an absent field
+       rather than an empty one — the backend refuses an empty description and it
+       would be refusing something nobody wrote. */
+    if (description) { body.description = description; }
+    return body;
+  }
+
+  /* The authoring half of a create or follow-up request.
+
+     Three shapes, and the differences between them are the whole point:
+
+     * **no declaration and no rows** — neither key is present. This is
+       byte-for-byte the request this panel sent before PR24, which is what makes
+       "not declared" genuinely backwards compatible rather than a new default
+       wearing an old name.
+     * **a declaration** — `continuity` is present and `criteria` is present
+       *even when it is empty*. An explicit `root` with no structured
+       requirements is a real thing to say: it starts a lineage and records that
+       nothing structured was required, which reads afterwards as
+       `no_structured_criteria` rather than as nobody having declared anything.
+     * **rows but no declaration** — `criteria` alone. The two fields are
+       independent on the wire and this panel does not couple them.
+
+     Nothing here manufactures a mode. There is no branch that turns an absent
+     choice into `root` because this is a first turn, or into `extend` because a
+     predecessor exists. */
+  function authoringFields(scope) {
+    var state = declarationFor(scope);
+    var fields = {};
+    if (state.mode === CONTINUITY_NOT_DECLARED) {
+      if (state.rows.length) { fields.criteria = state.rows.map(criterionPayload); }
+      return fields;
+    }
+    var continuity = { mode: state.mode };
+    if (modeNeedsPredecessor(state.mode) && state.predecessor) {
+      continuity.predecessor_snapshot_id = state.predecessor.snapshot_id;
+    }
+    fields.continuity = continuity;
+    fields.criteria = state.rows.map(criterionPayload);
+    return fields;
+  }
+
+  /* The declaration's contribution to the idempotency key.
+
+     Load-bearing in both directions. The server binds a `client_request_id` to a
+     hash of the payload and answers the same key carrying different words as a
+     conflict — so a key that ignored the declaration would make "add a
+     requirement and press send again" an unrecoverable conflict rather than a
+     new request. And it is a *deterministic function of what was authored*,
+     never a fresh value per attempt: pressing send twice on the same declaration
+     must reuse one key, or a timeout would turn into two turns. */
+  function authoringKey(scope) {
+    var fields = authoringFields(scope);
+    if (!fields.continuity && !fields.criteria) { return ""; }
+    return JSON.stringify([fields.continuity || null, fields.criteria || null]);
+  }
+
+  /* What this form can tell before asking the server.
+
+     Client validation, and only ever as usability: everything here is checked
+     again by `validate_criteria` and `validate_declaration`, which are the
+     authority, and the relational half — does that predecessor exist, is it this
+     task's, is it earlier — can only be decided by the database. This exists so
+     somebody is not made to round-trip to learn they left a path empty. */
+  function declarationProblem(scope) {
+    var state = declarationFor(scope);
+    if (modeNeedsPredecessor(state.mode) && !state.predecessor) {
+      return "Cofferdam has not read the turn this would continue from. " +
+        "Refresh and choose again.";
+    }
+    for (var index = 0; index < state.rows.length; index += 1) {
+      var row = state.rows[index];
+      var position = "Requirement " + String(index + 1);
+      if (row.kind === KIND_MANUAL) {
+        if (!trimmed(row.description)) {
+          return position + " needs a description of what must be true.";
+        }
+        continue;
+      }
+      if (!trimmed(row.path)) { return position + " needs a path."; }
+      var spec = predicateSpec(row.predicate);
+      if (spec && spec.toPath) {
+        if (!trimmed(row.to_path)) { return position + " needs a destination path."; }
+        if (trimmed(row.to_path) === trimmed(row.path)) {
+          return position + " renames a path to itself.";
+        }
+      }
+    }
+    return null;
+  }
+
+  function resetDeclaration(scope) {
+    authoring[scope] = newDeclaration();
+  }
+
+  /* A declaration belongs to the task it was authored against. Opening another
+     task starts a new one rather than carrying rows — and, more importantly, an
+     anchor — into a different history. */
+  function syncAuthoringTask(taskId) {
+    if (authoringTaskId === taskId) { return; }
+    authoringTaskId = taskId;
+    resetDeclaration("followup");
+  }
+
+  /* -- controls -------------------------------------------------------------- */
+
+  /* Row controls carry a scope and a position in their id, so they cannot be
+     cases in the panel's id switch. Longest prefix first: `taskAuthFollowup`
+     and `taskAuthCreate` do not collide, but ordering by length is the property
+     that keeps that true if a third scope is ever added. */
+  var AUTHORING_SCOPES = [
+    { prefix: "taskAuthFollowup", scope: "followup" },
+    { prefix: "taskAuthCreate", scope: "create" }
+  ];
+
+  var MODE_BY_FIELD = {};
+  (function () {
+    var modes = [
+      CONTINUITY_NOT_DECLARED, CONTINUITY_ROOT,
+      CONTINUITY_EXTEND, CONTINUITY_REPLACE
+    ];
+    for (var index = 0; index < modes.length; index += 1) {
+      MODE_BY_FIELD[MODE_IDS[modes[index]]] = modes[index];
+    }
+  }());
+
+  function parseAuthoringId(id) {
+    var name = String(id === undefined || id === null ? "" : id);
+    for (var index = 0; index < AUTHORING_SCOPES.length; index += 1) {
+      var entry = AUTHORING_SCOPES[index];
+      if (name.indexOf(entry.prefix) !== 0) { continue; }
+      var match = /^([A-Za-z]+)(\d*)$/.exec(name.slice(entry.prefix.length));
+      if (!match) { return null; }
+      return {
+        scope: entry.scope,
+        field: match[1],
+        index: match[2] === "" ? null : Number(match[2])
+      };
+    }
+    return null;
+  }
+
+  /* Choosing a mode is a deliberate act, and everything downstream of it is
+     rebuilt rather than carried: an anchor read for `extend` is not an anchor
+     for `replace` just because both need one. */
+  function selectMode(scope, mode) {
+    var state = declarationFor(scope);
+    var changed = state.mode !== mode;
+    if (changed) {
+      state.mode = mode;
+      /* An anchor read for one mode is not an anchor for another just because
+         both need one. */
+      state.predecessor = null;
+      state.predecessorError = null;
+      formError = null;
+    }
+    if (!modeNeedsPredecessor(mode) || state.predecessor) {
+      if (changed) { render(); }
+      return;
+    }
+    /* Choosing the mode again re-reads the anchor, and that is the point rather
+       than a redundant branch. `beginPending` allows one action at a time, so a
+       mode chosen while something else was in flight gets no anchor and no
+       error — and without this the person would be looking at a form that
+       cannot be submitted and a control that does nothing when pressed again.
+       Re-selecting is the retry. */
+    state.predecessorError = null;
+    render();
+    if (openTaskId) { loadPredecessor(scope, openTaskId); }
+  }
+
+  /* The typed path survives a change of predicate deliberately. Somebody moving
+     a row from "Path changed" to "Path exists" is saying something different
+     about the same file, and clearing the box would make them type it again.
+     Nothing leaks as a result: `criterionPayload` emits only the fields the
+     chosen predicate owns, so a `to_path` left over from a rename is never
+     sent. */
+  function applyRowType(row, value) {
+    if (value === KIND_MANUAL) { row.kind = KIND_MANUAL; return; }
+    var predicate = value.indexOf("evidence:") === 0
+      ? value.slice("evidence:".length)
+      : "";
+    if (!predicateSpec(predicate)) { return; }
+    row.kind = KIND_EVIDENCE;
+    row.predicate = predicate;
+  }
+
+  function handleAuthoringClick(id) {
+    var parsed = parseAuthoringId(id);
+    if (!parsed) { return false; }
+    var state = declarationFor(parsed.scope);
+    /* Modes are handled on click **as well as** on change, and both are needed.
+       `change` does not fire when a radio that is already selected is pressed
+       again, which is exactly the gesture that has to retry a failed anchor
+       read; `click` does not fire when a radio group is moved with the arrow
+       keys. `selectMode` is idempotent, so the pair firing together on an
+       ordinary mouse selection costs nothing. */
+    var mode = MODE_BY_FIELD[parsed.field];
+    if (mode !== undefined && parsed.index === null) {
+      selectMode(parsed.scope, mode);
+      return true;
+    }
+    if (parsed.field === "Add") {
+      /* Bounded here as well as on the server, and refused rather than
+         wrapped: a thirty-third row that silently replaced the first would be
+         the silent reduction of a requirement set. */
+      if (state.rows.length < MAX_CRITERIA_PER_TURN) { state.rows.push(newRow()); }
+      formError = null;
+      render();
+      return true;
+    }
+    if (parsed.field === "Remove" && parsed.index !== null) {
+      state.rows.splice(parsed.index, 1);
+      formError = null;
+      render();
+      return true;
+    }
+    return false;
+  }
+
+  function handleAuthoringChange(target) {
+    var parsed = parseAuthoringId(target.id);
+    if (!parsed) { return false; }
+    var mode = MODE_BY_FIELD[parsed.field];
+    if (mode !== undefined && parsed.index === null) {
+      selectMode(parsed.scope, mode);
+      return true;
+    }
+    if (parsed.index === null) { return false; }
+    var row = declarationFor(parsed.scope).rows[parsed.index];
+    if (!row) { return false; }
+    if (parsed.field === "Kind") {
+      applyRowType(row, String(target.value || ""));
+      formError = null;
+      render();
+      return true;
+    }
+    if (parsed.field === "Op") {
+      var operation = String(target.value || "");
+      /* Refused rather than stored, so a select that answered something outside
+         the closed set cannot put it in a request. */
+      if (CRITERION_OPERATIONS.indexOf(operation) !== -1) { row.operation = operation; }
+      return true;
+    }
+    return false;
+  }
+
+  /* Held in module state per keystroke and deliberately **not** re-rendered,
+     exactly as the prompt box is: a render would rebuild the input and lose the
+     caret mid-path. */
+  function handleAuthoringInput(target) {
+    var parsed = parseAuthoringId(target.id);
+    if (!parsed || parsed.index === null) { return false; }
+    var row = declarationFor(parsed.scope).rows[parsed.index];
+    if (!row) { return false; }
+    var value = String(target.value || "");
+    if (parsed.field === "Path") { row.path = value; return true; }
+    if (parsed.field === "To") { row.to_path = value; return true; }
+    if (parsed.field === "Desc") { row.description = value; return true; }
+    return false;
+  }
+
+  /* -- refusals -------------------------------------------------------------- */
+
+  /* Which of the four kinds of refusal this is.
+
+     Four, because they send a person to four different places: fix a
+     requirement, fix the lineage declaration, re-read the task because the
+     lineage moved, or try again because something else went wrong. Collapsing
+     them into one "that was refused" is what makes a form feel arbitrary. */
+  function authoringRefusalKind(failure) {
+    var code = failure && failure.code;
+    if (code === CODE_CRITERIA_INVALID) { return "criteria"; }
+    if (code === CODE_CONTINUITY_INVALID) {
+      return STALE_CONTINUITY_REASONS.indexOf(failure.detail) === -1
+        ? "continuity"
+        : "stale";
+    }
+    if (code === CODE_CRITERIA_UNRECORDED || code === CODE_CONTINUITY_UNRECORDED) {
+      return "unrecorded";
+    }
+    return null;
+  }
+
+  var AUTHORING_REFUSAL_TEXT = {
+    criteria: {
+      heading: "Those requirements were not accepted.",
+      body: "Nothing was started. Correct the requirement below and send again."
+    },
+    continuity: {
+      heading: "That requirement tracking choice was not accepted.",
+      body: "Nothing was started. Check the choice below and send again."
+    },
+    stale: {
+      heading: "This task moved on while the form was open.",
+      body: "The turn this would have continued from is no longer the latest one. " +
+        "Refresh, check what changed, and choose again — Cofferdam has not " +
+        "re-pointed the declaration for you."
+    },
+    unrecorded: {
+      heading: "Cofferdam could not record this turn's requirements.",
+      body: "Nothing was dispatched. This one is Cofferdam's end, not yours."
+    }
+  };
+
+  /* The refusal, rendered.
+
+     The closed reason code is kept — it is the thing that makes a report
+     actionable — and put behind the same Advanced disclosure the rest of the
+     panel uses for machine detail, rather than shown as the headline. There is
+     nothing else to render: the backend's refusals carry a code and a closed
+     reason and never echo a submitted path, a host path, a traceback or SQL, so
+     there is no such text here to leak. */
+  function authoringRefusalNote(failure) {
+    var kind = authoringRefusalKind(failure);
+    if (!kind) { return ""; }
+    var text = AUTHORING_REFUSAL_TEXT[kind];
+    return '<div class="media-note err task-authoring-error" data-refusal="' +
+      esc(kind) + '"><strong>' + esc(text.heading) + "</strong> " +
+      esc(text.body) +
+      (failure.detail
+        ? '<details class="task-advanced"><summary>Details</summary>' +
+          '<p class="task-refusal-code"><code>' + esc(failure.detail) +
+          "</code></p></details>"
+        : "") +
+      "</div>";
+  }
+
+  /* -- the anchor ------------------------------------------------------------
+   *
+   * `extend` and `replace` both name a `predecessor_snapshot_id`, and a person
+   * must never be asked to type one. It is read, from two routes that already
+   * exist and that the device token already reaches: the result route says how
+   * many turns this task has had, and the assessment route says which criteria
+   * snapshot the latest of them recorded. No new backend surface, no new
+   * credential, and no id typed by hand.
+   *
+   * Read when the mode is chosen rather than at submit time, so what the
+   * declaration is anchored to is visible on the form before it is sent. It can
+   * still be stale by the time the request lands — another caller can create a
+   * turn in between — and that is the server's to refuse, honestly, which it
+   * does. This panel never silently re-points a declaration at whatever the
+   * latest turn turned out to be.
+   */
+  function loadPredecessor(scope, taskId) {
+    var state = declarationFor(scope);
+    state.predecessor = null;
+    state.predecessorError = null;
+    if (!beginPending("predecessor")) { return Promise.resolve(null); }
+
+    function fail(message) {
+      endPending();
+      /* Only if the person is still asking for a mode that needs an anchor. */
+      if (modeNeedsPredecessor(declarationFor(scope).mode)) {
+        declarationFor(scope).predecessorError = message;
+      }
+      render();
+      return null;
+    }
+
+    return deps.api("/api/tasks/" + encodeURIComponent(taskId) + "/result")
+      .then(function (response) {
+        if (!response.ok) {
+          return fail("Cofferdam could not read this task's turns.");
+        }
+        var result = (response.payload && response.payload.result) || {};
+        var turn = result.turn_count;
+        if (typeof turn !== "number" || turn < 1) {
+          return fail("This task has no completed turn to continue from.");
+        }
+        return deps.api(
+          "/api/tasks/" + encodeURIComponent(taskId) + "/turns/" +
+          encodeURIComponent(String(turn)) + "/assessment"
+        ).then(function (assessmentResponse) {
+          if (!assessmentResponse.ok) {
+            return fail("Cofferdam could not read turn " + String(turn) + ".");
+          }
+          var view = (assessmentResponse.payload &&
+            assessmentResponse.payload.assessment) || {};
+          var criteria = view.criteria || {};
+          if (!criteria.snapshot_id) {
+            /* `legacy_unknown` — the turn predates criteria persistence, so
+               there is no snapshot to name and no honest way to continue from
+               it. Said plainly rather than dressed up as a network problem. */
+            return fail(
+              "Turn " + String(turn) + " has no recorded requirements to " +
+              "continue from, so it cannot be extended or replaced."
+            );
+          }
+          endPending();
+          var current = declarationFor(scope);
+          /* Discarded if the person changed their mind while this was in
+             flight. An anchor applied to a mode nobody chose is authority
+             arriving by timing. */
+          if (modeNeedsPredecessor(current.mode)) {
+            current.predecessor = {
+              turn_number: view.turn_number,
+              snapshot_id: criteria.snapshot_id,
+              criterion_count: criteria.criterion_count || 0
+            };
+          }
+          render();
+          return current.predecessor;
+        });
+      }).catch(function (error) {
+        if (error && error.message === "unauthorized") { endPending(); return null; }
+        return fail("Cofferdam could not reach the workstation.");
+      });
+  }
+
   function composer() {
     if (!composerOpen) {
       return '<div class="task-new"><button id="taskCompose" class="primary"' +
@@ -570,6 +1441,9 @@
     var length = draft.prompt.length;
     return '<div class="task-new task-new-open"><h3>New task</h3>' +
       (formError ? '<p class="media-note err">' + esc(formError) + "</p>" : "") +
+      /* A refusal of the declaration belongs on the form that produced it, not
+         only in the panel-level message strip — the correction is made here. */
+      (actionError ? authoringRefusalNote(actionError) : "") +
       '<label class="field"><span class="field-label">Project</span>' +
       '<select id="taskProject"' + (locked() ? " disabled" : "") + ">" +
       projectOptions() + "</select></label>" +
@@ -583,6 +1457,7 @@
       ">" + esc(draft.prompt) + "</textarea></label>" +
       '<p class="muted hint">' + length + " / " + MAX_PROMPT_CHARS + " characters. " +
       "This text is sent to the adapter you chose. It is never run as a command.</p>" +
+      authoringBlock("create") +
       '<div class="task-new-actions">' +
       '<button id="taskStart" class="primary"' + (locked() ? " disabled" : "") + ">" +
       (busy("create") ? "Starting…" : "Start task") + "</button>" +
@@ -787,10 +1662,17 @@
         '<p class="media-note task-turn-complete"><strong>Turn complete.</strong> ' +
         "You can send an optional follow-up in the same session, " +
         "or finish the task.</p>" +
+        (actionError ? authoringRefusalNote(actionError) : "") +
         '<div class="task-followup">' +
         '<label class="field"><span class="field-label">Follow-up (optional)</span>' +
         '<textarea id="taskFollowupText" rows="3" maxlength="' + MAX_FOLLOWUP_CHARS + '"' +
         (locked() ? " disabled" : "") + "></textarea></label>" +
+        /* The follow-up turn's requirements, authored on the same form that
+           dispatches it. One submission carries the instruction, the criteria
+           and the continuity declaration — there is no create-then-patch
+           sequence here, because a turn whose requirements arrive after it
+           started is a turn judged against a moving target. */
+        authoringBlock("followup") +
         '<button id="taskFollowupSend" class="primary"' + (locked() ? " disabled" : "") + ">" +
         (busy("followup") ? "Sending…" : "Send follow-up") + "</button>" +
         '<button id="taskFinish" class="ghost"' + (locked() ? " disabled" : "") + ">" +
@@ -1966,6 +2848,15 @@
       render();
       return Promise.resolve(null);
     }
+    /* The requirement declaration, checked for the things a form can see. The
+       server decides everything that matters; this only avoids a round trip to
+       be told a path was left empty. */
+    var problem = declarationProblem("create");
+    if (problem) {
+      formError = problem;
+      render();
+      return Promise.resolve(null);
+    }
     if (!beginPending("create", CREATE_TIMEOUT_MS)) { return Promise.resolve(null); }
 
     var generation = nextGeneration();
@@ -1974,14 +2865,27 @@
        exists. Editing the prompt after a refusal mints a new key, because it is
        a different request — the server would otherwise answer the second attempt
        with an idempotency conflict rather than creating anything. */
-    var content = draft.projectId + "|" + draft.adapterId + "|" + draft.prompt;
+    /* The declaration is part of the key's content, and has to be. The server
+       binds a key to a payload hash, so sending the same key with an added
+       requirement would be answered as a conflict rather than as the different
+       request it is. It is derived from what was authored rather than minted per
+       attempt, so pressing send twice on one declaration still reuses one key. */
+    var authored = authoringFields("create");
+    var content = draft.projectId + "|" + draft.adapterId + "|" + draft.prompt +
+      "|" + authoringKey("create");
+    var body = {
+      project_id: draft.projectId,
+      adapter_id: draft.adapterId,
+      prompt: draft.prompt,
+      client_request_id: requestIdFor("create", null, content)
+    };
+    /* Assigned only when there is something to say. A key present with a null
+       value is a key the caller sent, and `not_declared` must be an absent
+       field rather than a declared nothing. */
+    if (authored.criteria) { body.criteria = authored.criteria; }
+    if (authored.continuity) { body.continuity = authored.continuity; }
     return deps.api("/api/tasks", {
-      body: {
-        project_id: draft.projectId,
-        adapter_id: draft.adapterId,
-        prompt: draft.prompt,
-        client_request_id: requestIdFor("create", null, content)
-      }
+      body: body
     }).then(function (response) {
       endPending();
       if (!response.ok) {
@@ -2001,8 +2905,18 @@
         ? "Task started."
         : "That task was already started — this was the same request.";
       draft.prompt = "";
+      /* Cleared only on acceptance, exactly as the prompt is. A refused
+         declaration is the moment somebody most needs their requirement rows
+         still on screen to correct, so nothing above this line touches them. */
+      resetDeclaration("create");
       composerOpen = false;
       openTaskId = payload.task ? payload.task.task_id : null;
+      /* Creating a task moves `openTaskId` without going through the open
+         handler, so the follow-up declaration has to be re-anchored here too.
+         Reaching this with somebody else's rows in it needs a route the list
+         view happens to close today — `taskBack` already resets — and relying
+         on that is relying on a coincidence rather than on the rule. */
+      syncAuthoringTask(openTaskId);
       detail = payload.task || null;
       settleTerminalDrafts(detail);
       detailEvents = [];
@@ -2055,6 +2969,12 @@
       render();
       return Promise.resolve(null);
     }
+    var problem = declarationProblem("followup");
+    if (problem) {
+      actionError = { message: problem, detail: null };
+      render();
+      return Promise.resolve(null);
+    }
     if (!beginPending("followup")) { return Promise.resolve(null); }
 
     /* The draft is NOT cleared here. Clearing on submit means a refusal, a
@@ -2062,15 +2982,24 @@
        most likely to fail is the one where the text matters most. It is cleared
        after the server accepts it, and only then. */
     var sent = text;
+    var authored = authoringFields("followup");
+    var followupBody = {
+      followup: sent,
+      /* Keyed on the text as well as the task, so a retry of *this* message
+         reuses one key and an edited message gets a new one. The server binds
+         a key to a payload hash and answers the same key with different words
+         as a conflict, which is the case this keying makes unreachable. The
+         declaration is part of that content for the same reason the words are:
+         changing what the turn is required to achieve makes it a different
+         request, not a repeat of the last one. */
+      client_request_id: requestIdFor(
+        OP_FOLLOWUP, taskId, sent + "|" + authoringKey("followup")
+      )
+    };
+    if (authored.criteria) { followupBody.criteria = authored.criteria; }
+    if (authored.continuity) { followupBody.continuity = authored.continuity; }
     return deps.api("/api/tasks/" + encodeURIComponent(taskId) + "/followups", {
-      body: {
-        followup: sent,
-        /* Keyed on the text as well as the task, so a retry of *this* message
-           reuses one key and an edited message gets a new one. The server binds
-           a key to a payload hash and answers the same key with different words
-           as a conflict, which is the case this keying makes unreachable. */
-        client_request_id: requestIdFor(OP_FOLLOWUP, taskId, sent)
-      }
+      body: followupBody
     }).then(function (response) {
       endPending();
       if (!response.ok) {
@@ -2087,6 +3016,11 @@
          `clearAcceptedDraft` — and only if what is there is still the text the
          server took. */
       clearAcceptedDraft(taskId, OP_FOLLOWUP, sent);
+      /* The declaration went with the turn. The next follow-up is a different
+         turn with its own requirements, and leaving the old rows on screen would
+         invite somebody to re-send requirements that are already live — which
+         for `extend` would duplicate them under new identities. */
+      resetDeclaration("followup");
       actionNote = "Sent.";
       detail = response.payload.task;
       settleTerminalDrafts(detail);
@@ -2510,6 +3444,8 @@
              are per task, so nothing here can carry into the one being opened. */
           captureDraft();
           openTaskId = open.getAttribute("data-task-open");
+          /* A requirement declaration is anchored to one task's lineage. */
+          syncAuthoringTask(openTaskId);
           detail = null;
           detailEvents = [];
           /* Evidence belongs to one turn of one task. Carrying it across would
@@ -2523,6 +3459,10 @@
           return;
         }
 
+        /* Requirement rows first: their ids carry a scope and a position, so
+           they cannot be a case in the switch below. */
+        if (handleAuthoringClick(target.id)) { return; }
+
         switch (target.id) {
           case "tasksRefresh":
             loadCatalogues().then(function () {
@@ -2535,6 +3475,7 @@
           case "taskBack":
             captureDraft();
             openTaskId = null;
+            syncAuthoringTask(null);
             detail = null;
             detailEvents = [];
             detailEvidence = null;
@@ -2580,6 +3521,7 @@
 
       root.addEventListener("input", function (event) {
         if (!event.target) { return; }
+        if (handleAuthoringInput(event.target)) { return; }
         if (event.target.id === "taskPrompt") {
           /* Held in a variable rather than re-rendered per keystroke: a render
              would rebuild the textarea and lose the caret mid-sentence. */
@@ -2589,6 +3531,7 @@
 
       root.addEventListener("change", function (event) {
         if (!event.target) { return; }
+        if (handleAuthoringChange(event.target)) { return; }
         if (event.target.id === "taskProject") {
           draft.projectId = String(event.target.value || "");
           /* Follow the new project's delegation. Only when the host named one

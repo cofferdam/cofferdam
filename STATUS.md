@@ -797,10 +797,55 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2K PR24 — PWA explicit requirement authoring
+
+On `m2k-pr24-pwa-authoring`, from the merged `a1dfd23`. **Implemented on a branch, not merged and not
+deployed.**
+
+The first *human* caller of the acceptance stack. PR23 opened `criteria` and `continuity` to the
+device credential and said plainly that no human-facing caller used it; this is that caller. Three
+shipped files and one new test file. **No backend file changed at all**, which is asserted rather
+than claimed.
+
+**The whole design is the default.** The continuity control starts at `not declared` — visible,
+labelled, with its consequence beside it — and that is safe for one reason: it is the
+backwards-compatible non-authoritative state, producing byte-for-byte the request this panel sent
+before PR24. Preselecting `root` on a first turn or `extend` on a follow-up would be
+`D-2026-08-17-23`'s refused inference wearing a client's hat: the modes are not distinguishable by
+looking at the criteria, so a client guess is the same guess, further from the data, and invisible to
+every backend test.
+
+**Explicit empty is not omission.** An explicit `root` with an empty composer sends `criteria: []`,
+which reads afterwards as `no_structured_criteria` rather than `continuity_not_declared`. The two
+fields stay independent on the wire.
+
+**The anchor is read, never typed.** `extend` and `replace` name a `predecessor_snapshot_id`, and it
+is obtained from the result and assessment routes — both of which already existed and already
+answered the device token. No new backend surface, no new route, no identifier typed by a person, and
+the turn being continued from is shown before submit.
+
+**`revise` is absent rather than approximated**, and the form says so. Its relation names a
+`predecessor_criterion_id` validated against the predecessor's *resolved active set*, and nothing
+publishes that set — see `D-2026-08-17-26` for why each of the three ways to fake it was refused, and
+for the bounded read surface a later PR would need.
+
+**The composer is closed the way the model is.** Five evidence predicates and the manual kind, each
+row drawing only its own predicate's fields, so an invalid combination cannot be produced through the
+controls. Insertion order is sent as authored. No predicate is converted: `path_operation`/`created`
+stays exactly that and never becomes `path_exists`. Inherited requirements are never copied into the
+composer — for `extend` they survive through continuity, and copying them would mint fresh identities
+for requirements that already have them.
+
+**Four refusals stay four**, with the composer retained for correction and no automatic retry under a
+weaker authority. Three earlier negative-space guards that asserted "the PWA has no continuity or
+lineage control" are **updated rather than deleted**, to assert the boundary that actually survived:
+one dispatch request, no second authoring route, no post-dispatch edit, and no supersession
+vocabulary at all.
+
 ### M2K PR23 — explicit criteria / continuity authoring authority
 
-On `m2k-pr23-authoring-authority`, from the merged `c214d5c`. **Implemented on a branch, not merged
-and not deployed.**
+**Merged as `a1dfd23` (#68).** Not deployed. The record below was written while it was on
+`m2k-pr23-authoring-authority`.
 
 The first real caller path for acceptance. The stack has been complete since PR21 and inert, because
 nothing could declare its input; PR22 made that visible. `POST /api/tasks` and
@@ -1417,8 +1462,9 @@ M2K is **in progress**: PR1 through PR8 are merged and deployed; PR9 is merged (
 needed no deployment because it changed only documentation; PR10 is merged (`1efd49b`, #55) and
 deployed to slot A on schema v9; PR11 (`3bb9a5b`, #56), PR12 (`2dc4177`, #57), PR13 (`8cd8ba3`, #58),
 PR14 (`064fe51`, #59), PR15 (`12e64cd`, #60), PR16 (`c1d6f1d`, #61), PR17 (`c164383`, #62), PR18
-(`1116b61`, #63), PR19 (`d777e04`, #64), PR20 (`9fbf9a9`, #65), PR21 (`617412c`, #66) and PR22 (`c214d5c`, #67) are merged and **intentionally
-not deployed**; PR23 is on a branch. See *In progress* above for PR23.
+(`1116b61`, #63), PR19 (`d777e04`, #64), PR20 (`9fbf9a9`, #65), PR21 (`617412c`, #66), PR22
+(`c214d5c`, #67) and PR23 (`a1dfd23`, #68) are merged and **intentionally not deployed**; PR24 is on a
+branch. See *In progress* above for PR24.
 
 **`main` is now schema v11; production is still schema v9**, and that gap is the deployment decision
 rather than a lag. PR14 is the change that turns this batch from a slot flip into a schema move, so
@@ -1435,12 +1481,19 @@ requirements a user actually stated rather than being a clean downgrade.
 PR19 adds nothing to that cost at all: it is documentation and design, with no runtime surface. PR20,
 PR21 and PR22 add nothing either: derived read semantics and one additive private response section,
 with no schema of their own. PR23 adds two optional request fields on an existing private route and
-no schema either — but it is the change that makes the batch worth deploying, because it is the first
-one a person can actually use.
+no schema either. **PR24 adds no backend change at all** — it is a client, and its only server
+contact is routes that already exist.
+
+**PR24 is what makes the batch worth deploying**, and PR23 was not, despite reading that way at the
+time. PR23 made acceptance reachable over HTTP; PR24 makes it reachable by a person. Until this PR
+the honest description of PR11–PR23 in production would have been *a feature nobody can use without
+building the request by hand*, and shipping thirteen PRs and a schema move to reach that is a poor
+trade. That is now a live deployment decision rather than a deferred one, and it is still Tier 2 —
+PR14 and PR17 set that cost and nothing since has changed it.
 
 **A/B remains deployment machinery, not feature-development machinery.** Work is developed in
 isolated feature worktrees and merged to `main`; a slot is never a workbench; and a deployment happens
-when a running service actually needs the change. Twelve merged PRs sitting ahead of production is
+when a running service actually needs the change. Thirteen merged PRs sitting ahead of production is
 the policy working, not drift.
 
 ### M2K PR13 — cross-turn acceptance evidence-binding doctrine (documentation only)
