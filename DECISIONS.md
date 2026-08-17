@@ -2359,7 +2359,16 @@ record and the machine's. It is not a criterion result, not a task failure and n
 blocker, and placing it near an outcome is precisely how a reader would come to treat it as one. It
 stays on the evidence surface as audit context.
 
-## D-2026-08-16-4 — There is no task-level acceptance, because criterion continuity does not exist yet (EFE DECISION, ACTIVE)
+## D-2026-08-16-4 — There is no task-level acceptance, because criterion continuity does not exist yet (EFE DECISION, RATIONALE SUPERSEDED IN PART BY D-2026-08-17-15)
+
+> **Status note, 2026-08-17.** The **conclusion stands**: there is still no task-level acceptance and
+> Cofferdam still reports it as unavailable. The **stated reason no longer holds.** This decision
+> named the missing fact as criterion continuity, and PR10–PR12 built it — so the blocker it
+> identified is gone for a *target-turn* aggregate, which
+> [D-2026-08-17-15](#d-2026-08-17-15--the-target-turn-aggregate-is-derived-pure-and-versioned-separately-efe-decision-active)
+> now specifies. A *global task* verdict remains out of scope for a different and still-undecided
+> question: which turn's requirements a whole task should be judged against. The original text stands
+> unedited as history — its two worked counter-examples are exactly why that question is still open.
 
 **Decision.** Per-turn acceptance is well defined (D-2026-08-16-3). **Task-level acceptance across
 multiple turns is unavailable**, and Cofferdam will report it as unavailable rather than invent a
@@ -3428,7 +3437,7 @@ precisely the split the snapshot exists to prevent.
 
 ## D-2026-08-17-12 — PR9's two dimensions survive; their inputs move from one snapshot to the resolved active set (EFE DECISION, ACTIVE)
 
-**Decision.** [D-2026-08-16-3](#d-2026-08-16-3--per-turn-assessment-has-two-dimensions-and-known-failure-dominates-uncertainty)
+**Decision.** [D-2026-08-16-3](#d-2026-08-16-3--per-turn-assessment-has-two-dimensions-and-known-failure-dominates-uncertainty-efe-decision-active)
 is **reconciled, not replaced.** Both dimensions stand exactly as written — availability, then an
 acceptance outcome that exists only when assessable — and both the ordered fold and the vocabulary
 `met` / `not_met` / `incomplete` / `not_assessable` are unchanged.
@@ -3450,7 +3459,7 @@ binder reports the refusal at the **set** level. Same conclusion, reached one la
 
 **Two top-level availability states, not three.** PR18 added eight set-level refusals PR9 never had,
 and they divide cleanly into three families by *what a caller should do next* — see
-[D-2026-08-17-13](#d-2026-08-17-13--set-unavailable-and-criterion-unverified-are-different-facts-and-the-aggregate-must-keep-them-apart).
+[D-2026-08-17-13](#d-2026-08-17-13--set-unavailable-and-criterion-unverified-are-different-facts-and-the-aggregate-must-keep-them-apart-efe-decision-active).
 That division is real and is recorded, but it does **not** earn a third top-level state: in every one
 of those families there is no acceptance outcome, which is precisely what `not_assessable` already
 says. A third state would make every caller branch three ways to learn something the closed reason
@@ -3547,7 +3556,7 @@ fold: the availability dimension answers first, and an empty set never reaches t
 **Target-turn only.** The aggregate answers *acceptance at target turn N, over the criteria active at
 N, using their current status at N.* It is not a task verdict, not merge readiness, not deployment
 readiness and not project quality.
-[D-2026-08-16-4](#d-2026-08-16-4--there-is-no-task-level-acceptance-because-criterion-continuity-does-not-exist-yet)
+[D-2026-08-16-4](#d-2026-08-16-4--there-is-no-task-level-acceptance-because-criterion-continuity-does-not-exist-yet-efe-decision-rationale-superseded-in-part-by-d-2026-08-17-15)
 named the missing fact as criterion continuity, and PR10–PR12 supplied it — so the blocker **on a
 target-turn aggregate is removed**. The blocker on a *global task* verdict is not, and is not being
 lifted here: composing several target-turn answers into one is a separate question about which turn's
@@ -3570,7 +3579,7 @@ inherited-change `unverified` is `requires_human = false`; a missing final-state
 `requires_human = false`. Deriving it from "any `unverified`" would tell a user to go and look at
 something no human can resolve. It is orthogonal context beside the outcome, **never** a fourth
 acceptance value — restating
-[D-2026-08-16-3](#d-2026-08-16-3--per-turn-assessment-has-two-dimensions-and-known-failure-dominates-uncertainty)
+[D-2026-08-16-3](#d-2026-08-16-3--per-turn-assessment-has-two-dimensions-and-known-failure-dominates-uncertainty-efe-decision-active)
 against the concrete model.
 
 **Manual criteria still cap the outcome at `incomplete`, with no exception.** A manual criterion is
@@ -3609,12 +3618,12 @@ predates continuity*), `malformed_lineage`, `cycle_detected` and `lineage_depth_
 of that survives into the envelope.
 
 **Why it matters.**
-[D-2026-08-16-3](#d-2026-08-16-3--per-turn-assessment-has-two-dimensions-and-known-failure-dominates-uncertainty)
+[D-2026-08-16-3](#d-2026-08-16-3--per-turn-assessment-has-two-dimensions-and-known-failure-dominates-uncertainty-efe-decision-active)
 required that "we never asked" and "we cannot know what we asked" stay distinct, on the grounds that
 collapsing them turns two different facts into one sentence. Under the current envelope the aggregate
 *cannot* honour that, because the information is gone before it arrives. It also merges the
 population-unknown family with genuine structural corruption, which
-[D-2026-08-17-13](#d-2026-08-17-13--set-unavailable-and-criterion-unverified-are-different-facts-and-the-aggregate-must-keep-them-apart)
+[D-2026-08-17-13](#d-2026-08-17-13--set-unavailable-and-criterion-unverified-are-different-facts-and-the-aggregate-must-keep-them-apart-efe-decision-active)
 otherwise keeps apart.
 
 **It is a fidelity gap, not a safety gap.** Every affected case is already `not_assessable` and fails
