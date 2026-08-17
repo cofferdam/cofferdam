@@ -797,10 +797,55 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2K PR22 — private target-turn acceptance read surface
+
+On `m2k-pr22-acceptance-read-surface`, from the merged `617412c`. **Implemented on a branch, not
+merged and not deployed.**
+
+Publishes PR21's derived acceptance through the **existing** private assessment route as an additive
+third section. No new route, no new authorization, no bridge operation, no schema change, and no new
+acceptance semantics — the route is a serializer and PR21 remains the only authority.
+
+**One route, because it is one audit boundary.** Criteria, evaluation and acceptance answer the same
+turn-qualified question. A sibling route would let a client pair sections read at different moments,
+which is the inconsistency PR8's route exists to prevent. Additive: no key renamed or reinterpreted,
+`acceptance` optional so the old shape stays constructible, `ASSESSMENT_API_VERSION` unmoved.
+
+**The race was real and is closed at the read.** PR8's and PR16's reads are each internally
+consistent, and calling both would still have been wrong: the PR7 evaluation row is written *after*
+dispatch by a bounded recovery pass, so one landing between them would produce a single envelope
+saying `evaluation: not_recorded` beside `acceptance: assessable / met`. **The response is the unit of
+consistency**, so `TaskStore.turn_audit_inputs` takes both input sets under one snapshot — the store's
+existing re-entrant lock and one deferred transaction, nothing global.
+
+**Tri-states survive transport.** A resolved empty set publishes `counts: {0,0,0,0}` and
+`requires_human: false`; an unknown population publishes **`null` for both**. JSON is the last place
+these could be lost, and four zeros for an unknown population would state an observation nobody made.
+The PWA's named-field copy carries `null` through as `null`.
+
+**The ceiling covers acceptance, because acceptance is inside it** — placed in the payload before the
+bound is checked. Measured worst case is **38,710 bytes against 131,072**, 29.5% used, acceptance
+contributing 543. The constant was not raised.
+
+**Authorization unchanged.** `require_token`, never `require_task_caller`; the bridge credential is
+unknown to it and gets 401. GET only. The bridge gained no operation, schema or route.
+
+**The panel says "this turn".** "Requirements met at this turn", never "task passed". No PASS/FAIL,
+no score, and **no control** of any kind. `not_assessable` renders distinctly from `incomplete`, and
+structural failures get the error tone while operational gaps do not.
+
+**What publishing made visible.** `create_task` writes an explicit `not_declared` continuity row when
+a caller supplies none — PR10's deliberate choice — and **no caller supplies one today**. So every
+task created through a real surface resolves to `not_assessable / continuity_not_declared`. The layers
+are correct; the input is not being written. Acceptance is **not meaningfully consumable until a
+caller declares continuity**, which is the finding this PR exists to surface rather than a defect in
+it. D-2026-08-17-21 and D-2026-08-17-22.
+
 ### M2K PR21 — runtime target-turn acceptance aggregation
 
-On `m2k-pr21-acceptance-aggregation`, from the merged `9fbf9a9`. **Implemented on a branch, not
-merged and not deployed.**
+**Merged as `617412c` (#66) and deliberately NOT deployed.** Production remains on the PR10 runtime —
+workstation and Actions bridge both from **slot A at `1efd49b`**, live schema **v9**. The record below
+was written while PR21 was on `m2k-pr21-acceptance-aggregation`, from the merged `9fbf9a9`.
 
 The first aggregate this milestone has built. **`AGGREGATOR_VERSION = 1`**, in exactly one module,
 implementing the contract PR19 specified against the envelope PR20 stabilised. Schema stays v11;
@@ -1323,12 +1368,12 @@ M2K is **in progress**: PR1 through PR8 are merged and deployed; PR9 is merged (
 needed no deployment because it changed only documentation; PR10 is merged (`1efd49b`, #55) and
 deployed to slot A on schema v9; PR11 (`3bb9a5b`, #56), PR12 (`2dc4177`, #57), PR13 (`8cd8ba3`, #58),
 PR14 (`064fe51`, #59), PR15 (`12e64cd`, #60), PR16 (`c1d6f1d`, #61), PR17 (`c164383`, #62), PR18
-(`1116b61`, #63), PR19 (`d777e04`, #64) and PR20 (`9fbf9a9`, #65) are merged and **intentionally not
-deployed**; PR21 is on a branch. See *In progress* above for PR21.
+(`1116b61`, #63), PR19 (`d777e04`, #64), PR20 (`9fbf9a9`, #65) and PR21 (`617412c`, #66) are merged and **intentionally
+not deployed**; PR22 is on a branch. See *In progress* above for PR22.
 
 **`main` is now schema v11; production is still schema v9**, and that gap is the deployment decision
 rather than a lag. PR14 is the change that turns this batch from a slot flip into a schema move, so
-deploying PR11–PR21 is **Tier 2**: a verified pre-v9 backup taken with SQLite's online backup API, a
+deploying PR11–PR22 is **Tier 2**: a verified pre-v9 backup taken with SQLite's online backup API, a
 migration rehearsal, the old-runtime refusal check that PR14 already proves in CI, and an honest
 rollback **pair** — the slot *and* the restored snapshot — because a flip alone cannot walk a schema
 backwards. PR15, PR16 and PR18 add nothing to that cost: PR15 is documentation, and PR16 and PR18 are
@@ -1338,13 +1383,14 @@ rehearses that rebuild on a copy of the real database and the rollback backup mu
 it runs — and once a `path_exists` criterion has been written to v11, restoring that backup destroys
 requirements a user actually stated rather than being a clean downgrade.
 
-PR19 adds nothing to that cost at all: it is documentation and design, with no runtime surface. PR20
-and PR21 add nothing either: derived read semantics with no schema of their own and no caller yet.
+PR19 adds nothing to that cost at all: it is documentation and design, with no runtime surface. PR20,
+PR21 and PR22 add nothing either: derived read semantics and one additive private response section,
+with no schema of their own.
 
 **A/B remains deployment machinery, not feature-development machinery.** Work is developed in
 isolated feature worktrees and merged to `main`; a slot is never a workbench; and a deployment happens
-when a running service actually needs the change. Ten merged PRs sitting ahead of production is the
-policy working, not drift.
+when a running service actually needs the change. Eleven merged PRs sitting ahead of production is
+the policy working, not drift.
 
 ### M2K PR13 — cross-turn acceptance evidence-binding doctrine (documentation only)
 

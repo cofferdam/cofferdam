@@ -2042,18 +2042,43 @@ class TaskService:
 
         Returns ``None`` only when the turn does not exist. A historical turn
         whose criteria are ``legacy_unknown`` returns a real assessment saying so.
+
+        **M2K PR22 added the acceptance section**, and the interesting part is the
+        read rather than the field. Criteria, evaluation and the acceptance
+        inputs all come from **one** :meth:`~.store.TaskStore.turn_audit_inputs`
+        snapshot, because the PR7 evaluation row is written *after* dispatch by a
+        bounded recovery pass: two separate reads could produce one response
+        saying ``evaluation: not_recorded`` beside ``acceptance: assessable /
+        met``, which are two states that never coexisted. Both reads being
+        individually correct is not the property that matters — the response is
+        the unit of consistency.
+
+        The acceptance value itself is PR21's, folded from PR16's binder over
+        that same snapshot. Nothing here aggregates, counts or decides
+        availability; this method arranges one coherent read and hands the pieces
+        to two pure functions.
         """
+        from .acceptance import aggregate
+        from .binding import bind
+
         row = self.get_task(task_id)
-        inputs = self._store.turn_assessment_inputs(row.task_id, int(turn_number))
+        inputs = self._store.turn_audit_inputs(row.task_id, int(turn_number))
         if inputs is None:
             return None
-        turn_open, snapshot, record = inputs
+        turn_open, snapshot, record, assessment_inputs = inputs
+        current = bind(
+            assessment_inputs.resolved,
+            assessment_inputs.evaluation,
+            turn_closed=assessment_inputs.turn_closed,
+            final_state=assessment_inputs.final_state,
+        )
         return assessment_view(
             task_id=row.task_id,
             turn_number=int(turn_number),
             snapshot=snapshot,
             record=record,
             turn_open=turn_open,
+            acceptance=aggregate(current),
         )
 
     def turn_numbers(self, task_id: object) -> List[int]:

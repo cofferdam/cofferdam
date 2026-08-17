@@ -834,8 +834,8 @@ downstream reads from.
     layer could not answer. `lineage_unavailable` survives only as the honest fallback for a **newer**
     resolver's classification. No context is manufactured for non-lineage refusals, and no
     resolved-lineage fingerprint is fabricated. D-2026-08-17-17 and D-2026-08-17-18.
-  - **PR21 — runtime target-turn acceptance aggregation.** *Implemented on
-    `m2k-pr21-acceptance-aggregation`, not merged and not deployed.* The first aggregate this
+  - **PR21 — runtime target-turn acceptance aggregation.** *Merged as `617412c` (#66),
+    **not deployed**.* The first aggregate this
     milestone has built: **`AGGREGATOR_VERSION = 1`**, in exactly one module, implementing PR19's
     contract against PR20's stabilised envelope. Schema stays v11, nothing is persisted, and there is
     no public surface. **Two dimensions and neither absorbs the other** — availability answers whether
@@ -855,6 +855,27 @@ downstream reads from.
     as `assessment_input_invalid` and never normalised. `TaskService.turn_acceptance` folds one
     envelope and reopens nothing. **No global task verdict**, no named checks, no runner, no route.
     D-2026-08-17-19 and D-2026-08-17-20.
+  - **PR22 — private target-turn acceptance read surface.** *Implemented on
+    `m2k-pr22-acceptance-read-surface`, not merged and not deployed.* Publishes PR21's derived result
+    through the **existing** private assessment route as an additive third section — no new route, no
+    new authorization, no bridge operation, no schema change and no new semantics. **One route because
+    it is one audit boundary**: a sibling would let a client pair sections read at different moments,
+    the inconsistency PR8's route exists to prevent. **The race was real**: PR8's and PR16's reads are
+    each internally consistent, and calling both would still have been wrong, because the PR7
+    evaluation row is written *after* dispatch by a bounded recovery pass — so one landing between
+    them would produce a single envelope saying `evaluation: not_recorded` beside `acceptance:
+    assessable / met`. **The response is the unit of consistency**, so `turn_audit_inputs` takes both
+    input sets under one snapshot using the store's existing re-entrant lock, nothing global.
+    **Tri-states survive JSON**: a resolved empty set publishes zero counts and `requires_human:
+    false`, an unknown population publishes `null` for both, and the PWA's named-field copy carries
+    `null` through. **The ceiling covers acceptance** because it is placed in the payload before the
+    bound — measured worst case 38,710 bytes against 131,072, and the constant was not raised.
+    Authorization unchanged (`require_token`, bridge credential still 401, GET only). The panel says
+    **"Requirements met at this turn"**, never "task passed", with no control of any kind. **What it
+    made visible**: `create_task` writes an explicit `not_declared` continuity row when a caller
+    supplies none, and no caller supplies one today — so every task created through a real surface is
+    `not_assessable / continuity_not_declared`, and acceptance is not meaningfully consumable until a
+    caller declares continuity. D-2026-08-17-21 and D-2026-08-17-22.
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**

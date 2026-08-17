@@ -582,20 +582,56 @@ class NegativeSpaceTests(unittest.TestCase):
                               "AGGREGATOR_VERSION", "acceptance_fingerprint"):
                 self.assertNotIn(forbidden, text, str(path))
 
-    def test_the_pr8_assessment_response_was_not_widened(self):
-        from cofferdam.workstation.tasks import assessment as assessment_module
+    def test_the_pr8_assessment_response_is_widened_additively_only(self):
+        """M2K PR22 published acceptance. PR21 had asserted it had not — correctly
+        at the time, and overtaken rather than weakened.
 
-        tree = ast.parse(Path(assessment_module.__file__).read_text(encoding="utf-8"))
-        names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
-        names |= {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
-        modules = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module:
-                modules.add(node.module.rsplit(".", 1)[-1])
-        for forbidden in ("AcceptanceAggregate", "AGGREGATOR_VERSION", "aggregate",
-                          "availability", "requires_human"):
-            self.assertNotIn(forbidden, names)
-        self.assertNotIn("acceptance", modules)
+        What still has to hold is that the widening is **additive**: the two
+        sections PR8 shipped keep their exact keys and meanings, and the third is
+        optional so the older shape stays constructible.
+        """
+        from cofferdam.workstation.tasks.assessment import assessment_view
+        from cofferdam.workstation.tasks.criteria import CriteriaSnapshot
+
+        snapshot = CriteriaSnapshot(
+            task_id="task_01aaaaaaaaaaaaaaaaaaaaaaaa",
+            turn_number=1,
+            state="not_provided",
+        )
+        without = assessment_view(
+            task_id="task_01aaaaaaaaaaaaaaaaaaaaaaaa",
+            turn_number=1,
+            snapshot=snapshot,
+            record=None,
+            turn_open=False,
+        )
+        self.assertEqual(
+            {"version", "task_id", "turn_number", "criteria", "evaluation"},
+            set(without),
+        )
+
+        from cofferdam.workstation.tasks.acceptance import aggregate
+        from cofferdam.workstation.tasks.binding import bind, CurrentAssessment
+
+        with_acceptance = assessment_view(
+            task_id="task_01aaaaaaaaaaaaaaaaaaaaaaaa",
+            turn_number=1,
+            snapshot=snapshot,
+            record=None,
+            turn_open=False,
+            acceptance=aggregate(
+                CurrentAssessment(
+                    task_id="task_01aaaaaaaaaaaaaaaaaaaaaaaa",
+                    target_turn_number=1,
+                    assessment_version=CURRENT_ASSESSMENT_VERSION,
+                    state="resolved",
+                    fingerprint="e" * 64,
+                )
+            ),
+        )
+        self.assertEqual(set(without) | {"acceptance"}, set(with_acceptance))
+        for key in ("version", "task_id", "turn_number", "criteria", "evaluation"):
+            self.assertEqual(without[key], with_acceptance[key])
 
     def test_the_pwa_gained_nothing(self):
         base = REPO_ROOT / "cofferdam" / "workstation"

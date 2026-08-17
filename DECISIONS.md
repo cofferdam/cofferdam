@@ -3819,6 +3819,81 @@ carries one, an invalid result or kind, a criterion answered twice — each is
 one that exists was hand-built or corrupted, and quietly repairing it would make this layer agree with
 a record no other layer agrees with.
 
+## D-2026-08-17-21 — Acceptance is published on PR8's route, and the response is the unit of consistency (EFE DECISION, ACTIVE)
+
+**Decision.** The target-turn acceptance aggregate is exposed as an **additive third section** of the
+existing private assessment route, `GET /api/tasks/{task_id}/turns/{turn_number}/assessment`. No
+sibling route, no new authorization, no bridge operation.
+
+**One route, because it is one audit boundary.** Criteria, evaluation and acceptance describe the same
+turn-qualified question, and a reader needs them together. A second route would let a client pair
+sections read at different moments and draw a conclusion about the pair — the exact inconsistency
+PR8's own route exists to prevent — and would create two HTTP contracts free to drift while describing
+one thing. Additive: no key was renamed, removed or reinterpreted, `acceptance` is optional so the
+older two-section shape stays constructible, and `ASSESSMENT_API_VERSION` does not move.
+
+**The race was real, and it is closed at the read.** PR8's criteria/evaluation read and PR16's
+current-assessment read are each internally consistent, and calling both would still have been wrong:
+the PR7 evaluation row is **not** frozen at dispatch — it is written later by a bounded recovery pass.
+One landing between two reads would have produced a single envelope saying `evaluation:
+not_recorded` beside `acceptance: assessable / met`, two states that never coexisted. Both reads being
+individually correct is not the property that matters; **the response is the unit of consistency.**
+`TaskStore.turn_audit_inputs` takes both input sets under one snapshot, reusing the store's existing
+re-entrant lock and one deferred transaction. No new locking, nothing global.
+
+**The size ceiling covers acceptance because acceptance is inside it.** The section is placed in the
+payload *before* the bound is checked rather than attached afterwards; attaching it later would
+quietly make the bound describe something other than what is sent. Measured worst case — 32 criteria
+at maximum path length, plus an acceptance object with every optional field populated — is **38,710
+bytes against a 131,072-byte ceiling**, 29.5% used, with acceptance contributing 543 of them. The
+constant was not raised.
+
+**Authorization is unchanged, and deliberately.** `require_token`, never `require_task_caller`. The
+bridge credential has never been known to `require_token`, so a bridge request arrives as an ordinary
+unauthenticated one and gets 401 — a stronger guarantee than a check that rejects it, which a later
+refactor could lose. GET only; the other verbs are 405 because nothing registered them. The Actions
+Bridge gained no operation, no schema and no route.
+
+**The route is a serializer.** PR21 remains the only acceptance authority: nothing here folds, counts,
+or re-derives availability, asserted from the syntax tree. Reason codes are published **exactly** as
+the layers below produced them — no translation table, no prettier wording, and no collapsing of
+PR20's eighteen lineage reasons. Human phrasing belongs to the client.
+
+## D-2026-08-17-22 — The tri-states survive transport, and the panel says "this turn" (EFE DECISION, ACTIVE)
+
+**Decision.** The three optional fields are published as JSON `null`, never as zero and never as
+`false`, and the PWA renders them as three distinct states.
+
+| | resolved empty | population unknown |
+| --- | --- | --- |
+| `availability_reason` | `no_structured_criteria` | the exact lower-layer code |
+| `counts` | `{0,0,0,0}` | **`null`** |
+| `requires_human` | `false` | **`null`** |
+
+JSON is the last place these could be lost, and losing them there would undo at the final step what
+PR21 made unrepresentable internally. Serialising an unknown population as four zeros would publish an
+observation nobody made, indistinguishable at a glance from a genuinely empty requirement set. The
+PWA's named-field copy carries `null` through as `null` for the same reason.
+
+**`not_assessable` is never rendered as a fourth outcome.** It is the absence of one. Shown beside
+met / not-met / incomplete as though it ranked with them, it would tell somebody their work fell short
+when what actually happened is that Cofferdam could not determine what was required. Structural
+failures — a stored record disagreeing with itself — are shown in the error tone; operational gaps are
+not, and neither is prettified into ordinary uncertainty.
+
+**Every word on the screen is scoped to the turn.** "Requirements met at this turn", never "task
+passed". A screen is exactly where an unsupported word becomes a global verdict nobody decided, so
+there is no PASS, FAIL, SUCCESS, score, percentage, confidence or risk anywhere in the section, and no
+control of any kind: no rerun, no approve, no override, no mark-met, no dismiss.
+
+**What the surface made visible.** `create_task` writes an explicit `not_declared` continuity row when
+a caller supplies none — PR10's deliberate choice — and **no caller supplies one today**: `/api/tasks`
+has no continuity field and neither does the bridge. So every task created through a real surface
+resolves to `not_assessable / continuity_not_declared`. The layers are behaving correctly; the input
+is simply not being written yet. Acceptance is therefore **not meaningfully consumable in production
+until a caller declares continuity**, and publishing the surface is what turns that from a theoretical
+observation into a visible one.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

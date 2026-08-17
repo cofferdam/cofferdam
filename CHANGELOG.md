@@ -8,6 +8,38 @@ release.
 
 ### Added
 
+- **M2K PR22 — you can now see whether a piece of work met what you asked for, in the private task
+  view.** The first time any of this acceptance machinery becomes visible.
+
+  **What you see.** The turn detail panel already showed what you required and what the machine made
+  of each requirement. It now also shows the answer for the turn as a whole: *requirements met at this
+  turn*, *a requirement is not met at this turn*, or *requirement assessment incomplete* — plus how
+  many requirements there were and how they landed.
+
+  **Deliberately not a verdict on the task.** Every word is scoped to the one point in the task you
+  are looking at. There is no "passed", no "failed", no score and no percentage anywhere, because the
+  answer is about a single moment and a screen is exactly where that kind of word quietly becomes a
+  judgement on the whole job.
+
+  **"Cannot tell" looks different from "not quite".** If Cofferdam could not work out what was
+  required — nobody declared it, or the record predates the feature, or something stored looks
+  altered — it says so plainly instead of reporting an outcome. Those are shown apart from
+  *incomplete*, and a record that disagrees with itself is flagged as something to look at rather than
+  smoothed into ordinary uncertainty.
+
+  **Unknown is never shown as zero.** If the set of requirements could not be established, the counts
+  read "unknown" rather than a tidy row of zeros, and whether a person is needed reads "unknown"
+  rather than "no".
+
+  **Nothing to press.** The section is read-only: no re-run, no approve, no override, no marking
+  anything done. It is also private to your own device — the connected-assistant credential cannot
+  read it, exactly as before.
+
+  **One honest consequence.** Nothing that creates a task today records how its requirements relate to
+  the previous message, so in practice this panel will currently say it cannot assess most work. That
+  is the truthful answer, and making it visible is the point: the judging machinery is finished and
+  waiting on something to declare its input.
+
 - **M2K PR21 — Cofferdam can now say whether a piece of work met what you asked for.** Nothing is
   visible yet and nothing new is saved.
 

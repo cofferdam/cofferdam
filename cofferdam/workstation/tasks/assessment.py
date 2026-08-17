@@ -68,6 +68,7 @@ from .criteria import (
     AcceptanceCriterion,
     CriteriaSnapshot,
 )
+from .acceptance import AcceptanceAggregate
 from .evaluation import CriterionResult, EvaluationRecord
 
 #: Bumped when the published shape changes in a way a client could notice.
@@ -295,6 +296,60 @@ def evaluation_view(
 # -- the whole view -----------------------------------------------------------
 
 
+def acceptance_view(aggregate_result: object) -> Dict[str, Any]:
+    """M2K PR21's target-turn acceptance result, as published.
+
+    **A serializer and nothing else.** Every value here was decided by
+    :func:`~.acceptance.aggregate`; this function folds nothing, counts nothing,
+    and re-derives no availability. It refuses an object of the wrong type rather
+    than duck-typing its way through one, exactly as the views above do.
+
+    Three fields are **tri-state and must stay that way through JSON**:
+
+    * ``outcome`` is ``null`` exactly when the turn is not assessable — never a
+      neutral word, and never ``incomplete``, which is a statement about a
+      *known* requirement set containing something unverified;
+    * ``counts`` is ``null`` when the active population could not be determined,
+      and a real object of zeros when it was determined and is empty. Serialising
+      the first as four zeros would publish an observation nobody made, and a
+      client could not tell it from a genuinely empty requirement set;
+    * ``requires_human`` is ``true`` / ``false`` / ``null``, and ``null`` never
+      becomes ``false``. Whether a person is needed is unknown when the set is.
+
+    **Reason codes are published exactly as the layers below produced them.** No
+    translation, no prettier wording, no collapsing of PR20's eighteen lineage
+    reasons back into one. Human phrasing belongs to the client; the contract
+    carries the code-owned value.
+
+    Deliberately **not** here: any global task verdict, any pass/fail/success
+    word, any score, percentage, confidence or risk, and any low-level evidence
+    fingerprint. The compositional identity — which envelope was folded, by which
+    aggregator version, into which answer — is the audit trail this layer owes.
+    """
+    if not isinstance(aggregate_result, AcceptanceAggregate):
+        raise TypeError("an acceptance view needs an AcceptanceAggregate")
+    counts = aggregate_result.counts
+    return {
+        "aggregator_version": aggregate_result.aggregator_version,
+        "availability": aggregate_result.availability,
+        "availability_reason": aggregate_result.availability_reason,
+        "unavailable_cause": aggregate_result.unavailable_cause,
+        "unavailable_at_turn_number": aggregate_result.unavailable_at_turn_number,
+        "outcome": aggregate_result.outcome,
+        "counts": None
+        if counts is None
+        else {
+            "total": counts.total,
+            "met": counts.met,
+            "not_met": counts.not_met,
+            "unverified": counts.unverified,
+        },
+        "requires_human": aggregate_result.requires_human,
+        "assessment_fingerprint": aggregate_result.assessment_fingerprint,
+        "acceptance_fingerprint": aggregate_result.fingerprint,
+    }
+
+
 def assessment_view(
     *,
     task_id: str,
@@ -302,13 +357,28 @@ def assessment_view(
     snapshot: object,
     record: object,
     turn_open: bool,
+    acceptance: object = None,
 ) -> Dict[str, Any]:
-    """One turn's criteria and evaluation, as published.
+    """One turn's criteria, evaluation and acceptance, as published.
 
     Turn-qualified and nothing else: there is no "latest" here, no task-level
     rollup, and no path by which turn two's evaluation could be returned for
     turn one. The caller has already resolved which turn this is; this function
     cannot look up another.
+
+    ``acceptance`` is **additive** (M2K PR22). Existing clients reading
+    ``criteria`` and ``evaluation`` are untouched — no key was renamed, removed
+    or reinterpreted — and it is optional so the older two-section view stays
+    constructible. It belongs in the same response because all three describe one
+    historical target-turn audit boundary, and a reader needs them together or
+    not at all; two routes would let a client pair sections read at different
+    moments, which is the split
+    :meth:`~.store.TaskStore.turn_audit_inputs` holds one snapshot to prevent.
+
+    **The size ceiling covers acceptance too**, because it is placed in the
+    payload *before* the check rather than attached to the result afterwards.
+    Adding a field after the bound would quietly make the bound describe
+    something other than what is sent.
 
     Raises :class:`AssessmentTooLarge` rather than returning a trimmed response.
     """
@@ -323,6 +393,8 @@ def assessment_view(
             record, criteria_state=snapshot.state, turn_open=turn_open
         ),
     }
+    if acceptance is not None:
+        payload["acceptance"] = acceptance_view(acceptance)
     if serialized_size(payload) > MAX_SERIALIZED_ASSESSMENT_BYTES:
         raise AssessmentTooLarge(
             "the assessment does not fit the response contract"
@@ -339,6 +411,7 @@ __all__ = [
     "EVALUATION_TURN_NOT_CLOSED",
     "MAX_SERIALIZED_ASSESSMENT_BYTES",
     "AssessmentTooLarge",
+    "acceptance_view",
     "assessment_view",
     "criteria_view",
     "criterion_view",

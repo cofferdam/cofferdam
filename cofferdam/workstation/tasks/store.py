@@ -3872,47 +3872,62 @@ class TaskStore:
         observes no path. A turn awaiting either record is reported as awaiting
         it.
         """
+        with self._read_snapshot() as connection:
+            return self._current_assessment_inputs_locked(
+                connection, task_id, int(turn_number)
+            )
+
+    def _current_assessment_inputs_locked(
+        self, connection: sqlite3.Connection, task_id: str, turn_number: int
+    ) -> "AssessmentInputs":
+        """:meth:`current_assessment_inputs` against a snapshot the caller holds.
+
+        Extracted by M2K PR22 so the private audit read can take the assessment
+        inputs **and** PR8's criteria and evaluation inside one transaction. One
+        implementation, one place to get the conditional final-state fetch right;
+        a second copy of this is how the two would eventually disagree about what
+        a target turn's inputs are.
+        """
         from .binding import AssessmentInputs, STATE_PREDICATES
         from .criteria import KIND_EVIDENCE
         from .evaluation import EVALUATOR_VERSION
         from .lineage import resolve
 
-        with self._read_snapshot() as connection:
-            turn = connection.execute(
-                "SELECT completed_at FROM task_turns"
-                " WHERE task_id = ? AND turn_number = ?",
-                (task_id, int(turn_number)),
-            ).fetchone()
-            closed = turn is not None and turn["completed_at"] is not None
-            graph = self._lineage_graph_locked(connection, task_id, int(turn_number))
-            # The supported version first; failing that, whatever is stored.
-            # A record written by a newer evaluator must **reach** the binder so
-            # it can refuse it as unsupported, because "evaluated by semantics I
-            # do not know" and "not evaluated at all" are different facts and
-            # only one of them is going to change by waiting.
+        turn = connection.execute(
+            "SELECT completed_at FROM task_turns"
+            " WHERE task_id = ? AND turn_number = ?",
+            (task_id, int(turn_number)),
+        ).fetchone()
+        closed = turn is not None and turn["completed_at"] is not None
+        graph = self._lineage_graph_locked(connection, task_id, int(turn_number))
+        # The supported version first; failing that, whatever is stored.
+        # A record written by a newer evaluator must **reach** the binder so
+        # it can refuse it as unsupported, because "evaluated by semantics I
+        # do not know" and "not evaluated at all" are different facts and
+        # only one of them is going to change by waiting.
+        evaluation = self._evaluation_locked(
+            connection, task_id, int(turn_number), evaluator_version=EVALUATOR_VERSION
+        )
+        if evaluation is None:
             evaluation = self._evaluation_locked(
-                connection, task_id, int(turn_number), evaluator_version=EVALUATOR_VERSION
+                connection, task_id, int(turn_number), evaluator_version=None
             )
-            if evaluation is None:
-                evaluation = self._evaluation_locked(
-                    connection, task_id, int(turn_number), evaluator_version=None
-                )
 
-            resolved = resolve(graph)
-            wants_state = resolved.resolved and any(
-                entry.criterion.kind == KIND_EVIDENCE
-                and entry.criterion.predicate in STATE_PREDICATES
-                for entry in resolved.active
-            )
-            # Not fetched otherwise, and the absence is the point rather than a
-            # saved query: a target of change and manual criteria must have no
-            # dependency on PR14 at all, and the surest way to keep it that way
-            # is for the row never to enter the input set.
-            final_state = (
-                self._final_state_locked(connection, task_id, int(turn_number))
-                if wants_state
-                else None
-            )
+        resolved = resolve(graph)
+        wants_state = resolved.resolved and any(
+            entry.criterion.kind == KIND_EVIDENCE
+            and entry.criterion.predicate in STATE_PREDICATES
+            for entry in resolved.active
+        )
+        # Not fetched otherwise, and the absence is the point rather than a
+        # saved query: a target of change and manual criteria must have no
+        # dependency on PR14 at all, and the surest way to keep it that way
+        # is for the row never to enter the input set.
+        final_state = (
+            self._final_state_locked(connection, task_id, int(turn_number))
+            if wants_state
+            else None
+        )
         return AssessmentInputs(
             graph=graph,
             evaluation=evaluation,
@@ -4444,6 +4459,53 @@ class TaskStore:
             snapshot = self.turn_criteria(task_id, int(turn_number))
             record = self.evaluation(task_id, int(turn_number))
         return turn_open, snapshot, record
+
+    def turn_audit_inputs(self, task_id: str, turn_number: int):
+        """PR8's criteria and evaluation **and** PR21's acceptance inputs, as one view.
+
+        M2K PR22. Returns ``(turn_open, snapshot, record, assessment_inputs)``, or
+        ``None`` when the task has no such turn.
+
+        **Why this exists rather than two service calls.** PR8's assessment read
+        and PR16's current-assessment read are each internally consistent, and
+        calling both would still be wrong. They take the store lock separately, and
+        the PR7 evaluation row is **not** frozen at dispatch — it is written later
+        by a bounded recovery pass. So a recovery landing between the two calls
+        would produce one HTTP response saying ``evaluation: not_recorded`` beside
+        ``acceptance: assessable / met``: two states that never coexisted, in a
+        single envelope a reader would reasonably treat as one moment.
+
+        Both individual reads being correct is not the property that matters. The
+        response is the unit of consistency, so the reads that build it happen
+        under one snapshot — the same argument
+        :meth:`turn_assessment_inputs` makes for criteria and evaluation, applied
+        to the layer that was added on top of it.
+
+        **No new locking.** :meth:`_read_snapshot` takes the store's re-entrant
+        lock and opens one deferred transaction; the nested :meth:`_read` calls
+        below reuse the same cached connection, so they read inside it rather than
+        beside it. Nothing global, nothing to keep in step with the rest of the
+        store.
+
+        Writes nothing, creates nothing, repairs nothing, and never runs an
+        evaluation or an observation. A turn awaiting either is reported as
+        awaiting it.
+        """
+        with self._read_snapshot() as connection:
+            row = connection.execute(
+                "SELECT completed_at FROM task_turns"
+                " WHERE task_id = ? AND turn_number = ?",
+                (task_id, int(turn_number)),
+            ).fetchone()
+            if row is None:
+                return None
+            turn_open = row["completed_at"] is None
+            snapshot = self.turn_criteria(task_id, int(turn_number))
+            record = self.evaluation(task_id, int(turn_number))
+            inputs = self._current_assessment_inputs_locked(
+                connection, task_id, int(turn_number)
+            )
+        return turn_open, snapshot, record, inputs
 
     def turns(self, task_id: str) -> List["TaskTurn"]:
         """Every turn this task has had, oldest first. Bounded by the row limit."""

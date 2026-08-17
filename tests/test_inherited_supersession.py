@@ -1155,15 +1155,59 @@ class NegativeSpaceTests(unittest.TestCase):
                 "lineage", "turn_continuity", "criteria_continuity",
             ):
                 self.assertNotIn(forbidden, text, "%s: %s" % (label, forbidden))
-        for forbidden in ("supersession", "lineage", "continuity", "criterion_ordinal"):
-            self.assertNotIn(forbidden, pwa, forbidden)
+        # M2K PR22's read-only acceptance section names lineage reason codes in
+        # its human phrasings, so this checks for a **control** rather than for
+        # the vocabulary: no declaration editor, no supersession authoring, and
+        # no write of any kind from the panel.
+        raw = (REPO_ROOT / "web" / "tasks.js").read_text(encoding="utf-8")
+        for forbidden in (
+            'method: "POST"', 'method: "PUT"', 'method: "PATCH"',
+            'method: "DELETE"', "/continuity", "supersedes",
+            "predecessor_snapshot", "criterion_ordinal",
+        ):
+            self.assertNotIn(forbidden, raw, forbidden)
+        self.assertNotIn("resolve_active_criteria", pwa)
 
-    def test_the_assessment_response_is_unchanged(self):
-        from cofferdam.workstation.tasks import assessment
+    def test_the_assessment_response_publishes_no_supersession_structure(self):
+        """M2K PR22 added `acceptance`; PR12's supersession model stayed below it.
 
-        text = Path(assessment.__file__).read_text(encoding="utf-8").lower()
-        for forbidden in ("lineage", "continuity", "active_criteria", "supersession"):
-            self.assertNotIn(forbidden, text, forbidden)
+        This banned four words from the module's source, which was right while
+        PR8's response had two sections. PR22 publishes a third that legitimately
+        carries lineage-derived *reason codes*, so the guard moves to the
+        published shape: no active-criteria list, no supersession record, no
+        resolver identity in any key or value the route emits.
+        """
+        from cofferdam.workstation.tasks.acceptance import aggregate
+        from cofferdam.workstation.tasks.assessment import acceptance_view
+        from cofferdam.workstation.tasks.binding import bind
+        from cofferdam.workstation.tasks.lineage import (
+            LineageUnavailable,
+            RESOLVER_VERSION,
+        )
+
+        refusal = bind(
+            LineageUnavailable(
+                task_id="task_01aaaaaaaaaaaaaaaaaaaaaaaa",
+                target_turn_number=2,
+                resolver_version=RESOLVER_VERSION,
+                reason="supersession_target_not_active",
+                at_turn_number=2,
+            ),
+            None,
+            turn_closed=True,
+        )
+        acceptance = acceptance_view(aggregate(refusal))
+        self.assertEqual(
+            "supersession_target_not_active", acceptance["availability_reason"]
+        )
+        for forbidden in ("supersession", "lineage", "continuity",
+                          "active_criteria", "relations", "resolver_version"):
+            self.assertNotIn(forbidden, acceptance)
+        # The only version this section publishes is the aggregator's own.
+        self.assertEqual(
+            {"aggregator_version"},
+            {key for key in acceptance if key.endswith("_version")},
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover
