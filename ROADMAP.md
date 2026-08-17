@@ -731,8 +731,8 @@ downstream reads from.
     bounded recovery. Internal only: no route, no bridge Action, no PWA control, PR8 unchanged,
     `EVALUATOR_VERSION` unchanged, **no aggregate and no `AGGREGATOR_VERSION`**.
     D-2026-08-17-5 and D-2026-08-17-6.
-  - **PR17 — the criteria vocabulary v11 migration foundation.** *Implemented on
-    `m2k-pr17-criteria-v11`, not merged and not deployed.* Does one thing: makes `path_exists` and
+  - **PR17 — the criteria vocabulary v11 migration foundation.** *Merged as `c164383` (#62),
+    **not deployed**.* Does one thing: makes `path_exists` and
     `path_absent` **representable**, without evaluating them. **The first destructive-shape migration
     this project has performed** — SQLite has no `ALTER TABLE ... DROP CONSTRAINT` and the predicate
     list lives in a `CHECK`, both verified rather than assumed, so `task_turn_criterion_items` is
@@ -754,6 +754,36 @@ downstream reads from.
     rather than interpretation. **No conversion, ever**, and no version moved but the schema.
     Rollback is a **pair**, and stops being lossless the moment a v11-only criterion is written.
     D-2026-08-17-7 and D-2026-08-17-8.
+  - **PR18 — the final-state current-assessment domain.** *Implemented on
+    `m2k-pr18-final-state-assessment`, not merged and not deployed.* Teaches PR16's derived layer to
+    answer PR17's two state predicates from PR14's immutable observations, and nothing else. **No
+    schema change (v11 stands)**, no migration, no evaluator change, no observer change, no public
+    surface, no aggregate. **`CURRENT_ASSESSMENT_VERSION` moves 1 → 2** — the only version that moves
+    — because a criterion V1 answered `unsupported_predicate` can now be `met` or `not_met`, which is
+    a change in meaning rather than shape; the domain vocabulary becomes `turn_change` /
+    **`final_state`** / `not_applicable`, with `named_check` still unimplemented. At target turn N,
+    `path_exists(P)` asks whether **any** filesystem object existed at P at N's persisted boundary:
+    `present` → `met`, `absent` → `not_met`, `unavailable` → `unverified`; `path_absent` is the
+    mirror. **Kind never changes existence** — a file, a directory, a symlink and a *broken* symlink
+    are all present, and no kind predicate was added. **State criteria are re-assessed at every
+    target and never carried forward**, so one criterion legitimately reads `met`, `not_met`, `met`
+    as a file is created, deleted and restored — the opposite of an inherited *change* criterion, and
+    consistent with the same rule, because a state question is about *this* boundary. **PR7's
+    `unsupported_capability` row stays history and is not authority**, pinned by varying the stored
+    result across all three values with no movement in the answer. **The two domains never touch**:
+    a `path_operation(P, created)` PR7 decided `met` stays `met` even when final state says P is
+    gone. **Input dependency is domain-conditional in both directions** — a PR7 record is required
+    only for same-turn change criteria, an observation only for state criteria — so a state-only
+    target resolves with no evaluation and a change-only target has no PR14 dependency at all.
+    **Semantic limitation and structural corruption stay apart**: an `unavailable` path or
+    observation and a missing row are `unverified` with closed reasons and never `not_met`, while an
+    unknown observer version, an identity or count mismatch, a fingerprint that does not verify, a
+    **lineage-fingerprint disagreement** or a missing expected path fail the whole set closed with
+    nothing repaired. `incomplete` keeps per-path authority (PR15). PR14's stored
+    `observation_fingerprint` is now **verified rather than trusted**, by a verifier added at PR14's
+    own layer so one algorithm remains. Read from **one pinned snapshot** with PR11's resolver moved
+    inside it, because deciding whether an observation is needed requires the active set.
+    D-2026-08-17-9, D-2026-08-17-10 and D-2026-08-17-11.
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**

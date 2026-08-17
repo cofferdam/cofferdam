@@ -3843,11 +3843,10 @@ class TaskStore:
     ) -> "AssessmentInputs":
         """Every immutable row one current assessment may look at. **A read.**
 
-        M2K PR16. Returns the closed input set :func:`~.binding.bind` runs on —
-        after :func:`~.lineage.resolve` has turned the graph into an active set —
-        and decides nothing itself. Keeping the fetch out of the judgement is
-        what makes "the same stored rows always assess the same way" checkable
-        rather than promised.
+        M2K PR16, extended by PR18. Returns the closed input set
+        :func:`~.binding.bind` runs on and decides nothing itself. Keeping the
+        fetch out of the judgement is what makes "the same stored rows always
+        assess the same way" checkable rather than promised.
 
         **One coherent snapshot, and here it matters more than it did for PR11.**
         A lineage read walks immutable rows, so mixing database states could only
@@ -3857,13 +3856,26 @@ class TaskStore:
         and an autocommit evaluation read, an evaluation can legitimately appear —
         and an answer assembled from an active set read before it and an
         evaluation read after it would describe a database state that never
-        existed. :meth:`_read_snapshot` pins one view for all of it.
+        existed. :meth:`_read_snapshot` pins one view for all of it, final-state
+        rows and their path children included.
 
-        Writes nothing, creates nothing, repairs nothing, and never runs an
-        evaluation. A turn awaiting one is reported as awaiting one.
+        **The resolve happens in here** (M2K PR18), which is the one structural
+        change. PR18 must not read a final-state observation unless some active
+        criterion asks a state question, and *which criteria are active* is
+        precisely what the resolver answers — so the decision to fetch depends on
+        the resolve, and a resolve taken outside the snapshot would decide what
+        to read from one database state and then read it from another. PR11's own
+        pure resolver is called, never a re-implementation, and the result is
+        carried on the inputs so nothing resolves twice.
+
+        Writes nothing, creates nothing, repairs nothing, runs no evaluation and
+        observes no path. A turn awaiting either record is reported as awaiting
+        it.
         """
-        from .binding import AssessmentInputs
+        from .binding import AssessmentInputs, STATE_PREDICATES
+        from .criteria import KIND_EVIDENCE
         from .evaluation import EVALUATOR_VERSION
+        from .lineage import resolve
 
         with self._read_snapshot() as connection:
             turn = connection.execute(
@@ -3885,8 +3897,28 @@ class TaskStore:
                 evaluation = self._evaluation_locked(
                     connection, task_id, int(turn_number), evaluator_version=None
                 )
+
+            resolved = resolve(graph)
+            wants_state = resolved.resolved and any(
+                entry.criterion.kind == KIND_EVIDENCE
+                and entry.criterion.predicate in STATE_PREDICATES
+                for entry in resolved.active
+            )
+            # Not fetched otherwise, and the absence is the point rather than a
+            # saved query: a target of change and manual criteria must have no
+            # dependency on PR14 at all, and the surest way to keep it that way
+            # is for the row never to enter the input set.
+            final_state = (
+                self._final_state_locked(connection, task_id, int(turn_number))
+                if wants_state
+                else None
+            )
         return AssessmentInputs(
-            graph=graph, evaluation=evaluation, turn_closed=closed
+            graph=graph,
+            evaluation=evaluation,
+            turn_closed=closed,
+            resolved=resolved,
+            final_state=final_state,
         )
 
     # -- effective post-worker path state (schema v10) ------------------------
@@ -4014,30 +4046,47 @@ class TaskStore:
         Internal. There is no route, no bridge Action and no PWA control that
         reaches this in PR14 — a read surface is its own review.
         """
+        with self._read() as connection:
+            return self._final_state_locked(connection, task_id, int(turn_number))
+
+    def _final_state_locked(
+        self, connection: sqlite3.Connection, task_id: str, turn_number: int
+    ) -> "FinalStateObservation":
+        """:meth:`turn_final_state` against a connection the caller already holds.
+
+        Extracted by M2K PR18 so the current-assessment read can take the parent
+        and its path children inside its own :meth:`_read_snapshot` transaction
+        rather than in a second autocommit read. One query pair, one shape, one
+        place to get the ordinal ordering right — a second implementation of this
+        read is how the two would eventually disagree about what a stored
+        observation says.
+
+        Reads two tables and returns them. Opens no repository, runs no Git,
+        stats no path, and calls no observer.
+        """
         from .finalstate import (
             OBSERVATION_LEGACY_UNKNOWN,
             FinalStateObservation,
             PathObservation,
         )
 
-        with self._read() as connection:
-            row = connection.execute(
-                "SELECT * FROM task_turn_final_state"
-                " WHERE task_id = ? AND turn_number = ?",
-                (task_id, int(turn_number)),
-            ).fetchone()
-            if row is None:
-                return FinalStateObservation(
-                    task_id=task_id,
-                    turn_number=int(turn_number),
-                    state=OBSERVATION_LEGACY_UNKNOWN,
-                )
-            # ORDER BY the stored ordinal, never by rowid.
-            items = connection.execute(
-                "SELECT * FROM task_turn_final_state_paths"
-                " WHERE task_id = ? AND turn_number = ? ORDER BY ordinal ASC",
-                (task_id, int(turn_number)),
-            ).fetchall()
+        row = connection.execute(
+            "SELECT * FROM task_turn_final_state"
+            " WHERE task_id = ? AND turn_number = ?",
+            (task_id, int(turn_number)),
+        ).fetchone()
+        if row is None:
+            return FinalStateObservation(
+                task_id=task_id,
+                turn_number=int(turn_number),
+                state=OBSERVATION_LEGACY_UNKNOWN,
+            )
+        # ORDER BY the stored ordinal, never by rowid.
+        items = connection.execute(
+            "SELECT * FROM task_turn_final_state_paths"
+            " WHERE task_id = ? AND turn_number = ? ORDER BY ordinal ASC",
+            (task_id, int(turn_number)),
+        ).fetchall()
         return FinalStateObservation(
             task_id=row["task_id"],
             turn_number=int(row["turn_number"]),

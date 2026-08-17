@@ -307,7 +307,7 @@ class CurrentAssessmentEndToEnd(unittest.TestCase):
         self.assertEqual(settled, self.digest())
 
         # 18. No version around it moved.
-        self.assertEqual(1, CURRENT_ASSESSMENT_VERSION)
+        self.assertEqual(2, CURRENT_ASSESSMENT_VERSION)
         self.assertEqual(1, EVALUATOR_VERSION)
         self.assertEqual(3, ASSEMBLER_VERSION)
         self.assertEqual(1, RESOLVER_VERSION)
@@ -457,7 +457,15 @@ class NegativeSpaceTests(unittest.TestCase):
         for forbidden in ("run", "Popen", "system", "exec", "eval", "open", "connect"):
             self.assertNotIn(forbidden, called)
 
-    def test_the_binder_does_not_import_final_state(self):
+    def test_the_binder_imports_no_module_that_touches_the_world(self):
+        """M2K PR18 legitimises `finalstate`; it legitimises nothing else.
+
+        PR16 asserted the binder imported no final-state module at all. That
+        assertion has been overtaken rather than weakened: PR18 reads stored
+        observations, so the module is allowed and the store, the service, the
+        evaluator, the observers and every stdlib module that can reach a disk,
+        a clock or a network are still not.
+        """
         path = REPO_ROOT / "cofferdam" / "workstation" / "tasks" / "binding.py"
         tree = ast.parse(path.read_text(encoding="utf-8"))
         modules = set()
@@ -466,8 +474,11 @@ class NegativeSpaceTests(unittest.TestCase):
                 modules.add(node.module)
             elif isinstance(node, ast.Import):
                 modules.update(alias.name for alias in node.names)
-        self.assertNotIn("finalstate", modules)
-        self.assertNotIn(".finalstate", modules)
+        self.assertEqual(
+            {"__future__", "dataclasses", "typing", "hashlib", "criteria",
+             "evaluation", "finalstate"},
+            modules,
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

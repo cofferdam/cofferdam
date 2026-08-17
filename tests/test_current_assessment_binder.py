@@ -20,12 +20,17 @@ from cofferdam.workstation.tasks.binding import (
     ASSESSMENT_RESOLVED,
     ASSESSMENT_UNAVAILABLE,
     CURRENT_ASSESSMENT_VERSION,
+    DOMAIN_FINAL_STATE,
     DOMAIN_NOT_APPLICABLE,
     DOMAIN_TURN_CHANGE,
     EVIDENCE_DOMAINS,
     REASONS_FOR_RESULT,
     REASON_EVALUATION_INCONSISTENT,
     REASON_EVALUATION_NOT_RECORDED,
+    REASON_FINAL_STATE_NOT_RECORDED,
+    REASON_FINAL_STATE_OBSERVED,
+    REASON_FINAL_STATE_PATH_UNAVAILABLE,
+    REASON_FINAL_STATE_UNAVAILABLE,
     REASON_INHERITED_CHANGE_NOT_CURRENT,
     REASON_LINEAGE_UNAVAILABLE,
     REASON_MANUAL_AUTHORITY,
@@ -249,10 +254,18 @@ class ManualTests(unittest.TestCase):
 
 
 class UnsupportedPredicateTests(unittest.TestCase):
+    """A predicate no version of this binder knows.
+
+    `path_exists` used to stand in here and cannot any more — M2K PR18 decides
+    it. The stand-in is a name this build genuinely does not have, which is the
+    case the reason exists for: a criterion authored by a newer Cofferdam must
+    get an honest answer from an older one rather than a crash or a guess.
+    """
+
     def test_an_unknown_predicate_is_unverified_rather_than_an_exception(self):
         """Total, like PR7's evaluator, so a newer build's criterion is answerable."""
         item = AcceptanceCriterion(
-            ordinal=1, kind="evidence", predicate="path_exists", path="a.py"
+            ordinal=1, kind="evidence", predicate="path_is_executable", path="a.py"
         )
         assessment = bind(
             resolved(1, [active("criterion_0001", 1, item)]), None, turn_closed=True
@@ -263,7 +276,7 @@ class UnsupportedPredicateTests(unittest.TestCase):
 
     def test_an_unknown_predicate_needs_no_evaluation(self):
         item = AcceptanceCriterion(
-            ordinal=1, kind="evidence", predicate="path_exists", path="a.py"
+            ordinal=1, kind="evidence", predicate="path_is_executable", path="a.py"
         )
         answer = bind(
             resolved(1, [active("criterion_0001", 1, item)]), None, turn_closed=True
@@ -562,7 +575,8 @@ class FingerprintTests(unittest.TestCase):
             evidence_fingerprint="d" * 64,
         )
         self.assertNotEqual(one, "0" * 64)
-        self.assertEqual(1, CURRENT_ASSESSMENT_VERSION)
+        # M2K PR18: the binding semantics understand a second evidence domain.
+        self.assertEqual(2, CURRENT_ASSESSMENT_VERSION)
 
     def test_the_lineage_fingerprint_moves_the_set_fingerprint(self):
         self.assertNotEqual(
@@ -663,11 +677,25 @@ class FingerprintTests(unittest.TestCase):
 
 class VocabularyTests(unittest.TestCase):
     def test_only_a_bound_judgement_may_be_met_or_not_met(self):
-        """This version has one machine domain; nothing else can decide either way."""
-        self.assertEqual((REASON_TURN_CHANGE_EVALUATED,), REASONS_FOR_RESULT[RESULT_MET])
-        self.assertEqual(
-            (REASON_TURN_CHANGE_EVALUATED,), REASONS_FOR_RESULT[RESULT_NOT_MET]
-        )
+        """Two machine domains now; every other reason is `unverified`-only.
+
+        The list is asserted exactly rather than by membership. A limitation
+        reason quietly gaining permission to be `met` is the shape of mistake
+        that turns "we could not look" into "it is there".
+        """
+        for outcome in (RESULT_MET, RESULT_NOT_MET):
+            self.assertEqual(
+                (REASON_TURN_CHANGE_EVALUATED, REASON_FINAL_STATE_OBSERVED),
+                REASONS_FOR_RESULT[outcome],
+            )
+        for limitation in (
+            REASON_FINAL_STATE_UNAVAILABLE,
+            REASON_FINAL_STATE_NOT_RECORDED,
+            REASON_FINAL_STATE_PATH_UNAVAILABLE,
+        ):
+            self.assertNotIn(limitation, REASONS_FOR_RESULT[RESULT_MET])
+            self.assertNotIn(limitation, REASONS_FOR_RESULT[RESULT_NOT_MET])
+            self.assertIn(limitation, REASONS_FOR_RESULT[RESULT_UNVERIFIED])
 
     def test_every_produced_reason_is_valid_for_its_result(self):
         answers = [
@@ -697,8 +725,13 @@ class VocabularyTests(unittest.TestCase):
                     assessment.reason, REASONS_FOR_RESULT[assessment.result]
                 )
 
-    def test_the_domain_vocabulary_is_closed_and_v1_sized(self):
-        self.assertEqual((DOMAIN_TURN_CHANGE, DOMAIN_NOT_APPLICABLE), EVIDENCE_DOMAINS)
+    def test_the_domain_vocabulary_is_closed_and_v2_sized(self):
+        """M2K PR18 added exactly one domain. `named_check` is still not here."""
+        self.assertEqual(
+            (DOMAIN_TURN_CHANGE, DOMAIN_FINAL_STATE, DOMAIN_NOT_APPLICABLE),
+            EVIDENCE_DOMAINS,
+        )
+        self.assertNotIn("named_check", EVIDENCE_DOMAINS)
 
     def test_no_confidence_or_score_field_exists(self):
         assessment = bind(
@@ -738,10 +771,38 @@ class PurityTests(unittest.TestCase):
 
     def test_it_does_not_import_the_store_the_service_or_any_observer(self):
         forbidden = {
-            "store", "service", "TaskStore", "TaskService", "finalstate",
+            "store", "service", "TaskStore", "TaskService",
             "observe", "gitbaseline", "gitrange", "evidence", "claims",
         }
         self.assertEqual(set(), self.imported() & forbidden)
+
+    def test_it_takes_only_values_and_a_pure_verifier_from_final_state(self):
+        """M2K PR18: the vocabulary and the hash check, and nothing that looks.
+
+        PR16 forbade the `finalstate` import outright because it had no business
+        reading an observation. PR18 does, so the rule moves down a level rather
+        than away: the binder may name PR14's *constants and pure functions* and
+        may not name anything that touches a filesystem. Asserted as an exact
+        allowlist, because a permissive check here would let `observe_path`
+        arrive one day with no test noticing.
+        """
+        allowed = {
+            "FINAL_STATE_OBSERVER_VERSION", "OBSERVATION_COMPLETE",
+            "OBSERVATION_INCOMPLETE", "OBSERVATION_UNAVAILABLE", "PATH_ABSENT",
+            "PATH_PRESENT", "PATH_UNAVAILABLE", "STORED_OBSERVATION_STATES",
+            "verify_final_state_fingerprint", "finalstate",
+        }
+        taken = set()
+        for node in ast.walk(self.source()):
+            if isinstance(node, ast.ImportFrom) and node.module == ".finalstate".lstrip("."):
+                taken.update(alias.name for alias in node.names)
+        self.assertTrue(taken)
+        self.assertEqual(set(), taken - allowed)
+        for observer in (
+            "observe_path", "observe_paths", "target_paths",
+            "FinalStateObservation", "PathObservation", "final_state_fingerprint",
+        ):
+            self.assertNotIn(observer, taken)
 
     def test_it_never_calls_the_evaluator(self):
         """It reads stored results; it does not decide criteria."""
@@ -755,26 +816,28 @@ class PurityTests(unittest.TestCase):
         for forbidden in ("evaluate", "evaluate_criterion", "observe_path", "resolve"):
             self.assertNotIn(forbidden, called)
 
-    def test_it_does_not_consume_final_state_observations(self):
-        """PR14 exists on main and PR16 must not look at it."""
-        text = (
-            REPO_ROOT / "cofferdam" / "workstation" / "tasks" / "binding.py"
-        ).read_text(encoding="utf-8")
+    def test_it_reads_stored_observations_and_never_takes_one(self):
+        """"Use FinalStateObservation" means the stored row, never a fresh look.
+
+        The distinction PR18 rests on. Consuming an immutable observation as data
+        is the whole feature; going and asking the filesystem what is there now
+        would make historical answers drift with the repository and turn a read
+        into a probe of somebody's disk.
+        """
         tree = self.source()
         referenced = {
             node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
         } | {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
         for forbidden in (
-            "FinalStateObservation",
             "turn_final_state",
+            "record_final_state",
+            "observe_path",
             "observe_paths",
-            "PATH_PRESENT",
-            "PATH_ABSENT",
+            "target_paths",
+            "lstat",
+            "stat",
         ):
             self.assertNotIn(forbidden, referenced)
-        # The module may *discuss* final state in prose; it may not use it.
-        self.assertNotIn("from .finalstate", text)
-        self.assertNotIn("import finalstate", text)
 
 
 if __name__ == "__main__":  # pragma: no cover

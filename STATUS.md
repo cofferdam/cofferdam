@@ -797,10 +797,82 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2K PR18 — the final-state current-assessment domain
+
+On `m2k-pr18-final-state-assessment`, from the merged `c164383`. **Implemented on a branch, not
+merged and not deployed.**
+
+Teaches PR16's derived assessment layer to answer PR17's two state predicates from PR14's immutable
+observations, and nothing else. No schema change — **v11 stands** — no migration, no evaluator
+change, no observer change, no public surface, no aggregate.
+
+**`CURRENT_ASSESSMENT_VERSION` moves 1 → 2**, and it is the only version that moves. The shape of an
+assessment did not change; its meaning did. A criterion V1 answered `unverified` /
+`unsupported_predicate` can now be `met` or `not_met`, and the closed domain vocabulary gained a
+member — so a V1 and a V2 fingerprint of the same criterion must not collide.
+
+**The evidence-domain vocabulary is now `turn_change` / `final_state` / `not_applicable`.**
+`named_check` is named and not implemented.
+
+**Exact semantics.** At target turn N, `path_exists(P)` asks whether *any* filesystem object existed
+at P at N's persisted boundary: `present` → `met`, `absent` → `not_met`, `unavailable` →
+`unverified`. `path_absent(P)` is the mirror. Kind never changes the answer — a file, a directory, a
+symlink and a **broken** symlink are all `present`, because PR14 records the link object itself
+without following it and this does not follow it either. No `path_is_file`/`path_is_directory`/
+`path_is_symlink` predicate was added.
+
+**State criteria are re-assessed at every target and never carried forward.** An inherited *change*
+criterion is `unverified` because its question is about a turn that ended; an inherited *state*
+criterion's question is about *this* boundary, so turn N's own observation answers it. The same
+criterion legitimately reads `met`, `not_met`, `met` across three turns as a file is created, deleted
+and restored — three derived facts with three distinct fingerprints, none persisted.
+
+**PR7's state row is history, not authority.** PR7 still records `path_exists` as `unverified` /
+`unsupported_capability`, which is a correct permanent statement about what the turn-change evaluator
+could establish. PR18 does not read it for a state criterion, rewrite it or delete it — pinned
+mechanically by varying the stored PR7 result across `met`, `not_met` and `unverified` and showing
+the state answer does not move.
+
+**The two domains do not touch, in either direction.** A `path_operation(foo.py, created)` criterion
+PR7 decided `met` stays `met` even when final state says `foo.py` is gone, and an authored
+`path_exists(foo.py)` at the same turn is `not_met`. Surprising side by side and correct: they are
+two different questions, and blurring them is D-2026-08-17-4's forbidden conversion.
+
+**Input dependency is domain-conditional in both directions.** A PR7 record is required exactly when
+some active criterion originated at the target turn *and* is a change predicate; an observation is
+required exactly when some active criterion is a state predicate, at any origin. A state-only target
+resolves with no evaluation; a change-and-manual target has no PR14 dependency at all, proven by
+handing it a structurally broken observation and getting an identical fingerprint.
+
+**Semantic limitation and structural corruption stay apart.** An `unavailable` path row, an
+`unavailable` observation and a turn with no observation are things Cofferdam observed and stands
+behind: `unverified` with a closed reason, never `not_met`, and the set still resolves. An unknown
+observer version, a wrong task/turn identity, a `path_count` mismatch, a duplicated path, fields that
+do not hash to the stored fingerprint, a lineage fingerprint that disagrees with the active set
+resolved now, or an expected path missing from a claimed scope mean the row is not what the service
+writes — each fails the **whole set** closed, and nothing is repaired.
+
+**`incomplete` is not a blanket refusal.** PR15 decided per-path authority survives, so a path safely
+recorded `present` or `absent` in a partial observation still decides its criterion.
+
+**The stored fingerprint is now verified rather than trusted.** PR14 wrote `observation_fingerprint`
+and nothing read it back. PR18 adds `verify_final_state_fingerprint` **at PR14's layer**, calling
+PR14's own construction, so there remains exactly one fingerprint algorithm; a raw-SQL edit to a path
+state, kind, reason or HEAD anchor is now detectable.
+
+**One coherent read snapshot, and PR11's resolver moved inside it**, because deciding *whether* a
+final-state row is needed requires the active set and deciding from one database state then reading
+from another is the split the snapshot exists to prevent.
+
+**Still not an aggregate.** No verdict, no outcome, no `met` count, no `AGGREGATOR_VERSION`, no
+route, no bridge Action, no PWA control, and PR8's assessment response is unchanged.
+D-2026-08-17-9, D-2026-08-17-10 and D-2026-08-17-11.
+
 ### M2K PR17 — the criteria vocabulary v11 migration foundation
 
-On `m2k-pr17-criteria-v11`, from the merged `c1d6f1d`. **Implemented on a branch, not merged and not
-deployed.**
+**Merged as `c164383` (#62) and deliberately NOT deployed.** Production remains on the PR10 runtime —
+workstation and Actions bridge both from **slot A at `1efd49b`**, live schema **v9**. The record
+below was written while PR17 was on `m2k-pr17-criteria-v11`, from the merged `c1d6f1d`.
 
 Does one thing: makes `path_exists` and `path_absent` **representable**. It does not evaluate them.
 
@@ -1100,22 +1172,24 @@ actually running — not PR11 or PR12, which are merged and undeployed.
 M2K is **in progress**: PR1 through PR8 are merged and deployed; PR9 is merged (`b2314f0`, #54) and
 needed no deployment because it changed only documentation; PR10 is merged (`1efd49b`, #55) and
 deployed to slot A on schema v9; PR11 (`3bb9a5b`, #56), PR12 (`2dc4177`, #57), PR13 (`8cd8ba3`, #58),
-PR14 (`064fe51`, #59), PR15 (`12e64cd`, #60) and PR16 (`c1d6f1d`, #61) are merged and **intentionally
-not deployed**; PR17 is on a branch. See *In progress* above for PR17.
+PR14 (`064fe51`, #59), PR15 (`12e64cd`, #60), PR16 (`c1d6f1d`, #61) and PR17 (`c164383`, #62) are
+merged and **intentionally not deployed**; PR18 is on a branch. See *In progress* above for PR18.
 
-**`main` is now schema v10; production is still schema v9**, and that gap is the deployment decision
+**`main` is now schema v11; production is still schema v9**, and that gap is the deployment decision
 rather than a lag. PR14 is the change that turns this batch from a slot flip into a schema move, so
-deploying PR11–PR17 is **Tier 2**: a verified pre-v10 backup taken with SQLite's online backup API, a
+deploying PR11–PR18 is **Tier 2**: a verified pre-v9 backup taken with SQLite's online backup API, a
 migration rehearsal, the old-runtime refusal check that PR14 already proves in CI, and an honest
 rollback **pair** — the slot *and* the restored snapshot — because a flip alone cannot walk a schema
-backwards. PR15 and PR16 add nothing to that cost: PR15 is documentation, and PR16 is derived read
-logic with no schema of its own and no caller yet. **PR17 raises it**: it takes the database to v11
-through the first destructive-shape migration here, so the eventual deployment rehearses that rebuild
-on a copy of the real database and the rollback backup must be taken **before** it runs.
+backwards. PR15, PR16 and PR18 add nothing to that cost: PR15 is documentation, and PR16 and PR18 are
+derived read logic with no schema of their own and no caller yet. **PR17 raises it**: it takes the
+database to v11 through the first destructive-shape migration here, so the eventual deployment
+rehearses that rebuild on a copy of the real database and the rollback backup must be taken **before**
+it runs — and once a `path_exists` criterion has been written to v11, restoring that backup destroys
+requirements a user actually stated rather than being a clean downgrade.
 
 **A/B remains deployment machinery, not feature-development machinery.** Work is developed in
 isolated feature worktrees and merged to `main`; a slot is never a workbench; and a deployment happens
-when a running service actually needs the change. Six merged PRs sitting ahead of production is the
+when a running service actually needs the change. Seven merged PRs sitting ahead of production is the
 policy working, not drift.
 
 ### M2K PR13 — cross-turn acceptance evidence-binding doctrine (documentation only)

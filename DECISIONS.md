@@ -3329,6 +3329,103 @@ downgrade. **After** a `path_exists` or `path_absent` criterion has been written
 destroys requirements a user actually stated — the old schema cannot represent them, so there is no
 lossless path. Those two cases must never both be described as "simple rollback".
 
+## D-2026-08-17-9 — `final_state` is a second evidence domain, and the assessment version moves with it (EFE DECISION, ACTIVE)
+
+**Decision.** PR18 teaches the derived current-assessment layer to answer `path_exists` and
+`path_absent` from the target turn's immutable `FinalStateObservation`, and moves
+`CURRENT_ASSESSMENT_VERSION` from **1 to 2**.
+
+**The version had to move, and the reason is not cosmetic.** The shape of an assessment did not
+change; its *meaning* did. A criterion V1 answered `unverified` / `unsupported_predicate` can now be
+`met` or `not_met`, and the closed domain vocabulary gained a member. That is exactly what this
+number owns — *active criterion + evidence domain → current result at a target turn* — so a V1
+fingerprint and a V2 fingerprint of the same criterion must not collide. They are answers to the same
+question as two different builds understood it, and a reader must be able to tell which.
+
+**Nothing else moved.** `SCHEMA_VERSION` stays 11 with no migration, `EVALUATOR_VERSION` stays 1,
+`FINAL_STATE_OBSERVER_VERSION` stays 1, `RESOLVER_VERSION`, `CONTINUITY_MODEL_VERSION`,
+`CRITERIA_MODEL_VERSION` and `ASSEMBLER_VERSION` are untouched, and there is no `AGGREGATOR_VERSION`.
+PR18 is derived read semantics: no table, no write path, no recovery path.
+
+**The domain vocabulary is now `turn_change` / `final_state` / `not_applicable`, and it is still
+closed.** `named_check` is named and not implemented. Every assessment binds the domain it used into
+its fingerprint, which is what stops a later domain from silently reinterpreting an older answer.
+
+**PR7's state-predicate row stays and is not authority.** PR7 records `path_exists` as `unverified` /
+`unsupported_capability`. That is a correct, permanent statement about what the turn-change evaluator
+could establish, and PR18 neither reads it for a state criterion nor rewrites it. Pinned mechanically
+rather than argued: the stored PR7 result is varied across `met`, `not_met` and `unverified`, and the
+state answer does not move. This is the concrete payoff of D-2026-08-17-2 keeping the two layers
+apart.
+
+## D-2026-08-17-10 — A state criterion is answered at its target turn, and never carried forward (EFE DECISION, ACTIVE)
+
+**Decision.** A `path_exists` or `path_absent` criterion is decided by the **target** turn's stored
+observation, whether it originated at that turn or five turns earlier. No previous target's answer is
+reused.
+
+**Why this is the opposite of D-2026-08-17-5, and consistent with it.** An inherited *change*
+criterion is `unverified` because its question — *what did the worker do during turn 1* — is not a
+question about turn 4, and no evidence answers it there. An inherited *state* criterion's question —
+*is `foo.py` there* — is exactly as meaningful at turn 4, and turn 4's own boundary answers it. The
+rule was never "inherited means unknown"; it was always "evidence must match the criterion's
+semantics", and state predicates are the first criteria whose semantics reach forward.
+
+So the same criterion legitimately reads `met` at turn 1, `not_met` at turn 2 after a deletion, and
+`met` again at turn 3 after a repair. Three derived facts about three boundaries, with three distinct
+fingerprints, none persisted and all recomputable forever from immutable rows.
+
+**Object kind does not enter existence.** *Any* filesystem object counts as `present`: a file, a
+directory, a symlink, a **broken** symlink, a socket. PR14 records the link object itself without
+following it and PR18 does not follow it either, so `path_exists(link)` is `met` and
+`path_absent(link)` is `not_met` for a link pointing nowhere. No `path_is_file`, `path_is_directory`
+or `path_is_symlink` predicate was added.
+
+**A missing path row is never `absent`.** PR14 gives every target an explicit child row and stores an
+unobservable path as `unavailable` with a reason, so absence of a row means the observation does not
+describe the scope it claims — a structural defect, not a missing file.
+
+## D-2026-08-17-11 — Evidence is required only by the criteria that consume it, and corruption fails the set closed (EFE DECISION, ACTIVE)
+
+**Decision.** Two rules that had to be settled together, because each is the other's failure mode.
+
+**Input dependency is domain-conditional, in both directions.** A PR7 `EvaluationRecord` is required
+exactly when some active criterion originated at the target turn *and* is a change predicate — never
+merely because a target turn exists. A `FinalStateObservation` is required exactly when some active
+criterion is a state predicate, at any origin — never merely because PR14 recorded one. A target
+whose active set is one `path_exists` resolves with no evaluation at all; a target of change and
+manual criteria has no dependency on PR14 whatsoever, proven by handing it a structurally broken
+observation and getting an identical fingerprint. Making unused evidence an authority dependency
+would let a lag in one pipeline stage block answers that never needed it.
+
+**Semantic limitation and structural corruption are separated, and must stay separated.** A path row
+recorded `unavailable`, an observation legitimately `unavailable`, and a turn with no observation at
+all are things Cofferdam *observed and stands behind*: each maps its criterion to `unverified` with a
+closed reason, never to `not_met`, and the set still resolves. An unknown observer version, a wrong
+task or turn identity, a `path_count` that disagrees with its children, a duplicated path, an
+observation whose fields do not hash to its stored fingerprint, a lineage fingerprint that disagrees
+with the active set resolved now, or an expected path missing from a claimed scope mean the row **is
+not what the service writes** — and each fails the whole set closed, with nothing repaired.
+Laundering the second kind into the first would file tampering as a routine limitation.
+
+**Lineage agreement is a set-level gate, not a per-criterion one.** PR14 chose its targets from the
+active lineage at capture time and PR11 resolves it again at read time; a disagreement means the
+observation's declared scope belongs to a different requirement set, so no individual path row from
+it may be consumed however right its name looks. A scope-identity mismatch is not a fact about any
+single criterion.
+
+**Stored fingerprints are verified, not trusted.** PR14 wrote `observation_fingerprint` and nothing
+read it back, so a raw-SQL edit to a path state, kind or reason would have been consumed as authority
+on the strength of a string nobody recomputed. PR18 adds a verifier **at PR14's layer**, calling
+PR14's own `final_state_fingerprint`, so there remains exactly one fingerprint algorithm rather than
+two that eventually disagree.
+
+**One coherent read snapshot, and the resolver moved inside it.** Deciding whether a final-state row
+is needed requires the resolved active set, so PR11's resolver now runs inside the store's deferred
+read transaction alongside the lifecycle, the lineage graph, the optional evaluation and the optional
+observation. Deciding what to read from one database state and then reading it from another is
+precisely the split the snapshot exists to prevent.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

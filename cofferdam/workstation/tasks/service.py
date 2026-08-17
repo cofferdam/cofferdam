@@ -1927,26 +1927,35 @@ class TaskService:
     def current_criterion_assessment(self, task_id: object, turn_number: object):
         """What can honestly be said about each active criterion at one turn.
 
-        M2K PR16, and the layer PR13 identified and PR15 designed. Returns a
+        M2K PR16, extended by PR18. Returns a
         :class:`~.binding.CurrentAssessment` — never ``None``, never a partial
         set, and never an exception for stored data it dislikes.
 
         **Three components, and each stays in its own job.** The store fetches
-        every immutable input in one pinned read snapshot; PR11's resolver — the
-        same one, not a copy — turns the graph into an active set; PR16's pure
-        binder decides what each active criterion can honestly be said to be.
-        Nothing here evaluates anything.
+        every immutable input in one pinned read snapshot, resolving the active
+        set inside it with PR11's own resolver so it knows which evidence that
+        set actually needs; the pure binder decides what each active criterion
+        can honestly be said to be. Nothing here evaluates anything and nothing
+        here observes anything.
 
         **The rule it enforces.** A change criterion that originated at this turn
         binds to PR7's stored judgement for this turn, read and never recomputed.
         A change criterion inherited from an earlier turn is ``unverified``,
         because it asks what a worker did at *its* turn and no evidence in this
-        build answers that here — the old result is not carried forward, no
-        re-evaluation is attempted, and PR14's final state is not consulted.
-        Manual is ``unverified`` wherever it came from.
+        build answers that here — the old result is not carried forward and no
+        re-evaluation is attempted. A **state** criterion, inherited or not, is
+        decided by the *target* turn's stored PR14 observation: its question is
+        about a boundary rather than about a turn's work, so it is re-asked at
+        every target and never carried forward either. Manual is ``unverified``
+        wherever it came from.
+
+        **The two domains do not touch.** Final state never decides a change
+        criterion, even when it plainly contradicts one, and PR7's
+        ``unsupported_capability`` row for a state predicate is never authority
+        over the observation. Both are true statements about different questions.
 
         **Derived, never stored.** Every input is immutable and versioned, so the
-        answer is recomputed rather than cached. Schema stays at v10, no table is
+        answer is recomputed rather than cached. Schema stays at v11, no table is
         added, and there is no write path or recovery path to get wrong.
 
         **Internal**, exactly as PR6's criteria, PR10's continuity, PR11's active
@@ -1962,14 +1971,14 @@ class TaskService:
         asked. Calling it a thousand times leaves the database byte-identical.
         """
         from .binding import bind
-        from .lineage import resolve
 
         row = self.get_task(task_id)
         inputs = self._store.current_assessment_inputs(row.task_id, int(turn_number))
         return bind(
-            resolve(inputs.graph),
+            inputs.resolved,
             inputs.evaluation,
             turn_closed=inputs.turn_closed,
+            final_state=inputs.final_state,
         )
 
     def turn_assessment(self, task_id: object, turn_number: object):
