@@ -2790,6 +2790,202 @@ No verdict, no outcome, no `met` count, no `AGGREGATOR_VERSION`, no route, no
 bridge Action, no PWA control, and PR8's assessment response is unchanged.
 `TaskService.current_criterion_assessment` remains internal.
 
+## Acceptance aggregation: the runtime contract (M2K PR19 — doctrine only)
+
+PR9 settled *what an acceptance aggregate means* before one could be built. PR18
+made every currently-supported active criterion answerable. This section
+reconciles the two and fixes the contract the runtime PR implements. **Nothing
+here is code.** No `AGGREGATOR_VERSION` exists, no schema moves, and the binder
+is untouched.
+
+### PR9 stands; only its inputs moved
+
+PR9's two dimensions, its ordered fold and its vocabulary are unchanged. What
+changed is that availability is now read from PR18's `CurrentAssessment` envelope
+rather than from one turn's criteria state, because the resolved **active** set —
+not a single snapshot — is the real requirement population.
+
+| PR9 (criteria state) | PR18 envelope | availability | reason |
+| --- | --- | --- | --- |
+| `present` | `resolved`, `criterion_count > 0` | `assessable` | — |
+| `not_provided` | `resolved`, `criterion_count == 0` | `not_assessable` | `no_structured_criteria` |
+| `legacy_unknown` | `unavailable` / `lineage_unavailable` | `not_assessable` | `lineage_unavailable` |
+
+### The exact PR18 model the aggregate consumes
+
+Envelope `CurrentAssessment`: `task_id`, `target_turn_number`,
+`assessment_version` (**2**), `state`, `lineage_fingerprint`,
+`unavailable_reason`, `assessments`, `fingerprint`.
+
+Set states: `resolved` / `unavailable`. Criterion results: `met` / `not_met` /
+`unverified`. Evidence domains: `turn_change` / `final_state` /
+`not_applicable`. Criterion order is PR11's resolved-active order, unsorted.
+`assessments` is empty for every `unavailable` set, and legitimately empty for a
+`resolved` one.
+
+### Availability: two states, one closed reason set
+
+`assessable` / `not_assessable`. A third top-level state is **not** introduced:
+in every refusal there is no acceptance outcome, which is what `not_assessable`
+already says, and a third value would make callers branch three ways for
+something the reason already carries.
+
+`availability_reason` is PR18's `unavailable_reason` **verbatim**, plus one value
+PR18 cannot produce, giving a closed set of ten:
+
+| Family | Reason | Changes by waiting? |
+| --- | --- | --- |
+| no requirements | `no_structured_criteria` | no |
+| population unknown | `lineage_unavailable` | no |
+| operational | `turn_not_closed`, `evaluation_not_recorded` | **yes** |
+| structural integrity | `evaluation_inconsistent`, `unsupported_evaluator_version`, `final_state_inconsistent`, `unsupported_final_state_observer_version`, `final_state_lineage_mismatch`, `final_state_path_missing` | no — investigate |
+
+The families are documented, not a runtime field: they change what a caller
+should *do*, not what the answer *is*. No translation table — a parallel
+vocabulary would need keeping in step with PR18's, and this repository already
+carries the `ContinuityInvalid` → `ContinuityUnrecorded` debt as the example of
+what that costs.
+
+**None of these may be rendered as `incomplete`.** For the operational family
+that would file a lag in Cofferdam's own pipeline as a statement about the user's
+work; for the structural family it would hide corruption inside ordinary evidence
+uncertainty — the laundering PR18 refuses one layer down.
+
+### Set-unavailable vs criterion-unverified
+
+| | Means | Aggregate effect |
+| --- | --- | --- |
+| criterion `unverified` | the population is known; **this member** cannot be established | folds normally: blocks `met`, yields `incomplete` absent a `not_met` |
+| set `unavailable` | the **population itself** cannot be honestly constructed | nothing to fold; `not_assessable` |
+
+Criterion reasons are audit provenance and create **no** special acceptance
+rules. `final_state_not_recorded` folds exactly like
+`manual_criterion_no_machine_authority` — both are `unverified`.
+
+### The fold
+
+Availability first; the outcome dimension exists only when `assessable`.
+
+1. any `not_met` ⇒ **`not_met`**
+2. else any `unverified` ⇒ **`incomplete`**
+3. else all `met` ⇒ **`met`**
+
+**Not-met dominance holds across domains**, confirmed against the real model: a
+`not_met` state criterion beside an `unverified` inherited change criterion folds
+to `not_met`. Deterministic evidence that one requirement is unsatisfied is not
+erased by uncertainty about another.
+
+**Domain-agnostic.** The fold reads `result` and nothing else — no preference,
+weighting or ranking between `turn_change` and `final_state`, and no knowledge of
+Git or path mechanics. That complexity is resolved below and is already committed
+to by the envelope fingerprint.
+
+**Manual caps at `incomplete`.** A manual criterion is `unverified` today, so an
+active set containing one cannot reach `met`. No exception ignores manual
+criteria — that would let a turn report `met` while a human check went undone.
+
+### Zero active criteria has exactly one meaning
+
+`not_assessable` / `no_structured_criteria`. **Never `met`** — vacuous truth is
+not acceptance.
+
+The concern was that several lineage shapes might produce a zero count
+indistinguishably. Checked against the merged resolver and write path: `root`,
+`replace` and a chain of `extend`s over a `not_provided` snapshot all reach zero;
+`extend` never removes; and **`revise` cannot reach zero at all** — it is the only
+mode requiring supersession relations, every relation's `criterion_ordinal` must
+name a criterion of the current turn's own snapshot, so a `not_provided` revise is
+refused at write. Criteria `legacy_unknown` and continuity `not_declared` never
+reach a resolved set.
+
+So a resolved zero-count set can only mean *no structured criteria were declared
+anywhere in the resolved chain*. The count alone carries it; **no extra derived
+provenance is needed**, and `met` requires a non-empty set by construction rather
+than by a guard on the fold.
+
+### `requires_human` — derived from kind, never from uncertainty
+
+True when at least one active criterion is `manual`. Orthogonal context beside
+the outcome, **not** a fourth acceptance value.
+
+| Case | `requires_human` |
+| --- | --- |
+| manual `unverified` | **true** |
+| inherited-change `unverified` | false |
+| final-state unavailable/not recorded | false |
+
+Deriving it from "any `unverified`" would tell a user to go and look at something
+no human can resolve.
+
+### Shape, fingerprint and version
+
+Conceptual envelope, kept minimal: task, target turn, aggregator version, the
+consumed `CurrentAssessment.fingerprint`, availability, availability reason,
+outcome (only when assessable), counts (total / met / not_met / unverified),
+`requires_human`, and its own fingerprint.
+
+The fingerprint **composes rather than re-derives**: it binds `AGGREGATOR_VERSION`,
+task and target turn, `CurrentAssessment.fingerprint`, availability and reason,
+outcome, counts and `requires_human`. It does not re-bind evidence bundles,
+evaluation records or final-state observations — the envelope fingerprint already
+commits to the lineage fingerprint and every criterion-level answer, and binding
+them again would couple the aggregate to layers it may not read. No clock, rowid,
+host path or session id.
+
+**`AGGREGATOR_VERSION = 1`** is recommended for the runtime PR and is deliberately
+not added here. It owns *`CurrentAssessment` → target-turn availability and
+outcome*. A future domain or criterion family producing the same criterion-level
+results needs no bump — which is why **`named_check` is not a blocker**: the
+aggregate folds whatever legitimate active results exist today, and named checks
+join when their own assessment semantics do.
+
+### Derived, pure, and target-turn only
+
+**Derived on read, never persisted** — every input is immutable or deterministically
+derived from immutable rows, the fold is pure, and the fingerprint gives audit
+identity. No table, no migration, no write or recovery path.
+
+**Pure, consuming exactly one thing**: `aggregate(current_assessment)`. No SQLite,
+filesystem, Git, subprocess, `EvidenceBundle`, `FinalStateObservation`, evaluator,
+resolver, provider or clock. Verified achievable rather than assumed — a throwaway
+prototype folded every case, counts and `requires_human` included, from the
+envelope alone.
+
+**Lifecycle and claims stay out.** A completed turn may be `not_met` or
+`incomplete`; a lifecycle failure may have no assessable acceptance.
+`claim_conflict` is excluded entirely.
+
+**Target turn only.** PR9's task-level blocker was the absence of criterion
+continuity; PR10–PR12 supplied it, so the blocker **on a target-turn aggregate is
+removed**. A global task verdict remains out of scope — composing several
+target-turn answers is a separate undecided question.
+
+### Readiness, and the one gap
+
+| Question | Answer |
+| --- | --- |
+| every supported active criterion gets a legitimate result? | yes (PR18) |
+| set-unavailable distinguished from criterion-unverified? | yes |
+| zero-active semantics fully specified? | yes — one meaning |
+| fold deterministic? | yes — pure function of the envelope |
+| `named_check` needed first? | no |
+| new persistence needed? | no |
+| task-level verdict still out of scope? | yes, deliberately |
+
+**Runtime aggregation is ready to build**, with one recorded fidelity gap: PR18's
+binder collapses **eighteen** distinct resolver reasons — including
+`continuity_not_declared`, `continuity_legacy_unknown`, `malformed_lineage` and
+`cycle_detected` — into the single set reason `lineage_unavailable`. PR9 required
+"we never asked" and "we cannot know what we asked" to stay distinct, and the
+aggregate cannot honour that because the information is gone before it arrives.
+
+It is a **fidelity** gap, not a safety one: every affected case is already
+`not_assessable` and fails closed, and no outcome is manufactured. The fix is to
+carry the resolver's own reason onto the envelope as a derived field — which moves
+`CURRENT_ASSESSMENT_VERSION` 2 → 3 and changes every envelope fingerprint, so it
+should be decided explicitly and taken **before** `AGGREGATOR_VERSION = 1` is
+minted rather than after. See D-2026-08-17-16.
+
 ---
 
 ## Limitations of this milestone

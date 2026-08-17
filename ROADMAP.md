@@ -754,8 +754,8 @@ downstream reads from.
     rather than interpretation. **No conversion, ever**, and no version moved but the schema.
     Rollback is a **pair**, and stops being lossless the moment a v11-only criterion is written.
     D-2026-08-17-7 and D-2026-08-17-8.
-  - **PR18 — the final-state current-assessment domain.** *Implemented on
-    `m2k-pr18-final-state-assessment`, not merged and not deployed.* Teaches PR16's derived layer to
+  - **PR18 — the final-state current-assessment domain.** *Merged as `1116b61` (#63),
+    **not deployed**.* Teaches PR16's derived layer to
     answer PR17's two state predicates from PR14's immutable observations, and nothing else. **No
     schema change (v11 stands)**, no migration, no evaluator change, no observer change, no public
     surface, no aggregate. **`CURRENT_ASSESSMENT_VERSION` moves 1 → 2** — the only version that moves
@@ -784,6 +784,35 @@ downstream reads from.
     own layer so one algorithm remains. Read from **one pinned snapshot** with PR11's resolver moved
     inside it, because deciding whether an observation is needed requires the active set.
     D-2026-08-17-9, D-2026-08-17-10 and D-2026-08-17-11.
+  - **PR19 — acceptance aggregation contract reconciliation.** *Documentation and design only, on
+    `m2k-pr19-aggregation-contract`, not merged; nothing to deploy.* Settles the contract the runtime
+    aggregation PR implements, by **reconciling PR9 rather than redesigning it**: D-2026-08-16-3's two
+    dimensions, ordered fold and vocabulary all stand, and only their *inputs* move — availability is
+    now read from PR18's `CurrentAssessment` envelope rather than one turn's criteria state, because
+    the resolved **active** set is the real requirement population. `present` → `resolved` non-empty;
+    `not_provided` → `resolved` with zero; `legacy_unknown` → `unavailable` / `lineage_unavailable`,
+    the one shape change. **Two availability states, not three**: PR18's eight new set-level refusals
+    group into population-unknown, operational and structural-integrity families, documented rather
+    than made a runtime field, since in all of them there is no acceptance outcome. **No translation
+    table** — `availability_reason` is PR18's reason verbatim plus `no_structured_criteria`, ten in a
+    closed set, because a parallel vocabulary is exactly the debt `ContinuityInvalid` →
+    `ContinuityUnrecorded` already demonstrates. **Zero active criteria has exactly one meaning**,
+    verified against the merged resolver and write path: `revise` **cannot** reach zero (every
+    supersession relation must name a criterion of the current turn's own snapshot), `extend` never
+    removes, and `legacy_unknown` / `not_declared` never resolve — so zero can only mean no structured
+    criteria were declared, giving `not_assessable` / `no_structured_criteria` and **never `met`**.
+    Not-met dominance retained across domains; the fold is **domain-agnostic**, reading `result`
+    alone; manual criteria cap at `incomplete` with no exception; `requires_human` derives from
+    criterion **kind**, never from uncertainty, and stays orthogonal context. Aggregate is **derived,
+    never persisted**, and **pure** — `aggregate(current_assessment)` and nothing else — with a
+    fingerprint that **composes** on `CurrentAssessment.fingerprint` instead of re-binding bundles or
+    observations. `AGGREGATOR_VERSION = 1` recommended, not added; `named_check` is not a blocker.
+    PR9's task-level blocker was missing continuity, which PR10–PR12 supplied, so the blocker **on a
+    target-turn aggregate is removed** while a global task verdict stays out of scope. **One fidelity
+    gap recorded**: the binder collapses eighteen resolver reasons into one `lineage_unavailable`,
+    which PR9 required to stay distinct — fail-closed and therefore not a safety gap, but the fix
+    moves `CURRENT_ASSESSMENT_VERSION` 2 → 3 and should be decided before `AGGREGATOR_VERSION` is
+    minted. D-2026-08-17-12 through D-2026-08-17-16.
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**

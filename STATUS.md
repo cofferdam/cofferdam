@@ -797,10 +797,68 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2K PR19 — acceptance aggregation contract reconciliation (documentation only)
+
+On `m2k-pr19-aggregation-contract`, from the merged `1116b61`. **Documentation and design only**, so
+there is nothing to deploy: no schema change, no binder change, no `AGGREGATOR_VERSION` constant, no
+route, no UI, no bridge operation, and no runtime aggregation of any kind.
+
+Settles the exact contract the runtime aggregation PR will implement, by reconciling PR9's doctrine
+with the now-real PR18 model rather than redesigning it.
+
+**PR9 stands; only its inputs moved.** D-2026-08-16-3's two dimensions, ordered fold and vocabulary
+are unchanged. Availability is now read from PR18's `CurrentAssessment` envelope instead of one
+turn's criteria state, because the resolved **active** set is the real requirement population. PR9's
+three rows map across without loss: `present` → `resolved` with a non-empty set; `not_provided` →
+`resolved` with zero; `legacy_unknown` → `unavailable` / `lineage_unavailable`, the one shape change,
+because the resolver now refuses one layer earlier.
+
+**Two availability states, not three.** PR18 added eight set-level refusals PR9 never had. They group
+into three families by what a caller should *do* — population unknown, operational (changes by
+waiting), structural integrity (does not) — and the grouping is documented rather than made a runtime
+field, because in every family there is no acceptance outcome, which is exactly what
+`not_assessable` already says.
+
+**No translation table.** `availability_reason` is PR18's `unavailable_reason` verbatim plus one
+value PR18 cannot produce, `no_structured_criteria` — ten in a closed set. A parallel vocabulary
+would be a second closed set to keep in step, and this repository already carries the untranslated
+`ContinuityInvalid` → `ContinuityUnrecorded` debt as the example of what that costs.
+
+**Zero active criteria has exactly one meaning**, and this was checked against the merged resolver and
+write path rather than reasoned about. `root`, `replace` and chains of `extend` over a `not_provided`
+snapshot reach zero; `extend` never removes; **`revise` cannot reach zero at all**, because every
+supersession relation's `criterion_ordinal` must name a criterion of the current turn's own snapshot,
+so a `not_provided` revise is refused at write. Criteria `legacy_unknown` and continuity
+`not_declared` never reach a resolved set. So zero can only mean *no structured criteria were
+declared* → `not_assessable` / `no_structured_criteria`, **never `met`**. No extra provenance needed.
+
+**Not-met dominance retained**, confirmed across domains. **Domain-agnostic fold** — it reads
+`result` only. **Manual caps at `incomplete`** with no exception. **`requires_human` derives from
+criterion kind, never from uncertainty**, and remains orthogonal context rather than a fourth outcome.
+**Lifecycle and `claim_conflict` stay out.**
+
+**Derived, pure, target-turn only.** No table; `aggregate(current_assessment)` consumes exactly one
+value; the fingerprint composes on `CurrentAssessment.fingerprint` rather than re-binding evidence
+bundles or observations. `AGGREGATOR_VERSION = 1` is *recommended*, not added. `named_check` is not a
+blocker. PR9's task-level blocker was missing continuity, which PR10–PR12 supplied — so the blocker
+**on a target-turn aggregate is removed**, while a global task verdict stays deliberately out of
+scope.
+
+**One fidelity gap recorded.** PR18's binder collapses **eighteen** distinct resolver reasons —
+`continuity_not_declared`, `continuity_legacy_unknown`, `malformed_lineage`, `cycle_detected` and
+others — into the single `lineage_unavailable`. PR9 required "we never asked" and "we cannot know what
+we asked" to stay apart, and the aggregate cannot honour that because the information is gone before
+it arrives. Fidelity, not safety: every affected case is already `not_assessable` and fails closed.
+The fix carries the resolver's reason onto the envelope as a derived field, which moves
+`CURRENT_ASSESSMENT_VERSION` 2 → 3, so it is recorded for an explicit decision **before**
+`AGGREGATOR_VERSION` is minted rather than smuggled into a docs PR.
+D-2026-08-17-12 through D-2026-08-17-16.
+
 ### M2K PR18 — the final-state current-assessment domain
 
-On `m2k-pr18-final-state-assessment`, from the merged `c164383`. **Implemented on a branch, not
-merged and not deployed.**
+**Merged as `1116b61` (#63) and deliberately NOT deployed.** Production remains on the PR10 runtime —
+workstation and Actions bridge both from **slot A at `1efd49b`**, live schema **v9**. The record below
+was written while PR18 was on `m2k-pr18-final-state-assessment`, from the merged `c164383`.
 
 Teaches PR16's derived assessment layer to answer PR17's two state predicates from PR14's immutable
 observations, and nothing else. No schema change — **v11 stands** — no migration, no evaluator
@@ -1172,12 +1230,13 @@ actually running — not PR11 or PR12, which are merged and undeployed.
 M2K is **in progress**: PR1 through PR8 are merged and deployed; PR9 is merged (`b2314f0`, #54) and
 needed no deployment because it changed only documentation; PR10 is merged (`1efd49b`, #55) and
 deployed to slot A on schema v9; PR11 (`3bb9a5b`, #56), PR12 (`2dc4177`, #57), PR13 (`8cd8ba3`, #58),
-PR14 (`064fe51`, #59), PR15 (`12e64cd`, #60), PR16 (`c1d6f1d`, #61) and PR17 (`c164383`, #62) are
-merged and **intentionally not deployed**; PR18 is on a branch. See *In progress* above for PR18.
+PR14 (`064fe51`, #59), PR15 (`12e64cd`, #60), PR16 (`c1d6f1d`, #61), PR17 (`c164383`, #62) and PR18
+(`1116b61`, #63) are merged and **intentionally not deployed**; PR19 is on a branch. See *In progress*
+above for PR19.
 
 **`main` is now schema v11; production is still schema v9**, and that gap is the deployment decision
 rather than a lag. PR14 is the change that turns this batch from a slot flip into a schema move, so
-deploying PR11–PR18 is **Tier 2**: a verified pre-v9 backup taken with SQLite's online backup API, a
+deploying PR11–PR19 is **Tier 2**: a verified pre-v9 backup taken with SQLite's online backup API, a
 migration rehearsal, the old-runtime refusal check that PR14 already proves in CI, and an honest
 rollback **pair** — the slot *and* the restored snapshot — because a flip alone cannot walk a schema
 backwards. PR15, PR16 and PR18 add nothing to that cost: PR15 is documentation, and PR16 and PR18 are
@@ -1187,9 +1246,11 @@ rehearses that rebuild on a copy of the real database and the rollback backup mu
 it runs — and once a `path_exists` criterion has been written to v11, restoring that backup destroys
 requirements a user actually stated rather than being a clean downgrade.
 
+PR19 adds nothing to that cost at all: it is documentation and design, with no runtime surface.
+
 **A/B remains deployment machinery, not feature-development machinery.** Work is developed in
 isolated feature worktrees and merged to `main`; a slot is never a workbench; and a deployment happens
-when a running service actually needs the change. Seven merged PRs sitting ahead of production is the
+when a running service actually needs the change. Eight merged PRs sitting ahead of production is the
 policy working, not drift.
 
 ### M2K PR13 — cross-turn acceptance evidence-binding doctrine (documentation only)

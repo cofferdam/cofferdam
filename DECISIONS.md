@@ -3426,6 +3426,210 @@ read transaction alongside the lifecycle, the lineage graph, the optional evalua
 observation. Deciding what to read from one database state and then reading it from another is
 precisely the split the snapshot exists to prevent.
 
+## D-2026-08-17-12 — PR9's two dimensions survive; their inputs move from one snapshot to the resolved active set (EFE DECISION, ACTIVE)
+
+**Decision.** [D-2026-08-16-3](#d-2026-08-16-3--per-turn-assessment-has-two-dimensions-and-known-failure-dominates-uncertainty)
+is **reconciled, not replaced.** Both dimensions stand exactly as written — availability, then an
+acceptance outcome that exists only when assessable — and both the ordered fold and the vocabulary
+`met` / `not_met` / `incomplete` / `not_assessable` are unchanged.
+
+What changes is where availability is *read from*. PR9 derived it from the target turn's own criteria
+state, which was the only honest source before continuity existed. PR11–PR18 made the resolved
+**active** set the real requirement population, so availability is now derived from PR18's
+`CurrentAssessment` envelope. The three PR9 rows map onto it without loss of meaning:
+
+| PR9 (criteria state) | PR18 envelope | availability | reason |
+| --- | --- | --- | --- |
+| `present` | `resolved`, `criterion_count > 0` | `assessable` | — |
+| `not_provided` | `resolved`, `criterion_count == 0` | `not_assessable` | `no_structured_criteria` |
+| `legacy_unknown` | `unavailable` / `lineage_unavailable` | `not_assessable` | `lineage_unavailable` |
+
+The third row is the only shape change: a historical unknown no longer reaches the aggregate as a
+criteria-state reading, because the resolver refuses to produce an active set from it at all and the
+binder reports the refusal at the **set** level. Same conclusion, reached one layer earlier.
+
+**Two top-level availability states, not three.** PR18 added eight set-level refusals PR9 never had,
+and they divide cleanly into three families by *what a caller should do next* — see
+[D-2026-08-17-13](#d-2026-08-17-13--set-unavailable-and-criterion-unverified-are-different-facts-and-the-aggregate-must-keep-them-apart).
+That division is real and is recorded, but it does **not** earn a third top-level state: in every one
+of those families there is no acceptance outcome, which is precisely what `not_assessable` already
+says. A third state would make every caller branch three ways to learn something the closed reason
+already tells them.
+
+**The aggregate does not translate PR18's reasons; it passes them through.** `availability_reason` is
+PR18's `unavailable_reason` verbatim, plus exactly one value PR18 cannot produce —
+`no_structured_criteria`, for the resolved-but-empty case. A parallel aggregate vocabulary would be a
+second closed set that has to be kept in step with the first, and this repository already carries a
+live example of what that costs: the untranslated `ContinuityInvalid` → `ContinuityUnrecorded` debt.
+One vocabulary, extended by one member.
+
+**Acceptance outcome remains absent, not null-valued, when not assessable.** A turn whose active set
+could not be established is never `incomplete`. `incomplete` is a statement about a *known*
+requirement population containing at least one `unverified` criterion, and applying it to a set that
+was never determined would report evidence uncertainty where the real problem is that Cofferdam does
+not know what was required.
+
+## D-2026-08-17-13 — Set-unavailable and criterion-unverified are different facts, and the aggregate must keep them apart (EFE DECISION, ACTIVE)
+
+**Decision.** The distinction PR18 built into the binder is load-bearing at the aggregate too, and
+neither direction of collapse is permitted.
+
+**Criterion-level `unverified`** means *we know which active criterion this is and cannot establish
+`met` or `not_met` with sufficient authority.* The requirement population is known and this member of
+it is uncertain. It folds normally: it cannot produce `met`, and it yields `incomplete` when no
+`not_met` outranks it. Its reasons — `inherited_change_not_current_state_evaluable`,
+`manual_criterion_no_machine_authority`, `final_state_path_unavailable`, `final_state_unavailable`,
+`final_state_not_recorded`, `unsupported_predicate` — are audit provenance and **must not** create
+special acceptance rules.
+
+**Set-level unavailable** means *Cofferdam cannot honestly construct the requirement population at
+all.* There is nothing to fold. PR18's nine set reasons group into three families, and the grouping is
+documented rather than made a runtime field, because it changes what a caller should *do* and not
+what the acceptance answer *is*:
+
+| Family | PR18 reasons | Changes by waiting? |
+| --- | --- | --- |
+| population unknown | `lineage_unavailable` | no |
+| operational | `turn_not_closed`, `evaluation_not_recorded` | **yes** |
+| structural integrity | `evaluation_inconsistent`, `unsupported_evaluator_version`, `final_state_inconsistent`, `unsupported_final_state_observer_version`, `final_state_lineage_mismatch`, `final_state_path_missing` | no — needs investigation |
+
+**Rendering any of these as `incomplete` is forbidden.** For the operational family it would file a
+lag in Cofferdam's own pipeline as a statement about the user's work; for the structural family it
+would hide evidence corruption or tampering inside ordinary evidence uncertainty, which is the exact
+laundering PR18 refuses one layer down. Both would also be *stable-looking* answers to *unstable*
+situations, which is worse than an explicit refusal.
+
+**Not-met dominance is retained unchanged.** Any active criterion whose current result is `not_met`
+makes the outcome `not_met`, however many others are `unverified`. Deterministic machine evidence that
+one active requirement is unsatisfied is not erased by an inability to verify another. Confirmed
+against the now-real model rather than argued: a `not_met` state criterion beside an `unverified`
+inherited change criterion folds to `not_met`, across two different evidence domains.
+
+**Aggregation is domain-agnostic.** The fold reads `result` and nothing else. It must not prefer,
+weight or rank `turn_change` against `final_state`, must not treat an observation as stronger than an
+evaluation, must not discount inherited-change `unverified`, and must not know anything about Git,
+paths or filesystem mechanics. All of that complexity is resolved below it and is already committed to
+by the envelope's fingerprint.
+
+## D-2026-08-17-14 — Zero active criteria is `not_assessable`, and it has exactly one meaning (EFE DECISION, ACTIVE)
+
+**Decision.** A resolved active set of size zero is **`not_assessable` / `no_structured_criteria`**.
+It is never `met`. Vacuous truth is not acceptance, and "no requirements were stated" must never be
+rendered as "every requirement was satisfied" — the second is a claim about work that nobody made.
+
+**The subtle part turned out not to be subtle, and the reason is a real invariant.** The concern was
+that several different lineage shapes could produce a zero-count set and the aggregate would be unable
+to tell them apart. Checked against the merged resolver and the merged write path rather than reasoned
+about:
+
+* `root` with a `not_provided` snapshot → resolves, zero active;
+* `replace` with a `not_provided` snapshot → resolves, zero active;
+* `extend` over such a chain, itself `not_provided` → resolves, zero active;
+* `revise` → **cannot** produce zero. `revise` is the only mode requiring supersession relations, and
+  every relation's `criterion_ordinal` must name a criterion of the **current** turn's own snapshot;
+  a `not_provided` revise is refused at write with `REASON_RELATION_CURRENT_UNKNOWN`. So a revise
+  always contributes at least one criterion and leaves the active set non-empty;
+* `extend` never removes anything;
+* criteria `legacy_unknown` and continuity `not_declared` never reach a resolved set at all — the
+  resolver refuses and the binder reports `lineage_unavailable`.
+
+So **a resolved zero-count active set can only mean that no structured criteria were declared anywhere
+in the resolved chain.** There is exactly one meaning, the count alone carries it, and no additional
+derived provenance is required for this case. PR9's `not_provided` row is preserved exactly.
+
+**`met` therefore requires a non-empty active set by construction**, not by a guard bolted onto the
+fold: the availability dimension answers first, and an empty set never reaches the outcome dimension.
+
+## D-2026-08-17-15 — The target-turn aggregate is derived, pure, and versioned separately (EFE DECISION, ACTIVE)
+
+**Decision.** The shape of the runtime aggregation PR, settled before any of it is written.
+
+**Target-turn only.** The aggregate answers *acceptance at target turn N, over the criteria active at
+N, using their current status at N.* It is not a task verdict, not merge readiness, not deployment
+readiness and not project quality.
+[D-2026-08-16-4](#d-2026-08-16-4--there-is-no-task-level-acceptance-because-criterion-continuity-does-not-exist-yet)
+named the missing fact as criterion continuity, and PR10–PR12 supplied it — so the blocker **on a
+target-turn aggregate is removed**. The blocker on a *global task* verdict is not, and is not being
+lifted here: composing several target-turn answers into one is a separate question about which turn's
+requirements a task is judged against, and nobody has decided it.
+
+**Derived on read, never persisted.** Every input is immutable or deterministically derived from
+immutable rows, the fold is pure, and the fingerprint gives audit identity without storage. No table,
+no migration, no write path and no recovery path — the same conclusion PR16 reached for the layer
+below, for the same reasons.
+
+**Pure, and it consumes exactly one thing.** `aggregate(current_assessment) -> AcceptanceAggregate`.
+No SQLite, no filesystem, no Git, no subprocess, no `EvidenceBundle`, no `FinalStateObservation`, no
+evaluator, no resolver, no provider and no clock. The service builds the `CurrentAssessment` and hands
+it over; verified as achievable rather than hoped for — a throwaway prototype folded every case,
+including counts and `requires_human`, from the envelope alone.
+
+**`requires_human` is derived from criterion kind, never from uncertainty.** True when at least one
+active criterion is `manual` (or, later, another kind that explicitly needs human authority). An
+inherited-change `unverified` is `requires_human = false`; a missing final-state observation is
+`requires_human = false`. Deriving it from "any `unverified`" would tell a user to go and look at
+something no human can resolve. It is orthogonal context beside the outcome, **never** a fourth
+acceptance value — restating
+[D-2026-08-16-3](#d-2026-08-16-3--per-turn-assessment-has-two-dimensions-and-known-failure-dominates-uncertainty)
+against the concrete model.
+
+**Manual criteria still cap the outcome at `incomplete`, with no exception.** A manual criterion is
+`unverified` today because no human-answer channel exists, so an active set containing one cannot
+reach `met`. This is recorded, not worked around: an exception that ignored manual criteria would let
+a turn report `met` while a requirement a person was supposed to check went unchecked.
+
+**The fingerprint composes rather than re-derives.** It binds `AGGREGATOR_VERSION`, the task and
+target turn, **`CurrentAssessment.fingerprint`**, the availability and its reason, the outcome, the
+counts and `requires_human`. It does **not** re-bind evidence bundles, evaluation records or
+final-state observations: the envelope fingerprint already commits to the lineage fingerprint and to
+every criterion-level answer, so binding them again would duplicate the commitment and couple the
+aggregate to layers it is not allowed to read. No clock, no rowid, no host path, no session id.
+
+**`AGGREGATOR_VERSION = 1`** is recommended for the runtime PR and is deliberately **not** added as an
+executable constant here. It owns exactly *`CurrentAssessment` → target-turn availability and
+outcome*. A future evidence domain or criterion family that produces the same criterion-level `met` /
+`not_met` / `unverified` needs **no** bump, because the fold does not read domains — which is also why
+`named_check` is **not** a blocker: the aggregate folds whatever legitimate active results exist
+today, and named checks join when their own `CurrentCriterionAssessment` semantics do.
+
+**Lifecycle and claims stay out.** The aggregate never reinterprets task completion, failure or
+dispatch refusal — a completed turn may be `not_met` or `incomplete`, and a lifecycle failure may have
+no assessable acceptance at all. `claim_conflict` remains excluded entirely; an adapter disagreeing
+with the machine is audit context, not acceptance authority.
+
+## D-2026-08-17-16 — One fidelity gap remains: the binder collapses eighteen resolver reasons into one (EFE DECISION, ACTIVE)
+
+**Decision.** Recorded as a known, bounded gap rather than fixed in a documentation PR, and it is the
+one thing standing between the current model and full compliance with PR9's stated requirement.
+
+**The finding.** PR18's binder maps *any* unresolvable lineage to a single set reason,
+`lineage_unavailable`. The resolver distinguishes **eighteen** causes — among them
+`continuity_not_declared` (*nobody stated a relationship*), `continuity_legacy_unknown` (*this turn
+predates continuity*), `malformed_lineage`, `cycle_detected` and `lineage_depth_exceeded` — and none
+of that survives into the envelope.
+
+**Why it matters.**
+[D-2026-08-16-3](#d-2026-08-16-3--per-turn-assessment-has-two-dimensions-and-known-failure-dominates-uncertainty)
+required that "we never asked" and "we cannot know what we asked" stay distinct, on the grounds that
+collapsing them turns two different facts into one sentence. Under the current envelope the aggregate
+*cannot* honour that, because the information is gone before it arrives. It also merges the
+population-unknown family with genuine structural corruption, which
+[D-2026-08-17-13](#d-2026-08-17-13--set-unavailable-and-criterion-unverified-are-different-facts-and-the-aggregate-must-keep-them-apart)
+otherwise keeps apart.
+
+**It is a fidelity gap, not a safety gap.** Every affected case is already `not_assessable` and fails
+closed; no acceptance outcome is manufactured and nothing is reported as `incomplete` or `met` that
+should not be. The loss is entirely in *how precisely Cofferdam can explain itself*, which is why the
+runtime aggregate is judged ready to build and this is judged a defect to fix alongside it rather than
+a reason to stop.
+
+**The fix belongs in the binder, and it has a version consequence.** Carrying the resolver's own
+reason onto the envelope — as a derived field, no persistence — is a change to what a
+`CurrentAssessment` says, so it moves `CURRENT_ASSESSMENT_VERSION` 2 → 3 and changes every envelope
+fingerprint. That is a real cost and the reason it is not smuggled into a docs PR. It should be
+decided explicitly and, if taken, taken **before** `AGGREGATOR_VERSION = 1` is minted, so the
+aggregate is built once against a stable envelope instead of twice.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when
