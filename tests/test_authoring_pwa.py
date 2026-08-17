@@ -419,6 +419,21 @@ class TheAnchorIsReadNeverTyped(unittest.TestCase):
         self.assertEqual(result["posts"], [])
         self.assertIn("no recorded requirements to continue from", result["html"])
 
+    def test_a_failed_anchor_read_can_be_retried_from_the_control(self):
+        """The dead end this closes, found by walking the flow rather than by a
+        failing test: `beginPending` allows one action at a time, so a mode
+        chosen while a read was in flight got no anchor and no error — and a
+        radio that is already selected fires `click` without `change`, so
+        pressing it again did nothing. The person was left with a form that
+        could not be submitted and a control that would not respond.
+
+        Choosing the mode again is now the retry, and the panel listens on both
+        events because neither alone covers mouse *and* keyboard selection."""
+        result = panel("authoring-a-failed-anchor-read-can-be-retried")
+        self.assertEqual(result["attempts"], 2)
+        self.assertIn("could not read this task's turns", result["afterFailure"])
+        self.assertIn("Continuing from turn 1", result["afterRetry"])
+
     def test_a_declaration_does_not_cross_tasks(self):
         result = panel("authoring-declaration-does-not-cross-tasks")
         self.assertFalse(result["rowsOnSecondTask"])

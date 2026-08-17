@@ -2820,9 +2820,20 @@ function run() {
     return elements[id];
   }
 
+  /* A real radio fires both, and the panel listens to both on purpose — see
+     `handleAuthoringClick`. Firing the pair here is what a browser does, and is
+     also what proves the two handlers do not double-apply. */
   function chooseMode(prefix, modeId) {
     control(prefix + modeId);
+    fire("click", button(prefix + modeId));
     fire("change", button(prefix + modeId));
+  }
+
+  /* Press an already-selected mode again — the gesture a browser answers with a
+     `click` and no `change`. */
+  function reselectMode(prefix, modeId) {
+    control(prefix + modeId);
+    fire("click", button(prefix + modeId));
   }
 
   function addRow(prefix) {
@@ -3138,6 +3149,50 @@ function run() {
           criteria_fingerprint: null, criterion_count: 0, items: []
         }
       })
+    });
+  }
+
+  if (scenario === "authoring-a-failed-anchor-read-can-be-retried") {
+    /* The dead end this closes. `beginPending` allows one action at a time, so a
+       mode chosen while a read was in flight got no anchor and no error — and
+       pressing the same radio again fires `click` without `change`, so nothing
+       happened. The person was left holding a form that could not be submitted
+       and a control that did nothing. */
+    const ready = readyTask();
+    let attempts = 0;
+    return mount({
+      realAdapter: true,
+      initial: listPayload([ready]),
+      detail: ready,
+      onGet(pathname) {
+        if (pathname.indexOf("/result") === -1) { return null; }
+        attempts += 1;
+        if (attempts === 1) {
+          return Promise.resolve({
+            ok: false, status: 503,
+            payload: { error: { code: "task_unavailable", message: "not now" } }
+          });
+        }
+        return Promise.resolve({
+          ok: true, status: 200,
+          payload: { result: { task_id: "task_ready", turn_count: 1 } }
+        });
+      },
+      assessmentPayload: assessmentView({ task_id: "task_ready" }),
+      result: () => ({ payload: { task: ready } })
+    }).then(function () {
+      fire("click", openButton("task_ready"));
+      return drain();
+    }).then(function () {
+      chooseMode(FOLLOWUP, "Extend");
+      return drain();
+    }).then(function () {
+      const afterFailure = html();
+      /* The same radio, pressed again. */
+      reselectMode(FOLLOWUP, "Extend");
+      return drain().then(function () {
+        return { afterFailure: afterFailure, afterRetry: html(), attempts: attempts };
+      });
     });
   }
 

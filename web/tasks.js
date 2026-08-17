@@ -1148,15 +1148,28 @@
      for `replace` just because both need one. */
   function selectMode(scope, mode) {
     var state = declarationFor(scope);
-    if (state.mode === mode) { return; }
-    state.mode = mode;
-    state.predecessor = null;
-    state.predecessorError = null;
-    formError = null;
-    render();
-    if (modeNeedsPredecessor(mode) && openTaskId) {
-      loadPredecessor(scope, openTaskId);
+    var changed = state.mode !== mode;
+    if (changed) {
+      state.mode = mode;
+      /* An anchor read for one mode is not an anchor for another just because
+         both need one. */
+      state.predecessor = null;
+      state.predecessorError = null;
+      formError = null;
     }
+    if (!modeNeedsPredecessor(mode) || state.predecessor) {
+      if (changed) { render(); }
+      return;
+    }
+    /* Choosing the mode again re-reads the anchor, and that is the point rather
+       than a redundant branch. `beginPending` allows one action at a time, so a
+       mode chosen while something else was in flight gets no anchor and no
+       error — and without this the person would be looking at a form that
+       cannot be submitted and a control that does nothing when pressed again.
+       Re-selecting is the retry. */
+    state.predecessorError = null;
+    render();
+    if (openTaskId) { loadPredecessor(scope, openTaskId); }
   }
 
   /* The typed path survives a change of predicate deliberately. Somebody moving
@@ -1179,6 +1192,17 @@
     var parsed = parseAuthoringId(id);
     if (!parsed) { return false; }
     var state = declarationFor(parsed.scope);
+    /* Modes are handled on click **as well as** on change, and both are needed.
+       `change` does not fire when a radio that is already selected is pressed
+       again, which is exactly the gesture that has to retry a failed anchor
+       read; `click` does not fire when a radio group is moved with the arrow
+       keys. `selectMode` is idempotent, so the pair firing together on an
+       ordinary mouse selection costs nothing. */
+    var mode = MODE_BY_FIELD[parsed.field];
+    if (mode !== undefined && parsed.index === null) {
+      selectMode(parsed.scope, mode);
+      return true;
+    }
     if (parsed.field === "Add") {
       /* Bounded here as well as on the server, and refused rather than
          wrapped: a thirty-third row that silently replaced the first would be
