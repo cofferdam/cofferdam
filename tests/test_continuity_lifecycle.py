@@ -664,16 +664,30 @@ class Authority(ContinuityCase):
             self.assertNotIn("continuity", field)
             self.assertNotIn("supersed", field)
 
-    def test_no_http_route_accepts_continuity(self):
-        """PR6 kept criteria off the wire; PR10 does not widen that."""
+    def test_only_the_private_caller_may_declare_continuity_over_http(self):
+        """M2K PR23 opened this, and only to the device token.
+
+        PR10 asserted no route carried continuity at all, which was right while
+        nothing could declare it. What has to hold now is the authority
+        boundary: `require_task_caller` accepts the Actions bridge credential
+        too, so the field list is per caller rather than shared — otherwise a
+        remote Custom GPT user would become the authority on what its own work
+        is judged against.
+        """
         source = (
             Path(__file__).resolve().parents[1]
             / "cofferdam"
             / "workstation"
             / "service.py"
         ).read_text(encoding="utf-8")
-        self.assertNotIn('"continuity"', source)
-        self.assertNotIn("continuity=", source)
+        # The gate exists and is keyed on the authenticated caller.
+        self.assertIn("_authoring_fields", source)
+        self.assertIn("AUTHORING_FIELDS", source)
+        self.assertIn("if _caller(request) == CALLER_PWA else frozenset()", source)
+        # And nothing manufactures a declaration for a caller that sent none.
+        for forbidden in ('"mode": "root"', '"mode": "extend"',
+                          'payload.get("continuity", {'):
+            self.assertNotIn(forbidden, source, forbidden)
 
     def test_no_bridge_action_accepts_continuity(self):
         source = (

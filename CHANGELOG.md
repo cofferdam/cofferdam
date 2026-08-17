@@ -8,6 +8,34 @@ release.
 
 ### Added
 
+- **M2K PR23 — you can now tell Cofferdam what a piece of work has to achieve, and how it relates to
+  what you asked for before.** This is what makes the whole acceptance feature actually usable.
+
+  **What it adds.** When you start a task or send a follow-up from your own device, you can now attach
+  the requirements that work should be judged against, and say plainly how they relate to the previous
+  message: this is a fresh start, or it adds to what came before, or it replaces it, or it retires one
+  specific earlier requirement. Cofferdam then answers, at each point, whether those requirements were
+  met.
+
+  **It will never guess the relationship.** If you do not say, Cofferdam records that you did not say
+  — it does not assume a first message starts fresh, or that a follow-up adds to the last one. Those
+  are genuinely different intentions that look identical from the outside, and quietly picking one
+  would put words in your mouth about what your work is measured against.
+
+  **Only your own device can set them.** The connected-assistant credential cannot, and its request
+  format is unchanged — an assistant cannot decide what its own work will be judged against. That
+  boundary is the point, not a side effect.
+
+  **A rejected requirement now says so.** If a declaration is not something Cofferdam can accept — it
+  names a requirement that is no longer active, for instance — you are told that your declaration was
+  refused, rather than that Cofferdam failed to save it. Those are different problems pointing at
+  different places to look, and until now they read the same. A rejected declaration also never
+  reaches a worker: nothing is started on requirements that were not accepted.
+
+  **What is deliberately not here.** There is no screen for writing requirements yet — building one is
+  its own piece of work, and adding a rough version just to say the feature has a user would have been
+  the wrong reason. For now this is available to your own device's tooling.
+
 - **M2K PR22 — you can now see whether a piece of work met what you asked for, in the private task
   view.** The first time any of this acceptance machinery becomes visible.
 

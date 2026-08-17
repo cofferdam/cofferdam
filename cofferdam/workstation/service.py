@@ -2354,6 +2354,24 @@ def create_app(
             "counts": counts,
         }
 
+    #: M2K PR23. Acceptance criteria and criteria continuity are **authoring**
+    #: fields: they say what a piece of work is required to achieve and how that
+    #: requirement relates to the ones before it. That is host authority, and
+    #: `require_task_caller` is not a fine enough boundary to hold it — the same
+    #: dependency accepts the Actions bridge's own credential, so putting these
+    #: names in a shared allowlist would hand a remote Custom GPT user the power
+    #: to declare what its own work will be judged against.
+    #:
+    #: So the field list is per caller. The bridge's request shape is unchanged
+    #: and `_task_body` refuses an unexpected key, which means a bridge that
+    #: sends `criteria` gets the same refusal it got yesterday rather than a new
+    #: capability. This is the pattern the detail route already uses for
+    #: `prompt`, for the same reason and with the same shape.
+    AUTHORING_FIELDS = frozenset({"criteria", "continuity"})
+
+    def _authoring_fields(request: Request) -> frozenset:
+        return AUTHORING_FIELDS if _caller(request) == CALLER_PWA else frozenset()
+
     @app.post("/api/tasks", dependencies=[Depends(require_task_caller)])
     async def create_task(request: Request) -> JSONResponse:
         """Start one task. The whole client vocabulary is five bounded fields.
@@ -2366,7 +2384,8 @@ def create_app(
         """
         payload = await _task_body(
             request,
-            allowed={"project_id", "adapter_id", "prompt", "client_request_id", "title"},
+            allowed={"project_id", "adapter_id", "prompt", "client_request_id", "title"}
+            | _authoring_fields(request),
         )
         row, created = await _run_task(
             tasks.create_task,
@@ -2376,6 +2395,13 @@ def create_app(
             client_request_id=payload.get("client_request_id"),
             title=payload.get("title"),
             origin=ORIGIN_FOR_CALLER[_caller(request)],
+            # M2K PR23. Absent stays absent: `.get` yields ``None`` for a key the
+            # caller did not send, and the service writes a durable
+            # `not_declared` for that — never a manufactured `root`. An omitted
+            # declaration and an explicit one are different facts all the way
+            # down, and this is the layer where they would be easiest to blur.
+            criteria=payload.get("criteria"),
+            continuity=payload.get("continuity"),
         )
         return JSONResponse(
             # 200 rather than 201 when an idempotency key matched: nothing was
@@ -2450,13 +2476,23 @@ def create_app(
         later attributed is the opposite of what provenance is for. It is
         assigned here from the authenticated request context.
         """
-        payload = await _task_body(request, allowed={"followup", "client_request_id"})
+        payload = await _task_body(
+            request,
+            allowed={"followup", "client_request_id"} | _authoring_fields(request),
+        )
         row = await _run_task(
             tasks.send_followup,
             task_id,
             payload.get("followup"),
             client_request_id=payload.get("client_request_id"),
             source=FOLLOWUP_SOURCE_FOR_CALLER[_caller(request)],
+            # M2K PR23, and the same rule: omission is `not_declared`, never an
+            # inferred `extend`. A follow-up is exactly where guessing would be
+            # most tempting and most wrong — `extend`, `replace` and `revise` are
+            # not distinguishable by looking at the criteria, which is the whole
+            # reason PR10 made the declaration explicit.
+            criteria=payload.get("criteria"),
+            continuity=payload.get("continuity"),
         )
         return {"task": tasks.snapshot(row).to_dict()}
 

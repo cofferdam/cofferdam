@@ -3267,11 +3267,112 @@ override, mark-met or dismiss. `not_assessable` is rendered distinctly from
 
 `create_task` writes an explicit `not_declared` continuity row when a caller
 supplies none — PR10's deliberate choice — and **no caller supplies one today**:
-`/api/tasks` has no continuity field and neither does the bridge. So every task
-created through a real surface resolves to
-`not_assessable / continuity_not_declared`. The layers are correct; the input is
-not being written yet. Acceptance is **not meaningfully consumable in production
-until a caller declares continuity**.
+`/api/tasks` had no continuity field and neither did the bridge. So every task
+created through a real surface resolved to
+`not_assessable / continuity_not_declared`. The layers were correct; the input
+was not being written.
+
+**M2K PR23 closed this** — see *Explicit authoring authority* below. A device
+caller can now declare, and a declared turn reaches a real acceptance answer.
+
+---
+
+## Explicit authoring authority (M2K PR23)
+
+The acceptance stack has been complete since PR21 and inert, because nothing
+could declare its input. This is the first real caller path.
+
+### The contract
+
+`POST /api/tasks` and `POST /api/tasks/{id}/followups` accept two more fields:
+
+| Field | Meaning |
+| --- | --- |
+| `criteria` | the existing PR6/PR17 vocabulary, validated by `validate_criteria` |
+| `continuity` | the existing PR10/PR12 declaration, validated by `validate_declaration` and the store |
+
+No new representation: `TaskService.create_task` and `send_followup` already took
+both arguments. This PR gave a real caller a way to reach them.
+
+### Only the device credential may declare
+
+`require_task_caller` accepts **two** credentials — the device token and the
+Actions bridge's own — so a shared allowlist would have made a remote Custom GPT
+user the authority on what its own work is judged against, silently, without
+touching bridge code.
+
+So the field list is **per caller**. The bridge's request shape is byte-for-byte
+what it was, and `_task_body` refuses an unexpected key, so a bridge sending
+`criteria` gets the refusal it got yesterday rather than a capability. Same
+pattern the detail route already uses for `prompt`.
+
+| Caller | may declare |
+| --- | --- |
+| device token | **yes** |
+| Actions bridge credential | no — 422, unchanged shape |
+| unauthenticated | no — 401 |
+
+### Omission is never inference
+
+| Sent | Stored |
+| --- | --- |
+| `continuity` omitted, first turn | `not_declared` — **never** a manufactured `root` |
+| `continuity` omitted, follow-up | `not_declared` — **never** an inferred `extend` |
+| `{"mode": "root"}` | `declared` / `root` |
+| `criteria` omitted or `[]` | `not_provided` |
+
+PR10's point exactly: `extend`, `replace` and `revise` are not distinguishable by
+looking at the criteria, so a convenience default would have destroyed the
+distinction while looking like a usability improvement. Asserted from behaviour
+*and* from the source — no branch turns absence into a mode.
+
+### One semantic authority
+
+HTTP validates shape. `validate_criteria`, `validate_declaration` and
+`reserve_turn_continuity` decide what is valid, including the relational half only
+the database can settle. No convenience layer converts a predicate: an authored
+`path_operation(P, created)` is stored as that and never as `path_exists(P)`.
+
+### Requirement authority stays with the host
+
+An adapter cannot supply criteria or continuity — no such field exists on
+`AdapterContext`, `AdapterOutcome` or `AdapterCapabilities`, asserted from the
+dataclasses. A worker's output never mutates what it is judged against.
+
+### An invalid declaration reads as invalid
+
+The tracked `ContinuityInvalid → ContinuityUnrecorded` translation is **removed**
+at all four sites, and `CriteriaInvalid` given the same treatment. It was harmless
+only while nothing could declare continuity; a first caller meeting a wrong error
+message is worse than no caller.
+
+| Code | Means |
+| --- | --- |
+| `task_continuity_invalid` | the declaration is wrong — the caller's |
+| `task_continuity_unrecorded` | a valid declaration could not be made durable |
+| `not_declared` | nobody declared a relationship |
+| `continuity_legacy_unknown` | this turn predates continuity |
+
+Bounded **422** with the closed reason code, via the existing task error model and
+its existing default. The submitted value, host paths, tracebacks and SQL never
+travel back out.
+
+### A refusal never reaches a worker
+
+A shape refusal is decided before the task row exists. A relational refusal on a
+follow-up happens after the criteria snapshot is reserved — PR6's existing
+pre-dispatch behaviour, not something this PR introduces — and that snapshot is
+`captured`, the one replaceable state, so a corrected retry replaces it. Either
+way no worker was told anything.
+
+### What is still not built
+
+No PWA criteria editor. Building one is a product subsystem — predicate picker,
+path validation, supersession chooser — and inventing it to satisfy "a real caller
+exists" would be the wrong reason to ship a UI. The private HTTP contract is the
+caller; PWA and planner authoring is the next integration.
+
+The Actions Bridge gained nothing: same operations, same schemas, same fields.
 
 ---
 

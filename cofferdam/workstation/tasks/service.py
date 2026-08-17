@@ -534,10 +534,24 @@ class TaskService:
             # requirements as small as it can be.
             try:
                 criteria_turn = self._record_pre_work_criteria(row, criteria)
+            except CriteriaInvalid:
+                # **The caller's declaration is the problem, and saying otherwise
+                # would send them looking at Cofferdam** (M2K PR23). Re-raised
+                # rather than translated, so a refused criteria set reads as a
+                # refusal with its own closed reason instead of a persistence
+                # failure. The task row exists and is failed by the handler
+                # below; the adapter has not been called and will not be.
+                self._fail(
+                    row,
+                    CriteriaInvalid().code,
+                    "those acceptance criteria cannot be accepted",
+                    None,
+                )
+                raise
             except TaskError as error:
-                # Only reachable when criteria were supplied — see
-                # :meth:`_record_pre_work_criteria`. The adapter has not been
-                # called and will not be.
+                # Genuinely operational: the criteria were valid and could not be
+                # made durable. Only reachable when criteria were supplied — see
+                # :meth:`_record_pre_work_criteria`.
                 return self._fail(
                     row,
                     CriteriaUnrecorded().code,
@@ -550,7 +564,27 @@ class TaskService:
             # declaration was made and `not_declared` otherwise — never a guess.
             try:
                 continuity_turn = self._record_pre_work_continuity(row, continuity)
+            except ContinuityInvalid:
+                # **M2K PR23 — the tracked translation debt, paid.** The store
+                # decides the relational half of this check: an unknown
+                # predecessor, one from another task or a later turn, a
+                # supersession target that is not active. Every one of those is
+                # *the caller's declaration being wrong*, and V1 reported all of
+                # them as `continuity_unrecorded` — "Cofferdam could not write
+                # it" — which is a different sentence pointing at a different
+                # party. Harmless while no caller could declare continuity;
+                # actively misleading the moment one can.
+                self._fail(
+                    row,
+                    ContinuityInvalid().code,
+                    "that criteria continuity declaration cannot be accepted",
+                    None,
+                )
+                raise
             except TaskError as error:
+                # Genuinely operational: a valid declaration that could not be
+                # made durable. Still fatal, for the reason
+                # :class:`ContinuityUnrecorded` gives.
                 return self._fail(
                     row,
                     ContinuityUnrecorded().code,
@@ -1276,9 +1310,13 @@ class TaskService:
             if starts_new_turn:
                 try:
                     criteria_turn = self._record_pre_work_criteria(row, wanted)
+                except CriteriaInvalid:
+                    # The caller's criteria are the problem (M2K PR23). Nothing
+                    # has been sent to the session.
+                    self._reject(row, "followup", "criteria were refused")
+                    raise
                 except TaskError:
-                    # Only reachable when criteria were supplied. Nothing has been
-                    # sent to the session and nothing is written.
+                    # Operational. Only reachable when criteria were supplied.
                     self._reject(row, "followup", "criteria could not be recorded")
                     raise CriteriaUnrecorded()
                 # M2K PR10. This is the turn continuity was invented for: a
@@ -1290,6 +1328,14 @@ class TaskService:
                 # states no new requirements.
                 try:
                     continuity_turn = self._record_pre_work_continuity(row, lineage)
+                except ContinuityInvalid:
+                    # **M2K PR23 — the tracked translation debt, paid**, and this
+                    # is the site that mattered most: a follow-up is where
+                    # `revise` lives, so it is where a caller most often names a
+                    # supersession target that is not active. That refusal must
+                    # read as a refusal.
+                    self._reject(row, "followup", "continuity was refused")
+                    raise
                 except TaskError:
                     self._reject(row, "followup", "continuity could not be recorded")
                     raise ContinuityUnrecorded()
