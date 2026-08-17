@@ -510,9 +510,21 @@ class NegativeSpaceTests(unittest.TestCase):
             self.assertNotIn(forbidden, bridge, forbidden)
 
     def test_the_pwa_gained_no_final_state_control(self):
-        pwa = (REPO_ROOT / "web" / "tasks.js").read_text(encoding="utf-8").lower()
-        for forbidden in ("final_state", "finalstate", "path_state", "observer_version"):
-            self.assertNotIn(forbidden, pwa, forbidden)
+        tasks_js = (REPO_ROOT / "web" / "tasks.js").read_text(encoding="utf-8")
+        # M2K PR22 gave the panel a read-only acceptance section, whose human
+        # phrasings legitimately name the lineage and final-state reason codes
+        # PR20 fought to preserve. So this asserts what it always meant — no
+        # **control** — rather than banning the vocabulary.
+        for forbidden in (
+            'method: "POST"', 'method: "PUT"', 'method: "PATCH"',
+            'method: "DELETE"', "/continuity", "/lineage", "/final-state",
+            "/acceptance", "supersedes", "criterion_ordinal",
+            "predecessor_snapshot_id", "resolve_active_criteria",
+        ):
+            self.assertNotIn(forbidden, tasks_js, forbidden)
+        # The one assessment request the panel makes is a GET.
+        self.assertIn("/assessment", tasks_js)
+        self.assertNotIn("assessment\", {", tasks_js)
 
     def test_the_assessment_response_is_unchanged(self):
         from cofferdam.workstation.tasks import assessment

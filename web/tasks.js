@@ -1137,6 +1137,153 @@
     return esc(item.predicate || item.kind || "—");
   }
 
+  /* --------------------------------------------- acceptance (M2K PR22) */
+
+  /* Two dimensions, and the screen must not merge them.
+
+     `not_assessable` is not a bad outcome — it is the absence of one. Rendering
+     it beside met/not-met/incomplete as though it were a fourth verdict would
+     tell somebody their work fell short when what actually happened is that
+     Cofferdam could not work out what was required of it.
+
+     Every word here is scoped to *this turn's active requirements*. There is
+     deliberately no "task passed", no "succeeded", no PASS/FAIL, no score and no
+     percentage: the aggregate is a target-turn answer and a screen is exactly
+     where an unsupported word becomes a global verdict nobody decided. */
+  var ACCEPTANCE_WORDS = {
+    met: {
+      label: "Requirements met at this turn",
+      tone: "ok",
+      hint: "Every requirement active at this turn is established as met."
+    },
+    not_met: {
+      label: "A requirement is not met at this turn",
+      tone: "warn",
+      hint: "At least one active requirement was ruled out by machine evidence."
+    },
+    /* Neutral, never `err`. This is Cofferdam's reach, not a finding. */
+    incomplete: {
+      label: "Requirement assessment incomplete",
+      tone: "",
+      hint: "Nothing was ruled out, and at least one requirement could not be decided."
+    }
+  };
+
+  /* Why there is no outcome at all. Kept apart from `incomplete` on purpose:
+     these say the requirement set itself could not be established, which is a
+     statement about the record rather than about the work. The API keeps the
+     exact code; these are the human phrasings for it. */
+  var ACCEPTANCE_REASON_WORDS = {
+    no_structured_criteria:
+      "No structured requirements were declared, so there is nothing to assess.",
+    continuity_not_declared:
+      "The requirement lineage for this turn was never declared.",
+    continuity_legacy_unknown:
+      "This turn predates requirement lineage, so it cannot be reconstructed.",
+    predecessor_unavailable:
+      "A turn this one depends on could not be resolved.",
+    turn_not_closed:
+      "This turn is still running. Acceptance is answered once it has finished.",
+    evaluation_not_recorded:
+      "The turn evaluation this depends on has not been recorded yet.",
+    evaluation_inconsistent:
+      "A stored evaluation record does not satisfy its own invariants.",
+    unsupported_evaluator_version:
+      "A stored evaluation was written by evaluator semantics this build does not know.",
+    final_state_inconsistent:
+      "A stored end-of-turn observation does not satisfy its own invariants.",
+    unsupported_final_state_observer_version:
+      "A stored observation was written by semantics this build does not know.",
+    final_state_lineage_mismatch:
+      "A stored observation was taken for a different requirement set.",
+    final_state_path_missing:
+      "A stored observation is missing a path it claims to cover.",
+    assessment_input_invalid:
+      "The derived assessment this depends on does not satisfy its own contract.",
+    unsupported_assessment_version:
+      "The derived assessment was produced by semantics this build does not know."
+  };
+
+  /* Reasons that mean a stored record disagrees with itself, rather than that
+     Cofferdam simply has not got there yet. Shown in the error tone, because
+     somebody should look — and never prettified into ordinary uncertainty. */
+  var ACCEPTANCE_STRUCTURAL = {
+    evaluation_inconsistent: true,
+    unsupported_evaluator_version: true,
+    final_state_inconsistent: true,
+    unsupported_final_state_observer_version: true,
+    final_state_lineage_mismatch: true,
+    final_state_path_missing: true,
+    assessment_input_invalid: true,
+    unsupported_assessment_version: true,
+    malformed_lineage: true,
+    cycle_detected: true,
+    lineage_depth_exceeded: true,
+    duplicate_active_criterion: true
+  };
+
+  /* Tri-state, and `null` is never rendered as "No". Whether a person is needed
+     is unknown exactly when the requirement set is. */
+  function requiresHumanText(value) {
+    if (value === true) { return "Yes — a requirement needs a person to check it."; }
+    if (value === false) { return "No — nothing here needs a person."; }
+    return "Unknown — the requirement set could not be established.";
+  }
+
+  function acceptanceBlock(view) {
+    var acceptance = view.acceptance;
+    if (!acceptance) { return ""; }
+
+    var rows = "";
+    if (acceptance.availability === "assessable") {
+      var words = ACCEPTANCE_WORDS[acceptance.outcome] ||
+        { label: acceptance.outcome, tone: "", hint: "" };
+      rows += '<p class="task-acceptance-outcome">' + badge(words.label, words.tone) +
+        '<span class="muted hint">' + esc(words.hint) + "</span></p>";
+    } else {
+      var reason = acceptance.availability_reason;
+      var tone = ACCEPTANCE_STRUCTURAL[reason] ? "err" : "";
+      rows += '<p class="task-acceptance-outcome">' +
+        badge("Not assessable", tone) +
+        '<span class="muted hint">' +
+        esc(ACCEPTANCE_REASON_WORDS[reason] || reason || "") + "</span></p>";
+      if (acceptance.unavailable_cause) {
+        rows += '<p class="muted hint">Underlying cause: ' +
+          esc(ACCEPTANCE_REASON_WORDS[acceptance.unavailable_cause] ||
+              acceptance.unavailable_cause) +
+          (acceptance.unavailable_at_turn_number
+            ? " (found at turn " + esc(String(acceptance.unavailable_at_turn_number)) + ")"
+            : "") + "</p>";
+      }
+    }
+
+    var counts = acceptance.counts;
+    if (counts) {
+      rows += '<p class="muted hint task-acceptance-counts">' +
+        esc(String(counts.total)) + " active — " +
+        esc(String(counts.met)) + " met, " +
+        esc(String(counts.not_met)) + " not met, " +
+        esc(String(counts.unverified)) + " could not verify.</p>";
+    } else {
+      rows += '<p class="muted hint task-acceptance-counts">' +
+        "Requirement counts unknown — the active set could not be established.</p>";
+    }
+
+    rows += '<p class="muted hint task-acceptance-human">' +
+      esc(requiresHumanText(acceptance.requires_human)) + "</p>";
+
+    var handles = "<details class=\"task-assessment-audit\"><summary>Acceptance identifiers</summary>" +
+      '<ul class="task-evidence-list">' +
+      "<li>aggregator version <code>" +
+      esc(String(acceptance.aggregator_version)) + "</code></li>" +
+      "<li>assessment <code>" + esc(acceptance.assessment_fingerprint) + "</code></li>" +
+      "<li>acceptance <code>" + esc(acceptance.acceptance_fingerprint) + "</code></li>" +
+      "</ul></details>";
+
+    return '<div class="task-acceptance"><h5>Acceptance at this turn</h5>' +
+      rows + handles + "</div>";
+  }
+
   function assessmentBlock(task) {
     if (!detailAssessment || detailAssessment.task_id !== task.task_id) { return ""; }
     var view = detailAssessment;
@@ -1197,7 +1344,8 @@
     }
 
     return '<div class="task-block task-assessment-detail"><h4>Assessment — turn ' +
-      esc(String(view.turn_number)) + "</h4>" + note + body + handles + "</div>";
+      esc(String(view.turn_number)) + "</h4>" + note + body + handles +
+      acceptanceBlock(view) + "</div>";
   }
 
   function evidenceRelationships(bundle) {
@@ -2116,6 +2264,11 @@
       var view = (response.payload && response.payload.assessment) || {};
       var criteria = view.criteria || {};
       var evaluation = view.evaluation || {};
+      /* Named-field copy for acceptance too, and `null` is copied as `null`
+         rather than defaulted: `counts` and `requires_human` are tri-state, and
+         "unknown" collapsing into "zero" or "no" here would undo the whole
+         distinction the API went to trouble to keep. */
+      var acceptance = view.acceptance || null;
       detailAssessment = {
         task_id: view.task_id,
         turn_number: view.turn_number,
@@ -2156,6 +2309,27 @@
               reason: row.reason
             };
           })
+        },
+        acceptance: acceptance === null ? null : {
+          aggregator_version: acceptance.aggregator_version,
+          availability: acceptance.availability,
+          availability_reason: acceptance.availability_reason,
+          unavailable_cause: acceptance.unavailable_cause,
+          unavailable_at_turn_number: acceptance.unavailable_at_turn_number,
+          outcome: acceptance.outcome,
+          counts: acceptance.counts === null || acceptance.counts === undefined
+            ? null
+            : {
+                total: acceptance.counts.total,
+                met: acceptance.counts.met,
+                not_met: acceptance.counts.not_met,
+                unverified: acceptance.counts.unverified
+              },
+          requires_human: acceptance.requires_human === undefined
+            ? null
+            : acceptance.requires_human,
+          assessment_fingerprint: acceptance.assessment_fingerprint,
+          acceptance_fingerprint: acceptance.acceptance_fingerprint
         }
       };
       assessmentTurn = view.turn_number;

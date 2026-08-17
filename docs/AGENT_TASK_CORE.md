@@ -3181,6 +3181,100 @@ response is unchanged.
 
 ---
 
+## The private acceptance read surface (M2K PR22)
+
+`GET /api/tasks/{task_id}/turns/{turn_number}/assessment` gains an **additive
+third section**. No sibling route, no new authorization, no bridge operation, no
+schema change.
+
+### One route, because it is one audit boundary
+
+Criteria, evaluation and acceptance describe the same turn-qualified question and
+a reader needs them together. Two routes would let a client pair sections read at
+different moments — the inconsistency PR8's route exists to prevent — and would
+create two contracts free to drift while describing one thing.
+
+Additive: no key renamed, removed or reinterpreted; `acceptance` is optional so
+the older two-section shape stays constructible; `ASSESSMENT_API_VERSION` does
+not move.
+
+### The response is the unit of consistency
+
+PR8's criteria/evaluation read and PR16's current-assessment read are each
+internally consistent, and calling both would still be wrong. The PR7 evaluation
+row is **not** frozen at dispatch — a bounded recovery pass writes it later — so
+one landing between two reads would produce one envelope saying
+`evaluation: not_recorded` beside `acceptance: assessable / met`.
+
+`TaskStore.turn_audit_inputs` takes both input sets under **one** snapshot,
+reusing the store's re-entrant lock and one deferred transaction. No new locking.
+
+### The published shape
+
+| Field | Notes |
+| --- | --- |
+| `aggregator_version` | PR21's, `1` |
+| `availability` | `assessable` / `not_assessable` |
+| `availability_reason` | exact lower-layer code, never translated |
+| `unavailable_cause` | PR20's nested cause, verbatim |
+| `unavailable_at_turn_number` | where the chain broke |
+| `outcome` | `met` / `not_met` / `incomplete`, or **`null`** |
+| `counts` | object, or **`null`** |
+| `requires_human` | `true` / `false` / **`null`** |
+| `assessment_fingerprint` | the envelope folded |
+| `acceptance_fingerprint` | this answer's identity |
+
+Explicit whitelist. No `asdict`, no `vars`, no `__dict__`, no field loop — a
+future internal field does not become a client contract the day it is added. The
+serializer refuses an object of the wrong type rather than duck-typing one.
+
+### Tri-states survive JSON
+
+| | resolved empty | population unknown |
+| --- | --- | --- |
+| `counts` | `{0,0,0,0}` | **`null`** |
+| `requires_human` | `false` | **`null`** |
+
+Transport is the last place these could be lost. Publishing an unknown population
+as four zeros would state an observation nobody made, indistinguishable at a
+glance from a genuinely empty requirement set. The PWA's named-field copy carries
+`null` through as `null`.
+
+### The ceiling covers acceptance
+
+The section is placed in the payload **before** the bound is checked; attaching it
+afterwards would make the bound describe something other than what is sent.
+Measured worst case — 32 criteria at maximum path length plus every optional
+acceptance field populated — is **38,710 bytes against 131,072**, 29.5% used, with
+acceptance contributing 543. The constant was not raised, and an oversized
+response still fails closed rather than trimming.
+
+### Authorization unchanged
+
+`require_token`, never `require_task_caller`. The bridge credential is unknown to
+`require_token`, so a bridge request arrives as anonymous and gets 401 — stronger
+than a check that rejects it. GET only; other verbs are 405 because nothing
+registered them. The Actions Bridge gained no operation, schema or route.
+
+### The panel says "this turn"
+
+"Requirements met at this turn", never "task passed". No PASS, FAIL, SUCCESS,
+score, percentage, confidence or risk, and **no control** — no rerun, approve,
+override, mark-met or dismiss. `not_assessable` is rendered distinctly from
+`incomplete`, structural failures get the error tone, and operational gaps do not.
+
+### What publishing made visible
+
+`create_task` writes an explicit `not_declared` continuity row when a caller
+supplies none — PR10's deliberate choice — and **no caller supplies one today**:
+`/api/tasks` has no continuity field and neither does the bridge. So every task
+created through a real surface resolves to
+`not_assessable / continuity_not_declared`. The layers are correct; the input is
+not being written yet. Acceptance is **not meaningfully consumable in production
+until a caller declares continuity**.
+
+---
+
 ## Limitations of this milestone
 
 Stated in the API payload as well as here, because a client should never have to

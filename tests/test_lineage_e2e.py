@@ -609,20 +609,81 @@ class NegativeSpaceTests(unittest.TestCase):
 
     def test_the_pwa_gained_no_lineage_control(self):
         tasks_js = (REPO_ROOT / "web" / "tasks.js").read_text(encoding="utf-8")
+        # M2K PR22 gave the panel a read-only acceptance section, whose human
+        # phrasings legitimately name the lineage and final-state reason codes
+        # PR20 fought to preserve. So this asserts what it always meant — no
+        # **control** — rather than banning the vocabulary.
         for forbidden in (
-            "lineage", "active_criteria", "resolver_version", "supersession",
+            'method: "POST"', 'method: "PUT"', 'method: "PATCH"',
+            'method: "DELETE"', "/continuity", "/lineage", "/final-state",
+            "/acceptance", "supersedes", "criterion_ordinal",
+            "predecessor_snapshot_id", "resolve_active_criteria",
         ):
-            self.assertNotIn(forbidden, tasks_js.lower(), forbidden)
+            self.assertNotIn(forbidden, tasks_js, forbidden)
+        # The one assessment request the panel makes is a GET.
+        self.assertIn("/assessment", tasks_js)
+        self.assertNotIn("assessment\", {", tasks_js)
 
-    def test_the_assessment_response_is_unchanged(self):
-        from cofferdam.workstation.tasks import assessment
+    def test_the_assessment_response_is_additive_only(self):
+        """M2K PR22 added `acceptance`; nothing below it leaked into the shape.
 
-        text = Path(assessment.__file__).read_text(encoding="utf-8")
-        for forbidden in (
-            "lineage", "active_criteria", "resolver_version", "continuity",
-            "resolved_fingerprint",
-        ):
-            self.assertNotIn(forbidden, text.lower(), forbidden)
+        This used to ban the word "lineage" from the module outright, which was
+        right while PR8's response had two sections. PR22 publishes a third, and
+        it legitimately *carries* PR20's lineage-derived reason codes — that
+        fidelity is what PR20 existed for. So the guard moves from source text to
+        the published shape: the two original sections keep their exact keys, the
+        third is additive, and no lineage **structure** — an active-criteria
+        list, a resolver version, a continuity record, a resolved fingerprint —
+        is published anywhere.
+        """
+        from cofferdam.workstation.tasks.acceptance import aggregate
+        from cofferdam.workstation.tasks.assessment import (
+            acceptance_view,
+            assessment_view,
+        )
+        from cofferdam.workstation.tasks.binding import bind
+        from cofferdam.workstation.tasks.criteria import CriteriaSnapshot
+
+        snapshot = CriteriaSnapshot(
+            task_id="task_01aaaaaaaaaaaaaaaaaaaaaaaa",
+            turn_number=1,
+            state="not_provided",
+        )
+        published = assessment_view(
+            task_id="task_01aaaaaaaaaaaaaaaaaaaaaaaa",
+            turn_number=1,
+            snapshot=snapshot,
+            record=None,
+            turn_open=False,
+        )
+        self.assertEqual(
+            {"version", "task_id", "turn_number", "criteria", "evaluation"},
+            set(published),
+        )
+
+        from cofferdam.workstation.tasks.lineage import (
+            LineageUnavailable,
+            RESOLVER_VERSION,
+        )
+
+        refusal = bind(
+            LineageUnavailable(
+                task_id="task_01aaaaaaaaaaaaaaaaaaaaaaaa",
+                target_turn_number=1,
+                resolver_version=RESOLVER_VERSION,
+                reason="continuity_not_declared",
+                at_turn_number=1,
+            ),
+            None,
+            turn_closed=True,
+        )
+        acceptance = acceptance_view(aggregate(refusal))
+        # The reason code survives — that is PR20's whole point — and no lineage
+        # structure comes with it.
+        self.assertEqual("continuity_not_declared", acceptance["availability_reason"])
+        for forbidden in ("active_criteria", "lineage", "resolver_version",
+                          "continuity", "resolved_fingerprint", "criteria"):
+            self.assertNotIn(forbidden, acceptance)
 
 
 if __name__ == "__main__":  # pragma: no cover

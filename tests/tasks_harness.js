@@ -2380,11 +2380,29 @@ function run() {
      what is under test is that `met`, `not_met` and `unverified` read
      *differently on the same screen*, which a fixture per result would stop
      proving. */
+  /* M2K PR22. `counts` and `requires_human` are tri-state and the harness must
+     be able to produce `null` for both, so scenarios pass them explicitly. */
+  function acceptanceView(overrides) {
+    return Object.assign({
+      aggregator_version: 1,
+      availability: "assessable",
+      availability_reason: null,
+      unavailable_cause: null,
+      unavailable_at_turn_number: null,
+      outcome: "incomplete",
+      counts: { total: 4, met: 2, not_met: 1, unverified: 1 },
+      requires_human: true,
+      assessment_fingerprint: "e".repeat(64),
+      acceptance_fingerprint: "a".repeat(64)
+    }, overrides || {});
+  }
+
   function assessmentView(overrides) {
     return Object.assign({
       version: 1,
       task_id: "task_a",
       turn_number: 1,
+      acceptance: acceptanceView(),
       criteria: {
         state: "present",
         recorded: true,
@@ -2453,6 +2471,80 @@ function run() {
 
   if (scenario === "assessment-shows-all-three-results") {
     return assessmentScenario(assessmentView());
+  }
+
+  if (scenario === "acceptance-met") {
+    return assessmentScenario(assessmentView({
+      acceptance: acceptanceView({
+        outcome: "met",
+        counts: { total: 2, met: 2, not_met: 0, unverified: 0 },
+        requires_human: false
+      })
+    }));
+  }
+
+  if (scenario === "acceptance-not-met") {
+    return assessmentScenario(assessmentView({
+      acceptance: acceptanceView({
+        outcome: "not_met",
+        counts: { total: 3, met: 1, not_met: 1, unverified: 1 },
+        requires_human: false
+      })
+    }));
+  }
+
+  if (scenario === "acceptance-incomplete-needs-human") {
+    return assessmentScenario(assessmentView({ acceptance: acceptanceView() }));
+  }
+
+  if (scenario === "acceptance-no-structured-criteria") {
+    return assessmentScenario(assessmentView({
+      acceptance: acceptanceView({
+        availability: "not_assessable",
+        availability_reason: "no_structured_criteria",
+        outcome: null,
+        counts: { total: 0, met: 0, not_met: 0, unverified: 0 },
+        requires_human: false
+      })
+    }));
+  }
+
+  if (scenario === "acceptance-unknown-population") {
+    return assessmentScenario(assessmentView({
+      acceptance: acceptanceView({
+        availability: "not_assessable",
+        availability_reason: "continuity_not_declared",
+        outcome: null,
+        counts: null,
+        requires_human: null
+      })
+    }));
+  }
+
+  if (scenario === "acceptance-nested-cause") {
+    return assessmentScenario(assessmentView({
+      acceptance: acceptanceView({
+        availability: "not_assessable",
+        availability_reason: "predecessor_unavailable",
+        unavailable_cause: "continuity_legacy_unknown",
+        unavailable_at_turn_number: 2,
+        outcome: null,
+        counts: null,
+        requires_human: null
+      })
+    }));
+  }
+
+  if (scenario === "acceptance-structural") {
+    return assessmentScenario(assessmentView({
+      acceptance: acceptanceView({
+        availability: "not_assessable",
+        availability_reason: "final_state_inconsistent",
+        outcome: null,
+        counts: null,
+        requires_human: null
+      })
+    }));
   }
 
   if (scenario === "assessment-not-provided") {

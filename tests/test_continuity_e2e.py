@@ -492,13 +492,16 @@ class TheNegativeSpace(unittest.TestCase):
         English participle.
         """
         tasks_js = (REPO_ROOT / "web" / "tasks.js").read_text(encoding="utf-8")
+        # M2K PR22 gave the panel a read-only acceptance section, whose human
+        # phrasings legitimately name the `continuity_*` reason codes PR20 fought
+        # to preserve. So this asserts what it always meant — no declaration
+        # **control** — rather than banning the vocabulary.
         for forbidden in (
-            "continuity",
-            "supersession",
-            "predecessor_snapshot",
-            "criterion_ordinal",
+            'method: "POST"', 'method: "PUT"', 'method: "PATCH"',
+            'method: "DELETE"', "/continuity", "supersedes",
+            "predecessor_snapshot", "criterion_ordinal",
         ):
-            self.assertNotIn(forbidden, tasks_js.lower(), forbidden)
+            self.assertNotIn(forbidden, tasks_js, forbidden)
 
     def test_the_assessment_response_is_unchanged(self):
         from cofferdam.workstation.tasks import assessment
