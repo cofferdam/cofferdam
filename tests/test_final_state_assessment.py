@@ -371,6 +371,40 @@ class ObjectKindTests(unittest.TestCase):
             self.assertNotIn(forbidden, STATE_PREDICATES)
 
 
+class PathlessStateCriterionTests(unittest.TestCase):
+    """A shape PR17's validation forbids, answered rather than crashed on.
+
+    Only a hand-built fixture can produce a state criterion with no path — the
+    service refuses one. It reaches `_state_answer` past every structural check,
+    because `_state_paths` cannot have required a path it does not have, and the
+    binder must fail closed there rather than index into nothing.
+    """
+
+    def answer(self):
+        item = AcceptanceCriterion(
+            ordinal=1, kind="evidence", predicate=PREDICATE_PATH_EXISTS, path=None
+        )
+        return bind(
+            resolved(1, [active("criterion_0001", 1, item)]),
+            None,
+            turn_closed=True,
+            final_state=observation(1, paths(("a.txt", PATH_PRESENT, KIND_FILE))),
+        )
+
+    def test_it_does_not_raise(self):
+        self.assertEqual(ASSESSMENT_RESOLVED, self.answer().state)
+
+    def test_it_is_unverified_and_never_met(self):
+        assessment = self.answer().assessments[0]
+        self.assertEqual(RESULT_UNVERIFIED, assessment.result)
+        self.assertEqual(REASON_FINAL_STATE_NOT_RECORDED, assessment.reason)
+        self.assertIsNone(assessment.evidence_fingerprint)
+
+    def test_it_does_not_borrow_another_criterion_s_path(self):
+        """The observation has exactly one path; it must not be adopted."""
+        self.assertIsNone(self.answer().assessments[0].path_state)
+
+
 # -- same turn, inherited, and no carry-forward -------------------------------
 
 

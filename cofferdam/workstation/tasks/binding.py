@@ -919,7 +919,14 @@ def _state_answer(criterion, observation) -> Tuple[str, str, str, Optional[str],
         if item.path == criterion.path:
             found = item
             break
-    if found is None:  # pragma: no cover - _final_state_defect refuses these first
+    if found is None:
+        # Not dead code, and not reachable through the service either. Every
+        # active state criterion's path is in `required_paths`, so
+        # `_final_state_defect` has already refused a recorded observation
+        # missing one. What survives to here is a state criterion carrying no
+        # path at all — which PR17's validation forbids and only a hand-built
+        # fixture can produce. It fails closed like everything else rather than
+        # indexing into nothing.
         return (
             DOMAIN_NOT_APPLICABLE,
             RESULT_UNVERIFIED,
