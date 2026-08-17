@@ -784,8 +784,8 @@ downstream reads from.
     own layer so one algorithm remains. Read from **one pinned snapshot** with PR11's resolver moved
     inside it, because deciding whether an observation is needed requires the active set.
     D-2026-08-17-9, D-2026-08-17-10 and D-2026-08-17-11.
-  - **PR19 — acceptance aggregation contract reconciliation.** *Documentation and design only, on
-    `m2k-pr19-aggregation-contract`, not merged; nothing to deploy.* Settles the contract the runtime
+  - **PR19 — acceptance aggregation contract reconciliation.** *Merged as `d777e04` (#64);
+    documentation and design only, nothing to deploy.* Settles the contract the runtime
     aggregation PR implements, by **reconciling PR9 rather than redesigning it**: D-2026-08-16-3's two
     dimensions, ordered fold and vocabulary all stand, and only their *inputs* move — availability is
     now read from PR18's `CurrentAssessment` envelope rather than one turn's criteria state, because
@@ -813,6 +813,27 @@ downstream reads from.
     which PR9 required to stay distinct — fail-closed and therefore not a safety gap, but the fix
     moves `CURRENT_ASSESSMENT_VERSION` 2 → 3 and should be decided before `AGGREGATOR_VERSION` is
     minted. D-2026-08-17-12 through D-2026-08-17-16.
+  - **PR20 — current-assessment lineage-unavailability fidelity.** *Implemented on
+    `m2k-pr20-lineage-fidelity`, not merged and not deployed.* The small prerequisite PR19 recorded,
+    taken **before** `AGGREGATOR_VERSION` so the aggregate is built once against a stable envelope.
+    **`CURRENT_ASSESSMENT_VERSION` 2 → 3**; schema stays v11, the resolver is untouched, no criterion
+    result moves, no public surface, no aggregate. **Measured rather than suspected**: with task and
+    target turn held fixed and only the resolver's verdict varied, V2 produced **one identical
+    envelope fingerprint** for seven materially different failures; V3 produces seven identities.
+    PR10 had already preserved the distinction *in the database* — it writes an explicit
+    `not_declared` row rather than no row, exactly so "nobody declared a relationship" and "this turn
+    predates continuity" stay separable — and the V2 envelope discarded it on the way out. **The cheap
+    fix would not have worked**, which was the real gate: PR11 reports an inherited failure as
+    `predecessor_unavailable` with the real reason in `cause`, so preserving only the top-level reason
+    would have left PR9's named pair collapsed one level down. Hence `unavailable_cause` is carried,
+    and `unavailable_at_turn_number` with it — without which a chain breaking at turn 2 and at turn 5
+    for the same reason are one fact. All three are **bound into the fingerprint**, or they would be
+    annotations rather than facts. The vocabulary is **imported, not restated**: `LINEAGE_REASONS`
+    *is* PR11's `REASONS`, the binder defines no lineage reason of its own (asserted from its syntax
+    tree), and the nine assessment-layer reasons stay a separate family so an envelope says which
+    layer could not answer. `lineage_unavailable` survives only as the honest fallback for a **newer**
+    resolver's classification. No context is manufactured for non-lineage refusals, and no
+    resolved-lineage fingerprint is fabricated. D-2026-08-17-17 and D-2026-08-17-18.
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**

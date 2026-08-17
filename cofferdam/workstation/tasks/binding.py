@@ -154,6 +154,11 @@ from .evaluation import (
 # the repository it describes had been deleted years ago. The purity tests pin
 # this import list exactly, because "use FinalStateObservation" means *read the
 # stored row* and never *go and look now*.
+# PR11's closed lineage-failure vocabulary. A *value* import: this module never
+# calls the resolver, never re-implements it, and never classifies a lineage
+# failure itself — it preserves the classification PR11 already made.
+from .lineage import REASONS as RESOLVER_REASONS
+
 from .finalstate import (
     FINAL_STATE_OBSERVER_VERSION,
     OBSERVATION_COMPLETE,
@@ -190,9 +195,21 @@ from .finalstate import (
 #: That is a change in *meaning*, not in shape, which is precisely what this
 #: number is for: a V1 fingerprint and a V2 fingerprint of the same criterion
 #: must not collide, because they are answers to the question as two different
-#: builds understood it. Nothing else moves — the schema, the evaluator, the
-#: observer, the resolver and the criteria model are all untouched.
-CURRENT_ASSESSMENT_VERSION = 2
+#: builds understood it.
+#:
+#: **3 (M2K PR20).** An unavailable envelope now preserves *which* lineage
+#: failure occurred, where the chain broke, and — for a failure inherited from a
+#: predecessor — the underlying cause. V2 answered every one of PR11's eighteen
+#: distinct reasons with the single string ``lineage_unavailable``, so seven
+#: materially different failures at one task and turn produced **one identical
+#: fingerprint**. That was measured, not suspected. V3 makes them different
+#: facts with different identities, which is what
+#: :data:`~..lineage.LineageUnavailable` always knew and the envelope threw away.
+#:
+#: Nothing else moves in either step — the schema, the evaluator, the observer,
+#: the resolver and the criteria model are all untouched, and there is still no
+#: aggregate version.
+CURRENT_ASSESSMENT_VERSION = 3
 
 
 # -- evidence domains ---------------------------------------------------------
@@ -330,10 +347,21 @@ ASSESSMENT_STATES: Tuple[str, ...] = (ASSESSMENT_RESOLVED, ASSESSMENT_UNAVAILABL
 
 # -- set-level reasons --------------------------------------------------------
 
-#: PR11 could not resolve the active set — ``not_declared``, ``legacy_unknown``,
-#: a broken chain. There is no requirement set to assess, and guessing one from
-#: the latest snapshot or from all history is the inference this milestone
+#: PR11 could not resolve the active set, **and this binder does not recognise
+#: the reason it gave**. There is no requirement set to assess, and guessing one
+#: from the latest snapshot or from all history is the inference this milestone
 #: refuses.
+#:
+#: **M2K PR20 narrowed this to a fallback.** In V2 it was the answer to *every*
+#: lineage failure, which meant `continuity_not_declared`, `continuity_legacy_
+#: unknown`, `cycle_detected` and fifteen others arrived at a caller as one
+#: string with one fingerprint. PR9 required "we never asked" and "we cannot know
+#: what we asked" to stay apart, and V2 could not honour it. V3 preserves the
+#: resolver's own reason (see :data:`LINEAGE_REASONS`), so this now means only
+#: what it says: a **newer** resolver reported a reason outside the closed set
+#: this version knows. The same totality discipline as
+#: :data:`REASON_UNSUPPORTED_PREDICATE` and :data:`REASON_UNSUPPORTED_EVALUATOR`
+#: — an older build must answer honestly rather than crash or guess.
 REASON_LINEAGE_UNAVAILABLE = "lineage_unavailable"
 
 #: The target turn is not a completed boundary: it does not exist, or it is open.
@@ -407,7 +435,11 @@ REASON_FINAL_STATE_LINEAGE_MISMATCH = "final_state_lineage_mismatch"
 #: ``unverified``: the row's own account of itself is wrong.
 REASON_FINAL_STATE_PATH_MISSING = "final_state_path_missing"
 
-SET_REASONS: Tuple[str, ...] = (
+#: The assessment layer's own refusals. Each names a failure **in this layer or
+#: the evidence it reads**, and none of them is a lineage failure — which is why
+#: they stay separate from :data:`LINEAGE_REASONS` below rather than being merged
+#: into one flat list. An envelope should say which layer could not answer.
+ASSESSMENT_SET_REASONS: Tuple[str, ...] = (
     REASON_LINEAGE_UNAVAILABLE,
     REASON_TURN_NOT_CLOSED,
     REASON_EVALUATION_NOT_RECORDED,
@@ -418,6 +450,23 @@ SET_REASONS: Tuple[str, ...] = (
     REASON_FINAL_STATE_LINEAGE_MISMATCH,
     REASON_FINAL_STATE_PATH_MISSING,
 )
+
+#: PR11's closed lineage-failure vocabulary, **imported rather than restated**.
+#:
+#: This is the whole of M2K PR20. A lineage failure now reaches a caller as the
+#: reason PR11 actually determined — `continuity_not_declared`,
+#: `continuity_legacy_unknown`, `cycle_detected`, `supersession_target_not_active`
+#: and the rest — instead of as one generic string.
+#:
+#: Re-declaring these names here would create a second closed set to keep in step
+#: with the first, and a translation stack between them is precisely the class of
+#: debt this repository already tracks in `ContinuityInvalid` →
+#: `ContinuityUnrecorded`. There is one vocabulary; this module preserves it and
+#: owns none of it. PR11 remains the sole authority for *classifying* a lineage
+#: failure, and nothing here renames, reinterprets or extends its judgement.
+LINEAGE_REASONS: Tuple[str, ...] = tuple(RESOLVER_REASONS)
+
+SET_REASONS: Tuple[str, ...] = ASSESSMENT_SET_REASONS + LINEAGE_REASONS
 
 #: Evaluator semantics this version knows how to bind. Explicitly a set rather
 #: than ``<= EVALUATOR_VERSION``: an old binder must not assume it understands a
@@ -553,6 +602,19 @@ class CurrentAssessment:
     #: what proves *these* criteria were the ones in force here.
     lineage_fingerprint: Optional[str] = None
     unavailable_reason: Optional[str] = None
+    #: For a lineage failure inherited from a predecessor, the underlying reason.
+    #: PR11 reports such a failure as ``predecessor_unavailable`` — *a dependency
+    #: failed* — and puts *how* it failed here. Without it, a target that cannot
+    #: resolve because its predecessor was never declared is indistinguishable
+    #: from one whose predecessor predates continuity, which is exactly the pair
+    #: PR9 required to stay apart. ``None`` whenever the failure was at the target
+    #: turn itself, and for every non-lineage refusal.
+    unavailable_cause: Optional[str] = None
+    #: The turn the resolver's walk stopped at. Equal to the target for a failure
+    #: at the target, and the predecessor's number when the chain broke earlier —
+    #: which is the difference between *this turn is undeclared* and *something
+    #: four turns back is*. ``None`` for every non-lineage refusal.
+    unavailable_at_turn_number: Optional[int] = None
     assessments: Tuple[CriterionAssessment, ...] = ()
     fingerprint: str = ""
 
@@ -671,17 +733,27 @@ def current_assessment_fingerprint(
     unavailable_reason: Optional[str],
     lineage_fingerprint: Optional[str],
     assessments: Sequence[CriterionAssessment],
+    unavailable_cause: Optional[str] = None,
+    unavailable_at_turn_number: Optional[int] = None,
 ) -> str:
     """A stable hash of the whole answer at one target turn.
 
-    Binds the assessment version, the target, the set state and its reason, the
-    **lineage fingerprint** that selected the criteria, and every criterion
-    fingerprint in resolved-active order.
+    Binds the assessment version, the target, the set state, **its reason, cause
+    and the turn the failure was found at**, the **lineage fingerprint** that
+    selected the criteria, and every criterion fingerprint in resolved-active
+    order.
 
     The lineage fingerprint is bound because *which criteria were in force* is
     half of what the set asserts: two turns whose criteria all read ``unverified``
     are not the same fact if they were standing on different requirement sets.
     Order is bound by hashing the sequence as given, never a re-sorted copy.
+
+    **The cause and the turn are bound (M2K PR20) because without them they would
+    not be facts, only annotations.** A refusal whose identity does not move when
+    the underlying failure changes is a refusal a caller cannot audit or cache
+    against: under V2, `continuity_not_declared` and `continuity_legacy_unknown`
+    at one task and turn hashed identically. They are kept as separate fields
+    rather than folded into one string so that neither has to be parsed back out.
     """
     digest = _Fingerprint()
     digest.field("cofferdam.assessment.set")
@@ -690,6 +762,8 @@ def current_assessment_fingerprint(
     digest.field(target_turn_number)
     digest.field(state)
     digest.field(unavailable_reason)
+    digest.field(unavailable_cause)
+    digest.field(unavailable_at_turn_number)
     digest.field(lineage_fingerprint)
     digest.field(len(assessments))
     for item in assessments:
@@ -706,23 +780,74 @@ def current_assessment_fingerprint(
 
 
 def _unavailable(
-    task_id: str, target_turn_number: int, reason: str
+    task_id: str,
+    target_turn_number: int,
+    reason: str,
+    *,
+    cause: Optional[str] = None,
+    at_turn_number: Optional[int] = None,
 ) -> CurrentAssessment:
+    """One refusal, with whatever bounded context the failing layer produced.
+
+    ``cause`` and ``at_turn_number`` default to ``None`` and stay ``None`` for
+    every assessment-layer refusal — `turn_not_closed`, the evaluation reasons,
+    the final-state reasons. Those layers have no equivalent structured context,
+    and manufacturing some so the field looks populated would be inventing a fact
+    to fill a column.
+    """
     return CurrentAssessment(
         task_id=task_id,
         target_turn_number=int(target_turn_number),
         assessment_version=CURRENT_ASSESSMENT_VERSION,
         state=ASSESSMENT_UNAVAILABLE,
         unavailable_reason=reason,
+        unavailable_cause=cause,
+        unavailable_at_turn_number=at_turn_number,
         fingerprint=current_assessment_fingerprint(
             task_id=task_id,
             target_turn_number=int(target_turn_number),
             state=ASSESSMENT_UNAVAILABLE,
             unavailable_reason=reason,
+            unavailable_cause=cause,
+            unavailable_at_turn_number=at_turn_number,
             lineage_fingerprint=None,
             assessments=(),
         ),
     )
+
+
+def _lineage_refusal(resolved) -> Tuple[str, Optional[str], Optional[int]]:
+    """PR11's refusal, preserved rather than translated. **The whole of PR20.**
+
+    Returns ``(reason, cause, at_turn_number)`` taken from the immutable
+    :class:`~..lineage.LineageUnavailable` the resolver already produced. Nothing
+    is renamed, re-derived or re-classified: PR11 decided *why* the lineage could
+    not resolve, and this layer's only job is to stop that decision being thrown
+    away at the envelope boundary.
+
+    **Why the cause matters as much as the reason.** PR11 reports a failure it
+    inherited from a predecessor as ``predecessor_unavailable`` and puts the real
+    reason in ``cause``. So preserving only the top-level reason would fix the
+    direct cases and leave the nested ones exactly as collapsed as V2 had them —
+    a target whose predecessor was never declared would be indistinguishable from
+    one whose predecessor predates continuity, which is the specific pair PR9
+    insisted on keeping apart. Measured before it was written: seven materially
+    different failures shared one V2 fingerprint.
+
+    **Both values are validated against the closed set.** A reason outside
+    :data:`LINEAGE_REASONS` means a newer resolver classified something this
+    build does not know, and it is answered with the honest
+    :data:`REASON_LINEAGE_UNAVAILABLE` rather than passed through — the same
+    totality discipline this module applies to predicates and evaluator versions.
+    A cause is dropped in that case too: an unrecognised outer reason makes no
+    promise about its inner one.
+    """
+    reason = resolved.reason
+    if reason not in LINEAGE_REASONS:
+        return REASON_LINEAGE_UNAVAILABLE, None, None
+    cause = resolved.cause if resolved.cause in LINEAGE_REASONS else None
+    at_turn = resolved.at_turn_number
+    return reason, cause, None if at_turn is None else int(at_turn)
 
 
 def _evaluation_is_consistent(evaluation, resolved) -> bool:
@@ -1004,8 +1129,15 @@ def bind(
             resolved.task_id, resolved.target_turn_number, REASON_TURN_NOT_CLOSED
         )
     if not resolved.resolved:
+        # M2K PR20: PR11's own reason, its cause and where the walk stopped —
+        # not a generic string that made eighteen distinct failures one fact.
+        reason, cause, at_turn = _lineage_refusal(resolved)
         return _unavailable(
-            resolved.task_id, resolved.target_turn_number, REASON_LINEAGE_UNAVAILABLE
+            resolved.task_id,
+            resolved.target_turn_number,
+            reason,
+            cause=cause,
+            at_turn_number=at_turn,
         )
 
     # A PR7 record is required only if some active criterion actually needs one.
@@ -1166,6 +1298,8 @@ __all__ = [
     "DOMAIN_TURN_CHANGE",
     "EVIDENCE_DOMAINS",
     "FINGERPRINT_CHARS",
+    "ASSESSMENT_SET_REASONS",
+    "LINEAGE_REASONS",
     "REASONS_FOR_RESULT",
     "REASON_EVALUATION_INCONSISTENT",
     "REASON_EVALUATION_NOT_RECORDED",

@@ -3207,6 +3207,16 @@ have every incentive to use.
 
 ## D-2026-08-17-6 — The current assessment is derived, and its refusals are separated by kind (EFE DECISION, ACTIVE)
 
+> **Status note, 2026-08-17.** The principle here — *different kinds of silence are not collapsed into
+> one* — stands, and two later decisions applied it further rather than against it. Two details below
+> are historical: `CURRENT_ASSESSMENT_VERSION` is now **3**
+> ([D-2026-08-17-9](d-2026-08-17-9--finalstate-is-a-second-evidence-domain-and-the-assessment-version-moves-with-it-efe-decision-active)
+> took it to 2,
+> [D-2026-08-17-17](#d-2026-08-17-17--a-lineage-failure-keeps-the-reason-pr11-gave-it-efe-decision-active)
+> to 3), and the `lineage_unavailable` row of the table below has itself been split into PR11's
+> eighteen distinct reasons — this decision's own rule, applied one level deeper than it reached at
+> the time. The table stands as the four *kinds* it correctly identified.
+
 **Decision.** The layer adds **no table and no schema change**; schema stays at v10. Every input —
 the criterion row, the continuity declaration, the PR7 evaluation — is immutable and versioned, so
 the answer is a pure function that re-derives identically forever. Persisting it would add a write
@@ -3638,6 +3648,90 @@ reason onto the envelope — as a derived field, no persistence — is a change 
 fingerprint. That is a real cost and the reason it is not smuggled into a docs PR. It should be
 decided explicitly and, if taken, taken **before** `AGGREGATOR_VERSION = 1` is minted, so the
 aggregate is built once against a stable envelope instead of twice.
+
+> **Resolved, 2026-08-17 (M2K PR20).** Taken, and taken first. See
+> [D-2026-08-17-17](#d-2026-08-17-17--a-lineage-failure-keeps-the-reason-pr11-gave-it-efe-decision-active)
+> and
+> [D-2026-08-17-18](#d-2026-08-17-18--the-nested-cause-is-carried-because-the-top-level-reason-alone-would-not-have-fixed-it-efe-decision-active).
+> The investigation also found the gap was **worse than recorded here**: preserving only the top-level
+> reason would have left the nested `predecessor_unavailable` cases collapsed, so the cause is carried
+> as well. `AGGREGATOR_VERSION` is still not minted.
+
+## D-2026-08-17-17 — A lineage failure keeps the reason PR11 gave it (EFE DECISION, ACTIVE)
+
+**Decision.** `CurrentAssessment` preserves the resolver's own unavailability classification.
+`CURRENT_ASSESSMENT_VERSION` moves **2 → 3**. This closes the gap
+[D-2026-08-17-16](#d-2026-08-17-16--one-fidelity-gap-remains-the-binder-collapses-eighteen-resolver-reasons-into-one-efe-decision-active)
+recorded, and it is done **before** `AGGREGATOR_VERSION` is minted so the aggregate is built once
+against a stable envelope.
+
+**The measurement, not the suspicion.** Holding task and target turn fixed and varying only the
+resolver's verdict, V2 produced **one identical envelope fingerprint** for seven materially different
+failures — `continuity_legacy_unknown`, `continuity_not_declared`, two distinct nested predecessor
+causes, `cycle_detected`, `malformed_lineage` and `lineage_depth_exceeded`. Under V3 the same seven
+produce seven identities. That is the whole change.
+
+**PR10 already preserved this distinction in the database, and V2 threw it away on the way out.**
+`reserve_turn_continuity` deliberately writes an explicit `not_declared` row rather than no row,
+because — in its own words — "nobody declared a relationship" and "this turn predates continuity" are
+different facts, only the first is recoverable, and a future aggregate must be able to tell them apart
+forever. The rows were right; the envelope was not.
+
+**The vocabulary is imported, not restated.** `LINEAGE_REASONS` **is** PR11's `REASONS` tuple, and
+the binder defines no lineage reason of its own — asserted from its syntax tree. A parallel closed set
+would have to be kept in step with the first, and a translation stack between them is precisely the
+class of debt this repository already tracks in `ContinuityInvalid` → `ContinuityUnrecorded`. PR11
+remains the sole authority for *classifying* a lineage failure; this layer only stops the
+classification being discarded.
+
+**The two reason families stay separate.** `ASSESSMENT_SET_REASONS` (nine) names failures in the
+assessment layer or the evidence it reads; `LINEAGE_REASONS` (eighteen) names failures the resolver
+found. `SET_REASONS` is their union, twenty-seven, and no assessment-layer reason was renamed,
+absorbed or folded into a lineage one. An envelope should say **which layer** could not answer.
+
+**`lineage_unavailable` survives as a fallback and means only what it says.** A reason outside
+PR11's closed set means a *newer* resolver classified something this build does not know, and it is
+answered honestly rather than passed through — the same totality discipline this module already
+applies to unknown predicates and unknown evaluator versions. An unrecognised outer reason drops its
+cause and turn too: it makes no promise about its inner one.
+
+**Nothing else moved.** Schema stays v11 with no migration, no table and no persistence.
+`EVALUATOR_VERSION`, `FINAL_STATE_OBSERVER_VERSION`, `RESOLVER_VERSION`, `CONTINUITY_MODEL_VERSION`,
+`CRITERIA_MODEL_VERSION` and `ASSEMBLER_VERSION` are untouched, there is still no
+`AGGREGATOR_VERSION`, no criterion-level result changed, and there is no public surface.
+
+## D-2026-08-17-18 — The nested cause is carried, because the top-level reason alone would not have fixed it (EFE DECISION, ACTIVE)
+
+**Decision.** The V3 envelope carries `unavailable_cause` and `unavailable_at_turn_number` alongside
+`unavailable_reason`, and all three are bound into the fingerprint.
+
+**This was a real gate and it resolved against the cheaper answer.** The obvious minimal fix — preserve
+PR11's top-level reason and stop — is **not sufficient**, and the reason is structural rather than a
+matter of taste. PR11 reports a failure inherited from a predecessor as `predecessor_unavailable` and
+puts the real reason in `cause`. So a target whose predecessor was never declared and one whose
+predecessor predates continuity would *both* have read `predecessor_unavailable` — the exact pair PR9
+required to stay apart, collapsed one level down instead of at the top. Verified end to end against
+the real resolver walking real stored rows, not argued.
+
+**`at_turn_number` is carried for the same reason, one step weaker.** Without it, a chain that broke
+at turn 2 and one that broke at turn 5 for the identical reason are one fact with one fingerprint,
+and the resolver's own docstring already states that an audit needs to know where the chain broke. It
+is a bounded integer the resolver has already computed, not nested diagnostic data.
+
+**Both are bound into the fingerprint, because otherwise they would be annotations rather than
+facts.** A refusal whose identity does not move when the underlying failure changes cannot be audited
+or cached against. They are kept as **separate fields** rather than folded into one composite string,
+so that neither has to be parsed back out by a consumer.
+
+**They are populated only where a layer genuinely produced them.** `cause` is set exactly for
+`predecessor_unavailable`; `at_turn_number` exactly for a lineage failure. Every assessment-layer
+refusal — `turn_not_closed`, the evaluation reasons, the final-state reasons — leaves both `None`,
+because those layers have no equivalent bounded context and manufacturing some so a field looks
+populated would be inventing a fact to fill a column.
+
+**No resolved-lineage fingerprint is fabricated.** An unavailable envelope still carries
+`lineage_fingerprint = None`. Knowing precisely *why* resolution failed is not the same as having
+resolved something, and a reason is not a substitute for an identity.
 
 ## OPEN QUESTIONS
 
