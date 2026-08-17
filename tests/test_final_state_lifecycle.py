@@ -233,17 +233,27 @@ class CaptureOrderingTests(FinalStateCase):
         self.assertTrue(seen["turn_open"], "the turn was already closed")
 
     def test_the_committed_range_is_observed_before_the_final_state(self):
-        """PR5 at dispatch, PR14 inside the close. Recorded, not read off the source.
+        """Both inside the close, range first. Recorded, not read off the source.
 
-        **M2K PR25 moved the second one and this assertion moved with it.** PR14
-        observed one instruction after PR5, and the symmetry was the defect: PR5
-        measures a boundary already fixed before dispatch, while PR14 measures the
-        worker's effect and an asynchronous worker has not had one yet. The
-        final-state capture now happens inside ``_apply``, immediately before the
-        transition that durably closes the turn — so it is still after PR5 and
-        still before the close, which was always the property that mattered, but
-        it is now *bound to the worker's terminal result* rather than to the
-        adapter call returning. See :meth:`TaskService._capture_terminal_boundary`.
+        **M2K PR25 moved the second one and PR26 moved the first**, so this
+        assertion has now moved twice and has ended up asserting something
+        simpler than either intermediate version.
+
+        PR14 observed one instruction after PR5 and the symmetry looked like the
+        defect. PR25 read it that way: PR5 measures a boundary fixed before
+        dispatch, PR14 measures the worker's effect, so only the second was
+        wrong. That was half right. PR5's *baseline* is fixed before dispatch;
+        its **target** is HEAD, and at dispatch an asynchronous worker has not
+        committed to it yet — so the range was as premature as the final state
+        was, and it was worse, because it recorded coverage ``complete`` and gave
+        PR7 licence to answer ``not_met``.
+
+        Both are now taken by :meth:`TaskService._capture_terminal_boundary`,
+        immediately before the transition that durably closes the turn. So
+        ``_apply`` comes first, and **the relative order of the two observations
+        is unchanged** — range, then final state, exactly as PR5 and PR14 always
+        had it. That is deliberate: the pair moved together and no reader's
+        expectation about which comes first had to move with them.
         """
         order = []
         service = self.service(
@@ -273,7 +283,7 @@ class CaptureOrderingTests(FinalStateCase):
             continuity={"mode": "root"},
         )
         self.assertEqual(
-            order, ["_record_committed_range", "_apply", "_record_final_state"]
+            order, ["_apply", "_record_committed_range", "_record_final_state"]
         )
 
     def test_the_worker_ran_before_the_observation(self):

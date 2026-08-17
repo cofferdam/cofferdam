@@ -8,6 +8,41 @@ release.
 
 ### Added
 
+- **M2K PR26 — the same mistake, in the half we thought was safe.**
+  PR25 fixed *when* Cofferdam looks at your files. It did not fix when Cofferdam looks at your
+  project's **history**, because that check appeared to be settled already. It was not, and the
+  version of it that shipped was worse.
+
+  **What went wrong.** Cofferdam records what an agent committed by comparing your project before the
+  work with your project after it. The "before" really was taken before. The "after" was taken the
+  moment the job was handed over — so for a background agent it was the *same* moment. The record
+  therefore read "nothing was committed", and, worse, "and we checked thoroughly".
+
+  **Why nothing else caught it.** Cofferdam's other way of noticing changes is to look at unsaved
+  work sitting in your project. But an agent that *commits* its work leaves nothing sitting there —
+  committing is exactly what makes that second check come up empty. So both ways of noticing went
+  blind at the same moment, and Cofferdam confidently reported that a file it had been asked to
+  change was not changed. Not "cannot tell" — **not done**. That happened for every requirement about
+  what an agent did: changed a file, created or deleted one, renamed one.
+
+  **What changes for you.** A background agent that commits its work is now credited with it.
+  Requirements about what was done are answered from your project's history as it stood when the work
+  actually finished. An agent that finishes instantly behaves exactly as before, and an agent that
+  changes files without committing is still answered the way it always was.
+
+  **Work that ends badly still counts.** An agent that committed something and then failed or was
+  cancelled committed it. That stays in the record.
+
+  **When Cofferdam genuinely does not know, it says so.** If the workstation restarts while an agent
+  is running, that turn's requirements now read as unverified rather than being answered from a
+  measurement taken before the work started.
+
+  **Nothing was rewritten.** No old record was changed, re-checked against today's files, or
+  reinterpreted, and no database migration was needed.
+
+  Unreleased and undeployed: this is the second of two fixes that must both ship before the rolled-back
+  deployment is retried.
+
 - **M2K PR25 — a requirement is now checked when the work finishes, not when it is handed over.**
   Cofferdam used to look at your project the moment it passed the job to the agent, and record what it
   saw as "how things ended up". For an agent that finishes instantly that is the same thing. For one

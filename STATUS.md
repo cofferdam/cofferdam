@@ -797,10 +797,58 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2K PR26 — terminal-bound committed-range evidence
+
+On `m2k-pr26-terminal-bound-committed-range`, from the merged `778837d`. **Implemented on a branch,
+not merged and not deployed. Blocks the deployment retry.**
+
+The **second** asynchronous evidence-boundary defect, and the more damaging one. It was found by
+auditing PR25's own reasoning rather than by another failed smoke — PR25 left PR5's committed-range
+capture on the dispatch path because "the baseline revision was frozen before dispatch". The baseline
+is. A range has two revisions, and the **target** is `HEAD`, which an asynchronous `start` returns
+before the worker has committed to. The recorded range was `baseline == target`: ancestry
+`identical`, coverage `complete`, no paths — true about two equal revisions, false about the turn.
+
+**Why it was worse than PR14's.** PR14's premature row said `absent`. PR5's said
+**`coverage = complete`**, which claims the committed domain was fully examined. A negative
+conclusion requires both domains closed, and this closed one on a reading never taken. The worktree
+domain could not compensate: `git status` compares against the current `HEAD`, so **committing is
+exactly what blinds it** — and exactly what the dispatch-bound range could not see. Both domains went
+blind at the same instant, and the standing doctrine that one domain may be incomplete while another
+holds authority had nothing left to stand on.
+
+**Proved against merged `778837d` before anything was changed.** A deterministic asynchronous worker
+that committed its work produced:
+
+| Criterion | Merged main | With PR26 |
+| --- | --- | --- |
+| `path_changed` | `not_met` / `complete_resulting_change_absent` | `met` |
+| `path_operation` created / modified / deleted | `not_met` / `complete_resulting_change_absent` | `met` |
+| `rename` | `not_met` / `complete_rename_not_observed` | `met` |
+
+Two controls stayed correct on both builds: a worker that genuinely committed nothing still answers
+`not_met`, and a worker that changed a file **without** committing is still answered by the worktree
+domain.
+
+**One owner, joined rather than duplicated.** `_record_committed_range` moves off both dispatch paths
+into `_capture_terminal_boundary`, PR25's owner, in a pinned order — committed range, then final
+state. The evidence domains stay separate: the range is immutable event evidence and the final state
+is a write-once row. `waiting_for_user` finalizes nothing; a refused dispatch fabricates nothing;
+failure and cancellation still measure, because a commit is reachable from `HEAD` whatever word the
+lifecycle ends on; restart recovery deliberately does not, so interrupted turns answer `unverified`.
+
+**No version moves.** Schema v11, assembler 3, evaluator 1, aggregator 1, and PR25's observer 2 and
+assessment 4 untouched. Old and new observations are not distinguishable and no committed-range
+observer version is introduced — it would matter only if the evaluator read it, and that evaluator
+would have to move. The absence is safe because no stored range is false; only the inference was.
+Historical evaluations are not re-evaluated, overwritten or backfilled, and no compatibility refusal
+is defined because the live v9 database holds **zero** committed-range events, **zero** turn criteria
+and **zero** evaluations — the defect is pre-production. D-2026-08-18-1, D-2026-08-18-2.
+
 ### M2K PR25 — terminal-bound final-state observation
 
-On `m2k-pr25-terminal-bound-final-state`, from the merged `eb70a2b`. **Implemented on a branch, not
-merged and not deployed. Blocks the deployment retry.**
+Merged as `778837d` (#70) on 2026-08-17, from `eb70a2b`. **Merged but not deployed** — the retry is
+blocked on PR26 above.
 
 The first Tier-2 deployment of PR11–PR24 went out on 2026-08-17, **succeeded mechanically, and was
 deliberately rolled back** after its production smoke exposed a real authority defect in PR14. A
@@ -1518,16 +1566,17 @@ needed no deployment because it changed only documentation; PR10 is merged (`1ef
 deployed to slot A on schema v9; PR11 (`3bb9a5b`, #56), PR12 (`2dc4177`, #57), PR13 (`8cd8ba3`, #58),
 PR14 (`064fe51`, #59), PR15 (`12e64cd`, #60), PR16 (`c1d6f1d`, #61), PR17 (`c164383`, #62), PR18
 (`1116b61`, #63), PR19 (`d777e04`, #64), PR20 (`9fbf9a9`, #65), PR21 (`617412c`, #66), PR22
-(`c214d5c`, #67), PR23 (`a1dfd23`, #68) and PR24 (`eb70a2b`, #69) are merged; PR25 is on a branch.
-See *In progress* above for PR25.
+(`c214d5c`, #67), PR23 (`a1dfd23`, #68), PR24 (`eb70a2b`, #69) and PR25 (`778837d`, #70) are merged;
+PR26 is on a branch. See *In progress* above for PR26.
 
 **PR11–PR24 were deployed once, on 2026-08-17, and deliberately rolled back.** The deployment
 succeeded mechanically and its production smoke exposed the PR14 async capture-boundary defect PR25
+fixes — and the audit of PR25 then exposed the same defect in PR5's committed range, which PR26
 fixes. The rollback was performed as the required **pair** — runtime to slot A `1efd49b`, database to
 the verified pre-v11 v9 backup — and production integrity was verified afterwards. The one v11-only
 smoke task created during the attempt was deliberately lost as isolated deployment-test data.
-**Production is intentionally behind `main` and is not to be normalized until PR25 merges**;
-PR11–PR24 therefore remain undeployed. The tunnel unit was already failed before the attempt and
+**Production is intentionally behind `main` and is not to be normalized until PR26 merges**;
+PR11–PR25 therefore remain undeployed. The tunnel unit was already failed before the attempt and
 remains unrelated operational debt; the sanitizer timing-test flake remains separate. See
 D-2026-08-17-30.
 
