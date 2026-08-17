@@ -2911,6 +2911,12 @@
       resetDeclaration("create");
       composerOpen = false;
       openTaskId = payload.task ? payload.task.task_id : null;
+      /* Creating a task moves `openTaskId` without going through the open
+         handler, so the follow-up declaration has to be re-anchored here too.
+         Reaching this with somebody else's rows in it needs a route the list
+         view happens to close today — `taskBack` already resets — and relying
+         on that is relying on a coincidence rather than on the rule. */
+      syncAuthoringTask(openTaskId);
       detail = payload.task || null;
       settleTerminalDrafts(detail);
       detailEvents = [];
