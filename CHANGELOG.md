@@ -8,6 +8,37 @@ release.
 
 ### Added
 
+- **M2K PR21 — Cofferdam can now say whether a piece of work met what you asked for.** Nothing is
+  visible yet and nothing new is saved.
+
+  **What it adds.** Cofferdam could already say where each individual requirement stood at a given
+  point in a task. It can now add those up into one answer for that point: *met*, *not met*, or
+  *incomplete*.
+
+  **How it decides.** If even one requirement is definitely unmet, the answer is *not met* — however
+  many others were unclear. Knowing one thing failed is not undone by being unsure about something
+  else. If nothing is definitely unmet but something is unclear, the answer is *incomplete*. Only when
+  every requirement is satisfied is the answer *met*.
+
+  **When it declines to answer at all.** There is a difference between "I know what was required and
+  one item is unclear" and "I could not work out what was required". The first is *incomplete*. The
+  second is not an answer about your work, and Cofferdam says so plainly instead — including when the
+  reason is only that its own bookkeeping has not caught up yet, or that a stored record looks
+  altered. It also declines when you never stated any requirements, rather than declaring success over
+  an empty list.
+
+  **The distinction it takes most care over.** "You asked for nothing" and "I could not tell what you
+  asked for" both mean there is no verdict — but in the first case Cofferdam genuinely knows the
+  count is zero, and in the second it knows nothing at all. It reports those differently, and cannot
+  accidentally report the second as a tidy row of zeros.
+
+  **When a person is needed.** If you marked a requirement for a human to check, Cofferdam flags that
+  separately from the verdict, so a *not met* answer can still tell you somebody is also required. It
+  never raises that flag merely because it was unsure about something no person could resolve either.
+
+  **Still one point at a time.** This is a verdict on a single point in a task, not on the task as a
+  whole. That larger question remains deliberately unanswered.
+
 - **M2K PR20 — when Cofferdam cannot work out what was required, it now says which of eighteen
   reasons applies.** Nothing is visible yet and nothing new is saved.
 

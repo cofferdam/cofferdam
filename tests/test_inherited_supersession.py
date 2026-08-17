@@ -1122,6 +1122,8 @@ class NegativeSpaceTests(unittest.TestCase):
             "acceptance_outcome", "CheckRunner", "run_check", "check_id",
         }
         for path in sorted((REPO_ROOT / "cofferdam").rglob("*.py")):
+            if path.name == "acceptance.py":
+                continue  # M2K PR21; see the sole-definer test below
             declared = set()
             for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
                 if isinstance(

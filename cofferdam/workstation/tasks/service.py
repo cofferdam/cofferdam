@@ -1981,6 +1981,51 @@ class TaskService:
             final_state=inputs.final_state,
         )
 
+    def turn_acceptance(self, task_id: object, turn_number: object):
+        """Whether one turn's requirements were established. **A read.**
+
+        M2K PR21, and the first aggregate this milestone has built. Returns an
+        :class:`~.acceptance.AcceptanceAggregate` — never ``None``, never an
+        exception for an envelope it dislikes.
+
+        **Two components and one input.** This calls
+        :meth:`current_criterion_assessment` and hands the result to PR21's pure
+        fold. It does **not** open the lineage, the PR7 evaluation or PR14's
+        observations separately: doing so would be a second read of facts the
+        envelope already carries, taken from a database state that could differ
+        from the one the envelope was built in — the exact split
+        :meth:`~.store.TaskStore.current_assessment_inputs` pins shut one layer
+        down. One snapshot underneath, one fold on top.
+
+        **Two dimensions, never one.** *Availability* says whether an acceptance
+        question can be answered at all; *outcome* exists only when it can. A
+        turn whose requirement set could not be determined has **no outcome** —
+        not a neutral one, and emphatically not ``incomplete``, which is a
+        statement about a known set containing something unverified.
+
+        **The fold**, for a resolved non-empty set: any ``not_met`` wins;
+        otherwise any ``unverified`` gives ``incomplete``; otherwise ``met``.
+        Known failure dominates uncertainty, uncertainty blocks ``met``, and
+        nothing else reaches it.
+
+        **Not a task verdict.** Acceptance *at this turn*, over the criteria
+        active *at this turn*. There is no overall task result, no merge or
+        deployment readiness, and no alias for "the latest turn".
+
+        **Not lifecycle.** A completed turn may be ``not_met``; a failed one may
+        have no assessable acceptance at all.
+
+        **Derived, never stored.** Schema stays at v11, no table is added, and
+        there is no write path or recovery path to get wrong. **Internal**: no
+        HTTP route, no Actions Bridge operation, no PWA control, and
+        :meth:`turn_assessment` is unchanged.
+
+        Calling it a thousand times leaves the database byte-identical.
+        """
+        from .acceptance import aggregate
+
+        return aggregate(self.current_criterion_assessment(task_id, turn_number))
+
     def turn_assessment(self, task_id: object, turn_number: object):
         """One turn's published assessment, or ``None`` for no such turn.
 

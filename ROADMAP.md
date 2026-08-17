@@ -813,8 +813,8 @@ downstream reads from.
     which PR9 required to stay distinct — fail-closed and therefore not a safety gap, but the fix
     moves `CURRENT_ASSESSMENT_VERSION` 2 → 3 and should be decided before `AGGREGATOR_VERSION` is
     minted. D-2026-08-17-12 through D-2026-08-17-16.
-  - **PR20 — current-assessment lineage-unavailability fidelity.** *Implemented on
-    `m2k-pr20-lineage-fidelity`, not merged and not deployed.* The small prerequisite PR19 recorded,
+  - **PR20 — current-assessment lineage-unavailability fidelity.** *Merged as `9fbf9a9` (#65),
+    **not deployed**.* The small prerequisite PR19 recorded,
     taken **before** `AGGREGATOR_VERSION` so the aggregate is built once against a stable envelope.
     **`CURRENT_ASSESSMENT_VERSION` 2 → 3**; schema stays v11, the resolver is untouched, no criterion
     result moves, no public surface, no aggregate. **Measured rather than suspected**: with task and
@@ -834,6 +834,27 @@ downstream reads from.
     layer could not answer. `lineage_unavailable` survives only as the honest fallback for a **newer**
     resolver's classification. No context is manufactured for non-lineage refusals, and no
     resolved-lineage fingerprint is fabricated. D-2026-08-17-17 and D-2026-08-17-18.
+  - **PR21 — runtime target-turn acceptance aggregation.** *Implemented on
+    `m2k-pr21-acceptance-aggregation`, not merged and not deployed.* The first aggregate this
+    milestone has built: **`AGGREGATOR_VERSION = 1`**, in exactly one module, implementing PR19's
+    contract against PR20's stabilised envelope. Schema stays v11, nothing is persisted, and there is
+    no public surface. **Two dimensions and neither absorbs the other** — availability answers whether
+    an acceptance question can be answered at all, and an outcome exists only when it can, so an
+    undetermined requirement set has **no outcome** rather than `incomplete`. **PR9's fold unchanged**:
+    any `not_met` wins, else any `unverified` gives `incomplete`, else `met` — and `met` is unreachable
+    vacuously because an empty set never reaches the outcome dimension. **Domain-agnostic, asserted
+    from the syntax tree**: the module never names an evidence domain, a predicate or a criterion
+    reason, reading `result` for the fold and `kind` only for whether a person is needed — so
+    `AGGREGATOR_VERSION` does not move when a future domain appears. **Counted zero and unknown
+    population are made unrepresentable as the same thing**: a resolved empty set carries zero counts
+    and `requires_human = False`, an unavailable envelope carries neither, and the fingerprint binds a
+    presence flag before the numbers. **`requires_human` is a tri-state** derived from criterion kind,
+    never from uncertainty, and orthogonal to the outcome. **Thirty reasons — three owned, PR20's
+    twenty-seven passed through verbatim** with cause and at-turn carried, because re-flattening them
+    one layer up would undo PR20. **Input semantics enumerated** at `(3,)`, malformed envelopes refused
+    as `assessment_input_invalid` and never normalised. `TaskService.turn_acceptance` folds one
+    envelope and reopens nothing. **No global task verdict**, no named checks, no runner, no route.
+    D-2026-08-17-19 and D-2026-08-17-20.
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**
