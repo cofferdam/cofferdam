@@ -797,10 +797,59 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2K PR23 — explicit criteria / continuity authoring authority
+
+On `m2k-pr23-authoring-authority`, from the merged `c214d5c`. **Implemented on a branch, not merged
+and not deployed.**
+
+The first real caller path for acceptance. The stack has been complete since PR21 and inert, because
+nothing could declare its input; PR22 made that visible. `POST /api/tasks` and
+`POST /api/tasks/{id}/followups` now accept `criteria` and `continuity`, using the existing internal
+contract — `TaskService` already took both arguments, so no second representation was created.
+
+**The authority boundary was the real risk, and not where it looks.** `require_task_caller` accepts
+the Actions bridge credential as well as the device token, so adding these names to the shared
+allowlist would have made a remote Custom GPT user the authority on what its own work is measured
+against — silently, without touching a line of bridge code. The field list is therefore **per
+caller**: the bridge's request shape is byte-for-byte what it was, and `_task_body` refuses an
+unexpected key, so a bridge sending `criteria` gets the refusal it got yesterday rather than a new
+capability. The detail route already uses this pattern for `prompt`.
+
+**Omission is never inference.** A first turn without a declaration is `not_declared`, never a
+manufactured `root`; a follow-up without one is `not_declared`, never an inferred `extend`. That was
+PR10's whole point — the modes are not distinguishable by looking at the criteria — and an HTTP-layer
+default would have destroyed it while looking like a usability improvement. Pinned from behaviour and
+from the source.
+
+**One semantic authority.** HTTP validates shape; `validate_criteria`, `validate_declaration` and
+`reserve_turn_continuity` decide validity, including the relational half only the database can settle.
+No convenience layer converts a predicate.
+
+**Requirement authority stays with the host.** An adapter cannot supply criteria or continuity — no
+such field exists on `AdapterContext`, `AdapterOutcome` or `AdapterCapabilities`, asserted from the
+dataclasses. A worker's output never mutates what it is judged against.
+
+**The tracked `ContinuityInvalid` → `ContinuityUnrecorded` debt is paid**, at all four sites, with
+`CriteriaInvalid` given the same treatment. It was harmless only while nothing could declare
+continuity; a first caller meeting "Cofferdam could not write it" for *their own mistake* is worse
+than no caller. Invalid, unrecorded, not-declared and legacy-unknown stay four distinct facts, and an
+invalid declaration is a bounded 422 with its closed reason code and no host detail.
+
+**A refusal never reaches a worker.** A shape refusal is decided before the task row exists; a
+relational refusal on a follow-up happens after the criteria snapshot is reserved — PR6's existing
+pre-dispatch behaviour — and that snapshot is `captured`, the one replaceable state, so a corrected
+retry replaces it.
+
+**No PWA editor was built.** A criteria authoring UI is a product subsystem, and inventing one to
+satisfy "a real caller exists" would be the wrong reason to ship it. The private HTTP contract is the
+caller; PWA and planner authoring is named as the next integration.
+D-2026-08-17-23 and D-2026-08-17-24.
+
 ### M2K PR22 — private target-turn acceptance read surface
 
-On `m2k-pr22-acceptance-read-surface`, from the merged `617412c`. **Implemented on a branch, not
-merged and not deployed.**
+**Merged as `c214d5c` (#67) and deliberately NOT deployed.** Production remains on the PR10 runtime —
+workstation and Actions bridge both from **slot A at `1efd49b`**, live schema **v9**. The record below
+was written while PR22 was on `m2k-pr22-acceptance-read-surface`, from the merged `617412c`.
 
 Publishes PR21's derived acceptance through the **existing** private assessment route as an additive
 third section. No new route, no new authorization, no bridge operation, no schema change, and no new
@@ -1368,12 +1417,12 @@ M2K is **in progress**: PR1 through PR8 are merged and deployed; PR9 is merged (
 needed no deployment because it changed only documentation; PR10 is merged (`1efd49b`, #55) and
 deployed to slot A on schema v9; PR11 (`3bb9a5b`, #56), PR12 (`2dc4177`, #57), PR13 (`8cd8ba3`, #58),
 PR14 (`064fe51`, #59), PR15 (`12e64cd`, #60), PR16 (`c1d6f1d`, #61), PR17 (`c164383`, #62), PR18
-(`1116b61`, #63), PR19 (`d777e04`, #64), PR20 (`9fbf9a9`, #65) and PR21 (`617412c`, #66) are merged and **intentionally
-not deployed**; PR22 is on a branch. See *In progress* above for PR22.
+(`1116b61`, #63), PR19 (`d777e04`, #64), PR20 (`9fbf9a9`, #65), PR21 (`617412c`, #66) and PR22 (`c214d5c`, #67) are merged and **intentionally
+not deployed**; PR23 is on a branch. See *In progress* above for PR23.
 
 **`main` is now schema v11; production is still schema v9**, and that gap is the deployment decision
 rather than a lag. PR14 is the change that turns this batch from a slot flip into a schema move, so
-deploying PR11–PR22 is **Tier 2**: a verified pre-v9 backup taken with SQLite's online backup API, a
+deploying PR11–PR23 is **Tier 2**: a verified pre-v9 backup taken with SQLite's online backup API, a
 migration rehearsal, the old-runtime refusal check that PR14 already proves in CI, and an honest
 rollback **pair** — the slot *and* the restored snapshot — because a flip alone cannot walk a schema
 backwards. PR15, PR16 and PR18 add nothing to that cost: PR15 is documentation, and PR16 and PR18 are
@@ -1385,11 +1434,13 @@ requirements a user actually stated rather than being a clean downgrade.
 
 PR19 adds nothing to that cost at all: it is documentation and design, with no runtime surface. PR20,
 PR21 and PR22 add nothing either: derived read semantics and one additive private response section,
-with no schema of their own.
+with no schema of their own. PR23 adds two optional request fields on an existing private route and
+no schema either — but it is the change that makes the batch worth deploying, because it is the first
+one a person can actually use.
 
 **A/B remains deployment machinery, not feature-development machinery.** Work is developed in
 isolated feature worktrees and merged to `main`; a slot is never a workbench; and a deployment happens
-when a running service actually needs the change. Eleven merged PRs sitting ahead of production is
+when a running service actually needs the change. Twelve merged PRs sitting ahead of production is
 the policy working, not drift.
 
 ### M2K PR13 — cross-turn acceptance evidence-binding doctrine (documentation only)

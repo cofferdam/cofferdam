@@ -614,12 +614,17 @@ class DispatchTests(SupersessionCase):
     def test_the_adapter_is_never_reached_by_a_refused_declaration(self):
         """Through the real follow-up dispatch path, end to end.
 
-        The service surfaces the store's refusal as
+        This used to note that the service surfaced the store's refusal as
         :class:`~.errors.ContinuityUnrecorded` rather than
-        :class:`~.errors.ContinuityInvalid` — a PR10 translation this PR does not
-        change. What matters here is unchanged either way: it is raised before
-        the adapter is constructed a context, so the worker is never told
-        anything, and nothing durable is written.
+        :class:`~.errors.ContinuityInvalid` — a PR10 translation PR12 did not
+        change. **M2K PR23 changed it**, because it stopped being harmless the
+        moment a caller could actually declare continuity: a stale supersession
+        target is the caller's declaration being wrong, not Cofferdam failing to
+        write it.
+
+        What this test is actually about is unchanged either way: the refusal is
+        raised before the adapter is constructed a context, so the worker is
+        never told anything and nothing durable is written.
         """
         from cofferdam.workstation.tasks.adapters.protocol import (
             AdapterCapabilities,
@@ -666,9 +671,9 @@ class DispatchTests(SupersessionCase):
             registry,
             projects=load_projects(self.config, registry.ids()),
         )
-        from cofferdam.workstation.tasks.errors import ContinuityUnrecorded
-
-        with self.assertRaises(ContinuityUnrecorded):
+        # M2K PR23: the refusal now reads as a refusal. `ContinuityInvalid` is
+        # already imported at module scope for exactly this reason.
+        with self.assertRaises(ContinuityInvalid):
             service.send_followup(
                 self.task_id,
                 "more work",

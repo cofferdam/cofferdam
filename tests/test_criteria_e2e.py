@@ -415,7 +415,14 @@ class CriteriaEndToEnd(TaskTestCase):
         for route in routes:
             self.assertNotIn("criteri", route.lower(), route)
 
-    def test_the_task_body_allowlist_has_no_criteria_key(self):
+    def test_the_task_body_allowlist_gained_criteria_only_for_the_private_caller(self):
+        """M2K PR23. PR6 kept criteria off the wire entirely; that has been
+        overtaken rather than weakened.
+
+        The base allowlist is unchanged — an ordinary caller's five fields are
+        exactly the five they were — and the authoring pair is added per caller,
+        so the Actions bridge's request shape is byte-for-byte what it was.
+        """
         source = (REPO_ROOT / "cofferdam" / "workstation" / "service.py").read_text(
             encoding="utf-8"
         )
@@ -423,7 +430,8 @@ class CriteriaEndToEnd(TaskTestCase):
             '{"project_id", "adapter_id", "prompt", "client_request_id", "title"}',
             source,
         )
-        self.assertNotIn('"criteria"', source)
+        self.assertIn('AUTHORING_FIELDS = frozenset({"criteria", "continuity"})', source)
+        self.assertIn("| _authoring_fields(request)", source)
 
     def test_the_actions_bridge_is_unchanged(self):
         bridge = REPO_ROOT / "cofferdam" / "actions_bridge"

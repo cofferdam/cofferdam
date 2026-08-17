@@ -313,12 +313,29 @@ class WhatTodaysCallersActuallyGet(AcceptanceApiCase):
             self.acceptance(row.task_id)["availability_reason"],
         )
 
-    def test_the_public_task_route_still_has_no_continuity_field(self):
-        service = (
-            REPO_ROOT / "cofferdam" / "workstation" / "service.py"
-        ).read_text(encoding="utf-8")
-        self.assertNotIn('"continuity"', service)
-        self.assertNotIn("predecessor_snapshot_id", service)
+    def test_the_route_now_accepts_a_declaration_but_only_from_the_device(self):
+        """M2K PR23 opened this, and only for the private caller.
+
+        PR22 asserted no route carried a continuity field, which was true and is
+        the gap PR23 closes. What must still hold is the authority boundary: the
+        device token may declare, the bridge credential may not, and omission is
+        still `not_declared` rather than an inferred `root`.
+        """
+        declared = self.client.post(
+            "/api/tasks",
+            headers=self.device(),
+            json={"project_id": PROJECT_ID, "adapter_id": "validation",
+                  "prompt": "scenario: complete", "continuity": {"mode": "root"}},
+        )
+        self.assertEqual(201, declared.status_code, declared.text)
+
+        refused = self.client.post(
+            "/api/tasks",
+            headers=self.bridge(),
+            json={"project_id": PROJECT_ID, "adapter_id": "validation",
+                  "prompt": "scenario: complete", "continuity": {"mode": "root"}},
+        )
+        self.assertEqual(422, refused.status_code)
 
 
 class TheReadIsInert(AcceptanceApiCase):

@@ -3894,6 +3894,82 @@ is simply not being written yet. Acceptance is therefore **not meaningfully cons
 until a caller declares continuity**, and publishing the surface is what turns that from a theoretical
 observation into a visible one.
 
+## D-2026-08-17-23 — Declaring acceptance is device authority, and omission is still never inference (EFE DECISION, ACTIVE)
+
+**Decision.** `criteria` and `continuity` become caller-supplied fields on the existing task-create and
+follow-up routes, accepted **only from the private device credential**. Omitting either keeps the
+behaviour it has always had.
+
+**The authority boundary was the real risk, and it is not where it looks.** `require_task_caller`
+accepts two credentials — the device token and the Actions bridge's own — so adding these names to
+the shared allowlist would have made a remote Custom GPT user the authority on what its own work is
+measured against. That is the single worst thing this PR could have done, and it would have happened
+silently, without touching a line of bridge code. So the field list is **per caller**: the bridge's
+request shape is byte-for-byte what it was, and `_task_body` refuses an unexpected key, which means a
+bridge sending `criteria` gets the same refusal it got yesterday rather than a new capability. The
+detail route already uses this pattern for `prompt`, for the same reason.
+
+**Omission is never inference, and this is where it would have been easiest to break.** A first turn
+without a declaration is `not_declared`, **not** a manufactured `root`. A follow-up without one is
+`not_declared`, **not** an inferred `extend`. That was PR10's whole point — `extend`, `replace` and
+`revise` are not distinguishable by looking at the criteria — and a convenience default at the HTTP
+layer would have quietly destroyed it while looking like a usability improvement. Pinned from both
+ends: the same request with and without the field produces materially different stored lineage, and
+from the source, that no branch turns absence into a mode.
+
+**One semantic authority, unchanged.** The HTTP layer validates shape and nothing else.
+`validate_criteria`, `validate_declaration` and `reserve_turn_continuity` remain the deciders of what
+a valid declaration is — including the relational half only the database can settle. No second
+representation was created: `TaskService.create_task` and `send_followup` already took both
+arguments, and this PR only gave a real caller a way to reach them.
+
+**Requirement authority stays with the host.** An adapter cannot supply criteria or continuity: no
+field exists on `AdapterContext`, `AdapterOutcome` or `AdapterCapabilities`, asserted from the
+dataclasses rather than from prose. A worker's output never mutates the requirement set it is being
+judged against.
+
+**No new authoring surface beyond the contract.** The PWA gained no criteria editor. Building one is a
+product subsystem — a predicate picker, a path validator, a supersession chooser — and inventing it to
+satisfy "a real caller exists" would be the wrong reason to ship a UI. The private HTTP contract is the
+caller; PWA and planner authoring is the next integration, named rather than pretended.
+
+## D-2026-08-17-24 — An invalid declaration reads as invalid (EFE DECISION, ACTIVE)
+
+**Decision.** The tracked `ContinuityInvalid → ContinuityUnrecorded` translation is removed, at all
+four sites, and `CriteriaInvalid` is given the same treatment.
+
+**What it was doing.** The store decides the relational half of a continuity check — an unknown
+predecessor, one belonging to another task or a later turn, a supersession target that is not
+**active**. Every one of those is *the caller's declaration being wrong*. The service caught them
+alongside genuine persistence failures and reported all of them as `continuity_unrecorded`:
+*Cofferdam could not write it*. That is a different sentence, about a different party, pointing at a
+different system to go and look at.
+
+**It was harmless for exactly as long as nothing could declare continuity.** No caller could reach it,
+so the misleading word never reached anybody. `D-2026-08-17-23` ends that, which is why the debt is
+paid in the same PR rather than after — a first caller meeting a wrong error message is worse than no
+caller at all.
+
+**The distinction that had to survive.** Four situations stay four:
+
+| | means |
+| --- | --- |
+| `task_continuity_invalid` | the declaration is wrong — **the caller's** |
+| `task_continuity_unrecorded` | a valid declaration could not be made durable |
+| `not_declared` | nobody declared a relationship |
+| `continuity_legacy_unknown` | this turn predates continuity |
+
+Over HTTP an invalid declaration is a bounded **422** carrying its closed reason code, using the
+existing task error model and its existing default rather than a status chosen by preference. The
+submitted value never travels back out, and neither does a path, a traceback or any SQL.
+
+**A refused declaration never reaches a worker**, and the refusal is honest about where it happened.
+A shape refusal is decided before the task row exists, so nothing is left behind at all. A relational
+refusal on a follow-up happens after the criteria snapshot is reserved — that is PR6's existing
+pre-dispatch behaviour, not something this PR introduces — and the snapshot is `captured`, the one
+replaceable state, so a corrected retry replaces it. What matters, and is tested, is that no worker
+was told anything either way.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

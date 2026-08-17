@@ -855,8 +855,8 @@ downstream reads from.
     as `assessment_input_invalid` and never normalised. `TaskService.turn_acceptance` folds one
     envelope and reopens nothing. **No global task verdict**, no named checks, no runner, no route.
     D-2026-08-17-19 and D-2026-08-17-20.
-  - **PR22 — private target-turn acceptance read surface.** *Implemented on
-    `m2k-pr22-acceptance-read-surface`, not merged and not deployed.* Publishes PR21's derived result
+  - **PR22 — private target-turn acceptance read surface.** *Merged as `c214d5c` (#67),
+    **not deployed**.* Publishes PR21's derived result
     through the **existing** private assessment route as an additive third section — no new route, no
     new authorization, no bridge operation, no schema change and no new semantics. **One route because
     it is one audit boundary**: a sibling would let a client pair sections read at different moments,
@@ -876,6 +876,28 @@ downstream reads from.
     supplies none, and no caller supplies one today — so every task created through a real surface is
     `not_assessable / continuity_not_declared`, and acceptance is not meaningfully consumable until a
     caller declares continuity. D-2026-08-17-21 and D-2026-08-17-22.
+  - **PR23 — explicit criteria / continuity authoring authority.** *Implemented on
+    `m2k-pr23-authoring-authority`, not merged and not deployed.* The first real caller path for
+    acceptance: `POST /api/tasks` and `POST /api/tasks/{id}/followups` accept `criteria` and
+    `continuity` through the existing internal contract, so no second representation was created.
+    **The authority boundary was the real risk and not where it looks**: `require_task_caller`
+    accepts the Actions bridge credential as well as the device token, so a shared allowlist would
+    have made a remote Custom GPT user the authority on what its own work is judged against —
+    silently, without touching bridge code. The field list is therefore **per caller**, leaving the
+    bridge's request shape byte-for-byte unchanged. **Omission is never inference**: a first turn
+    without a declaration stays `not_declared` rather than a manufactured `root`, and a follow-up
+    without one stays `not_declared` rather than an inferred `extend` — PR10's whole point, and the
+    thing an HTTP-layer convenience default would have destroyed while looking like an improvement.
+    **One semantic authority**: HTTP validates shape, and the existing validators plus the store
+    decide validity including the relational half only the database can settle. **Requirement
+    authority stays with the host** — an adapter has no criteria or continuity field on any of its
+    protocol dataclasses. **The tracked `ContinuityInvalid` → `ContinuityUnrecorded` debt is paid** at
+    all four sites, because it stopped being harmless the moment a caller could declare: invalid,
+    unrecorded, not-declared and legacy-unknown stay four distinct facts, and an invalid declaration
+    is a bounded 422 with its closed reason and no host detail. **A refusal never reaches a worker.**
+    No PWA editor was built — that is a product subsystem, and the private contract is the caller
+    while PWA/planner authoring is named as the next integration.
+    D-2026-08-17-23 and D-2026-08-17-24.
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**
