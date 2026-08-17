@@ -797,10 +797,54 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2K PR20 — current-assessment lineage-unavailability fidelity
+
+On `m2k-pr20-lineage-fidelity`, from the merged `d777e04`. **Implemented on a branch, not merged and
+not deployed.**
+
+A deliberately small prerequisite before runtime aggregation, and the fix PR19 recorded as the one
+thing standing between the model and PR9 compliance. **`CURRENT_ASSESSMENT_VERSION` 2 → 3**; schema
+stays v11 with no migration, no resolver change, no criterion-level change, no public surface and no
+aggregate.
+
+**The measurement, not the suspicion.** Holding task and target turn fixed and varying only the
+resolver's verdict, V2 produced **one identical envelope fingerprint** for seven materially different
+failures — `continuity_legacy_unknown`, `continuity_not_declared`, a predecessor failing for each of
+those, `cycle_detected`, `malformed_lineage`, `lineage_depth_exceeded`. Under V3 the same seven
+produce seven identities.
+
+**PR10 had already preserved this in the database.** `reserve_turn_continuity` writes an explicit
+`not_declared` row rather than no row, precisely so "nobody declared a relationship" and "this turn
+predates continuity" stay separable forever. The rows were right; the V2 envelope discarded it.
+
+**The cheap fix would not have worked, and that was the real gate.** Preserving only PR11's top-level
+reason is insufficient: PR11 reports an inherited failure as `predecessor_unavailable` and puts the
+real reason in `cause`, so the `not_declared` / `legacy_unknown` pair PR9 named would have stayed
+collapsed one level down. So `unavailable_cause` is carried too, and
+`unavailable_at_turn_number` with it — without the latter, a chain breaking at turn 2 and one
+breaking at turn 5 for the identical reason are one fact with one fingerprint. All three are bound
+into the fingerprint; otherwise they would be annotations rather than facts.
+
+**The vocabulary is imported, not restated.** `LINEAGE_REASONS` **is** PR11's `REASONS` tuple and the
+binder defines no lineage reason of its own, asserted from its syntax tree. A parallel closed set
+would need keeping in step with PR11's, and a translation stack between them is the class of debt
+already tracked in `ContinuityInvalid` → `ContinuityUnrecorded`. Nine assessment-layer reasons plus
+eighteen lineage reasons, kept as separate families so an envelope says **which layer** could not
+answer; twenty-seven in the union, none renamed or absorbed.
+
+**`lineage_unavailable` survives as a fallback** meaning only what it says: a newer resolver
+classified something this build does not know. Answered honestly rather than passed through — the
+same totality discipline used for unknown predicates and evaluator versions — and an unrecognised
+outer reason drops its cause and turn with it.
+
+**Context is never manufactured.** Every assessment-layer refusal leaves cause and turn `None`, and
+no resolved-lineage fingerprint is fabricated: knowing why resolution failed is not having resolved
+something. D-2026-08-17-17 and D-2026-08-17-18.
+
 ### M2K PR19 — acceptance aggregation contract reconciliation (documentation only)
 
-On `m2k-pr19-aggregation-contract`, from the merged `1116b61`. **Documentation and design only**, so
-there is nothing to deploy: no schema change, no binder change, no `AGGREGATOR_VERSION` constant, no
+**Merged as `d777e04` (#64).** Documentation and design only, so there was no deployment step and
+nothing to deploy: no schema change, no binder change, no `AGGREGATOR_VERSION` constant, no
 route, no UI, no bridge operation, and no runtime aggregation of any kind.
 
 Settles the exact contract the runtime aggregation PR will implement, by reconciling PR9's doctrine
@@ -844,7 +888,7 @@ blocker. PR9's task-level blocker was missing continuity, which PR10–PR12 supp
 **on a target-turn aggregate is removed**, while a global task verdict stays deliberately out of
 scope.
 
-**One fidelity gap recorded.** PR18's binder collapses **eighteen** distinct resolver reasons —
+**One fidelity gap recorded — and closed by PR20 above.** PR18's binder collapsed **eighteen** distinct resolver reasons —
 `continuity_not_declared`, `continuity_legacy_unknown`, `malformed_lineage`, `cycle_detected` and
 others — into the single `lineage_unavailable`. PR9 required "we never asked" and "we cannot know what
 we asked" to stay apart, and the aggregate cannot honour that because the information is gone before
@@ -1230,13 +1274,13 @@ actually running — not PR11 or PR12, which are merged and undeployed.
 M2K is **in progress**: PR1 through PR8 are merged and deployed; PR9 is merged (`b2314f0`, #54) and
 needed no deployment because it changed only documentation; PR10 is merged (`1efd49b`, #55) and
 deployed to slot A on schema v9; PR11 (`3bb9a5b`, #56), PR12 (`2dc4177`, #57), PR13 (`8cd8ba3`, #58),
-PR14 (`064fe51`, #59), PR15 (`12e64cd`, #60), PR16 (`c1d6f1d`, #61), PR17 (`c164383`, #62) and PR18
-(`1116b61`, #63) are merged and **intentionally not deployed**; PR19 is on a branch. See *In progress*
-above for PR19.
+PR14 (`064fe51`, #59), PR15 (`12e64cd`, #60), PR16 (`c1d6f1d`, #61), PR17 (`c164383`, #62), PR18
+(`1116b61`, #63) and PR19 (`d777e04`, #64) are merged and **intentionally not deployed**; PR20 is on a
+branch. See *In progress* above for PR20.
 
 **`main` is now schema v11; production is still schema v9**, and that gap is the deployment decision
 rather than a lag. PR14 is the change that turns this batch from a slot flip into a schema move, so
-deploying PR11–PR19 is **Tier 2**: a verified pre-v9 backup taken with SQLite's online backup API, a
+deploying PR11–PR20 is **Tier 2**: a verified pre-v9 backup taken with SQLite's online backup API, a
 migration rehearsal, the old-runtime refusal check that PR14 already proves in CI, and an honest
 rollback **pair** — the slot *and* the restored snapshot — because a flip alone cannot walk a schema
 backwards. PR15, PR16 and PR18 add nothing to that cost: PR15 is documentation, and PR16 and PR18 are
@@ -1246,11 +1290,12 @@ rehearses that rebuild on a copy of the real database and the rollback backup mu
 it runs — and once a `path_exists` criterion has been written to v11, restoring that backup destroys
 requirements a user actually stated rather than being a clean downgrade.
 
-PR19 adds nothing to that cost at all: it is documentation and design, with no runtime surface.
+PR19 adds nothing to that cost at all: it is documentation and design, with no runtime surface. PR20
+adds nothing either: derived read semantics with no schema of its own and no caller yet.
 
 **A/B remains deployment machinery, not feature-development machinery.** Work is developed in
 isolated feature worktrees and merged to `main`; a slot is never a workbench; and a deployment happens
-when a running service actually needs the change. Eight merged PRs sitting ahead of production is the
+when a running service actually needs the change. Nine merged PRs sitting ahead of production is the
 policy working, not drift.
 
 ### M2K PR13 — cross-turn acceptance evidence-binding doctrine (documentation only)

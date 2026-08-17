@@ -2430,6 +2430,10 @@ set is empty; it does not mean acceptance was met.
 | `evaluation_not_recorded` | **operational** — the turn is closed, PR7 has not run yet | yes |
 | `evaluation_inconsistent`, `unsupported_evaluator_version` | a stored row violates service-owned invariants, or unknown evaluator semantics | no |
 
+Since **M2K PR20** the lineage row is not one reason but eighteen — PR11's own
+closed vocabulary, preserved rather than collapsed. See *Lineage-failure
+fidelity* below.
+
 `evaluation_not_recorded` is set-level on purpose: reporting a pending recovery
 pass as a set of `unverified` criteria would file a gap in Cofferdam's own
 pipeline as a statement about the user's work. It is **never** `not_met`.
@@ -2452,7 +2456,7 @@ exists to prevent.
 
 ### Versioning and identity
 
-**`CURRENT_ASSESSMENT_VERSION = 2`** (PR18; it was 1 in PR16), distinct from `SCHEMA_VERSION`,
+**`CURRENT_ASSESSMENT_VERSION = 3`** (PR20; 1 in PR16, 2 in PR18), distinct from `SCHEMA_VERSION`,
 `CRITERIA_MODEL_VERSION`, `CONTINUITY_MODEL_VERSION`, `ASSEMBLER_VERSION`,
 `EVALUATOR_VERSION`, `RESOLVER_VERSION`, `FINAL_STATE_OBSERVER_VERSION` and the
 future aggregate version. It owns the mapping *active criterion + evidence domain
@@ -2972,19 +2976,109 @@ target-turn answers is a separate undecided question.
 | new persistence needed? | no |
 | task-level verdict still out of scope? | yes, deliberately |
 
-**Runtime aggregation is ready to build**, with one recorded fidelity gap: PR18's
-binder collapses **eighteen** distinct resolver reasons — including
-`continuity_not_declared`, `continuity_legacy_unknown`, `malformed_lineage` and
-`cycle_detected` — into the single set reason `lineage_unavailable`. PR9 required
-"we never asked" and "we cannot know what we asked" to stay distinct, and the
-aggregate cannot honour that because the information is gone before it arrives.
+**Runtime aggregation is ready to build.** One fidelity gap was recorded here —
+V2 collapsed eighteen resolver reasons into one `lineage_unavailable`, so PR9's
+"we never asked" / "we cannot know what we asked" distinction could not be
+honoured. **M2K PR20 closed it**, and took it first so the aggregate is built once
+against a stable envelope. See *Lineage-failure fidelity* below and
+D-2026-08-17-17.
 
-It is a **fidelity** gap, not a safety one: every affected case is already
-`not_assessable` and fails closed, and no outcome is manufactured. The fix is to
-carry the resolver's own reason onto the envelope as a derived field — which moves
-`CURRENT_ASSESSMENT_VERSION` 2 → 3 and changes every envelope fingerprint, so it
-should be decided explicitly and taken **before** `AGGREGATOR_VERSION = 1` is
-minted rather than after. See D-2026-08-17-16.
+One consequence for the aggregate: `availability_reason` is still PR18's
+`unavailable_reason` verbatim, but that reason is now drawn from a closed set of
+**27** rather than 9. The mapping does not change — pass-through, no translation
+table — and the aggregate simply carries a more precise word.
+
+---
+
+## Lineage-failure fidelity (M2K PR20, derived, no schema)
+
+`CURRENT_ASSESSMENT_VERSION` **2 → 3**. Nothing else moves: schema stays v11 with
+no migration, no criterion result changes, and there is still no
+`AGGREGATOR_VERSION`.
+
+### What V2 did
+
+Every lineage failure — all eighteen of PR11's distinct reasons — became the one
+string `lineage_unavailable`. Measured with task and target turn held fixed and
+only the resolver's verdict varied, **seven materially different failures produced
+one identical envelope fingerprint**:
+
+`continuity_legacy_unknown`, `continuity_not_declared`, a predecessor failing for
+each of those two reasons, `cycle_detected`, `malformed_lineage`,
+`lineage_depth_exceeded`. Under V3 the same seven produce seven identities.
+
+PR10 had already preserved this distinction *in the database* — it writes an
+explicit `not_declared` row rather than no row, precisely so that "nobody
+declared a relationship" and "this turn predates continuity" stay separable
+forever. The rows were right; the envelope discarded it on the way out.
+
+### The V3 unavailable model
+
+| Field | Set when |
+| --- | --- |
+| `unavailable_reason` | always — PR11's own reason for a lineage failure, or the assessment layer's own |
+| `unavailable_cause` | only for `predecessor_unavailable` — PR11's underlying reason |
+| `unavailable_at_turn_number` | only for a lineage failure — the turn the walk stopped at |
+
+All three are bound into the envelope fingerprint. Without that they would be
+annotations rather than facts: a refusal whose identity does not move when the
+underlying failure changes cannot be audited or cached against.
+
+`lineage_fingerprint` stays `None` for every unavailable envelope. Knowing
+precisely *why* resolution failed is not the same as having resolved something.
+
+### The cause is carried, and the cheap fix would not have worked
+
+Preserving only the top-level reason is **not sufficient**. PR11 reports a failure
+inherited from a predecessor as `predecessor_unavailable` and puts the real reason
+in `cause` — so a target whose predecessor was never declared and one whose
+predecessor predates continuity would both have read `predecessor_unavailable`.
+That is the exact pair PR9 required to stay apart, collapsed one level down
+instead of at the top. Verified against the real resolver walking real rows.
+
+`at_turn_number` follows for a weaker version of the same argument: without it a
+chain breaking at turn 2 and one breaking at turn 5 for the identical reason are
+one fact with one fingerprint, and the resolver's own docstring says an audit
+needs to know where the chain broke.
+
+### Two reason families, one imported vocabulary
+
+| Family | Count | Owner |
+| --- | --- | --- |
+| `ASSESSMENT_SET_REASONS` | 9 | this layer — `turn_not_closed`, the evaluation reasons, the final-state reasons |
+| `LINEAGE_REASONS` | 18 | **PR11**, imported as `REASONS`, not restated |
+| `SET_REASONS` | 27 | their union |
+
+The binder defines **no lineage reason of its own** — asserted from its syntax
+tree. A parallel closed set would need keeping in step with PR11's, and a
+translation stack between them is the class of debt this repository already tracks
+in `ContinuityInvalid` → `ContinuityUnrecorded`. PR11 stays the sole authority for
+*classifying* a lineage failure; this layer only stops the classification being
+discarded.
+
+The families stay separate so an envelope says **which layer** could not answer.
+No assessment-layer reason was renamed, absorbed or folded into a lineage one.
+
+### `lineage_unavailable` is now a fallback
+
+It survives, meaning only what it says: a **newer** resolver classified something
+outside the closed set this build knows. Answered honestly rather than passed
+through — the same totality discipline applied to unknown predicates and unknown
+evaluator versions — and an unrecognised outer reason drops its cause and turn
+too, because it makes no promise about its inner one.
+
+### Context is never manufactured
+
+Every assessment-layer refusal leaves `unavailable_cause` and
+`unavailable_at_turn_number` as `None`. Those layers have no equivalent bounded
+context, and populating a field so it looks filled would be inventing a fact.
+
+### Still pure, still derived, still not an aggregate
+
+The binder imports PR11's reason *values* and never the resolver — `resolve` is
+still never called, and the import allowlist is pinned by test. No schema, no
+table, no persistence, no route, no bridge Action, no PWA control. No
+`met`/`not_met`/`incomplete` fold, no `requires_human`, no `AGGREGATOR_VERSION`.
 
 ---
 

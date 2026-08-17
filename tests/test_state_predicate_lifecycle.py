@@ -563,10 +563,11 @@ class NegativeSpaceTests(unittest.TestCase):
 
     def test_no_semantic_version_moved(self):
         self.assertEqual(1, EVALUATOR_VERSION)
-        # M2K PR18 moved exactly this one, and only this one: the binder learned
-        # a second evidence domain. The evaluator and the observer below did not
-        # change, which is the assertion that keeps PR18 a read-semantics change.
-        self.assertEqual(2, CURRENT_ASSESSMENT_VERSION)
+        # M2K PR18 moved this one (a second evidence domain) and M2K PR20 moved
+        # it again (lineage-failure fidelity). The evaluator and the observer
+        # below did not change in either, which is the assertion that keeps both
+        # read-semantics changes.
+        self.assertEqual(3, CURRENT_ASSESSMENT_VERSION)
         self.assertEqual(1, FINAL_STATE_OBSERVER_VERSION)
         self.assertEqual(1, CRITERIA_MODEL_VERSION)
         from cofferdam.workstation.tasks.continuity import CONTINUITY_MODEL_VERSION

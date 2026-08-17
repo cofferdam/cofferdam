@@ -29,6 +29,10 @@ from cofferdam.workstation.tasks.binding import (
     REASON_UNSUPPORTED_EVALUATOR,
 )
 from cofferdam.workstation.tasks.continuity import validate_declaration
+from cofferdam.workstation.tasks.lineage import (
+    REASON_LEGACY_UNKNOWN as RESOLVER_LEGACY_UNKNOWN,
+    REASON_NOT_DECLARED as RESOLVER_NOT_DECLARED,
+)
 from cofferdam.workstation.tasks.criteria import validate_criteria
 from cofferdam.workstation.tasks.evaluation import EVALUATOR_VERSION, RESULT_UNVERIFIED
 from cofferdam.workstation.tasks.identity import new_task_id
@@ -224,21 +228,45 @@ class EvaluationAbsenceTests(AssessmentStoreCase):
 
 
 class UnknownLineageTests(AssessmentStoreCase):
-    def test_a_turn_with_no_continuity_declaration_is_unavailable(self):
+    def undeclared_turn(self):
+        """A turn with an explicit `not_declared` row — nobody stated a relationship.
+
+        `reserve_turn_continuity(..., None)` writes that row deliberately rather
+        than leaving none, because PR10 decided "nobody declared a relationship"
+        and "this turn predates continuity" are different facts. Producing it the
+        way the service does, rather than by hand, is what makes this a test of
+        the distinction instead of a test of a fixture.
+        """
         self.store.reserve_turn_criteria(
             self.task_id, validate_criteria([self.change("a")]), recorded_at="x"
         )
+        number = self.store.reserve_turn_continuity(self.task_id, None, recorded_at="x")
         with self.sql() as connection:
             connection.execute(
                 "INSERT INTO task_turns (task_id, turn_number, provider, source,"
                 " started_at, completed_at, outcome)"
-                " VALUES (?,1,'validation','pwa','x','y','completed')",
-                (self.task_id,),
+                " VALUES (?,?,'validation','pwa','x','y','completed')",
+                (self.task_id, number),
             )
-        answer = self.assess(1)
+        return number
+
+    def test_a_turn_with_no_continuity_declaration_is_unavailable(self):
+        answer = self.assess(self.undeclared_turn())
         self.assertEqual(ASSESSMENT_UNAVAILABLE, answer.state)
-        self.assertEqual(REASON_LINEAGE_UNAVAILABLE, answer.unavailable_reason)
+        # M2K PR20: PR11's own reason, not the generic `lineage_unavailable` V2
+        # answered every lineage failure with.
+        self.assertEqual(RESOLVER_NOT_DECLARED, answer.unavailable_reason)
+        self.assertNotEqual(REASON_LINEAGE_UNAVAILABLE, answer.unavailable_reason)
+        self.assertIsNone(answer.unavailable_cause)
+        self.assertEqual(1, answer.unavailable_at_turn_number)
         self.assertEqual((), answer.assessments)
+
+    def test_the_continuity_row_really_is_the_explicit_not_declared_one(self):
+        """Guards the fixture: an absent row would be `legacy_unknown` instead."""
+        number = self.undeclared_turn()
+        self.assertEqual(
+            "not_declared", self.store.turn_continuity(self.task_id, number).state
+        )
 
     def test_a_legacy_turn_with_no_criteria_at_all_is_unavailable(self):
         with self.sql() as connection:
@@ -249,7 +277,29 @@ class UnknownLineageTests(AssessmentStoreCase):
                 (self.task_id,),
             )
         answer = self.assess(1)
-        self.assertEqual(REASON_LINEAGE_UNAVAILABLE, answer.unavailable_reason)
+        self.assertEqual(RESOLVER_LEGACY_UNKNOWN, answer.unavailable_reason)
+        self.assertNotEqual(REASON_LINEAGE_UNAVAILABLE, answer.unavailable_reason)
+
+    def test_the_two_unknown_cases_are_not_the_same_fact(self):
+        """"We never asked" and "we cannot know what we asked" stay apart.
+
+        The distinction PR9 named and V2 could not express: both turns are
+        unavailable, and under V2 both produced the identical string *and the
+        identical envelope fingerprint*. They are different facts about the
+        record and now have different identities.
+        """
+        first = self.undeclared_turn()
+        with self.sql() as connection:
+            connection.execute(
+                "INSERT INTO task_turns (task_id, turn_number, provider, source,"
+                " started_at, completed_at, outcome)"
+                " VALUES (?,?,'validation','pwa','x','y','completed')",
+                (self.task_id, first + 1),
+            )
+        undeclared, legacy = self.assess(first), self.assess(first + 1)
+        self.assertEqual(RESOLVER_NOT_DECLARED, undeclared.unavailable_reason)
+        self.assertEqual(RESOLVER_LEGACY_UNKNOWN, legacy.unavailable_reason)
+        self.assertNotEqual(undeclared.fingerprint, legacy.fingerprint)
 
 
 class CorruptedEvaluationTests(AssessmentStoreCase):

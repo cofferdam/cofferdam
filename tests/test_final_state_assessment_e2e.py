@@ -705,7 +705,7 @@ class NegativeSpaceTests(unittest.TestCase):
         self.assertEqual(11, SCHEMA_VERSION)
 
     def test_only_the_assessment_version_moved(self):
-        self.assertEqual(2, CURRENT_ASSESSMENT_VERSION)
+        self.assertEqual(3, CURRENT_ASSESSMENT_VERSION)
         self.assertEqual(1, EVALUATOR_VERSION)
         self.assertEqual(1, FINAL_STATE_OBSERVER_VERSION)
         self.assertEqual(1, RESOLVER_VERSION)

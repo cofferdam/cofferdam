@@ -1185,8 +1185,9 @@ class DerivedFingerprintTests(unittest.TestCase):
 
 
 class VersionTests(unittest.TestCase):
-    def test_the_assessment_version_is_two(self):
-        self.assertEqual(2, CURRENT_ASSESSMENT_VERSION)
+    def test_the_assessment_version_has_moved_past_two(self):
+        """PR18 set this to 2; PR20 moved it to 3 without touching PR18 semantics."""
+        self.assertEqual(3, CURRENT_ASSESSMENT_VERSION)
 
     def test_the_domain_vocabulary_gained_exactly_final_state(self):
         self.assertEqual(

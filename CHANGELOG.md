@@ -8,6 +8,32 @@ release.
 
 ### Added
 
+- **M2K PR20 — when Cofferdam cannot work out what was required, it now says which of eighteen
+  reasons applies.** Nothing is visible yet and nothing new is saved.
+
+  **What it fixes.** Cofferdam works out which of your requirements are standing at any point in a
+  task by following the relationships you declared between messages. Sometimes it cannot: nobody
+  declared a relationship, or the message predates the feature, or the stored record is damaged. It
+  already knew precisely which of those had happened — but when it reported the answer, it flattened
+  all eighteen possibilities into one bland "could not work it out". Two genuinely different
+  situations became one indistinguishable sentence.
+
+  **Why that mattered.** "Nobody ever said" and "this is too old for me to know" need different
+  responses from you: the first is fixable going forward, the second never will be. And "the record
+  looks damaged" deserves attention that neither of the others does. Cofferdam had been careful to
+  record these as separate facts when it saved them; it was only losing the distinction on the way
+  back out.
+
+  **The part that was easy to get wrong.** When the problem is not with the message you asked about
+  but with an earlier one it depends on, Cofferdam reports "something this depends on could not be
+  worked out" and keeps the real reason underneath. Fixing only the top-level wording would have
+  looked like a fix while leaving exactly the two cases above still indistinguishable. Both are now
+  carried, along with which message in the chain the trouble was actually found at.
+
+  **Nothing else changed.** Every individual requirement is judged exactly as before. Nothing was
+  renamed, nothing new is stored, and none of these situations became an answer about your work —
+  they are all still Cofferdam declining to answer, just saying why.
+
 - **M2K PR19 — Cofferdam settles how it will add up "is this done?", before it does.** Documentation
   only. Nothing is visible, nothing behaves differently, and nothing new is saved.
 

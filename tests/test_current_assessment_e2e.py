@@ -307,7 +307,7 @@ class CurrentAssessmentEndToEnd(unittest.TestCase):
         self.assertEqual(settled, self.digest())
 
         # 18. No version around it moved.
-        self.assertEqual(2, CURRENT_ASSESSMENT_VERSION)
+        self.assertEqual(3, CURRENT_ASSESSMENT_VERSION)
         self.assertEqual(1, EVALUATOR_VERSION)
         self.assertEqual(3, ASSEMBLER_VERSION)
         self.assertEqual(1, RESOLVER_VERSION)
@@ -465,6 +465,12 @@ class NegativeSpaceTests(unittest.TestCase):
         observations, so the module is allowed and the store, the service, the
         evaluator, the observers and every stdlib module that can reach a disk,
         a clock or a network are still not.
+
+        M2K PR20 adds `lineage` for the same kind of reason and under the same
+        limit: it imports PR11's closed *reason vocabulary* as values, so a
+        lineage failure keeps the classification PR11 made. It does not import
+        the resolver, and `test_it_never_calls_the_evaluator` still pins that
+        `resolve` is never called here.
         """
         path = REPO_ROOT / "cofferdam" / "workstation" / "tasks" / "binding.py"
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -476,7 +482,7 @@ class NegativeSpaceTests(unittest.TestCase):
                 modules.update(alias.name for alias in node.names)
         self.assertEqual(
             {"__future__", "dataclasses", "typing", "hashlib", "criteria",
-             "evaluation", "finalstate"},
+             "evaluation", "finalstate", "lineage"},
             modules,
         )
 
