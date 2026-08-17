@@ -3733,6 +3733,92 @@ populated would be inventing a fact to fill a column.
 `lineage_fingerprint = None`. Knowing precisely *why* resolution failed is not the same as having
 resolved something, and a reason is not a substitute for an identity.
 
+## D-2026-08-17-19 — The acceptance aggregate is built, and it is target-turn only (EFE DECISION, ACTIVE)
+
+**Decision.** `AGGREGATOR_VERSION = 1` exists, in exactly one module, implementing the contract
+[D-2026-08-17-15](#d-2026-08-17-15--the-target-turn-aggregate-is-derived-pure-and-versioned-separately-efe-decision-active)
+specified. It answers *acceptance at target turn N, over the criteria active at N, using their
+current status at N*, and nothing larger.
+
+**Two dimensions, and neither may absorb the other.** Availability answers whether an acceptance
+question can be answered at all; an outcome exists **only** when it can. A turn whose requirement set
+could not be determined has no outcome — not a null one, not a neutral one, and never `incomplete`.
+That word is a statement about a *known* set containing something unverified, and applying it to an
+undetermined set would report evidence uncertainty where the real problem is that Cofferdam does not
+know what was required.
+
+**The fold, unchanged from PR9.** Any `not_met` wins; otherwise any `unverified` gives `incomplete`;
+otherwise `met`. Known failure dominates uncertainty, uncertainty blocks `met`, nothing else reaches
+it. `met` is unreachable vacuously because an empty set never reaches the outcome dimension.
+
+**Domain-agnostic by construction, asserted from the syntax tree.** The fold reads `result` and
+nothing else — the module never names an evidence domain, a predicate, or a criterion's *reason*. It
+reads `kind` for exactly one thing: whether a person is needed. Letting criterion reasons steer
+acceptance would put a second, unreviewed rule set underneath this one.
+
+**`AGGREGATOR_VERSION` does not move for a new evidence domain.** A future domain or criterion family
+that produces the same criterion-level `met` / `not_met` / `unverified` folds identically, because the
+fold never reads domains. Only a change in *aggregate semantics* moves it.
+
+**Supported input semantics are enumerated, not bounded.** `SUPPORTED_ASSESSMENT_VERSIONS = (3,)`,
+not `<= 3`. A V4 envelope may mean something different by the same field names, and a dataclass whose
+shape still fits is not evidence of compatible semantics. V1 and V2 are refused for the same reason —
+V2 collapsed lineage reasons and genuinely meant something else.
+
+**Still no task verdict, and no public surface.** No overall task result, no merge or deployment
+readiness, no "latest turn" alias, no route, no bridge Action, no PWA control, and PR8's assessment
+response is unchanged. Composing several target-turn answers into one remains the separate undecided
+question of which turn's requirements a task is judged against.
+
+**Derived, never persisted.** Schema stays v11 with no table, no migration, no cache and no recovery
+path. `TaskService.turn_acceptance` calls `current_criterion_assessment` and folds the result — it
+does not reopen the lineage, the evaluation or the observations, because a second read could come
+from a different database state than the envelope was built in.
+
+## D-2026-08-17-20 — Counted zero and unknown population are different facts, and `requires_human` is a tri-state (EFE DECISION, ACTIVE)
+
+**Decision.** The aggregate distinguishes *we counted, and the answer was zero* from *we could not
+determine the population at all*, mechanically and in its fingerprint. This is the single mistake this
+layer was most able to make silently, so it is made unrepresentable rather than merely avoided.
+
+**Both are `not_assessable`, and everything else about them differs.**
+
+| | resolved, empty set | unavailable envelope |
+| --- | --- | --- |
+| reason | `no_structured_criteria` | the envelope's own, verbatim |
+| counts | `CriterionCounts(0, 0, 0, 0)` | **absent** |
+| `requires_human` | `False` | **absent** |
+| outcome | none | none |
+
+Reporting four zeros for an unavailable envelope would state an observation nobody made, and at a
+glance it is indistinguishable from a genuinely empty requirement set. So `counts` is an optional
+type rather than four integers that default to zero, and the fingerprint binds a **presence flag
+before the numbers** so the two can never collide.
+
+**`requires_human` has three answers, not two.** `True` when at least one active criterion is
+`manual`; `False` when the set is known and contains none; **`None` when the population is unknown**,
+because whether a person is needed is a fact about a set nobody determined. Emitting `False` there
+would be an assertion, not a default. It is derived from criterion **kind** and never from
+uncertainty — an inherited-change `unverified` is `False`, since no person can resolve it and sending
+somebody to look would waste their time. It remains orthogonal context beside the outcome, never a
+fourth acceptance value: a manual criterion beside a `not_met` one gives `not_met` **and**
+`requires_human = True`.
+
+**The envelope's reasons pass through untranslated.** The aggregate's vocabulary is its own three —
+`no_structured_criteria`, `assessment_input_invalid`, `unsupported_assessment_version`, each naming a
+failure of *its own* input contract — plus PR20's twenty-seven verbatim, thirty in total. PR20 went to
+real trouble to stop `continuity_not_declared` being flattened into `lineage_unavailable`;
+re-flattening it one layer up would undo exactly that. `unavailable_cause` and
+`unavailable_at_turn_number` are carried for the same reason, since this layer is the one most likely
+to become a user-facing read model later.
+
+**Malformed envelopes are refused, never normalised.** A resolved set carrying an unavailable reason,
+an unavailable one carrying criteria, a reason outside the closed set, a cause on a reason that never
+carries one, an invalid result or kind, a criterion answered twice — each is
+`assessment_input_invalid` with no counts and no outcome. The service cannot produce any of them, so
+one that exists was hand-built or corrupted, and quietly repairing it would make this layer agree with
+a record no other layer agrees with.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

@@ -2976,7 +2976,8 @@ target-turn answers is a separate undecided question.
 | new persistence needed? | no |
 | task-level verdict still out of scope? | yes, deliberately |
 
-**Runtime aggregation is ready to build.** One fidelity gap was recorded here —
+**Runtime aggregation is ready to build** — and **M2K PR21 built it**; see
+*Acceptance aggregation* below. One fidelity gap was recorded here —
 V2 collapsed eighteen resolver reasons into one `lineage_unavailable`, so PR9's
 "we never asked" / "we cannot know what we asked" distinction could not be
 honoured. **M2K PR20 closed it**, and took it first so the aggregate is built once
@@ -3079,6 +3080,104 @@ The binder imports PR11's reason *values* and never the resolver — `resolve` i
 still never called, and the import allowlist is pinned by test. No schema, no
 table, no persistence, no route, no bridge Action, no PWA control. No
 `met`/`not_met`/`incomplete` fold, no `requires_human`, no `AGGREGATOR_VERSION`.
+
+---
+
+## Acceptance aggregation (M2K PR21, derived, no schema)
+
+**`AGGREGATOR_VERSION = 1`.** The contract PR19 specified, implemented against the
+envelope PR20 stabilised. Schema stays v11; nothing is persisted.
+
+### Two dimensions, and neither absorbs the other
+
+*Availability* answers whether an acceptance question can be answered at all;
+*outcome* exists **only** when it can. A turn whose requirement set could not be
+determined has no outcome — not null, not neutral, and never `incomplete`.
+
+| Envelope | availability | reason | outcome |
+| --- | --- | --- | --- |
+| resolved, non-empty | `assessable` | — | the fold |
+| resolved, empty | `not_assessable` | `no_structured_criteria` | none |
+| unavailable | `not_assessable` | the envelope's own, verbatim | none |
+| unsupported version | `not_assessable` | `unsupported_assessment_version` | none |
+| contract violation | `not_assessable` | `assessment_input_invalid` | none |
+
+### The fold
+
+1. any `not_met` ⇒ **`not_met`**
+2. else any `unverified` ⇒ **`incomplete`**
+3. else ⇒ **`met`**
+
+Known failure dominates uncertainty; uncertainty blocks `met`; nothing else
+reaches it. `met` is unreachable vacuously, because an empty set never reaches
+the outcome dimension at all.
+
+**Domain-agnostic, asserted from the syntax tree.** The module never names an
+evidence domain, a predicate or a criterion `reason`. It reads `result` for the
+fold and `kind` for one thing only — whether a person is needed.
+
+### Counted zero vs unknown population
+
+The mistake this layer was most able to make silently, so it is made
+unrepresentable:
+
+| | resolved empty | unavailable |
+| --- | --- | --- |
+| counts | `CriterionCounts(0,0,0,0)` | **absent** |
+| `requires_human` | `False` | **absent** |
+
+Four zeros for an unavailable envelope would state an observation nobody made.
+`counts` is optional rather than four integers defaulting to zero, and the
+fingerprint binds a **presence flag before the numbers** so the two cannot
+collide.
+
+### `requires_human` is a tri-state
+
+`True` when an active criterion is `manual`; `False` when the set is known and
+has none; **`None`** when the population is unknown. Derived from criterion
+**kind**, never from uncertainty — an inherited-change `unverified` is `False`.
+Orthogonal context, never a fourth outcome: manual beside `not_met` gives
+`not_met` **and** `requires_human = True`.
+
+### Vocabulary: three owned, twenty-seven passed through
+
+`AVAILABILITY_REASONS` is this layer's three — `no_structured_criteria`,
+`assessment_input_invalid`, `unsupported_assessment_version`, each naming a
+failure of *its own* input contract — plus PR20's twenty-seven verbatim. Thirty,
+closed, no translation table. `unavailable_cause` and
+`unavailable_at_turn_number` are carried through, because this is the layer most
+likely to become a user-facing read model and dropping them would undo PR20.
+
+### Supported input semantics are enumerated
+
+`SUPPORTED_ASSESSMENT_VERSIONS = (3,)`, not `<= 3`. A V4 may mean something
+different by the same field names; V1 and V2 are refused too, V2 having genuinely
+meant something else about lineage reasons.
+
+### Malformed envelopes are refused, never normalised
+
+A resolved set carrying an unavailable reason, an unavailable one carrying
+criteria, a reason outside the closed set, a cause on a reason that never carries
+one, an invalid result or kind, a criterion answered twice. The service cannot
+produce any of them; repairing one would make this layer agree with a record no
+other layer does.
+
+### Compositional identity
+
+The fingerprint binds `AGGREGATOR_VERSION`, task, target turn, the consumed
+**`CurrentAssessment.fingerprint`**, availability and reason, cause and turn,
+outcome, the counts presence flag and values, and `requires_human`. It does not
+re-bind evidence bundles, evaluation records, observations or the lineage
+fingerprint — the envelope already commits to all of it. Two envelopes folding to
+identical visible answers from different evidence therefore get different
+aggregate identities automatically.
+
+### Still not a task verdict
+
+`TaskService.turn_acceptance(task_id, turn_number)` and nothing else. No overall
+task result, no merge or deployment readiness, no "latest turn" alias, no route,
+no bridge Action, no PWA control, no named checks and no runner. PR8's assessment
+response is unchanged.
 
 ---
 

@@ -462,6 +462,8 @@ class NegativeSpaceTests(unittest.TestCase):
         import re
 
         for path, text in self.python_sources():
+            if path.name == "acceptance.py":
+                continue  # M2K PR21; see test_the_acceptance_module_is_the_only_aggregate...
             self.assertEqual(
                 [],
                 re.findall(r"^\s*AGGREGATOR_VERSION\s*[:=]", text, re.M),
@@ -483,10 +485,52 @@ class NegativeSpaceTests(unittest.TestCase):
             "active_set_outcome",
         }
         for path, text in self.python_sources():
-            defined = self.defined_names(text)
+            if path.name == "acceptance.py":
+                continue  # M2K PR21; see the sole-definer test below.
+            # Definitions only. `defined_names` also collects loads, attributes
+            # and string constants, which is right for the other checks here and
+            # wrong for this one: the service legitimately *calls* PR21's
+            # `aggregate`, and calling a function is not defining an aggregate.
+            declared = set()
+            for node in ast.walk(ast.parse(text)):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    declared.add(node.name)
+                elif isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            declared.add(target.id)
             self.assertEqual(
-                set(), defined & forbidden, "%s defines %s" % (path, defined & forbidden)
+                set(), declared & forbidden, "%s defines %s" % (path, declared & forbidden)
             )
+
+
+    def test_the_acceptance_module_is_the_only_aggregate_and_is_turn_scoped(self):
+        """M2K PR21 built an aggregate; this pins how far it is allowed to go.
+
+        The scans above used to ban `AGGREGATOR_VERSION` outright. That claim has
+        been overtaken rather than weakened: it now lives in exactly one module,
+        and what it defines is a **target-turn** aggregate with no task verdict,
+        no check runner and no lifecycle vocabulary.
+        """
+        import ast as _ast
+
+        definers = set()
+        for path in sorted((REPO_ROOT / "cofferdam").rglob("*.py")):
+            for node in _ast.walk(_ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, _ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, _ast.Name) and target.id == "AGGREGATOR_VERSION":
+                            definers.add(path.name)
+        self.assertEqual({"acceptance.py"}, definers)
+
+        from cofferdam.workstation.tasks import acceptance
+
+        self.assertEqual(1, acceptance.AGGREGATOR_VERSION)
+        for forbidden in ("task_verdict", "task_acceptance", "overall_result",
+                          "all_met", "latest_acceptance", "CheckRunner",
+                          "run_check", "check_id", "project_acceptance"):
+            self.assertFalse(hasattr(acceptance, forbidden))
+            self.assertNotIn(forbidden, acceptance.__all__)
 
     def test_the_lineage_module_defines_no_judgement(self):
         from cofferdam.workstation.tasks import lineage
@@ -512,6 +556,8 @@ class NegativeSpaceTests(unittest.TestCase):
     def test_no_named_check_runner_exists(self):
         """Definitions only — `check_id` is *described* in PR6 prose as absent."""
         for path, text in self.python_sources():
+            if path.name == "acceptance.py":
+                continue  # M2K PR21; see test_the_acceptance_module_is_the_only_aggregate...
             declared = set()
             for node in ast.walk(ast.parse(text)):
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):

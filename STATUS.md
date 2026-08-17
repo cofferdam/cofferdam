@@ -797,10 +797,58 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2K PR21 — runtime target-turn acceptance aggregation
+
+On `m2k-pr21-acceptance-aggregation`, from the merged `9fbf9a9`. **Implemented on a branch, not
+merged and not deployed.**
+
+The first aggregate this milestone has built. **`AGGREGATOR_VERSION = 1`**, in exactly one module,
+implementing the contract PR19 specified against the envelope PR20 stabilised. Schema stays v11;
+nothing is persisted; there is no public surface.
+
+**Two dimensions, and neither absorbs the other.** Availability answers whether an acceptance
+question can be answered at all; an outcome exists **only** when it can. A turn whose requirement set
+could not be determined has **no outcome** — not null, not neutral, and never `incomplete`, which is a
+statement about a *known* set containing something unverified.
+
+**The fold is PR9's, unchanged.** Any `not_met` wins; otherwise any `unverified` gives `incomplete`;
+otherwise `met`. Known failure dominates uncertainty, uncertainty blocks `met`, and `met` is
+unreachable vacuously because an empty set never reaches the outcome dimension.
+
+**Domain-agnostic, asserted from the syntax tree.** The module never names an evidence domain, a
+predicate or a criterion `reason`. It reads `result` for the fold and `kind` for one thing only —
+whether a person is needed. So `AGGREGATOR_VERSION` does **not** move when a future evidence domain
+appears, provided it produces the same criterion-level results.
+
+**Counted zero and unknown population are made unrepresentable as the same thing.** A resolved empty
+set carries `CriterionCounts(0,0,0,0)` and `requires_human = False`; an unavailable envelope carries
+**neither**. Four zeros there would state an observation nobody made and would be indistinguishable at
+a glance from a genuinely empty requirement set — so `counts` is optional rather than four integers
+defaulting to zero, and the fingerprint binds a **presence flag before the numbers**.
+
+**`requires_human` is a tri-state.** `True` for a manual criterion, `False` for a known set without
+one, **`None`** when the population is unknown. Derived from criterion **kind**, never from
+uncertainty, and orthogonal to the outcome: manual beside `not_met` gives `not_met` *and* `True`.
+
+**Thirty reasons: three owned, twenty-seven passed through verbatim.** The owned three name failures
+of this layer's *own* input contract. PR20 went to real trouble to stop `continuity_not_declared`
+being flattened into `lineage_unavailable`; re-flattening it one layer up would undo exactly that, so
+`unavailable_cause` and `unavailable_at_turn_number` are carried too.
+
+**Input semantics are enumerated, not bounded.** `SUPPORTED_ASSESSMENT_VERSIONS = (3,)`. A V4 may mean
+something different by the same field names, and V2 genuinely did. Malformed envelopes are refused as
+`assessment_input_invalid` and never normalised.
+
+**Derived and internal.** `TaskService.turn_acceptance` folds the result of `current_criterion_
+assessment` and reopens nothing — a second read could come from a different database state than the
+envelope was built in. No table, no migration, no route, no bridge Action, no PWA control, no named
+checks, no runner, and **no global task verdict**. D-2026-08-17-19 and D-2026-08-17-20.
+
 ### M2K PR20 — current-assessment lineage-unavailability fidelity
 
-On `m2k-pr20-lineage-fidelity`, from the merged `d777e04`. **Implemented on a branch, not merged and
-not deployed.**
+**Merged as `9fbf9a9` (#65) and deliberately NOT deployed.** Production remains on the PR10 runtime —
+workstation and Actions bridge both from **slot A at `1efd49b`**, live schema **v9**. The record below
+was written while PR20 was on `m2k-pr20-lineage-fidelity`, from the merged `d777e04`.
 
 A deliberately small prerequisite before runtime aggregation, and the fix PR19 recorded as the one
 thing standing between the model and PR9 compliance. **`CURRENT_ASSESSMENT_VERSION` 2 → 3**; schema
@@ -1275,12 +1323,12 @@ M2K is **in progress**: PR1 through PR8 are merged and deployed; PR9 is merged (
 needed no deployment because it changed only documentation; PR10 is merged (`1efd49b`, #55) and
 deployed to slot A on schema v9; PR11 (`3bb9a5b`, #56), PR12 (`2dc4177`, #57), PR13 (`8cd8ba3`, #58),
 PR14 (`064fe51`, #59), PR15 (`12e64cd`, #60), PR16 (`c1d6f1d`, #61), PR17 (`c164383`, #62), PR18
-(`1116b61`, #63) and PR19 (`d777e04`, #64) are merged and **intentionally not deployed**; PR20 is on a
-branch. See *In progress* above for PR20.
+(`1116b61`, #63), PR19 (`d777e04`, #64) and PR20 (`9fbf9a9`, #65) are merged and **intentionally not
+deployed**; PR21 is on a branch. See *In progress* above for PR21.
 
 **`main` is now schema v11; production is still schema v9**, and that gap is the deployment decision
 rather than a lag. PR14 is the change that turns this batch from a slot flip into a schema move, so
-deploying PR11–PR20 is **Tier 2**: a verified pre-v9 backup taken with SQLite's online backup API, a
+deploying PR11–PR21 is **Tier 2**: a verified pre-v9 backup taken with SQLite's online backup API, a
 migration rehearsal, the old-runtime refusal check that PR14 already proves in CI, and an honest
 rollback **pair** — the slot *and* the restored snapshot — because a flip alone cannot walk a schema
 backwards. PR15, PR16 and PR18 add nothing to that cost: PR15 is documentation, and PR16 and PR18 are
@@ -1291,11 +1339,11 @@ it runs — and once a `path_exists` criterion has been written to v11, restorin
 requirements a user actually stated rather than being a clean downgrade.
 
 PR19 adds nothing to that cost at all: it is documentation and design, with no runtime surface. PR20
-adds nothing either: derived read semantics with no schema of its own and no caller yet.
+and PR21 add nothing either: derived read semantics with no schema of their own and no caller yet.
 
 **A/B remains deployment machinery, not feature-development machinery.** Work is developed in
 isolated feature worktrees and merged to `main`; a slot is never a workbench; and a deployment happens
-when a running service actually needs the change. Nine merged PRs sitting ahead of production is the
+when a running service actually needs the change. Ten merged PRs sitting ahead of production is the
 policy working, not drift.
 
 ### M2K PR13 — cross-turn acceptance evidence-binding doctrine (documentation only)
