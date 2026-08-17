@@ -496,12 +496,27 @@ class TheNegativeSpace(unittest.TestCase):
         # phrasings legitimately name the `continuity_*` reason codes PR20 fought
         # to preserve. So this asserts what it always meant — no declaration
         # **control** — rather than banning the vocabulary.
+        # M2K PR24 made the PWA the first human author of requirements, so
+        # "the panel has no continuity control" is no longer the property to
+        # hold — it authors one, deliberately, through the single dispatch
+        # request PR23 opened to the device caller. What this guard now asserts
+        # is the boundary that *did* survive: the declaration travels with the
+        # turn it belongs to and nowhere else. There is no second authoring
+        # route, no post-dispatch edit, and no supersession vocabulary at all —
+        # `revise` needs the predecessor's resolved active set, no read surface
+        # publishes it, and the mode is therefore absent rather than guessed.
         for forbidden in (
-            'method: "POST"', 'method: "PUT"', 'method: "PATCH"',
-            'method: "DELETE"', "/continuity", "supersedes",
-            "predecessor_snapshot", "criterion_ordinal",
+            'method: "PUT"', 'method: "PATCH"', 'method: "DELETE"',
+            "/continuity", "/lineage", "supersedes", "criterion_ordinal",
+            "resolve_active_criteria",
         ):
             self.assertNotIn(forbidden, tasks_js, forbidden)
+        # The one continuity field the panel does carry, and where it may
+        # appear: inside the declaration attached to a dispatch, never as a box
+        # somebody types into. It is read from the assessment route.
+        self.assertIn("predecessor_snapshot_id", tasks_js)
+        self.assertNotIn('id="taskAuthCreateSnapshot', tasks_js)
+        self.assertNotIn('id="taskAuthFollowupSnapshot', tasks_js)
 
     def test_the_assessment_response_is_unchanged(self):
         from cofferdam.workstation.tasks import assessment

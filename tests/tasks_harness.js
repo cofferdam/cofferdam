@@ -149,6 +149,18 @@ function makeElement(id) {
       ).forEach(function (match) {
         values[match[1]] = unescapeHtml(match[2]);
       });
+      /* And a text input rendered with a `value` attribute comes back holding
+         it, exactly as the textarea above does. Without this a form whose state
+         lives in the markup — the M2K PR24 requirement rows — would look empty
+         after every render, and a test could not tell "the composer survived a
+         refusal" from "the composer was thrown away", which is the distinction
+         those scenarios exist to make. */
+      Array.from(
+        markup.matchAll(/<input\b[^>]*\bid="([^"]+)"[^>]*>/g)
+      ).forEach(function (match) {
+        const attribute = /\bvalue="([^"]*)"/.exec(match[0]);
+        if (attribute) { values[match[1]] = unescapeHtml(attribute[1]); }
+      });
       current.forEach(function (childId) {
         const child = makeElement(childId);
         if (Object.prototype.hasOwnProperty.call(values, childId)) {
@@ -2783,6 +2795,596 @@ function run() {
             html: html()
           };
         });
+      });
+    });
+  }
+
+  /* -- requirement authoring (M2K PR24) ------------------------------------
+   *
+   * The properties here are about the *request*, not the pixels: whether a
+   * declaration was sent at all, whether an empty one is distinguishable from an
+   * absent one, and whether anything in the panel manufactures a mode nobody
+   * chose. Every one of those is invisible to a scan of the source and visible
+   * in `writes()`.
+   */
+
+  const CREATE = "taskAuthCreate";
+  const FOLLOWUP = "taskAuthFollowup";
+
+  /* Operating a control that is not on screen must fail loudly. `field()` mints
+     an element on demand, which is exactly right for a stub and exactly wrong
+     for a test that means to assert the control exists — it would let a
+     scenario "type into" a box the panel never rendered and pass. */
+  function control(id) {
+    if (!existing(id)) { throw new Error("no such control: " + id); }
+    return elements[id];
+  }
+
+  function chooseMode(prefix, modeId) {
+    control(prefix + modeId);
+    fire("change", button(prefix + modeId));
+  }
+
+  function addRow(prefix) {
+    control(prefix + "Add");
+    fire("click", button(prefix + "Add"));
+  }
+
+  function setRowType(prefix, index, value) {
+    const id = prefix + "Kind" + String(index);
+    control(id);
+    fire("change", field(id, value));
+  }
+
+  function setRowText(prefix, index, name, value) {
+    const id = prefix + name + String(index);
+    control(id);
+    fire("input", field(id, value));
+  }
+
+  function setRowOperation(prefix, index, value) {
+    const id = prefix + "Op" + String(index);
+    control(id);
+    fire("change", field(id, value));
+  }
+
+  function createPosts() {
+    return writes().filter((w) => w.path === "/api/tasks");
+  }
+
+  function followupPosts() {
+    return writes().filter((w) => w.path.indexOf("/followups") !== -1);
+  }
+
+  /* A create scenario: open the composer, write a prompt, run `build`, send. */
+  function createScenario(build, extra) {
+    return mount(Object.assign({
+      hang: true,
+      result: () => ({ payload: {} })
+    }, extra || {})).then(function () {
+      fire("click", button("taskCompose"));
+      return drain();
+    }).then(function () {
+      field("taskPrompt", "bir görev");
+      fire("input", field("taskPrompt", "bir görev"));
+      return Promise.resolve(build ? build() : null);
+    }).then(function () {
+      return drain();
+    }).then(function () {
+      fire("click", button("taskStart"));
+      return drain().then(function () {
+        return { posts: createPosts(), html: html() };
+      });
+    });
+  }
+
+  /* A follow-up scenario against a task whose latest turn recorded criteria, so
+     an anchor can actually be read. Both routes the anchor needs already exist
+     and are already device-token-only; the stub answers them as the real ones
+     do. */
+  function followupScenario(build, extra) {
+    const ready = readyTask();
+    const options = extra || {};
+    return mount(Object.assign({
+      realAdapter: true,
+      initial: listPayload([ready]),
+      detail: ready,
+      onGet(pathname) {
+        if (pathname.indexOf("/result") !== -1) {
+          return Promise.resolve({
+            ok: true, status: 200,
+            payload: { result: {
+              task_id: "task_ready", turn_number: options.turnCount || 1,
+              turn_count: options.turnCount || 1, turn_count_known: true
+            } }
+          });
+        }
+        return null;
+      },
+      assessmentPayload: options.assessment || assessmentView({ task_id: "task_ready" }),
+      result: () => ({ payload: { task: ready } })
+    }, options.behaviour || {})).then(function () {
+      fire("click", openButton("task_ready"));
+      return drain();
+    }).then(function () {
+      return Promise.resolve(build ? build() : null);
+    }).then(function () {
+      return drain();
+    }).then(function () {
+      field("taskFollowupText", "devam et");
+      fire("click", button("taskFollowupSend"));
+      return drain().then(function () {
+        return { posts: followupPosts(), html: html(), requests: record.requests.slice() };
+      });
+    });
+  }
+
+  /* -- create ------------------------------------------------------------- */
+
+  if (scenario === "authoring-create-not-declared") {
+    /* The form is left alone. The request must be byte-for-byte the one this
+       panel sent before PR24 — no `continuity` key at all, and no `criteria`
+       key either. An omitted declaration is `not_declared` in the store, and
+       nothing here may turn "this is turn one" into `root`. */
+    return createScenario(null);
+  }
+
+  if (scenario === "authoring-create-root-with-state-criterion") {
+    return createScenario(function () {
+      chooseMode(CREATE, "Root");
+      addRow(CREATE);
+      setRowType(CREATE, 0, "evidence:path_exists");
+      setRowText(CREATE, 0, "Path", "a.txt");
+    });
+  }
+
+  if (scenario === "authoring-create-root-with-no-criteria") {
+    /* Explicit `root`, empty composer. The declaration is real and the criteria
+       set is genuinely empty — which the server records as `not_provided`, and
+       which reads afterwards as `no_structured_criteria` rather than as nobody
+       having declared anything. So `criteria` must be present and `[]`, not
+       absent. */
+    return createScenario(function () { chooseMode(CREATE, "Root"); });
+  }
+
+  if (scenario === "authoring-create-criteria-without-a-declaration") {
+    /* The two fields are independent on the wire. Requirements with no lineage
+       declaration is a legitimate thing to say, and the panel must not couple
+       them by inventing a `root` to carry them. */
+    return createScenario(function () {
+      addRow(CREATE);
+      setRowType(CREATE, 0, "evidence:path_changed");
+      setRowText(CREATE, 0, "Path", "src/app.py");
+    });
+  }
+
+  if (scenario === "authoring-create-offers-only-first-turn-modes") {
+    return mount({ result: () => ({ payload: {} }) }).then(function () {
+      fire("click", button("taskCompose"));
+      return drain().then(function () {
+        return {
+          html: html(),
+          hasRoot: !!existing("taskAuthCreateRoot"),
+          hasNotDeclared: !!existing("taskAuthCreateNotDeclared"),
+          hasExtend: !!existing("taskAuthCreateExtend"),
+          hasReplace: !!existing("taskAuthCreateReplace"),
+          hasRevise: !!existing("taskAuthCreateRevise")
+        };
+      });
+    });
+  }
+
+  if (scenario === "authoring-every-predicate") {
+    /* All six shapes the model owns, in one snapshot, in the order they were
+       added. Ordinal is positional and part of the stored fingerprint, so the
+       order sent has to be the order on screen. */
+    return createScenario(function () {
+      chooseMode(CREATE, "Root");
+      const rows = [
+        ["evidence:path_changed", { Path: "one.txt" }],
+        ["evidence:path_operation", { Path: "two.txt", op: "created" }],
+        ["evidence:rename", { Path: "three.txt", To: "four.txt" }],
+        ["manual", { Desc: "somebody reads the page" }],
+        ["evidence:path_exists", { Path: "five.txt" }],
+        ["evidence:path_absent", { Path: "six.txt" }],
+        /* A second `path_operation`, so the operation select is proved to carry
+           a chosen value rather than the one a new row happens to start on —
+           and so `deleted` is visibly not the same thing as `path_absent`. */
+        ["evidence:path_operation", { Path: "seven.txt", op: "deleted" }]
+      ];
+      rows.forEach(function (entry, index) {
+        addRow(CREATE);
+        setRowType(CREATE, index, entry[0]);
+        Object.keys(entry[1]).forEach(function (name) {
+          if (name === "op") { setRowOperation(CREATE, index, entry[1][name]); return; }
+          setRowText(CREATE, index, name, entry[1][name]);
+        });
+      });
+    });
+  }
+
+  if (scenario === "authoring-predicate-fields-are-bounded-by-predicate") {
+    /* A row draws only the fields its predicate owns. A `path_exists` row with
+       a destination box or an operation select would be a control whose only
+       outcome is a refusal — and would be the place an invalid combination
+       came from. */
+    return mount({ result: () => ({ payload: {} }) }).then(function () {
+      fire("click", button("taskCompose"));
+      return drain().then(function () {
+        addRow(CREATE);
+        return drain();
+      }).then(function () {
+        const seen = {};
+        [
+          "evidence:path_changed", "evidence:path_operation", "evidence:rename",
+          "manual", "evidence:path_exists", "evidence:path_absent"
+        ].forEach(function (value) {
+          setRowType(CREATE, 0, value);
+          seen[value] = {
+            path: !!existing(CREATE + "Path0"),
+            to: !!existing(CREATE + "To0"),
+            operation: !!existing(CREATE + "Op0"),
+            description: !!existing(CREATE + "Desc0")
+          };
+        });
+        return { seen: seen, html: html() };
+      });
+    });
+  }
+
+  if (scenario === "authoring-rows-keep-their-order") {
+    return createScenario(function () {
+      chooseMode(CREATE, "Root");
+      ["zebra.txt", "apple.txt", "mango.txt"].forEach(function (path, index) {
+        addRow(CREATE);
+        setRowType(CREATE, index, "evidence:path_exists");
+        setRowText(CREATE, index, "Path", path);
+      });
+      /* Remove the middle one. What is left must still be in insertion order,
+         renumbered by position rather than resorted by anything. */
+      fire("click", button(CREATE + "Remove1"));
+    });
+  }
+
+  /* -- follow-up ---------------------------------------------------------- */
+
+  if (scenario === "authoring-followup-not-declared") {
+    return followupScenario(null);
+  }
+
+  if (scenario === "authoring-followup-extend") {
+    return followupScenario(function () {
+      chooseMode(FOLLOWUP, "Extend");
+      return drain().then(function () {
+        addRow(FOLLOWUP);
+        setRowType(FOLLOWUP, 0, "evidence:path_absent");
+        setRowText(FOLLOWUP, 0, "Path", "b.txt");
+      });
+    });
+  }
+
+  if (scenario === "authoring-followup-replace") {
+    return followupScenario(function () {
+      chooseMode(FOLLOWUP, "Replace");
+      return drain().then(function () {
+        addRow(FOLLOWUP);
+        setRowType(FOLLOWUP, 0, "evidence:path_exists");
+        setRowText(FOLLOWUP, 0, "Path", "replacement.txt");
+      });
+    });
+  }
+
+  if (scenario === "authoring-followup-offers-no-root") {
+    const ready = readyTask();
+    return mount({
+      realAdapter: true,
+      initial: listPayload([ready]),
+      detail: ready,
+      result: () => ({ payload: { task: ready } })
+    }).then(function () {
+      fire("click", openButton("task_ready"));
+      return drain().then(function () {
+        return {
+          html: html(),
+          hasNotDeclared: !!existing("taskAuthFollowupNotDeclared"),
+          hasExtend: !!existing("taskAuthFollowupExtend"),
+          hasReplace: !!existing("taskAuthFollowupReplace"),
+          hasRoot: !!existing("taskAuthFollowupRoot"),
+          hasRevise: !!existing("taskAuthFollowupRevise")
+        };
+      });
+    });
+  }
+
+  if (scenario === "authoring-anchor-is-read-not-typed") {
+    /* The one property that decides whether this is a user interface: the
+       predecessor snapshot id reaches the request without anybody typing it.
+       There is no control for it, and the value that is sent is the one the
+       assessment route answered with. */
+    let beforeSubmit = null;
+    let identityInputs = null;
+    return followupScenario(function () {
+      chooseMode(FOLLOWUP, "Extend");
+      return drain().then(function () {
+        /* Captured while the form is still on screen: what the anchor is has to
+           be visible *before* the request goes, not reconstructable after it. */
+        beforeSubmit = html();
+        /* Every control the panel is currently rendering. None of them may be a
+           box for an internal identifier — that is the difference between a user
+           interface and a JSON editor with a nicer font. */
+        identityInputs = Object.keys(elements).filter(function (id) {
+          return /snapshot|predecessor|criterion.?id/i.test(id);
+        });
+      });
+    }).then(function (payload) {
+      payload.htmlBeforeSubmit = beforeSubmit;
+      payload.identityInputs = identityInputs;
+      return payload;
+    });
+  }
+
+  if (scenario === "authoring-legacy-turn-cannot-be-continued") {
+    /* A turn that predates criteria persistence publishes no snapshot id. There
+       is nothing to anchor to, so the panel says so rather than sending a
+       declaration with a missing field. */
+    return followupScenario(function () {
+      chooseMode(FOLLOWUP, "Extend");
+      return drain();
+    }, {
+      assessment: assessmentView({
+        task_id: "task_ready",
+        criteria: {
+          state: "legacy_unknown", recorded: false, snapshot_id: null,
+          criteria_fingerprint: null, criterion_count: 0, items: []
+        }
+      })
+    });
+  }
+
+  if (scenario === "authoring-declaration-does-not-cross-tasks") {
+    const first = readyTask("task_one");
+    const second = readyTask("task_two");
+    return mount({
+      realAdapter: true,
+      initial: listPayload([first, second]),
+      detail: first,
+      result: () => ({ payload: { task: first } })
+    }).then(function () {
+      fire("click", openButton("task_one"));
+      return drain();
+    }).then(function () {
+      addRow(FOLLOWUP);
+      setRowType(FOLLOWUP, 0, "evidence:path_exists");
+      setRowText(FOLLOWUP, 0, "Path", "only-for-task-one.txt");
+      return drain();
+    }).then(function () {
+      fire("click", button("taskBack"));
+      return drain();
+    }).then(function () {
+      fire("click", openButton("task_two"));
+      return drain().then(function () {
+        return {
+          html: html(),
+          rowsOnSecondTask: !!existing("taskAuthFollowupPath0")
+        };
+      });
+    });
+  }
+
+  /* -- refusals ----------------------------------------------------------- */
+
+  function refusedScenario(code, detail) {
+    return createScenario(function () {
+      chooseMode(CREATE, "Root");
+      addRow(CREATE);
+      setRowType(CREATE, 0, "evidence:path_exists");
+      setRowText(CREATE, 0, "Path", "a.txt");
+    }, {
+      hang: false,
+      onWrite(pathname) {
+        if (pathname !== "/api/tasks") { return null; }
+        return Promise.resolve({
+          ok: false, status: 422,
+          payload: { error: {
+            code: code,
+            message: "that was refused",
+            detail: detail
+          } }
+        });
+      }
+    });
+  }
+
+  if (scenario === "authoring-criteria-refusal") {
+    return refusedScenario("task_criteria_invalid", "criterion_path_invalid");
+  }
+
+  if (scenario === "authoring-continuity-refusal") {
+    return refusedScenario("task_continuity_invalid", "continuity_mode_invalid");
+  }
+
+  if (scenario === "authoring-stale-anchor-refusal") {
+    /* The concurrency case. A form is displayed, another caller creates a turn,
+       and the anchor this declaration names is no longer where it was. The
+       server refuses honestly; the panel must say so, keep the composer, and —
+       the property that matters — must not send a second, altered request. */
+    return refusedScenario(
+      "task_continuity_invalid", "continuity_predecessor_unknown"
+    );
+  }
+
+  if (scenario === "authoring-refusal-keeps-the-composer") {
+    return refusedScenario(
+      "task_criteria_invalid", "criterion_path_required"
+    ).then(function (payload) {
+      return {
+        posts: payload.posts,
+        html: payload.html,
+        pathStillThere: valueOf("taskAuthCreatePath0"),
+        rowStillThere: !!existing("taskAuthCreateKind0"),
+        modeStillRoot: payload.html.indexOf(
+          'id="taskAuthCreateRoot" class="task-continuity-input" checked'
+        ) !== -1
+      };
+    });
+  }
+
+  /* -- idempotency -------------------------------------------------------- */
+
+  if (scenario === "authoring-double-tap-sends-one-request") {
+    return mount({
+      hang: true,
+      result: () => ({ payload: {} })
+    }).then(function () {
+      fire("click", button("taskCompose"));
+      return drain();
+    }).then(function () {
+      field("taskPrompt", "iki kere");
+      fire("input", field("taskPrompt", "iki kere"));
+      chooseMode(CREATE, "Root");
+      addRow(CREATE);
+      setRowType(CREATE, 0, "evidence:path_exists");
+      setRowText(CREATE, 0, "Path", "a.txt");
+      return drain();
+    }).then(function () {
+      fire("click", button("taskStart"));
+      fire("click", button("taskStart"));
+      fire("click", button("taskStart"));
+      return drain().then(function () {
+        return { posts: createPosts() };
+      });
+    });
+  }
+
+  if (scenario === "authoring-retry-reuses-its-request-id") {
+    /* Same declaration, pressed twice after a refusal: one key, because the key
+       is a function of what was authored rather than a fresh value per attempt.
+       A new key on every attempt is how a timeout becomes two turns. */
+    let attempts = 0;
+    return createScenario(function () {
+      chooseMode(CREATE, "Root");
+      addRow(CREATE);
+      setRowType(CREATE, 0, "evidence:path_exists");
+      setRowText(CREATE, 0, "Path", "a.txt");
+    }, {
+      hang: false,
+      onWrite(pathname) {
+        if (pathname !== "/api/tasks") { return null; }
+        attempts += 1;
+        return Promise.resolve({
+          ok: false, status: 503,
+          payload: { error: { code: "task_adapter_error", message: "not now" } }
+        });
+      }
+    }).then(function () {
+      fire("click", button("taskStart"));
+      return drain().then(function () {
+        return { requestIds: createPosts().map((w) => w.body.client_request_id) };
+      });
+    });
+  }
+
+  if (scenario === "authoring-an-edited-declaration-gets-a-new-request-id") {
+    /* The other half, and the reason the declaration is in the key at all: the
+       server binds a key to a payload hash, so a changed requirement arriving
+       under the old key would be answered as a conflict rather than as the
+       different request it is. */
+    return createScenario(function () {
+      chooseMode(CREATE, "Root");
+      addRow(CREATE);
+      setRowType(CREATE, 0, "evidence:path_exists");
+      setRowText(CREATE, 0, "Path", "a.txt");
+    }, {
+      hang: false,
+      onWrite(pathname) {
+        if (pathname !== "/api/tasks") { return null; }
+        return Promise.resolve({
+          ok: false, status: 503,
+          payload: { error: { code: "task_adapter_error", message: "not now" } }
+        });
+      }
+    }).then(function () {
+      /* One more requirement, same prompt. */
+      addRow(CREATE);
+      setRowType(CREATE, 1, "evidence:path_absent");
+      setRowText(CREATE, 1, "Path", "b.txt");
+      return drain();
+    }).then(function () {
+      fire("click", button("taskStart"));
+      return drain().then(function () {
+        return { requestIds: createPosts().map((w) => w.body.client_request_id) };
+      });
+    });
+  }
+
+  /* -- the loop ----------------------------------------------------------- */
+
+  if (scenario === "authoring-reaches-acceptance") {
+    /* The whole point of the milestone, end to end through the shipped request
+       layer: a person declares a root and a requirement, the turn runs, and the
+       acceptance section that PR22 already built answers for that turn. No
+       second acceptance viewer, and no developer tooling anywhere in the path. */
+    const created = taskPayload({
+      task_id: "task_a", state: "completed", result: "Bitti.",
+      capabilities: SDK_CAPABILITIES
+    });
+    return mount({
+      initial: listPayload([]),
+      detail: created,
+      assessmentPayload: assessmentView({
+        task_id: "task_a",
+        turn_number: 1,
+        acceptance: acceptanceView({
+          availability: "assessable", availability_reason: null,
+          outcome: "met", requires_human: false,
+          counts: { total: 1, met: 1, not_met: 0, unverified: 0 }
+        }),
+        criteria: {
+          state: "present", recorded: true,
+          snapshot_id: "acs_" + "a".repeat(26),
+          criteria_fingerprint: "c".repeat(64), criterion_count: 1,
+          items: [{
+            criterion_id: "acr_1", ordinal: 1, kind: "evidence",
+            predicate: "path_exists", path: "a.txt", to_path: null,
+            operation: null, description: null
+          }]
+        },
+        evaluation: {
+          state: "recorded", recorded: true,
+          evaluation_id: "evl_" + "b".repeat(26), evaluator_version: 1,
+          criteria_state: "present", criteria_snapshot_id: "acs_" + "a".repeat(26),
+          criteria_fingerprint: "c".repeat(64), assembler_version: 3,
+          evidence_input_fingerprint: "f".repeat(64), result_count: 1,
+          evaluation_fingerprint: "d".repeat(64),
+          results: [{
+            criterion_id: "acr_1", ordinal: 1, result: "met",
+            reason: "machine_state_observed"
+          }]
+        }
+      }),
+      result: (body, pathname) => ({
+        payload: pathname === "/api/tasks"
+          ? { created: true, task: created }
+          : { task: created }
+      })
+    }).then(function () {
+      fire("click", button("taskCompose"));
+      return drain();
+    }).then(function () {
+      field("taskPrompt", "a.txt oluştur");
+      fire("input", field("taskPrompt", "a.txt oluştur"));
+      chooseMode(CREATE, "Root");
+      addRow(CREATE);
+      setRowType(CREATE, 0, "evidence:path_exists");
+      setRowText(CREATE, 0, "Path", "a.txt");
+      return drain();
+    }).then(function () {
+      fire("click", button("taskStart"));
+      return drain();
+    }).then(function () {
+      fire("click", button("taskShowAssessment"));
+      return drain().then(function () {
+        return { posts: createPosts(), html: html() };
       });
     });
   }

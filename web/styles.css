@@ -619,6 +619,55 @@ button.danger { color: var(--err); }
 
 /* The authentication wait. Deliberately shaped like a warning and deliberately
    containing no input: the whole point is that there is nothing to type. */
+/* Requirement authoring (M2K PR24) ---------------------------------------
+ *
+ * `min-width: 0` and `overflow-wrap` on everything that can hold a path, for
+ * the reason the rest of this sheet already records: a 512-character path in a
+ * grid child with the default `min-width: auto` widens the page instead of
+ * wrapping, and a page that scrolls sideways on a phone hides the controls on
+ * the right — which here would be the Remove button and the send button. */
+
+.task-authoring { display: grid; gap: 10px; min-width: 0; margin-top: 10px; }
+
+.task-continuity {
+  border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px; margin: 0; display: grid; gap: 8px; min-width: 0;
+}
+.task-continuity legend { padding: 0 4px; }
+.task-continuity-mode {
+  display: flex; align-items: baseline; gap: 8px;
+  min-width: 0; overflow-wrap: anywhere;
+}
+.task-continuity-mode input { min-width: 0; flex: 0 0 auto; }
+.task-continuity-label { font-weight: 600; }
+.task-continuity-note { font-size: 13px; min-width: 0; overflow-wrap: anywhere; }
+.task-continuity-absent, .task-continuity-anchor {
+  margin: 0; min-width: 0; overflow-wrap: anywhere;
+}
+
+.task-criteria { display: grid; gap: 8px; min-width: 0; }
+.task-criteria-list {
+  list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; min-width: 0;
+}
+.task-criteria-empty { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.task-criterion {
+  border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px; display: grid; gap: 8px; min-width: 0;
+}
+.task-criterion-head { display: flex; align-items: flex-end; gap: 8px; min-width: 0; }
+.task-criterion-ordinal { color: var(--muted); font-size: 13px; }
+.task-criterion-kind { flex: 1 1 10em; min-width: 0; }
+.task-criterion-remove { min-height: 44px; min-width: 0; }
+.task-criterion-field { min-width: 0; }
+.task-criterion-field input {
+  width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box;
+}
+.task-criteria-actions { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.task-criteria-actions button { min-height: 44px; min-width: 0; }
+
+.task-authoring-error { overflow-wrap: anywhere; min-width: 0; }
+.task-refusal-code { margin: 4px 0 0; overflow-wrap: anywhere; min-width: 0; }
+
 .task-secret-wait { overflow-wrap: anywhere; min-width: 0; }
 
 /* A finished turn. Deliberately NOT the warn colour the waiting states use:
@@ -766,6 +815,17 @@ button.danger { color: var(--err); }
   /* An option's description wraps under its label rather than competing with it
      for a phone's width. */
   .task-option label { flex-wrap: wrap; }
+  /* M2K PR24. A requirement row is a stack on a phone, never a row: a predicate
+     select, a path and a note competing for 375px would push the Remove button
+     off the side of the page, and a control you cannot reach is worse than one
+     that is not there. The head keeps its ordinal and select on one line and
+     lets the button wrap under them. */
+  .task-criterion-head { flex-wrap: wrap; }
+  .task-criterion-kind { flex: 1 1 100%; }
+  .task-criterion-remove { flex: 1 1 100%; }
+  .task-criteria-actions button { flex: 1 1 100%; }
+  /* A mode's sentence wraps under its label rather than beside it. */
+  .task-continuity-mode { flex-wrap: wrap; }
 }
 
 /* Remote Control (M2H Lane A) -------------------------------------------- */

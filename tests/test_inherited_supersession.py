@@ -1165,10 +1165,16 @@ class NegativeSpaceTests(unittest.TestCase):
         # the vocabulary: no declaration editor, no supersession authoring, and
         # no write of any kind from the panel.
         raw = (REPO_ROOT / "web" / "tasks.js").read_text(encoding="utf-8")
+        # M2K PR24 gave the panel a bounded authoring form, so the property
+        # this half asserts is no longer "no control" but "no *supersession*
+        # control". That is the one this module actually cares about: inherited
+        # supersession is what `revise` expresses, it needs the predecessor's
+        # resolved active set, and nothing publishes one — so the mode is
+        # absent from the client rather than approximated in it.
         for forbidden in (
-            'method: "POST"', 'method: "PUT"', 'method: "PATCH"',
+            'method: "PUT"', 'method: "PATCH"',
             'method: "DELETE"', "/continuity", "supersedes",
-            "predecessor_snapshot", "criterion_ordinal",
+            "predecessor_criterion_id", "criterion_ordinal",
         ):
             self.assertNotIn(forbidden, raw, forbidden)
         self.assertNotIn("resolve_active_criteria", pwa)
