@@ -169,7 +169,7 @@ class VocabularyTests(unittest.TestCase):
         self.assertEqual(1, AGGREGATOR_VERSION)
 
     def test_it_supports_exactly_assessment_version_three(self):
-        self.assertEqual((3,), SUPPORTED_ASSESSMENT_VERSIONS)
+        self.assertEqual((4,), SUPPORTED_ASSESSMENT_VERSIONS)
         self.assertEqual((CURRENT_ASSESSMENT_VERSION,), SUPPORTED_ASSESSMENT_VERSIONS)
 
     def test_availability_has_two_values(self):
@@ -612,7 +612,7 @@ class CriterionReasonsAreNotInputs(unittest.TestCase):
 
 class UnsupportedInputVersion(unittest.TestCase):
     def test_a_newer_envelope_is_refused(self):
-        answer = aggregate(resolved([criterion("c1", RESULT_MET)], version=4))
+        answer = aggregate(resolved([criterion("c1", RESULT_MET)], version=5))
         self.assertEqual(AVAILABILITY_NOT_ASSESSABLE, answer.availability)
         self.assertEqual(REASON_UNSUPPORTED_ASSESSMENT_VERSION, answer.availability_reason)
         self.assertIsNone(answer.outcome)

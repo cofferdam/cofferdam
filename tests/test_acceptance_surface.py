@@ -687,7 +687,7 @@ class ServiceReadIsInert(StoreHarness):
 class NegativeSpaceTests(unittest.TestCase):
     def test_versions(self):
         self.assertEqual(11, SCHEMA_VERSION)
-        self.assertEqual(3, CURRENT_ASSESSMENT_VERSION)
+        self.assertEqual(4, CURRENT_ASSESSMENT_VERSION)
         self.assertEqual(1, AGGREGATOR_VERSION)
 
     def test_no_global_task_verdict_is_published(self):

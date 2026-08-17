@@ -92,6 +92,7 @@ from .errors import (
     FollowupInvalid,
     FollowupNotWaiting,
     FollowupUnsupported,
+    ProjectRootInvalid,
     PromptInvalid,
     RequestIdInvalid,
     ResultNotReady,
@@ -651,9 +652,15 @@ class TaskService:
             # which the turn is *guaranteed* open — which is what makes the
             # event's sequence fall inside the turn's own bounds.
             self._record_committed_range(row, root, opened)
-            # M2K PR14, immediately after PR5's observation and still before
-            # `_apply` can close the turn.
-            self._record_final_state(row, root, opened)
+            # **No final-state observation here — M2K PR25.** PR14 took it on
+            # this line, one instruction after PR5's, and the symmetry was the
+            # mistake: PR5 measures a boundary that is genuinely fixed by now
+            # (the baseline revision was frozen before dispatch), while PR14
+            # measures the *worker's* effect and the worker may not have had one
+            # yet. `adapter.start()` returning is not `worker finished`; for an
+            # asynchronous adapter it means the opposite. See
+            # :meth:`_capture_terminal_boundary`, which owns this observation
+            # now, and the version note on `FINAL_STATE_OBSERVER_VERSION`.
             return self._apply(row, outcome)
 
     def _record_pre_work_baseline(self, row: TaskRow, root: Path) -> Optional[int]:
@@ -874,17 +881,85 @@ class TaskService:
 
     # -- the committed range (M2K PR5) ---------------------------------------
 
+    def _capture_terminal_boundary(self, row: TaskRow, close) -> None:
+        """The one owner of final-state capture. **M2K PR25.**
+
+        Called immediately before a transition that will durably close a turn,
+        by the two methods that can perform one — :meth:`_apply` and
+        :meth:`_fail` — each passing the very ``_TurnClose`` it is about to hand
+        to the store, and each holding ``self._lock``. ``close`` being non-``None``
+        is the entire condition, and it is not a timing heuristic: it is the
+        caller's already-made decision that *this report is the terminal result
+        that ends this turn*.
+
+        **Why the condition is sufficient.** A ``_TurnClose`` exists only when
+        :meth:`_store.current_turn` found an open turn, and a turn exists only
+        because a dispatch path opened one — which both do strictly *after* the
+        adapter accepted the work. So an open turn is proof that worker authority
+        began, and a turn being closed now is proof that the worker's authority
+        over it has ended. The two facts PR14 needed and could not establish from
+        its call site are both structural here, for every adapter family at once.
+
+        **Why there is no second algorithm.** PR14 had two call sites, one per
+        dispatch path, each guessing that the adapter had finished because it had
+        returned. That guess was right for synchronous adapters and wrong for
+        asynchronous ones, and fixing the two sites separately would have
+        produced four timing rules to keep in step. There is now one rule and it
+        does not mention adapters: *the turn is closing, so observe first*. A
+        synchronous adapter reaches it through ``start`` → ``_apply``; an
+        asynchronous one through ``refresh_task`` → ``inspect`` → ``_apply``;
+        a cancellation through ``cancel_task`` → ``_apply``; an adapter fault
+        through ``_fail``. Same line of code, same moment relative to the close.
+
+        **Not called from restart recovery, deliberately.**
+        :meth:`recover_after_restart` also closes turns, as ``interrupted``, and
+        it is the one closing path with no terminal worker result behind it: the
+        process died, the worker was never observed reaching an end, and whatever
+        the worktree holds when the daemon next starts is a fact about *now*
+        rather than about that turn's boundary. Observing there would manufacture
+        exactly the historical claim PR14's no-fallback doctrine forbids, so the
+        turn closes with no observation and every state criterion on it stays
+        ``unverified``. Failing closed is the honest answer, and it is also
+        strictly better than V1's, which would have left a pre-work observation
+        behind and called it the boundary.
+        """
+        if close is None:
+            return
+        open_turn = self._store.current_turn(row.task_id)
+        if open_turn is None:  # pragma: no cover - `close` implies one exists
+            return
+        # Resolved here rather than passed in, because the callers are the
+        # lifecycle's closing transitions and neither of them otherwise needs a
+        # filesystem path. A project whose folder went away between dispatch and
+        # this moment yields ``None`` and an explicitly unavailable observation —
+        # never a silent skip, which a later reader could not tell from a turn
+        # that predates the observer.
+        root: Optional[Path] = None
+        try:
+            root = verify_root(self._projects.get(row.project_id).root)
+        except TaskError:
+            root = None
+        self._record_final_state(row, root, open_turn.turn_number)
+
     def _record_final_state(
-        self, row: TaskRow, root: Path, turn_number: Optional[int]
+        self, row: TaskRow, root: Optional[Path], turn_number: Optional[int]
     ) -> None:
         """Observe what is actually there, while the turn is still open.
 
-        M2K PR14, and the position is the argument. Both dispatch paths call it
-        after the adapter has returned, after :meth:`_record_committed_range`,
-        and before :meth:`_apply` — the only method that can close a turn — with
-        ``self._lock`` held throughout. So the observation describes the
+        M2K PR14 wrote this; **M2K PR25 moved its caller and kept its body.** The
+        observer was never the defect — during the failed deployment it answered
+        ``present`` / ``file`` correctly the moment it was asked after the work.
+        What changed is that there is now exactly one caller,
+        :meth:`_capture_terminal_boundary`, invoked when the worker has reached
+        the terminal result that closes this turn and before the closing write.
+        ``self._lock`` is held throughout, so the observation describes the
         repository as the worker left it, and it is durable before anything can
         report the turn finished.
+
+        ``root`` is ``None`` when host project authority can no longer resolve
+        the project folder. That is recorded as an unavailable observation
+        carrying :data:`~.finalstate.REASON_POST_WORKER_BOUNDARY_LOST`, the same
+        answer the equivalent mid-observation failure already produced.
 
         **PR13 is why this exists.** Every acceptance predicate this build has
         asks *what the worker did during this turn*; none asks *what the project
@@ -933,6 +1008,13 @@ class TaskService:
             limitation: Optional[str] = None
             observations: Tuple[PathObservation, ...] = ()
             lineage_fingerprint: Optional[str] = None
+
+            if root is None:
+                # Host project authority could not resolve the folder at the
+                # boundary. Exactly the answer the same failure produces when it
+                # surfaces mid-observation, and reached without a second
+                # construction of it.
+                raise ProjectRootInvalid()
 
             resolved = resolve(
                 self._store.lineage_inputs(row.task_id, int(turn_number))
@@ -1416,12 +1498,11 @@ class TaskService:
                 self._record_committed_range(
                     row, root, opened.turn_number if opened is not None else None
                 )
-                # M2K PR14, at the same point in the lifecycle as the first
-                # turn's: the turn is open, `_apply` has not run, and the lock
-                # has not been released since.
-                self._record_final_state(
-                    row, root, opened.turn_number if opened is not None else None
-                )
+                # **No final-state observation here — M2K PR25**, for the reason
+                # the first-turn path gives at length. A follow-up dispatch knows
+                # even less than a first one about whether work has happened:
+                # `send_followup` returning means the session accepted the
+                # message, which is not a statement about the worktree at all.
             self._audit(
                 "task_followup",
                 OUTCOME_ACCEPTED,
@@ -2580,6 +2661,20 @@ class TaskService:
                 else WAITING_UNKNOWN
             )
 
+        # M2K PR25. The turn's fate is decided but not yet durable, which is the
+        # only moment at which a post-worker observation can be taken and still
+        # be a statement about this turn's boundary. Computed once and passed to
+        # both the capture and the write, so the thing observed and the thing
+        # closed cannot disagree.
+        #
+        # `waiting_for_user` reaches here with `closing` as ``None`` and is
+        # therefore never observed, which is the point: the deployment audit
+        # proved a clarification resumes the *same* turn, so a question is a
+        # pause inside a turn rather than the end of one. Observing there would
+        # freeze a mid-work worktree as the turn's final state and then refuse to
+        # replace it, because the row is write-once.
+        closing = self._turn_to_close(current, outcome, requested)
+        self._capture_terminal_boundary(row, closing)
         updated = self._store.transition(
             row.task_id,
             requested,
@@ -2598,7 +2693,7 @@ class TaskService:
             # reported ``ready_for_followup`` with nothing recorded as having
             # produced the result somebody is about to read — is a disagreement
             # between two rows that nobody can resolve afterwards.
-            close_turn=self._turn_to_close(current, outcome, requested),
+            close_turn=closing,
             # The question and the move to `waiting_for_user` are one write. A
             # task that says it is waiting with no question to answer, or a
             # question left open on a task that has finished, is a disagreement
@@ -2680,6 +2775,43 @@ class TaskService:
         """
         if not can_transition(row.state, STATE_FAILED):  # pragma: no cover - defensive
             return self._store.get(row.task_id)
+        # The turn ends with the task, and with Cofferdam's words rather than a
+        # provider's. A turn left open on a failed task would make
+        # `current_turn` report something in flight forever, which is the state a
+        # later follow-up check reads.
+        closing = (
+            _TurnClose(
+                outcome=STATE_FAILED,
+                completed_at=now_iso(),
+                failure_code=code,
+                failure_summary=message,
+            )
+            if self._store.current_turn(row.task_id) is not None
+            else None
+        )
+        # M2K PR25, and this call is a doctrine decision rather than symmetry
+        # with `_apply`.
+        #
+        # **A final-state observation describes the worktree, not the worker.** A
+        # worker that wrote three files and then died left those three files
+        # behind, and they are the effective state at this turn's boundary
+        # whatever the turn's outcome word says. Refusing to look because the
+        # word is ``failed`` would make the record thinnest exactly where a
+        # half-finished change most needs describing — the same argument
+        # `evaluate_closed_turns` makes below for judging a failed turn's
+        # criteria at all. So: observed, and a criterion may legitimately come
+        # out ``met`` on a turn that failed. That is not a contradiction; the two
+        # sentences are about different subjects.
+        #
+        # **A refused dispatch is excluded structurally, not by a check.** Both
+        # dispatch paths call the adapter before opening a turn, so a first-turn
+        # refusal reaches here with no open turn at all: ``closing`` is ``None``
+        # and nothing is observed. No post-worker authority is fabricated for a
+        # worker that never received authority. The one case where a refusal
+        # *does* observe is a refused follow-up into a turn that is still open —
+        # and there worker authority genuinely began earlier in that same turn,
+        # so the boundary is real.
+        self._capture_terminal_boundary(row, closing)
         updated = self._store.transition(
             row.task_id,
             STATE_FAILED,
@@ -2689,20 +2821,7 @@ class TaskService:
             expected_state=row.state,
             text=message,
             failure=TaskFailure(code=code, message=message, detail=bounded_line(detail, 200)),
-            # The turn ends with the task, and with Cofferdam's words rather
-            # than a provider's. A turn left open on a failed task would make
-            # `current_turn` report something in flight forever, which is the
-            # state a later follow-up check reads.
-            close_turn=(
-                _TurnClose(
-                    outcome=STATE_FAILED,
-                    completed_at=now_iso(),
-                    failure_code=code,
-                    failure_summary=message,
-                )
-                if self._store.current_turn(row.task_id) is not None
-                else None
-            ),
+            close_turn=closing,
         )
         self._audit(
             "task_failed",

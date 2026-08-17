@@ -116,18 +116,56 @@ from .lineage import REASON_PREDECESSOR_UNAVAILABLE
 #: :data:`~.binding.CURRENT_ASSESSMENT_VERSION`. Eight things that move for eight
 #: reasons; a reader must be able to tell which one did.
 #:
-#: This one owns exactly the mapping *CurrentAssessment V3 → target-turn
-#: availability and outcome*. It does not own how any criterion was decided, and
-#: it does **not** move when a new evidence domain or criterion family appears —
-#: a future domain that produces the same criterion-level ``met`` / ``not_met`` /
-#: ``unverified`` folds identically here, because the fold never reads domains.
+#: This one owns exactly the mapping *a supported CurrentAssessment envelope →
+#: target-turn availability and outcome*. It does not own how any criterion was
+#: decided, and it does **not** move when a new evidence domain or criterion
+#: family appears — a future domain that produces the same criterion-level
+#: ``met`` / ``not_met`` / ``unverified`` folds identically here, because the
+#: fold never reads domains.
+#:
+#: **Held at 1 through M2K PR25, and the decision is on purpose.** PR25 moved the
+#: envelope this layer consumes from CurrentAssessment V3 to V4, and the
+#: temptation is to move in step. It would be wrong, for three reasons that have
+#: to hold together:
+#:
+#: #. **Nothing this constant owns changed.** The bump criteria above are a
+#:    different fold, a different availability rule, or a different notion of
+#:    what a count or a missing outcome asserts. The fold is still ``not_met``
+#:    dominates, else any ``unverified`` → ``incomplete``, else ``met``; the
+#:    availability rule is still "the active set resolved and is non-empty"; the
+#:    counts still count the same things. A V4 envelope folds through byte-identical
+#:    logic to a V3 one.
+#: #. **Aggregate identity already moves.** :func:`aggregate_fingerprint` binds
+#:    the consumed assessment fingerprint as a field, and that fingerprint binds
+#:    :data:`~.binding.CURRENT_ASSESSMENT_VERSION`. So a V3-derived aggregate and
+#:    a V4-derived one already have different identities without this number
+#:    moving, and bumping it as well would encode the same change twice — which
+#:    makes a later reader unable to tell whether the aggregator's own semantics
+#:    ever changed independently.
+#: #. **The compatibility gate is derived, not enumerated.**
+#:    :data:`SUPPORTED_ASSESSMENT_VERSIONS` below is ``(CURRENT_ASSESSMENT_VERSION,)``,
+#:    so the accepted input set moved to ``(4,)`` with no edit here and cannot
+#:    drift out of step. Nothing widened: a V3 envelope is now refused as
+#:    :data:`REASON_UNSUPPORTED_ASSESSMENT_VERSION`, exactly as a V4 one was
+#:    yesterday.
+#:
+#: The honest summary is that this layer's *input contract* changed and its
+#: *semantics* did not, and the repository's version doctrine attaches a number
+#: to the second thing. When the fold itself changes, this moves.
 AGGREGATOR_VERSION = 1
 
-#: Envelope semantics this aggregator knows how to fold. Enumerated rather than
-#: ``<= CURRENT_ASSESSMENT_VERSION``: a future V4 may mean something different by
-#: the same field names, and folding it as though it meant V3's thing is the
-#: silent reinterpretation every layer in this milestone refuses. A dataclass
-#: whose shape happens to still fit is not evidence of compatible semantics.
+#: Envelope semantics this aggregator knows how to fold. Derived from
+#: :data:`~.binding.CURRENT_ASSESSMENT_VERSION` rather than listed, so it is
+#: exactly one version wide and moves when the binder moves — currently ``(4,)``
+#: after M2K PR25.
+#:
+#: Deliberately not ``<= CURRENT_ASSESSMENT_VERSION`` and deliberately not an
+#: accumulating list. A superseded version may mean something different by the
+#: same field names — V3 accepted final-state observer V1 as state authority and
+#: V4 refuses it, on the same fields — and folding a V3 envelope as though it
+#: meant V4's thing is the silent reinterpretation every layer in this milestone
+#: refuses. A dataclass whose shape happens to still fit is not evidence of
+#: compatible semantics.
 SUPPORTED_ASSESSMENT_VERSIONS: Tuple[int, ...] = (CURRENT_ASSESSMENT_VERSION,)
 
 

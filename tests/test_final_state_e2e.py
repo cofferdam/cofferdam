@@ -333,7 +333,7 @@ class FinalStateEndToEnd(unittest.TestCase):
         self.assertEqual(CRITERIA_MODEL_VERSION, 1)
         self.assertEqual(CONTINUITY_MODEL_VERSION, 1)
         self.assertEqual(RESOLVER_VERSION, 1)
-        self.assertEqual(FINAL_STATE_OBSERVER_VERSION, 1)
+        self.assertEqual(FINAL_STATE_OBSERVER_VERSION, 2)
 
         # 21-22. No aggregate anywhere in what was produced.
         for observation in after:

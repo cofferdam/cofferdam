@@ -522,10 +522,10 @@ class NegativeSpaceTests(unittest.TestCase):
         from cofferdam.workstation.tasks.lineage import RESOLVER_VERSION
 
         self.assertEqual(11, SCHEMA_VERSION)
-        self.assertEqual(3, CURRENT_ASSESSMENT_VERSION)
+        self.assertEqual(4, CURRENT_ASSESSMENT_VERSION)
         self.assertEqual(1, AGGREGATOR_VERSION)
         self.assertEqual(1, EVALUATOR_VERSION)
-        self.assertEqual(1, FINAL_STATE_OBSERVER_VERSION)
+        self.assertEqual(2, FINAL_STATE_OBSERVER_VERSION)
         self.assertEqual(1, RESOLVER_VERSION)
         self.assertEqual(1, CONTINUITY_MODEL_VERSION)
         self.assertEqual(1, CRITERIA_MODEL_VERSION)

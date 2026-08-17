@@ -233,7 +233,18 @@ class CaptureOrderingTests(FinalStateCase):
         self.assertTrue(seen["turn_open"], "the turn was already closed")
 
     def test_the_committed_range_is_observed_before_the_final_state(self):
-        """PR5 first, then PR14, then the close. Recorded, not read off the source."""
+        """PR5 at dispatch, PR14 inside the close. Recorded, not read off the source.
+
+        **M2K PR25 moved the second one and this assertion moved with it.** PR14
+        observed one instruction after PR5, and the symmetry was the defect: PR5
+        measures a boundary already fixed before dispatch, while PR14 measures the
+        worker's effect and an asynchronous worker has not had one yet. The
+        final-state capture now happens inside ``_apply``, immediately before the
+        transition that durably closes the turn — so it is still after PR5 and
+        still before the close, which was always the property that mattered, but
+        it is now *bound to the worker's terminal result* rather than to the
+        adapter call returning. See :meth:`TaskService._capture_terminal_boundary`.
+        """
         order = []
         service = self.service(
             Worker(action=lambda root: (root / "a.txt").write_text("x"))
@@ -262,7 +273,7 @@ class CaptureOrderingTests(FinalStateCase):
             continuity={"mode": "root"},
         )
         self.assertEqual(
-            order, ["_record_committed_range", "_record_final_state", "_apply"]
+            order, ["_record_committed_range", "_apply", "_record_final_state"]
         )
 
     def test_the_worker_ran_before_the_observation(self):

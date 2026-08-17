@@ -549,9 +549,19 @@ class MalformedObservationEndToEnd(Harness):
         self.assertEqual((), answer.assessments)
 
     def test_an_unsupported_observer_version_fails_the_set_closed(self):
-        task_id = self.scenario()
-        self.corrupt(task_id, observer_version=2)
-        self.assertEqual(ASSESSMENT_UNAVAILABLE, self.assess(task_id, 1).state)
+        """Both directions, since M2K PR25 made ``1`` a superseded version.
+
+        A version this build has moved past and one it has not reached are the
+        same kind of refusal: the row's fields would have to be read under
+        semantics this build does not have.
+        """
+        for unsupported in (1, 3):
+            with self.subTest(observer_version=unsupported):
+                task_id = self.scenario()
+                self.corrupt(task_id, observer_version=unsupported)
+                self.assertEqual(
+                    ASSESSMENT_UNAVAILABLE, self.assess(task_id, 1).state
+                )
 
     def test_a_tampered_path_state_is_caught_by_the_fingerprint(self):
         """The check that makes a raw edit to a path row detectable at all."""
@@ -705,9 +715,9 @@ class NegativeSpaceTests(unittest.TestCase):
         self.assertEqual(11, SCHEMA_VERSION)
 
     def test_only_the_assessment_version_moved(self):
-        self.assertEqual(3, CURRENT_ASSESSMENT_VERSION)
+        self.assertEqual(4, CURRENT_ASSESSMENT_VERSION)
         self.assertEqual(1, EVALUATOR_VERSION)
-        self.assertEqual(1, FINAL_STATE_OBSERVER_VERSION)
+        self.assertEqual(2, FINAL_STATE_OBSERVER_VERSION)
         self.assertEqual(1, RESOLVER_VERSION)
         self.assertEqual(1, CONTINUITY_MODEL_VERSION)
         self.assertEqual(1, CRITERIA_MODEL_VERSION)

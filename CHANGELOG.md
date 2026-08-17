@@ -8,6 +8,37 @@ release.
 
 ### Added
 
+- **M2K PR25 — a requirement is now checked when the work finishes, not when it is handed over.**
+  Cofferdam used to look at your project the moment it passed the job to the agent, and record what it
+  saw as "how things ended up". For an agent that finishes instantly that is the same thing. For one
+  that works away in the background — which is the normal case — it is a photograph of the room
+  before anybody walked in.
+
+  **What went wrong, concretely.** We deployed the whole acceptance stack, asked for one file to be
+  created, and the agent created it. Cofferdam still said the requirement was not met, because it had
+  already written down "that file is not there" three seconds before the file appeared. Nothing was
+  broken about the looking; it looked at the wrong moment.
+
+  **What changes for you.** Requirements about what a file *is* — it must exist, it must be gone —
+  are now answered from what your project actually looked like when the work finished. A background
+  agent gets the same honest answer an instant one always did. While work is still running, Cofferdam
+  says it cannot answer yet rather than guessing, and a question the agent asks you part-way through
+  no longer freezes a half-finished snapshot as the answer.
+
+  **Work that ends badly is still described.** If an agent changed some files and then failed or was
+  cancelled, those changes are real and are recorded. A requirement can honestly read as met on a task
+  that failed — that is a statement about your project, not a claim that the work succeeded.
+
+  **Old records are left exactly as they are.** Anything recorded before this change stays untouched
+  and readable as history. What Cofferdam will no longer do is treat it as a current answer, because
+  there is no way to tell from the record whether one of those older observations was taken before the
+  work or after it. Where that is all there is, it says it cannot verify rather than picking an
+  answer. Nothing was rewritten, nothing was re-checked against today's files, and no database
+  migration was needed.
+
+  Rolled back, unreleased and undeployed: the deployment that found this was reverted, and this fix
+  has to ship before it is retried.
+
 - **M2K PR24 — there is now a screen for saying what a piece of work has to achieve.** PR23 opened the
   door; this walks through it. Until now the only way to declare requirements was to make the HTTP
   request by hand.

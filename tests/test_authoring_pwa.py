@@ -675,16 +675,27 @@ class NegativeSpace(unittest.TestCase):
 
     def test_no_backend_file_changed(self):
         """PR24 is a client. If this ever fails, the authority boundary moved and
-        the change belongs in a PR that says so."""
+        the change belongs in a PR that says so.
+
+        **Pinned to PR24's own commit range since M2K PR25.** It was written
+        against the working tree while PR24 was the head, which asserted "nothing
+        since PR23 has touched the backend" — true then, and false the moment any
+        later backend PR lands, for reasons that say nothing about PR24. The
+        claim worth keeping is the historical one: *the commit that shipped this
+        panel changed no backend file*. That is a fixed range and stays true.
+        """
         import subprocess as sp
 
         changed = sp.run(
-            ["git", "diff", "--name-only", "a1dfd23b", "--"],
+            ["git", "diff", "--name-only", "a1dfd23b", "eb70a2b9", "--"],
             cwd=REPO_ROOT, capture_output=True, text=True, check=False,
-        ).stdout.split()
-        if not changed:  # pragma: no cover - depends on the checkout
+        )
+        if changed.returncode != 0:  # pragma: no cover - depends on the checkout
+            raise unittest.SkipTest("not a git checkout with both commits")
+        names = changed.stdout.split()
+        if not names:  # pragma: no cover - depends on the checkout
             raise unittest.SkipTest("not a git checkout with the base commit")
-        for name in changed:
+        for name in names:
             self.assertFalse(
                 name.startswith("cofferdam/"),
                 f"a production backend file changed: {name}",

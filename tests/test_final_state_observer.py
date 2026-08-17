@@ -399,7 +399,7 @@ class FingerprintTests(unittest.TestCase):
         finally:
             module.FINAL_STATE_OBSERVER_VERSION = original
         self.assertNotEqual(before, moved)
-        self.assertEqual(FINAL_STATE_OBSERVER_VERSION, 1)
+        self.assertEqual(FINAL_STATE_OBSERVER_VERSION, 2)
 
     def test_the_path_moves_it(self):
         self.assertNotEqual(

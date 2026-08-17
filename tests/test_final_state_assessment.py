@@ -890,12 +890,16 @@ class MalformedObservation(unittest.TestCase):
 
     def test_an_unsupported_observer_version_is_refused(self):
         """Not "the columns parse, so it must mean the same thing"."""
-        self.refuse(
-            observation(
-                1, paths(("a.txt", PATH_PRESENT, KIND_FILE)), observer_version=2
-            ),
-            REASON_UNSUPPORTED_OBSERVER,
-        )
+        for unsupported in (1, 3):
+            with self.subTest(observer_version=unsupported):
+                self.refuse(
+                    observation(
+                        1,
+                        paths(("a.txt", PATH_PRESENT, KIND_FILE)),
+                        observer_version=unsupported,
+                    ),
+                    REASON_UNSUPPORTED_OBSERVER,
+                )
 
     def test_a_path_count_that_disagrees_with_the_children_is_refused(self):
         self.refuse(
@@ -1010,13 +1014,18 @@ class MalformedObservation(unittest.TestCase):
 
 
 class ObserverVersionTests(unittest.TestCase):
-    def test_only_version_one_is_supported(self):
-        self.assertEqual((1,), SUPPORTED_OBSERVER_VERSIONS)
+    def test_only_version_two_is_supported(self):
+        self.assertEqual((2,), SUPPORTED_OBSERVER_VERSIONS)
         self.assertEqual(FINAL_STATE_OBSERVER_VERSION, SUPPORTED_OBSERVER_VERSIONS[0])
 
     def test_it_is_an_enumeration_rather_than_a_ceiling(self):
-        """`<= OBSERVER_VERSION` would silently accept version 5 one day."""
-        for unknown in (0, 2, 3, 99):
+        """`<= OBSERVER_VERSION` would silently accept version 5 one day.
+
+        M2K PR25 moved the supported version from 1 to 2, so ``1`` joins this list
+        rather than leaving it: a superseded version is refused in the same way an
+        unreached one is, which is the whole reason the set is enumerated.
+        """
+        for unknown in (0, 1, 3, 99):
             with self.subTest(version=unknown):
                 self.assertNotIn(unknown, SUPPORTED_OBSERVER_VERSIONS)
 
@@ -1039,14 +1048,25 @@ class FingerprintVerifierTests(unittest.TestCase):
         self.assertFalse(verify_final_state_fingerprint(legacy(1)))
 
     def test_an_unknown_observer_version_does_not(self):
-        """The hash binds version 1's semantics; comparing across is meaningless."""
+        """The hash binds *this build's* semantics; comparing across is meaningless.
+
+        Both directions, since M2K PR25: a superseded version 1 and an unreached
+        version 3 are equally uncomparable, and the verifier refuses rather than
+        calling the disagreement corruption.
+        """
         from cofferdam.workstation.tasks.finalstate import verify_final_state_fingerprint
 
-        self.assertFalse(
-            verify_final_state_fingerprint(
-                observation(1, paths(("a.txt", PATH_ABSENT)), observer_version=2)
-            )
-        )
+        for unsupported in (1, 3):
+            with self.subTest(observer_version=unsupported):
+                self.assertFalse(
+                    verify_final_state_fingerprint(
+                        observation(
+                            1,
+                            paths(("a.txt", PATH_ABSENT)),
+                            observer_version=unsupported,
+                        )
+                    )
+                )
 
     def test_there_is_one_fingerprint_algorithm(self):
         """The binder must not carry a second copy of PR14's construction."""
@@ -1187,7 +1207,7 @@ class DerivedFingerprintTests(unittest.TestCase):
 class VersionTests(unittest.TestCase):
     def test_the_assessment_version_has_moved_past_two(self):
         """PR18 set this to 2; PR20 moved it to 3 without touching PR18 semantics."""
-        self.assertEqual(3, CURRENT_ASSESSMENT_VERSION)
+        self.assertEqual(4, CURRENT_ASSESSMENT_VERSION)
 
     def test_the_domain_vocabulary_gained_exactly_final_state(self):
         self.assertEqual(
@@ -1204,7 +1224,7 @@ class VersionTests(unittest.TestCase):
 
         self.assertEqual(11, SCHEMA_VERSION)
         self.assertEqual(1, EVALUATOR_VERSION)
-        self.assertEqual(1, FINAL_STATE_OBSERVER_VERSION)
+        self.assertEqual(2, FINAL_STATE_OBSERVER_VERSION)
         self.assertEqual(1, RESOLVER_VERSION)
         self.assertEqual(1, CRITERIA_MODEL_VERSION)
 

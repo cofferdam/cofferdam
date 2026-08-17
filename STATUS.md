@@ -797,10 +797,65 @@ the gate closes there.
 
 ## In progress (on a branch, not merged)
 
+### M2K PR25 — terminal-bound final-state observation
+
+On `m2k-pr25-terminal-bound-final-state`, from the merged `eb70a2b`. **Implemented on a branch, not
+merged and not deployed. Blocks the deployment retry.**
+
+The first Tier-2 deployment of PR11–PR24 went out on 2026-08-17, **succeeded mechanically, and was
+deliberately rolled back** after its production smoke exposed a real authority defect in PR14. A
+person declared `path_exists("deploy-smoke.txt")` from the new PR24 form, the worker created the
+file, and acceptance said the requirement was not met.
+
+**The defect is *when* the observation was taken, not *what* the observer saw.** PR14 captured
+immediately after `adapter.start()` / `adapter.send_followup()` returned. For a synchronous adapter
+that is after the work; for an asynchronous one it is before it, and PR14 persisted the result as
+`complete` either way. The production timeline:
+
+| Time | What happened |
+|---|---|
+| `16:55:43.192` | `FinalStateObservation` persisted — `deploy-smoke.txt` `absent`, `observation_state` `complete` |
+| `16:55:46.446` | the asynchronous worker creates the file |
+| `16:56:04.827` | the turn reaches completion |
+
+Called after the work, the observer answered `present` / `file` correctly. PR18 legitimately trusted
+the stored fact and PR21 legitimately folded it. **PR7 was not the defect** and is untouched:
+`path_exists` / `path_absent` remain `unverified` / `unsupported_capability` as *turn-change*
+questions, which is the PR13 separation working as intended.
+
+**One capture owner, derived from the lifecycle.** Both dispatch call sites are removed.
+`_capture_terminal_boundary` takes every observation immediately before a transition that durably
+closes a turn, and only `_apply` and `_fail` call it — the two methods that perform one — each
+passing the `_TurnClose` it is about to hand to the store, under the same lock. The condition is
+structural rather than a timing heuristic: a turn exists only because a dispatch path opened one
+*after* the adapter accepted the work, so an open turn proves worker authority began and a turn
+closing proves it has ended. Synchronous `start`, asynchronous `refresh`/`inspect`, follow-up,
+cancellation and adapter fault all arrive at the same line at the same moment relative to the close.
+
+**Boundaries pinned.** `waiting_for_user` finalizes nothing — a clarification resumes the same turn,
+and an observation there would freeze a mid-work worktree as final and then refuse replacement,
+because the row is write-once. A refused first-turn dispatch has no turn to close and captures
+nothing, structurally rather than by a check. A terminal **failure or cancellation still captures**,
+because the observation describes the worktree and not the worker; a state criterion may legitimately
+be `met` on a failed turn. **Restart recovery deliberately captures nothing** — no terminal worker
+result stands behind it, so the turn closes as `interrupted` and its state criteria stay
+`unverified`.
+
+**Versions.** `FINAL_STATE_OBSERVER_VERSION` 1 → 2, and V1 stops being current-state authority: no
+field distinguishes a V1 fact taken after a synchronous worker from one taken before an asynchronous
+one, so the family fails closed through the existing `unsupported_final_state_observer_version`.
+Historical V1 rows are **not** backfilled, rewritten, re-probed or converted.
+`CURRENT_ASSESSMENT_VERSION` 3 → 4. `AGGREGATOR_VERSION` stays 1 (the fold is unchanged and aggregate
+identity already moves through the composed assessment fingerprint).
+`ASSESSMENT_API_VERSION` stays 1. `SCHEMA_VERSION` stays 11 — the row already stores
+`observer_version`, so there is nothing to migrate. Observer mechanics are untouched.
+
+D-2026-08-17-27 … D-2026-08-17-30.
+
 ### M2K PR24 — PWA explicit requirement authoring
 
-On `m2k-pr24-pwa-authoring`, from the merged `a1dfd23`. **Implemented on a branch, not merged and not
-deployed.**
+Merged as `eb70a2b` (#69). **Deployed once on 2026-08-17 and rolled back with the rest of the
+batch** — the rollback was a PR14 finding, not a PR24 one. Retained below as its branch record.
 
 The first *human* caller of the acceptance stack. PR23 opened `criteria` and `continuity` to the
 device credential and said plainly that no human-facing caller used it; this is that caller. Three
@@ -1463,8 +1518,18 @@ needed no deployment because it changed only documentation; PR10 is merged (`1ef
 deployed to slot A on schema v9; PR11 (`3bb9a5b`, #56), PR12 (`2dc4177`, #57), PR13 (`8cd8ba3`, #58),
 PR14 (`064fe51`, #59), PR15 (`12e64cd`, #60), PR16 (`c1d6f1d`, #61), PR17 (`c164383`, #62), PR18
 (`1116b61`, #63), PR19 (`d777e04`, #64), PR20 (`9fbf9a9`, #65), PR21 (`617412c`, #66), PR22
-(`c214d5c`, #67) and PR23 (`a1dfd23`, #68) are merged and **intentionally not deployed**; PR24 is on a
-branch. See *In progress* above for PR24.
+(`c214d5c`, #67), PR23 (`a1dfd23`, #68) and PR24 (`eb70a2b`, #69) are merged; PR25 is on a branch.
+See *In progress* above for PR25.
+
+**PR11–PR24 were deployed once, on 2026-08-17, and deliberately rolled back.** The deployment
+succeeded mechanically and its production smoke exposed the PR14 async capture-boundary defect PR25
+fixes. The rollback was performed as the required **pair** — runtime to slot A `1efd49b`, database to
+the verified pre-v11 v9 backup — and production integrity was verified afterwards. The one v11-only
+smoke task created during the attempt was deliberately lost as isolated deployment-test data.
+**Production is intentionally behind `main` and is not to be normalized until PR25 merges**;
+PR11–PR24 therefore remain undeployed. The tunnel unit was already failed before the attempt and
+remains unrelated operational debt; the sanitizer timing-test flake remains separate. See
+D-2026-08-17-30.
 
 **`main` is now schema v11; production is still schema v9**, and that gap is the deployment decision
 rather than a lag. PR14 is the change that turns this batch from a slot flip into a schema move, so
