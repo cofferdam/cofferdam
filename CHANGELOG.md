@@ -8,6 +8,48 @@ release.
 
 ### Added
 
+- **M2K PR19 — Cofferdam settles how it will add up "is this done?", before it does.** Documentation
+  only. Nothing is visible, nothing behaves differently, and nothing new is saved.
+
+  **What it is.** Cofferdam can now say where each of your individual requirements stands at any point
+  in a task. The obvious next step is to add those up into a single answer for that point. The rules
+  for doing so were written down some time ago, before the per-requirement answers actually existed.
+  This change checks those rules against what was actually built, and fixes the contract before any of
+  it is written.
+
+  **The rules held up.** The original doctrine survives intact: known failure beats uncertainty, so if
+  even one requirement is definitely unmet the answer is *not met*, however many others are unclear.
+  If nothing is definitely unmet but something is unclear, the answer is *incomplete*. Only when every
+  requirement is satisfied is the answer *met*.
+
+  **The important distinction it protects.** There is a difference between "I know what was required
+  and cannot tell whether one item holds" and "I cannot work out what was required in the first
+  place". The first is *incomplete*. The second is not an answer about your work at all, and gets said
+  plainly as such — including when the reason is simply that Cofferdam has not finished its own
+  bookkeeping yet, or that a stored record looks like it was altered outside Cofferdam. Reporting any
+  of those as *incomplete* would quietly hide a problem with the tooling inside a report about the
+  work.
+
+  **No requirements is not the same as all requirements met.** If you never stated any requirements,
+  Cofferdam will say there is nothing to judge rather than declaring success over an empty list. This
+  turned out to be safer than expected: it was checked that there is genuinely only one way a task can
+  end up with no standing requirements, so this answer can never be confused with something else.
+
+  **A requirement you asked a person to check still holds the answer back.** Cofferdam has no way for
+  a human to record their verdict yet, so any such requirement keeps the overall answer at
+  *incomplete*. It is flagged separately so you can see that a person, not the tooling, is what is
+  needed — and that flag is never raised just because Cofferdam was unsure about something a person
+  could not resolve anyway.
+
+  **Still one point at a time.** This is about a single point in a task, not an overall verdict on the
+  whole task. That larger question remains deliberately unanswered.
+
+  **One honesty gap found and written down.** When Cofferdam cannot work out what was required, it
+  currently gives one generic explanation where eighteen more specific ones exist underneath — so it
+  cannot yet distinguish "nobody ever said" from "this predates the feature" from "the record is
+  damaged". Nothing unsafe results; every one of those still refuses to answer. But it is less
+  forthcoming than intended, and the fix is recorded to be decided before the adding-up is built.
+
 - **M2K PR18 — Cofferdam can now answer "this file must exist".** Nothing is visible yet and nothing
   new is saved.
 
