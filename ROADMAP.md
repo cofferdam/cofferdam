@@ -898,8 +898,9 @@ downstream reads from.
     No PWA editor was built — that is a product subsystem, and the private contract is the caller
     while PWA/planner authoring is named as the next integration.
     D-2026-08-17-23 and D-2026-08-17-24.
-  - **PR24 — PWA explicit requirement authoring.** *Implemented on `m2k-pr24-pwa-authoring`, not
-    merged and not deployed.* The integration PR23 named, and the first **human** caller of the
+  - **PR24 — PWA explicit requirement authoring.** *Merged as `eb70a2b` (#69). **Deployed once,
+    2026-08-17, and rolled back** — the deployment succeeded mechanically and its smoke exposed a
+    PR14 defect. See PR25 below.* The integration PR23 named, and the first **human** caller of the
     acceptance stack: the new-task composer and the follow-up box gain a bounded requirement form
     that sends `criteria` and `continuity` through the single PR23 request on the device credential.
     **No backend file changed**, asserted from the diff rather than claimed. **The default is the
@@ -920,6 +921,74 @@ downstream reads from.
     stay four, the composer survives one, and nothing is retried under a weaker authority. Three
     earlier "the PWA has no such control" guards are updated rather than deleted.
     D-2026-08-17-25 and D-2026-08-17-26.
+  - **PR25 — terminal-bound final-state observation.** *Implemented on
+    `m2k-pr25-terminal-bound-final-state`, not merged and not deployed. **Blocks the deployment
+    retry.*** The first Tier-2 deployment of PR11–PR24 went out on 2026-08-17, succeeded
+    mechanically, and its production smoke found a real authority defect — which is exactly what a
+    smoke is for. A person declared `path_exists("deploy-smoke.txt")` from the new PR24 form; the
+    file was created; acceptance said the requirement was not met. The deployment was deliberately
+    rolled back as the required pair (slot A `1efd49b`, verified pre-v11 v9 backup restored) and
+    production remains there.
+
+    **The defect was *when*, not *what*.** PR14 took its observation immediately after
+    `adapter.start()` / `adapter.send_followup()` returned. For a synchronous adapter that is after
+    the work; for an asynchronous one it is before it. Production timestamps: the observation
+    recording `absent` / `complete` was persisted at `16:55:43.192`, the worker created the file at
+    `16:55:46.446`, and the turn closed at `16:56:04.827`. The observer itself was correct — asked
+    after the work it answered `present` / `file` — and PR18 and PR21 were both correct to trust
+    what was in front of them. **PR7 was not the defect** and is untouched: `path_exists` /
+    `path_absent` remain `unverified` / `unsupported_capability` as turn-change questions, which is
+    the separation PR13 established.
+
+    **One owner, derived from the lifecycle rather than from adapter families.** The two dispatch
+    call sites are gone. `_capture_terminal_boundary` takes every observation, immediately before a
+    transition that durably closes a turn, and is called only by the two methods that perform one —
+    `_apply` and `_fail` — each passing the very `_TurnClose` it is about to hand to the store. The
+    condition is not a timing heuristic: an open turn exists only because a dispatch path opened one
+    *after* the adapter accepted the work, so an open turn proves worker authority began and a turn
+    closing now proves it has ended. Synchronous `start`, asynchronous `refresh`/`inspect`,
+    follow-up, cancellation and adapter fault all reach the same line at the same moment relative to
+    the close, so there is no first-turn/follow-up/sync/async algorithm left to drift apart.
+
+    **The boundaries this settles.** `waiting_for_user` is *not* a turn boundary and finalizes
+    nothing — the deployment audit proved a clarification resumes the same turn, and an observation
+    there would freeze a mid-work worktree as final and then refuse to be replaced, because the row
+    is write-once. A refused dispatch observes nothing, and structurally rather than by a check: both
+    paths call the adapter before opening a turn, so a first-turn refusal has no turn to close. A
+    terminal **failure or cancellation still observes**, because the observation describes the
+    worktree and not the worker — a worker that wrote three files and then died left three files
+    behind, and refusing to look would make the record thinnest where a half-finished change most
+    needs describing. **Restart recovery deliberately does not observe**: it is the one closing path
+    with no terminal worker result behind it, so the turn closes as `interrupted` with nothing
+    recorded and every state criterion on it stays `unverified`. Failing closed there is PR14's
+    no-fallback doctrine, and it is strictly better than V1's behaviour, which left a pre-work
+    observation behind and called it the boundary.
+
+    **`FINAL_STATE_OBSERVER_VERSION` 1 → 2, and V1 stops being current-state authority.** V1 claimed
+    terminal post-worker semantics and did not deliver them for asynchronous adapters. Nothing in a
+    stored row distinguishes a V1 fact taken after a synchronous worker from one taken before an
+    asynchronous one — the failed deployment's row was internally valid in every respect: correct
+    fingerprint, agreeing lineage, `complete`, one path `absent`. There is no repair available; the
+    moment is gone, and re-probing now would answer a question about today and file it as history.
+    So the whole family fails closed through the existing
+    `unsupported_final_state_observer_version`, which needed no new sibling. **Historical V1 rows are
+    not backfilled, not rewritten, not re-probed and not converted** — they remain immutable audit
+    facts, byte-identical across a reopen, and PR25 simply stops believing them about the present.
+    The fingerprint already binds the observer version, so V1 and V2 of the same path facts have
+    distinct identities with no parallel hash.
+
+    **`CURRENT_ASSESSMENT_VERSION` 3 → 4**, because a criterion V3 answered `met` from a stored V1
+    row is answered `unavailable` / `unsupported_final_state_observer_version` by V4 from the same
+    unchanged row — two builds, two answers, one database. **`AGGREGATOR_VERSION` stays 1**, argued
+    rather than assumed: the fold, the availability rule and the counts are unchanged, aggregate
+    identity already moves because the aggregate fingerprint binds the assessment fingerprint which
+    binds the assessment version, and `SUPPORTED_ASSESSMENT_VERSIONS` is derived from
+    `CURRENT_ASSESSMENT_VERSION` so it moved to `(4,)` with no edit and cannot drift.
+    **`ASSESSMENT_API_VERSION` stays 1** — the HTTP shape is byte-identical and only nested values
+    moved. **`SCHEMA_VERSION` stays 11**; the row already stores `observer_version` and no migration
+    exists. Observer mechanics — descriptor-relative `O_NOFOLLOW`, symlink doctrine, normalization,
+    the kind vocabulary, the bounded path scope, two-pass stability — are untouched.
+    D-2026-08-17-27 … D-2026-08-17-30.
 - **Objective:** an `EvidenceBundle` per turn, assembled from observations and structured claims;
   deterministic criteria checks; risk levels; and machine-observed failure reason codes attached to
   tasks. **Model-free.**

@@ -539,7 +539,7 @@ class FinalStateScopeTests(unittest.TestCase):
         }
         for forbidden in ("path_exists", "path_absent"):
             self.assertNotIn(forbidden, names)
-        self.assertEqual(1, FINAL_STATE_OBSERVER_VERSION)
+        self.assertEqual(2, FINAL_STATE_OBSERVER_VERSION)
 
 
 class NegativeSpaceTests(unittest.TestCase):
@@ -563,12 +563,14 @@ class NegativeSpaceTests(unittest.TestCase):
 
     def test_no_semantic_version_moved(self):
         self.assertEqual(1, EVALUATOR_VERSION)
-        # M2K PR18 moved this one (a second evidence domain) and M2K PR20 moved
-        # it again (lineage-failure fidelity). The evaluator and the observer
-        # below did not change in either, which is the assertion that keeps both
-        # read-semantics changes.
-        self.assertEqual(3, CURRENT_ASSESSMENT_VERSION)
-        self.assertEqual(1, FINAL_STATE_OBSERVER_VERSION)
+        # M2K PR18 moved this one (a second evidence domain), M2K PR20 moved it
+        # again (lineage-failure fidelity), and M2K PR25 moved it a third time
+        # (final-state observer V1 refused as state authority). The observer
+        # moved in PR25 too and for the same incident; the evaluator did not move
+        # in any of them, which is the assertion that keeps turn-change
+        # evaluation and state assessment provably separate.
+        self.assertEqual(4, CURRENT_ASSESSMENT_VERSION)
+        self.assertEqual(2, FINAL_STATE_OBSERVER_VERSION)
         self.assertEqual(1, CRITERIA_MODEL_VERSION)
         from cofferdam.workstation.tasks.continuity import CONTINUITY_MODEL_VERSION
         from cofferdam.workstation.tasks.evidence import ASSEMBLER_VERSION

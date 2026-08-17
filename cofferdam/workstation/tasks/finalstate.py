@@ -91,17 +91,47 @@ from .projects import verify_root
 
 #: Bumped when the **meaning** of an effective path-state observation changes: a
 #: different authority (index rather than worktree), a different kind
-#: vocabulary, a different symlink rule, a different stability guarantee.
+#: vocabulary, a different symlink rule, a different stability guarantee — or, as
+#: in version 2, a different *moment*.
 #:
 #: Distinct from :data:`~.store.SCHEMA_VERSION` (table shape),
 #: :data:`~.evidence.ASSEMBLER_VERSION` (how a bundle is built),
 #: :data:`~.evaluation.EVALUATOR_VERSION` (how a criterion is decided),
 #: :data:`~.criteria.CRITERIA_MODEL_VERSION`,
 #: :data:`~.continuity.CONTINUITY_MODEL_VERSION`,
-#: :data:`~.lineage.RESOLVER_VERSION`, and the future binding and aggregate
-#: versions. Seven things that move for seven reasons; a reader must be able to
-#: tell which one did.
-FINAL_STATE_OBSERVER_VERSION = 1
+#: :data:`~.lineage.RESOLVER_VERSION`, and the binding and aggregate versions.
+#: Seven things that move for seven reasons; a reader must be able to tell which
+#: one did.
+#:
+#: **1 (M2K PR14).** *Claimed* the effective post-worker worktree state at the
+#: post-worker / pre-turn-close boundary, and delivered it for one adapter family
+#: only. The capture sat immediately after ``adapter.start()`` or
+#: ``adapter.send_followup()`` returned — which for a synchronous adapter really
+#: is after the work, and for an asynchronous one is *before* it. A production
+#: smoke on 2026-08-17 proved the second half: an observation recording
+#: ``deploy-smoke.txt`` ``absent`` was persisted at 16:55:43, the worker created
+#: the file at 16:55:46, and the turn closed at 16:56:04. The observer was
+#: correct; the moment it was invoked was not.
+#:
+#: **2 (M2K PR25).** Captured at exactly one lifecycle boundary: the worker has
+#: reached the terminal result that will close **this** turn, and the turn has
+#: not yet been durably closed. Not dispatch time, not adapter-start-return time,
+#: not GET time. The observation is taken by
+#: :meth:`~.service.TaskService._capture_terminal_boundary` and by nothing else,
+#: inside the same lock as the closing transition, so "post-worker" is a
+#: structural property of where the call sits rather than a property of which
+#: adapter happened to be configured.
+#:
+#: **Why this is a version and not a fix.** The row shape did not change and the
+#: schema did not move, so a V1 row and a V2 row are indistinguishable by
+#: inspection — yet one of them may be a pre-work fact labelled complete. The
+#: version is the only thing that separates them, which is why
+#: :data:`~.binding.SUPPORTED_OBSERVER_VERSIONS` is derived from this constant
+#: and why V1 rows stop being current-state authority the moment it moves. They
+#: are not rewritten, not re-probed and not backfilled: they remain exactly the
+#: historical facts they always were, and PR25 simply stops believing them about
+#: the present.
+FINAL_STATE_OBSERVER_VERSION = 2
 
 #: How many distinct paths one observation may look at.
 #:

@@ -4059,6 +4059,187 @@ never re-pointed at whatever the latest turn turned out to be**, and no refusal 
 a different authority: a rejected `revise` does not become an `extend`, and a rejected `root` does not
 become an omission. An authority change requires another human action.
 
+## D-2026-08-17-27 — A final-state observation is bound to the worker's terminal result, not to the adapter call returning (EFE DECISION, ACTIVE)
+
+**Decision.** Cofferdam captures a `FinalStateObservation` at exactly one lifecycle moment: the
+worker has reached the terminal result that will close **this** turn, and the turn has not yet been
+durably closed. One method owns it — `_capture_terminal_boundary` — called only by the two methods
+that perform a turn-closing transition, `_apply` and `_fail`, each passing the same `_TurnClose` it
+is about to hand to the store, inside the same lock. The dispatch paths capture nothing.
+
+**What went wrong.** M2K PR14 took the observation immediately after `adapter.start()` or
+`adapter.send_followup()` returned. That is a statement about *the call*, and the call returning means
+two different things depending on the adapter family: for a synchronous adapter the work is done, for
+an asynchronous one it has not started. PR14 recorded both as `complete`. The first Tier-2 deployment
+of PR11–PR24 made the second case real in production on 2026-08-17:
+
+    16:55:43.192  observation persisted — deploy-smoke.txt absent, observation_state complete
+    16:55:46.446  the asynchronous worker creates the file
+    16:56:04.827  the turn closes
+
+The observer was not wrong. Called after the work it answered `present` / `file`. **The defect was
+the capture boundary**, and PR18 trusting the row and PR21 folding the result were both correct
+behaviour on a fact that lied about when it was taken.
+
+**Why the condition is `a turn is closing` and nothing more.** A `_TurnClose` exists only when there
+is an open turn, and a turn exists only because a dispatch path opened one — which both do strictly
+*after* the adapter accepted the work. So an open turn is proof that worker authority began, and a
+turn being closed now is proof that authority over it has ended. Both facts PR14 needed and could not
+establish from its call site are structural here, for every adapter family at once, with no adapter
+asked to cooperate and no capability consulted.
+
+**The alternative was four algorithms.** Fixing first-turn and follow-up independently, or branching
+on whether an adapter declares itself synchronous, produces a first-turn rule, a follow-up rule, a
+sync rule and an async rule that drift separately and are individually plausible. The rule as
+written never mentions an adapter.
+
+**The boundaries this settles, each derived rather than assumed.**
+
+- **`waiting_for_user` finalizes nothing.** It is not a turn-ending state, so no `_TurnClose` is
+  produced and nothing is captured. The deployment audit confirmed a clarification answer resumes the
+  *same* turn rather than opening an acceptance turn. Capturing there would freeze a mid-work
+  worktree as the turn's final state and then refuse to be replaced, because the row is write-once.
+- **A refused dispatch captures nothing, structurally.** Both paths call the adapter before opening a
+  turn, so a first-turn refusal reaches `_fail` with no turn to close. No post-worker authority is
+  fabricated for a worker that never received authority. A refused follow-up *into an already open
+  turn* does capture — and correctly, because worker authority genuinely began earlier in that turn.
+- **A terminal failure or cancellation still captures.** The observation describes the **worktree**,
+  not the worker. A worker that wrote three files and then failed left three files behind, and those
+  are the effective state at the boundary whatever the outcome word says. A state criterion may
+  therefore be `met` on a failed turn; that is a sentence about the project, never about the worker
+  having succeeded. This is the same argument `evaluate_closed_turns` already makes for judging a
+  failed turn's criteria at all.
+- **Restart recovery deliberately captures nothing.** It is the one closing path with no terminal
+  worker result behind it: the process died, the worker was never observed reaching an end, and
+  whatever the worktree holds when the daemon returns is a fact about *now*. The turn closes as
+  `interrupted` with no observation, and every state criterion on it stays `unverified`. Failing
+  closed is PR14's no-fallback doctrine, and it is strictly better than V1's answer, which left a
+  pre-work observation behind and called it the boundary.
+
+**Durable ordering.** The observation is committed before the closing transition, so the invariant is
+*if an observation exists, it corresponds to a post-worker point before the turn was durably closed*.
+A crash between the terminal result and the capture leaves no row and an open turn, and the retry
+takes the boundary properly. A crash after the capture and before the close leaves the observation
+and an open turn; the retry — including restart recovery — reuses it and never overwrites it, because
+the store's write-once guard makes a second `record_final_state` a no-op. **No GET-time probing, no
+reconstruction from HEAD, no reinterpretation of PR3/PR5 change evidence as state**, and no path by
+which a turn becomes durably closed and is then live-probed to manufacture history.
+
+## D-2026-08-17-28 — `FINAL_STATE_OBSERVER_VERSION` moves to 2, and V1 stops being current-state authority (EFE DECISION, ACTIVE)
+
+**Decision.** `FINAL_STATE_OBSERVER_VERSION` is 2. V2 means *captured only at the legitimate terminal
+post-worker / pre-close boundary*. `SUPPORTED_OBSERVER_VERSIONS` is derived from it and is therefore
+`(2,)`: a stored V1 observation is refused as state authority through the existing
+`unsupported_final_state_observer_version`, and the active set fails closed rather than producing
+`met` or `not_met`.
+
+**Why keeping 1 was not available.** The row shape did not change. A V1 row and a V2 row are
+indistinguishable by inspection, and one of them may be a pre-work fact labelled complete. Writing
+corrected observations under version 1 would make two semantically different kinds of historical fact
+share one identity — which is the precise failure `D-2026-08-17-8` established the version numbers
+exist to prevent.
+
+**Why refusing the whole V1 family is the safe reading rather than the timid one.** Nothing in a
+stored row records which adapter family produced it, so V1 cannot be triaged into trustworthy and
+untrustworthy halves. The failed deployment's row was internally valid in every respect — correct
+fingerprint, agreeing lineage, `complete`, one path `absent` — and consuming it would have meant
+consuming it as proof that a file was not created, when the worker created it three seconds later.
+There is no repair: the moment is gone, and re-probing now would answer a question about today and
+file the answer as history.
+
+**No new reason code.** `unsupported_final_state_observer_version` already existed for exactly this
+and is checked first, before any other field is interpreted, which is what stops a V1 row being read
+under V2 semantics on the way to being rejected. Adding a sibling would have been a second name for
+one fact.
+
+**Historical V1 rows are left completely alone.** Not backfilled, not rewritten, not re-probed, not
+converted. `UPDATE task_turn_final_state SET observer_version = 2` is never issued and the old
+fingerprint is never reinterpreted. Opening a v11 database containing V1 rows migrates nothing, the
+rows survive field-identical, and the schema stays 11. They remain immutable audit facts about what
+was observed; PR25 stops believing them about the present, which is a different claim.
+
+**The fingerprint needed no work.** `final_state_fingerprint` already binds the observer version as
+its second field, so the same stored path facts hash differently under V1 and V2 automatically. No
+parallel hash algorithm was added, and the existing one was reused rather than re-derived.
+
+## D-2026-08-17-29 — `CURRENT_ASSESSMENT_VERSION` moves to 4; `AGGREGATOR_VERSION` and `ASSESSMENT_API_VERSION` deliberately do not (EFE DECISION, ACTIVE)
+
+**Decision.** `CURRENT_ASSESSMENT_VERSION` is 4. `AGGREGATOR_VERSION` stays 1.
+`ASSESSMENT_API_VERSION` stays 1. `SCHEMA_VERSION` stays 11.
+
+**Why the binder moved.** Nothing in it computes differently — same reading of `present` / `absent`,
+same domains, same closed reasons, same shape. That is exactly why the number had to move. A
+criterion V3 answered `met` from a stored V1 row is answered `unavailable` /
+`unsupported_final_state_observer_version` by V4 from the *same unchanged row*: two builds giving two
+different answers to one question about one database. A fingerprint that did not distinguish them
+would assert those two answers are the same fact.
+
+**Why the aggregator did not.** Three things had to hold together, and they do:
+
+1. **Nothing it owns changed.** Its bump criteria are a different fold, a different availability rule,
+   or a different notion of what a count or a missing outcome asserts. The fold is still `not_met`
+   dominates, else any `unverified` → `incomplete`, else `met`; availability is still "the active set
+   resolved and is non-empty"; the counts count the same things. A V4 envelope folds through
+   byte-identical logic.
+2. **Aggregate identity already moves.** `aggregate_fingerprint` binds the consumed assessment
+   fingerprint, which binds `CURRENT_ASSESSMENT_VERSION`. Bumping the aggregator as well would encode
+   one change twice and leave a later reader unable to tell whether the fold ever changed
+   independently.
+3. **The compatibility gate is derived.** `SUPPORTED_ASSESSMENT_VERSIONS` is
+   `(CURRENT_ASSESSMENT_VERSION,)`, so the accepted input set moved to `(4,)` with no edit and cannot
+   drift. Nothing widened: a V3 envelope is now refused as `unsupported_assessment_version`, exactly
+   as a V4 one was yesterday. **No arbitrary future version is supported.**
+
+The honest summary is that this layer's *input contract* changed and its *semantics* did not, and the
+repository's version doctrine attaches a number to the second thing. When the fold changes, it moves.
+
+**Why the API version did not.** The response shape is byte-identical: same keys, same nesting, same
+closed vocabularies. Only nested values moved — `assessment_version` reads 4 and
+`observer_version` reads 2. A transport version that moved whenever a value inside it changed would
+tell a client nothing about whether it still knows how to parse the body.
+
+**Why the schema did not.** `task_turn_final_state` already stores `observer_version` per row. The
+distinction PR25 needs is already durable, so there is nothing to migrate — and a migration would
+have been the mechanism by which historical rows got silently reinterpreted.
+
+## D-2026-08-17-30 — The first Tier-2 deployment was rolled back on a smoke finding, and the fix blocks the retry (EFE DECISION, ACTIVE)
+
+**Decision.** The 2026-08-17 deployment of PR11–PR24 was deliberately rolled back as a **pair** —
+runtime to slot A `1efd49b`, database to the verified pre-v11 v9 backup — and production stays there
+until PR25 merges. Production is intentionally behind `main` and is **not** to be normalized in the
+meantime.
+
+**The deployment did not fail; the smoke worked.** Every mechanical step succeeded: the slot built,
+the services came up, the v9 → v11 migration ran, the routes answered. What failed was the first
+human-equivalent acceptance question ever asked of the stack in production, and it failed by
+returning a confident wrong answer rather than an error — which is the failure mode this whole
+milestone is built to make impossible. Catching it in a smoke, on a rollback-ready pair, is the
+procedure behaving as designed.
+
+**Rolling back rather than patching forward.** The bad row was already persisted and is write-once,
+and the semantics of every V1 row in that database had just become untrustworthy. A forward patch
+would have left production running on evidence it could not justify. The one v11-only smoke task was
+deliberately lost as isolated deployment-test data. Retained: the verified pre-v11 backups, a
+failed-deployment v11 audit copy, the deployment record, and the prepared slot B — none of which are
+to be modified.
+
+**The audit copy earns its keep as a test fixture.** It holds the exact defective observation, and
+PR25 uses a **copy** of it to prove the refusal catches the thing that actually happened rather than
+only a hand-built equivalent. A hand-built V1 row proves the rule; the artifact proves the rule
+covers reality.
+
+**Deployment retry prerequisites**, all of which must hold together: PR25 merged with green
+final-head CI; the pair rehearsed again (slot + v9 backup) before any migration; and a repeat of the
+same smoke — an explicit `path_exists` requirement authored from the PWA against an asynchronous
+adapter — reaching `assessable` / `met` **in production**. Two pre-existing items stay explicitly out
+of scope and out of the retry's critical path: the tunnel unit was already failed before the attempt
+and remains unrelated operational debt, and the sanitizer timing-test flake remains separate.
+
+**PR24B stays deferred** until a deployment succeeds. It is further authoring surface on a stack whose
+evidence authority has just been shown to have a boundary defect, and widening what a person can
+declare before the thing that answers declarations is proven in production would be building on the
+part that just broke.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

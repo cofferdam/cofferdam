@@ -209,7 +209,35 @@ from .finalstate import (
 #: Nothing else moves in either step — the schema, the evaluator, the observer,
 #: the resolver and the criteria model are all untouched, and there is still no
 #: aggregate version.
-CURRENT_ASSESSMENT_VERSION = 3
+#:
+#: **4 (M2K PR25).** The set of final-state observations this binder will accept
+#: as state authority changed: V1 observations are refused and V2 observations
+#: are accepted. Nothing here computes differently — the same
+#: ``present``/``absent`` reading, the same domains, the same closed reasons, the
+#: same shape — and that is exactly why the number had to move. A criterion that
+#: V3 answered ``met`` from a stored V1 row is answered ``unverified`` /
+#: ``unsupported_final_state_observer_version`` by V4 from the *same unchanged
+#: row*, so two builds give two different answers to one question about one
+#: database. A fingerprint that did not distinguish them would assert those two
+#: answers are the same fact.
+#:
+#: **Why refusing V1 is the safe reading and not the timid one.** A V1 row cannot
+#: be told from the outside whether it came from a synchronous adapter after the
+#: work or an asynchronous one before it — the row shape is identical and no
+#: field records which. The failed deployment produced exactly the second kind
+#: and it was internally valid in every respect: fingerprint correct, lineage
+#: agreeing, ``observation_state`` ``complete``, one path answered ``absent``.
+#: Continuing to consume V1 would mean consuming that row as proof the file was
+#: not created, when the worker created it three seconds later. There is no
+#: repair available: the moment is gone, and re-probing now would answer a
+#: question about today while filing it as history. So the whole family fails
+#: closed, through :data:`REASON_UNSUPPORTED_OBSERVER`, which already existed for
+#: precisely this and needed no new sibling.
+#:
+#: Still nothing else moves: the schema, the evaluator, the resolver, the
+#: criteria model and the aggregate fold are untouched. What moved is the
+#: observer, and this number records that the binder noticed.
+CURRENT_ASSESSMENT_VERSION = 4
 
 
 # -- evidence domains ---------------------------------------------------------

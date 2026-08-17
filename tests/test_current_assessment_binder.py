@@ -577,7 +577,7 @@ class FingerprintTests(unittest.TestCase):
         self.assertNotEqual(one, "0" * 64)
         # M2K PR18 took this to 2 (a second evidence domain); M2K PR20 to 3 (an
         # unavailable envelope that preserves which lineage failure occurred).
-        self.assertEqual(3, CURRENT_ASSESSMENT_VERSION)
+        self.assertEqual(4, CURRENT_ASSESSMENT_VERSION)
 
     def test_the_lineage_fingerprint_moves_the_set_fingerprint(self):
         self.assertNotEqual(

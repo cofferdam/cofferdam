@@ -402,7 +402,7 @@ class DerivedAndInertEndToEnd(Harness):
             self.assertNotIn(forbidden, names)
 
     def test_the_version_is_three(self):
-        self.assertEqual(3, CURRENT_ASSESSMENT_VERSION)
+        self.assertEqual(4, CURRENT_ASSESSMENT_VERSION)
 
 
 if __name__ == "__main__":  # pragma: no cover

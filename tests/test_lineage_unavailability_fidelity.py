@@ -507,7 +507,7 @@ class FingerprintTests(unittest.TestCase):
                 self.assertIsNone(envelope(reason).lineage_fingerprint)
 
     def test_the_version_is_bound_and_has_moved(self):
-        self.assertEqual(3, CURRENT_ASSESSMENT_VERSION)
+        self.assertEqual(4, CURRENT_ASSESSMENT_VERSION)
 
 
 class PurityTests(unittest.TestCase):
@@ -562,7 +562,7 @@ class NegativeSpaceTests(unittest.TestCase):
         from cofferdam.workstation.tasks.finalstate import FINAL_STATE_OBSERVER_VERSION
 
         self.assertEqual(1, EVALUATOR_VERSION)
-        self.assertEqual(1, FINAL_STATE_OBSERVER_VERSION)
+        self.assertEqual(2, FINAL_STATE_OBSERVER_VERSION)
         self.assertEqual(1, RESOLVER_VERSION)
         self.assertEqual(1, CONTINUITY_MODEL_VERSION)
         self.assertEqual(1, CRITERIA_MODEL_VERSION)

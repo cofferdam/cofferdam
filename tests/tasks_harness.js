@@ -2949,6 +2949,21 @@ function run() {
     });
   }
 
+  if (scenario === "authoring-deploy-smoke-request") {
+    /* M2K PR25. The human-equivalent request from the failed Tier-2 deployment
+       smoke: an explicit root and one `path_exists("deploy-smoke.txt")`. The
+       body this produces is fed to a real server with an *asynchronous* adapter
+       in `tests/test_terminal_bound_final_state_e2e.py`, so the request half of
+       that end-to-end proof is the shipped panel's own rather than a hand-built
+       payload that happens to look like it. */
+    return createScenario(function () {
+      chooseMode(CREATE, "Root");
+      addRow(CREATE);
+      setRowType(CREATE, 0, "evidence:path_exists");
+      setRowText(CREATE, 0, "Path", "deploy-smoke.txt");
+    });
+  }
+
   if (scenario === "authoring-create-root-with-no-criteria") {
     /* Explicit `root`, empty composer. The declaration is real and the criteria
        set is genuinely empty — which the server records as `not_provided`, and
