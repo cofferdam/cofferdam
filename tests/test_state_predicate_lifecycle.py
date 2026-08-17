@@ -32,6 +32,9 @@ from cofferdam.workstation.tasks.binding import (
     ASSESSMENT_RESOLVED,
     CURRENT_ASSESSMENT_VERSION,
     DOMAIN_NOT_APPLICABLE,
+    DOMAIN_TURN_CHANGE,
+    REASON_FINAL_STATE_NOT_RECORDED,
+    REASON_INHERITED_CHANGE_NOT_CURRENT,
     REASON_UNSUPPORTED_PREDICATE,
 )
 from cofferdam.workstation.tasks.continuity import validate_declaration
@@ -428,14 +431,24 @@ class StopGateFourTests(LifecycleCase):
         self.assertIsNotNone(row["completed_at"])
         self.assertEqual("completed", row["outcome"])
 
-    def test_the_pr16_binder_answers_unsupported_predicate(self):
+    def test_the_binder_answers_from_final_state_or_says_it_has_none(self):
+        """M2K PR18 replaced `unsupported_predicate` here, not the fail-closed rule.
+
+        These turns are synthesised straight into SQLite, so no PR14 observation
+        was ever recorded for them — the state criterion is therefore
+        `unverified` / `final_state_not_recorded`. That is the same refusal PR17
+        pinned, now stated in the vocabulary of the domain that owns it: the
+        binder knows the predicate and has no evidence, rather than not knowing
+        the predicate at all. It does **not** go and look.
+        """
         number = self.turn([self.state_criterion()], {"mode": "root"})
         self.service.evaluate_closed_turns(self.task_id)
         answer = self.service.current_criterion_assessment(self.task_id, number)
         self.assertEqual(ASSESSMENT_RESOLVED, answer.state)
         (assessment,) = answer.assessments
         self.assertEqual(RESULT_UNVERIFIED, assessment.result)
-        self.assertEqual(REASON_UNSUPPORTED_PREDICATE, assessment.reason)
+        self.assertEqual(REASON_FINAL_STATE_NOT_RECORDED, assessment.reason)
+        self.assertNotEqual(REASON_UNSUPPORTED_PREDICATE, assessment.reason)
 
     def test_the_binder_never_classifies_it_as_turn_change(self):
         """The failure that would silently make a state predicate a change one."""
@@ -444,10 +457,11 @@ class StopGateFourTests(LifecycleCase):
         (assessment,) = self.service.current_criterion_assessment(
             self.task_id, number
         ).assessments
+        self.assertNotEqual(DOMAIN_TURN_CHANGE, assessment.domain)
         self.assertEqual(DOMAIN_NOT_APPLICABLE, assessment.domain)
         self.assertIsNone(assessment.evidence_fingerprint)
 
-    def test_an_inherited_state_criterion_is_also_unsupported_not_carried(self):
+    def test_an_inherited_state_criterion_is_not_carried_forward(self):
         first = self.turn([self.state_criterion()], {"mode": "root"})
         self.service.evaluate_closed_turns(self.task_id)
         second = self.turn(
@@ -463,9 +477,12 @@ class StopGateFourTests(LifecycleCase):
         answer = self.service.current_criterion_assessment(self.task_id, second)
         inherited = answer.assessments[0]
         self.assertEqual(RESULT_UNVERIFIED, inherited.result)
-        # Unsupported, not "inherited change": the predicate is the reason it
-        # cannot be decided, and that is true at its own turn too.
-        self.assertEqual(REASON_UNSUPPORTED_PREDICATE, inherited.reason)
+        # Not "inherited change", which is a statement about a question that
+        # cannot be re-asked. A state question *can* be, at this very turn — so
+        # the reason names the missing evidence for this turn, and turn 1's
+        # answer is not reused whatever it was.
+        self.assertEqual(REASON_FINAL_STATE_NOT_RECORDED, inherited.reason)
+        self.assertNotEqual(REASON_INHERITED_CHANGE_NOT_CURRENT, inherited.reason)
 
     def test_no_final_state_observation_is_interpreted(self):
         """PR14 observes the path. Nothing turns that into an acceptance result."""
@@ -546,7 +563,10 @@ class NegativeSpaceTests(unittest.TestCase):
 
     def test_no_semantic_version_moved(self):
         self.assertEqual(1, EVALUATOR_VERSION)
-        self.assertEqual(1, CURRENT_ASSESSMENT_VERSION)
+        # M2K PR18 moved exactly this one, and only this one: the binder learned
+        # a second evidence domain. The evaluator and the observer below did not
+        # change, which is the assertion that keeps PR18 a read-semantics change.
+        self.assertEqual(2, CURRENT_ASSESSMENT_VERSION)
         self.assertEqual(1, FINAL_STATE_OBSERVER_VERSION)
         self.assertEqual(1, CRITERIA_MODEL_VERSION)
         from cofferdam.workstation.tasks.continuity import CONTINUITY_MODEL_VERSION

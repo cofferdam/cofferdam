@@ -576,6 +576,49 @@ def final_state_fingerprint(
     return digest.hexdigest()
 
 
+def verify_final_state_fingerprint(observation: "FinalStateObservation") -> bool:
+    """Whether a stored observation still hashes to the fingerprint it carries.
+
+    M2K PR18 needs this and PR14 did not: PR14 wrote the fingerprint and nothing
+    read it back, so a row edited outside the service — every field of it, paths
+    included — would have been consumed as authority on the strength of a string
+    nobody recomputed. Recomputing is what makes the fingerprint evidence rather
+    than decoration.
+
+    **Pure, and the same algorithm.** It calls :func:`final_state_fingerprint`
+    on the stored fields rather than re-deriving the construction, because two
+    implementations of one hash is how they drift. Nothing here observes a path,
+    opens a repository or touches a database.
+
+    Returns ``False`` — never raises, and never repairs — when:
+
+    * the observation was never recorded (``legacy_unknown``), so there is no
+      fingerprint to verify and no fields to verify it against;
+    * it carries no fingerprint at all;
+    * its ``observer_version`` is not :data:`FINAL_STATE_OBSERVER_VERSION`. The
+      hash binds *this module's* observer version, so recomputing it for a row
+      written under other semantics would compare two different things and call
+      the disagreement corruption. A caller must decide what an unsupported
+      observer version means **before** asking this, and say so in its own
+      vocabulary.
+    """
+    if observation.state not in STORED_OBSERVATION_STATES:
+        return False
+    if not observation.fingerprint:
+        return False
+    if observation.observer_version != FINAL_STATE_OBSERVER_VERSION:
+        return False
+    return observation.fingerprint == final_state_fingerprint(
+        observation.task_id,
+        int(observation.turn_number),
+        observation.state,
+        observation.limitation_reason,
+        observation.lineage_fingerprint,
+        observation.head_revision,
+        observation.paths,
+    )
+
+
 __all__ = [
     "FINAL_STATE_OBSERVER_VERSION",
     "FINGERPRINT_CHARS",
@@ -615,4 +658,5 @@ __all__ = [
     "observe_path",
     "observe_paths",
     "target_paths",
+    "verify_final_state_fingerprint",
 ]

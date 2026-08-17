@@ -2357,7 +2357,7 @@ criteria remain `unverified` at every turn regardless.
 
 ---
 
-## Current criterion assessment (M2K PR16, derived, no schema)
+## Current criterion assessment (M2K PR16, extended by PR18, derived, no schema)
 
 PR11 says which criteria are in force at turn N. PR7 says what the worker did
 during turn N. This answers the question an aggregate would have to ask and
@@ -2370,14 +2370,17 @@ Derived from immutable rows, versioned, and stored nowhere.
 
 ### One rule: evidence must match the criterion's semantics
 
-Every machine predicate in this build — `path_changed`, `path_operation`,
-`rename` — is a *turn-change* observation. That makes it answerable at its own
-turn and nowhere else, which produces exactly three cases:
+A machine predicate in this build is one of two kinds, and the kind decides which
+evidence may answer it. `path_changed`, `path_operation` and `rename` are
+*turn-change* observations, answerable at their own turn and nowhere else.
+`path_exists` and `path_absent` are *state* observations, answerable at **every**
+target turn from that turn's own final-state boundary.
 
 | Active criterion | Current result at turn N |
 | --- | --- |
 | change predicate, origin turn **= N** | PR7's stored judgement for turn N, read and never recomputed |
 | change predicate, origin turn **< N** | `unverified` — `inherited_change_not_current_state_evaluable` |
+| **state predicate, any origin** | **turn N's stored PR14 observation — `final_state_observed`** |
 | `manual`, any origin | `unverified` — `manual_criterion_no_machine_authority` |
 | unknown predicate | `unverified` — `unsupported_predicate` (total, like PR7's evaluator) |
 
@@ -2395,8 +2398,9 @@ honest answer is *no* — so this would report `not_met` precisely when the work
 was right.
 
 **Reading PR14's final state** — `foo.py` is present, so `created` is met — is
-the semantic conversion the milestone forbids. PR14's observations exist on
-`main`; this layer does not import `finalstate` at all.
+the semantic conversion the milestone forbids. PR18 reads final state and still
+refuses this: the observation decides `path_exists(foo.py)` and touches no change
+criterion. See D-2026-08-17-4.
 
 `unverified` is therefore the accurate answer, not a placeholder: Cofferdam has
 no evidence of the right kind at this boundary. Pinned in all three directions —
@@ -2448,7 +2452,7 @@ exists to prevent.
 
 ### Versioning and identity
 
-**`CURRENT_ASSESSMENT_VERSION = 1`**, distinct from `SCHEMA_VERSION`,
+**`CURRENT_ASSESSMENT_VERSION = 2`** (PR18; it was 1 in PR16), distinct from `SCHEMA_VERSION`,
 `CRITERIA_MODEL_VERSION`, `CONTINUITY_MODEL_VERSION`, `ASSEMBLER_VERSION`,
 `EVALUATOR_VERSION`, `RESOLVER_VERSION`, `FINAL_STATE_OBSERVER_VERSION` and the
 future aggregate version. It owns the mapping *active criterion + evidence domain
@@ -2462,15 +2466,19 @@ the version, target, set state and reason, PR11's **lineage fingerprint**, and
 every criterion fingerprint in order. Not bound: any clock, the minted
 `evaluation_id`, rowids, host paths, provider or session identifiers.
 
-An **evidence-domain** discriminator (`turn_change` / `not_applicable`) is carried
-from the start, so a future `final_state` or `named_check` answer cannot hash
-equal to a V1 one.
+An **evidence-domain** discriminator is carried from the start and is now
+`turn_change` / `final_state` / `not_applicable`, so a `final_state` answer of
+`met` cannot hash equal to a `turn_change` one, and neither can hash equal to the
+V1 answer to the same question. `named_check` is still not implemented.
 
 ### Derived, and read from one snapshot
 
-No table, no schema change — v10 stands — no write path and no recovery path.
-Lineage, the turn's lifecycle and the evaluation are read inside **one deferred
-read transaction**. That matters more than it did for PR11: criteria and
+No table, no schema change — v11 stands — no write path and no recovery path.
+Lineage, the turn's lifecycle, the evaluation and (when required) the final-state
+parent and its path children are read inside **one deferred read transaction**.
+PR11's resolver runs inside that transaction too, because deciding *whether* a
+final-state row is needed requires the active set, and deciding from one database
+state then reading from another is the split this pins shut. That matters more than it did for PR11: criteria and
 continuity are frozen at dispatch, but an evaluation row is written *later* by
 bounded recovery, so an active set read before that commit combined with an
 evaluation read after it would describe a database state that never existed.
@@ -2481,9 +2489,10 @@ evaluation read after it would describe a database state that never existed.
 else. No HTTP route, no bridge Action, no Custom GPT Action, no PWA control, and
 PR8's assessment response is unchanged. There is no verdict, no outcome, no count
 of what was met, and no `AGGREGATOR_VERSION`. This produces the legitimate
-per-criterion inputs an aggregate would need — and the aggregate stays blocked
-until state predicates exist, because today an inherited requirement can only be
-`unverified`.
+per-criterion inputs an aggregate would need. PR18 removes the reason the
+aggregate was blocked — an inherited state requirement now has a real `met` or
+`not_met` at each boundary — and the aggregate is still not built, because what a
+*mixture* of results means is its own decision.
 
 ---
 
@@ -2585,8 +2594,9 @@ Observing that a path exists is not deciding a criterion, and nothing joins them
 
 ### Versions
 
-Only the schema moved: **v11**. `EVALUATOR_VERSION` stays 1,
-`CURRENT_ASSESSMENT_VERSION` stays 1, `FINAL_STATE_OBSERVER_VERSION` stays 1,
+Only the schema moved in PR17: **v11**. (`CURRENT_ASSESSMENT_VERSION` moved to 2
+in PR18, which added no schema at all.) `EVALUATOR_VERSION` stays 1,
+`FINAL_STATE_OBSERVER_VERSION` stays 1,
 `CRITERIA_MODEL_VERSION` stays 1 — the existing criteria fingerprint already binds
 predicate and path honestly, so `path_exists(foo.py)` and `path_absent(foo.py)`
 hash differently with no new fingerprint version, and neither hashes like the
@@ -2604,6 +2614,181 @@ runtime plus a verified pre-v11 backup.
   cannot represent them.
 
 Those two cases must never both be called "simple rollback".
+
+---
+
+## The final-state assessment domain (M2K PR18, derived, no schema)
+
+PR17 made `path_exists` and `path_absent` representable and left both answering
+`unverified` / `unsupported_predicate`. PR18 gives them the one evidence domain
+that can honestly decide them: the target turn's immutable PR14
+`FinalStateObservation`. **`CURRENT_ASSESSMENT_VERSION` moves 1 → 2**; nothing
+else moves, and no schema changes.
+
+### Exact semantics
+
+At target turn N, `path_exists(P)` asks: *at turn N's persisted final-state
+boundary, did **any** filesystem object exist at P?*
+
+| Stored path state at N | `path_exists(P)` | `path_absent(P)` |
+| --- | --- | --- |
+| `present` (any kind) | `met` | `not_met` |
+| `absent` | `not_met` | `met` |
+| `unavailable` | `unverified` — `final_state_path_unavailable` | same |
+
+**Kind never changes the answer.** A regular file, a directory, a symlink, a
+**broken** symlink and any other safely observed object are all `present`. PR14
+records the link object itself without following it, and PR18 does not follow it
+either. There is deliberately no `path_is_file`, `path_is_directory` or
+`path_is_symlink`.
+
+**A missing path row is never `absent`.** See *structural corruption* below.
+
+### State criteria are re-assessed at every target, never carried forward
+
+An inherited *change* criterion is `unverified` because its question is about a
+turn that already ended. An inherited *state* criterion is the opposite: *is
+`foo.py` there?* is exactly as meaningful at turn 4 as at turn 1, so it is
+answered from **turn 4's** observation.
+
+| Turn | Project | Current result for the same criterion |
+| --- | --- | --- |
+| 1 | `foo` present | `met` |
+| 2 | `foo` deleted | `not_met` |
+| 3 | `foo` restored | `met` |
+
+Three derived facts about three boundaries, with three distinct fingerprints. No
+answer is reused, and none is persisted — there is no "current status" column and
+no table.
+
+### PR7's state-predicate row is history, not authority
+
+PR7 records `path_exists` as `unverified` / `unsupported_capability`, and that
+record is **correct and permanent**: it says what the turn-change evaluator could
+establish, which is nothing, because this is not a turn-change question. PR18
+does not read it for a state criterion, does not rewrite it and does not delete
+it. Pinned mechanically: the stored PR7 result is varied across `met`, `not_met`
+and `unverified` and the state answer does not move.
+
+This is exactly why the `EvaluationRecord` and the current assessment are two
+layers (D-2026-08-17-2).
+
+### The two domains do not touch, in either direction
+
+| Authored criterion | PR7 says | Final state says | Current result |
+| --- | --- | --- | --- |
+| `path_operation(foo.py, created)` | `met` | `foo.py` absent | **`met`** |
+| `path_exists(foo.py)` | `unverified`/unsupported | `foo.py` absent | **`not_met`** |
+
+Surprising and correct. The first asks *did this turn create it*; the second asks
+*is it there*. Blurring them would be D-2026-08-17-4's forbidden conversion, and
+what a *combination* of the two should mean is an aggregate's decision, not this
+layer's.
+
+### Each domain's evidence is required only by the criteria that consume it
+
+| Active set at target N | PR7 record required? | Observation required? |
+| --- | --- | --- |
+| `path_exists(foo)` only | **no** | yes |
+| `path_changed(foo)` + `path_exists(foo)` | yes | yes |
+| inherited `path_changed(foo)` + `path_exists(foo)` | **no** | yes |
+| `manual` + `path_exists(foo)` | **no** | yes |
+| change and/or `manual` only | yes, if same-turn change | **no** |
+
+A PR7 record is required exactly when some active criterion originated at the
+target turn *and* is a change predicate. An observation is required exactly when
+some active criterion is a state predicate, at any origin. A target that needs
+neither resolves with neither, and an unrelated corrupt row of the other kind
+cannot become an authority dependency — proven by handing a change-only target a
+structurally broken observation and getting an identical fingerprint.
+
+### Semantic limitation vs structural corruption
+
+The distinction is load-bearing. One is an observation Cofferdam made and stands
+behind; the other means the row is not what the service writes.
+
+**Semantic — the criterion is `unverified`, the set still resolves:**
+
+| Condition | Reason |
+| --- | --- |
+| the exact path row is `unavailable` | `final_state_path_unavailable` |
+| the whole observation is `unavailable` | `final_state_unavailable` |
+| no observation row exists (`legacy_unknown`, or a pre-PR14 turn) | `final_state_not_recorded` |
+
+None of these is ever `not_met`, and none triggers a live re-probe: a filesystem
+read taken today is not a statement about a boundary that passed months ago.
+
+**Structural — the whole set is `unavailable`, and nothing is repaired:**
+
+| Condition | Reason |
+| --- | --- |
+| unknown `observer_version` | `unsupported_final_state_observer_version` |
+| wrong task or turn identity, `path_count` mismatch, duplicate path or ordinal, an `unavailable` observation carrying paths, or fields that do not hash to the stored fingerprint | `final_state_inconsistent` |
+| the observation's `lineage_fingerprint` disagrees with the active set resolved now | `final_state_lineage_mismatch` |
+| an active state criterion's path is missing from an observation claiming a recorded scope | `final_state_path_missing` |
+
+Laundering any of these into an ordinary `unverified` would file tampering as a
+routine limitation.
+
+### `incomplete` is not a blanket refusal
+
+PR15 decided per-path authority survives a partial observation, and PR18 honours
+it: in an `incomplete` observation, a path safely recorded `present` or `absent`
+still decides its criterion, and only the `unavailable` one is `unverified`.
+Discarding a real fact over an unrelated wall would be evidence loss.
+
+### Lineage agreement is required, and it is a set-level gate
+
+PR14 selected its target paths from the active criteria lineage **at capture
+time**; PR11 resolves the active lineage again at read time. For an observation
+to be used as current evidence, the two fingerprints must agree wherever PR14
+recorded one. A disagreement means the observation's declared scope belongs to a
+different requirement set, so its path rows — even ones whose names look right —
+are answers to another question. Fails closed at the set, never downgraded to one
+criterion's `unverified`.
+
+### Supported observer versions are enumerated
+
+`SUPPORTED_OBSERVER_VERSIONS = (1,)`, not `<= FINAL_STATE_OBSERVER_VERSION`. A
+future observer may read the index rather than the worktree, follow symlinks or
+use a different kind vocabulary; consuming its rows because the columns parse is
+the reinterpretation this layer exists to prevent.
+
+### The stored fingerprint is verified, not trusted
+
+PR14 wrote `observation_fingerprint` and nothing read it back, so a raw-SQL edit
+to a path state, a kind, a reason or the HEAD anchor would have been consumed as
+authority on the strength of a string nobody recomputed. PR18 adds
+`finalstate.verify_final_state_fingerprint` — **at PR14's layer, calling PR14's
+own `final_state_fingerprint`**, so there is exactly one algorithm — and refuses
+any observation that does not verify. It is only valid for observer version 1,
+which is why the version gate runs first.
+
+### Path lookup is exact
+
+A state criterion's path matches a final-state path by exact canonical persisted
+identity. No basename matching, no case folding, no symlink-target identity, no
+similarity, no normalisation guessed at read time. PR6 and PR17 own path
+normalisation and validation; this layer compares what they stored.
+
+### Provenance
+
+A state criterion's `evidence_fingerprint` is the **exact stored
+`observation_fingerprint`** — not a second copy, not the minted `observation_id`.
+The per-criterion fingerprint additionally binds the assessment version, the
+criterion identity and origin, the target turn, the predicate, the domain, the
+result and the reason. `path_state` and `path_kind` are carried on the assessment
+for audit and are deliberately **not** hashed: they are already inside the
+observation fingerprint that is.
+
+If an observation is `legacy_unknown` there is no fingerprint, and none is
+fabricated.
+
+### Still not an aggregate
+
+No verdict, no outcome, no `met` count, no `AGGREGATOR_VERSION`, no route, no
+bridge Action, no PWA control, and PR8's assessment response is unchanged.
+`TaskService.current_criterion_assessment` remains internal.
 
 ---
 

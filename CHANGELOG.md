@@ -8,6 +8,47 @@ release.
 
 ### Added
 
+- **M2K PR18 — Cofferdam can now answer "this file must exist".** Nothing is visible yet and nothing
+  new is saved.
+
+  **What it adds.** In the previous change you could write down requirements about what must be
+  *true* — that a file exists, or that it does not — and Cofferdam could only say it had no way to
+  check them. It can now answer them, using the record it already takes of what was actually in your
+  project at the moment each piece of work finished. It does not go and look at your files when you
+  ask; it reads what it saw at the time, which is why asking the same question tomorrow gives the same
+  answer, and why deleting the project afterwards changes nothing.
+
+  **The part that matters most.** A requirement like "this file must exist" is answered *afresh at
+  every point*, not once. If the file was there after the first message, missing after the second and
+  back after the third, Cofferdam reports exactly that: satisfied, then not satisfied, then satisfied
+  again. It never reuses an earlier answer, so a requirement that quietly broke three messages ago
+  stops looking fine.
+
+  **The two kinds of requirement stay separate, on purpose.** "Create this file" and "this file must
+  exist" are different requests and get different answers, even about the same file at the same
+  moment. If a worker genuinely created a file and something removed it afterwards, Cofferdam says the
+  *create* requirement was met — because it was — and the *must exist* requirement was not. That can
+  look odd side by side, and it is the honest reading of two different questions. Cofferdam will not
+  quietly turn one into the other.
+
+  **Anything counts as existing.** A file, a folder, a shortcut — including a shortcut pointing at
+  something that is gone. Something is there, so the path exists. Cofferdam does not follow the
+  shortcut to see what is on the other end.
+
+  **When it still says "I don't know".** If it could not safely look at a particular path when the
+  work finished — a permissions wall, for instance — it says so rather than reporting the requirement
+  as failed. Work that ran before Cofferdam started keeping this record gets the same honest answer.
+  "I could not look" is never reported as "it is not there".
+
+  **If the record itself looks wrong, it refuses.** If the stored record of what was in your project
+  has been altered outside Cofferdam, or does not match the requirements it claims to be about, the
+  whole answer is withheld rather than partly given. It also repairs nothing — a record that had been
+  tampered with stays exactly as it is, so the tampering remains visible.
+
+  **Still no verdict.** Cofferdam reports each requirement on its own and does not add them up into a
+  pass or a fail. What a mixture of satisfied and unsatisfied requirements *means* is a separate
+  decision nobody has made yet.
+
 - **M2K PR17 — you can now write down "this file must exist", even though Cofferdam cannot check it
   yet.** Nothing is visible yet and nothing behaves differently.
 
