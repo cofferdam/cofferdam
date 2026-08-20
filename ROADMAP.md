@@ -21,10 +21,15 @@ record of what shipped; **M2J is complete** and the work actually queued next is
   Guardian protocol, and A/B state. These are Cofferdam's canonical models.
 - **OpenClaw is optional and replaceable** and must never become Cofferdam's canonical internal
   model. Nothing in the Guardian or activation path may depend on it.
-- **A local model may classify intent and, from M2L, plan** — it may never execute arbitrary shell
-  commands, and its output is always schema-validated before anything runs. The Local Planner is
-  **advisory**: it drafts proposals, and every consequence passes through an existing validated,
-  user-confirmed path (D-2026-08-11-2). Implementation stays delegated to cloud workers.
+- **A model may classify intent and, from M2L, plan — and where that model runs is not the
+  invariant.** It may never execute arbitrary shell commands, and its output is always
+  schema-validated before anything runs. The planner is **advisory**: it drafts proposals, and every
+  consequence passes through an existing validated, user-confirmed path (D-2026-08-11-2).
+  Implementation stays delegated to workers. **Local-first is about authority, not about where
+  inference happens** (D-2026-08-20-1): state, memory, evidence, credentials, scheduling and
+  execution control stay local; the reasoning may be a cloud frontier model, and for deep
+  development planning it is expected to be. A local general LLM is an optional, specialized
+  capability — never a requirement, and never kept merely because a GPU exists.
 - **Trust Core is preserved but off the immediate critical path** — see
   [`DECISIONS.md`](DECISIONS.md) D-2026-08-01-7. Do not build on it now; do not delete it.
 - **Ship the smallest thing that a phone can actually do**, then improve it with itself.
@@ -88,7 +93,7 @@ below are fixed by [`DECISIONS.md`](DECISIONS.md) D-2026-08-08-1 … -6.
 ```
 M2J  Workspace, Working Context, mind foundation, Context Builder   COMPLETE (merged + deployed)
 M2K  Evidence & evaluation foundation, + machine reason codes       (deterministic, model-free)
-M2L  Local Planner MVP                                             (advisory, confirm-by-default)
+M2L  Cloud Coworker Planning and Orchestration                     (advisory, confirm-by-default)
 M2M  Remote operations completion — overview, dashboard, diagnosis
 ──── later, in this order unless evidence reorders it ────
 M2N  Mind retrieval — required (backlinks first, vectors second)
@@ -1095,9 +1100,14 @@ downstream reads from.
   serving beyond the bounded preview the five-step PR defines.
 - **Review depth:** normal backend, plus the focused check-runner review.
 
-### M2L — Local Planner MVP
+### M2L — Cloud Coworker Planning and Orchestration
 
-One model, one role, advisory throughout (D-2026-08-11-2).
+One **role**, one authority boundary, advisory throughout (D-2026-08-11-2, D-2026-08-20-1).
+
+> **Renamed from "Local Planner MVP" on 2026-08-20** (D-2026-08-20-1). The milestone's objective did
+> not change; the assumption about *where the model runs* did. M2L is a provider-neutral planner
+> role, and its first backend is expected to be a cloud frontier model. The local-model work that
+> produced that decision is recorded below rather than deleted.
 
 - **Objective:** conversation, drafting, delegation through existing validated paths, an evaluation
   narrative over evidence bundles, and honest refusal when the context does not support an answer.
@@ -1109,12 +1119,16 @@ One model, one role, advisory throughout (D-2026-08-11-2).
   distinguishes what the worker *claimed* from what Cofferdam *observed*.
 - **Confirmation is explicit, by default, for every consequential proposal. There is no autonomous
   planner → worker continuation in this milestone.**
-- **Placement:** `cofferdam/workstation/planner/` plus routes; the model runtime is a separate
-  loopback process with its own systemd user unit, reached through a replaceable provider client
-  (D-2026-08-11-10). The planner is not a `TaskAdapter` and does not speak to Task Core through the
-  Actions bridge.
-- **Model choice comes from Track D**, not from intuition. Qwen3.5-9B quantized is the current
-  candidate and not an architectural dependency.
+- **Placement:** `cofferdam/workstation/planner/` plus routes, reached through a replaceable
+  **provider** client (D-2026-08-11-10). A provider may be a cloud endpoint or a loopback local
+  runtime with its own systemd user unit; the planner does not know which. The planner is not a
+  `TaskAdapter` and does not speak to Task Core through the Actions bridge.
+- **The planner is provider-neutral** (D-2026-08-20-1). Claude/Opus-class, OpenAI, Gemini, a future
+  provider, or an optional local model are all backends behind one role. Core logic never names a
+  vendor; model selection is provider configuration.
+- **The first backend is expected to be cloud**, because deep development planning is where model
+  quality shows and Track D measured local candidates falling short of it (see below). This is a
+  preference backed by evidence, not a permanent exclusion of local planners.
 - **Security:** off by default behind its own flag; no bridge exposure; proposals-only writes;
   structured output schema-validated before use, never best-effort-parsed; bounded conversation
   store under the existing `no-store` content rules. One focused review on the
@@ -1175,8 +1189,27 @@ understanding, project/context understanding, plan extraction, worker-prompt qua
 quality, result explanation, expected-vs-observed evaluation, unsupported-claim detection, tool
 selection, deciding **not** to act, and asking for clarification. Deterministic scoring where
 possible; rubric scoring labeled advisory. **Real and private examples stay local-only**; committed
-fixtures are synthetic or public-safe until an explicit review decision says otherwise. Track D
-must produce numbers before M2L's model choice is frozen.
+fixtures are synthetic or public-safe until an explicit review decision says otherwise.
+
+**Track D ran, and it is no longer a gate on M2L** (D-2026-08-20-1). What it produced, kept here
+because the evidence outlived the plan it was meant to serve:
+
+- **Qwen3.5-4B-Q4_K_M is a proven fast local capability** — full GPU offload on a 4 GB GTX 1650 Ti
+  with a 16K context, ~45 tok/s, ~4 s per bounded decision, and 12/12 on a twelve-case planner
+  evaluation with reasoning disabled. It remains installed and is a legitimate **optional**
+  backend for lightweight routing, Turkish command understanding and cheap bounded
+  classification.
+- **Qwen3.5-9B-Q4_K_M is VRAM-bound on this host**, not RAM-bound: `-ngl 18` is the ceiling, and a
+  focused experiment confirmed the ceiling is model weights rather than KV cache — moving the KV
+  cache to system RAM freed no additional layers and cost ~8% throughput.
+- **Deep-planner candidates did not clear the bar.** Gemma 4 12B ran without swap but took 8–9
+  minutes per planning decision at ~3.4 tok/s, at the edge of the accepted latency budget. MoE
+  candidates that might do better need a newer llama.cpp for `--n-cpu-moe`, which is not a
+  dependency M2L should carry.
+
+Track D's conclusion is therefore **recorded, not discarded**: local models are good enough to be
+useful and not good enough to be the deep planner, so M2L took the provider-neutral route and
+expects a cloud backend first.
 
 ### Later, in this order unless evidence reorders it
 

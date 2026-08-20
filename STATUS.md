@@ -3759,10 +3759,13 @@ above); nothing else below is implemented, and no code was written for any of it
   **Start with the five-step artifact/change-claims Task Core PR that D-2026-08-09-3 already
   specifies** — it is the foundation the rest of the milestone reads from, and it is deterministic
   and model-free.
-- **M2L — Local Planner MVP.** One local model, one role, advisory throughout: Turkish-first
-  conversation, worker-prompt and follow-up drafting, evidence interpretation, next-step
-  recommendations, honest refusal. Every consequential proposal is explicitly confirmed; there is
-  no autonomous planner → worker continuation in this milestone.
+- **M2L — Cloud Coworker Planning and Orchestration.** One **role**, provider-neutral, advisory
+  throughout: Turkish-first conversation, worker-prompt and follow-up drafting, evidence
+  interpretation, next-step recommendations, honest refusal. Every consequential proposal is
+  explicitly confirmed; there is no autonomous planner → worker continuation in this milestone.
+  **Renamed from "Local Planner MVP" on 2026-08-20** (D-2026-08-20-1): the objective is unchanged,
+  but the planner is no longer assumed to be a local model. Its first backend is expected to be a
+  cloud frontier model; a local model remains an optional backend behind the same role.
 - **M2M — remote operations completion.** A consolidated status overview, the workspace dashboard
   in the existing PWA, deterministic diagnosis synthesis over M2K's reason codes, and retry UX over
   idempotent replays. The PWA and main API stay tailnet-private.
@@ -3776,9 +3779,14 @@ deployment integrity — is **cleared**; the remaining media-feature walkthrough
 Two **parallel tracks**, isolated from production and outside the milestone gates — neither is
 started: **Track B**, browser-actuator feasibility comparing Playwright, Kimi WebBridge and
 BrowserSkill on one narrow user-triggered spike, semantic automation only, dedicated automation
-profile; and **Track D**, Ollama host provisioning plus a Cofferdam-specific planner benchmark
-whose numbers must exist before M2L's model choice is frozen. Qwen3.5-9B quantized is the current
-candidate, not an architectural dependency; real and private fixtures stay local-only for now.
+profile; and **Track D**, local planner-model provisioning plus a Cofferdam-specific planner benchmark.
+**Track D has run, and it is no longer a gate on M2L** (D-2026-08-20-1). Measured on the dedicated
+server: Qwen3.5-4B-Q4_K_M is fully GPU-resident with a 16K context at ~45 tok/s and ~4 s per bounded
+decision, scoring 12/12 on a twelve-case planner evaluation — a proven **optional** fast/local
+capability. Qwen3.5-9B is VRAM-bound at `-ngl 18` (model weights, not KV cache), and Gemma 4 12B
+needed 8–9 minutes per planning decision. The conclusion recorded in D-2026-08-20-1 is that local
+models are good enough to be useful and not good enough to be the deep planner. Real and private
+fixtures stay local-only for now.
 
 Later, unordered: **M2N** richer Markdown memory retrieval (backlinks first, vectors second) ·
 **M2O** browser and desktop skills productized from Track B · **M2P** Codex app-server as a second
