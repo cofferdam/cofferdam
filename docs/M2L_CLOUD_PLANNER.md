@@ -116,16 +116,54 @@ accounting.
 
 ---
 
-## Deferred to PR1c-b
+## Durability (PR1c-b)
 
-Persistence (SQLite table and migration), the internal read surface, and the real live smokes —
-`PREPARE_WORKER_PROMPT` and `ASK_USER` against the subscription-authenticated CLI. The contracts
-here are what PR1c-b persists, so nothing in this PR is throwaway.
+**Its own database.** `planner.sqlite3`, beside `tasks.sqlite3`, `workspace.sqlite3` and
+`mind.sqlite3`. The planner owns no Task Core lifecycle, so planner rows do not live in Task Core's
+file — that would be the semantic coupling the protocol decision exists to prevent. Own
+`PLANNER_SCHEMA_VERSION`, own forward-only refusal, WAL + `synchronous=FULL`, mode `0600`.
 
-## Deferred further
+**Lifecycle and action are separate columns.** `pending / running / succeeded / failed /
+interrupted` is what the *invocation* did. `ASK_USER / PREPARE_WORKER_PROMPT / STOP` is what the
+*model decided*. **A `STOP` is a successful invocation** whose result was a refusal to plan; a
+provider failure is not. One column for both would make those indistinguishable later.
 
-Worker dispatch · planner→worker loop · result evaluation · memory application · Project Handoff API
-· Custom GPT integration · routines · artifacts · MCP server · connectors · deployment.
+**Crash truth.** The request row commits *before* the provider is invoked, so a call cut off
+mid-flight is visible as an abandoned row rather than as nothing. Result and provenance land in a
+single `UPDATE`, so no row can read *succeeded with no action*. At startup, `pending`/`running` rows
+become `interrupted` — **marked, never rerun**: re-invoking would spend a second call and assert the
+first never happened, neither of which this host knows.
+
+**The bounded packet is durable.** The exact payload the provider received is stored whole, because
+a reference to mutable local sources could not later prove what the model was given. It is
+projection-derived, so it carries only what was already eligible to leave. It is deliberately *not*
+on the routine read model — a caller that wants the whole context has to ask for it.
+
+**Read surface.** `PlannerService.get(...)` / `.recent(...)` return a `PlannerRecord` whose
+`to_dict()` is an allowlist, not a dump: `needs_user_input` and `has_prepared_prompt` are derived,
+provider and context provenance are nested, and the request payload, raw envelope and session id are
+absent. **No HTTP route, no bridge endpoint** — PR1c-b adds no network surface.
+
+**A prepared prompt starts nothing.** Persisting a `PREPARE_WORKER_PROMPT` writes a string to a
+column. There is no code path from it to a task, an adapter, a worker or a subprocess, and the
+service exposes no `dispatch`, `create_task` or `submit`.
+
+## Live validation (PR1c-b)
+
+Both smokes ran against the real subscription-authenticated CLI with `--model opus`, resolving to
+`claude-opus-5`:
+
+- **`PREPARE_WORKER_PROMPT`** — messy Turkish intent, 67.8 s, a 6117-character worker prompt with
+  objective, architecture, decisions-to-preserve, scope, forbidden changes, escalation, acceptance
+  criteria, verification, stop conditions and expected report. Durably persisted; read-back matched.
+- **`ASK_USER`** — an unresolved architecture choice. It refused to pick, asked in Turkish, and
+  carried no worker prompt.
+
+## Still deferred
+
+User confirmation/answer API · worker dispatch · worker result evaluation · next-step planner pass ·
+Project Handoff · Custom GPT integration · phone/PWA UI · bounded autonomous loop · routines ·
+artifacts · MCP server · connectors · deployment.
 
 The first product mode stays **prepare a prompt, then wait for the user**. There is no autonomous
 continuation anywhere in this milestone.
