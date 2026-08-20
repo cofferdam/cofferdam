@@ -39,8 +39,8 @@ phone/tablet (PWA over Tailscale)
   files · Ollama (intent) · OpenClaw (optional accel)
 ```
 
-The planned extension of this picture — a local planner that plans rather than implements, cloud
-workers that implement, bounded actuators, and canonical Markdown memory — is
+The planned extension of this picture — a planner that plans rather than implements, workers that
+implement, bounded actuators, and canonical Markdown memory — is
 [Local-first orchestration](#local-first-orchestration-planned-recorded-2026-08-11) below. It adds
 components; it changes none of the authority rules in this section.
 
@@ -198,7 +198,12 @@ expected UI evidence" — never "proven correct".
 ## Local-first orchestration (planned; recorded 2026-08-11)
 
 **None of this section is implemented.** It records the architecture the M2J → M2K → M2L → M2M
-sequence builds toward, decided as [`DECISIONS.md`](DECISIONS.md) D-2026-08-11-1 … -12. It is an
+sequence builds toward, decided as [`DECISIONS.md`](DECISIONS.md) D-2026-08-11-1 … -12, and
+**amended on 2026-08-20 by D-2026-08-20-1**: the planner is a provider-neutral role whose backend may
+be a cloud model, so "local-first" below means local **authority, state, memory, evidence,
+credentials and execution control** — not that every model runs on the host. Where this section says
+a component is local, read it as a statement about authority unless it is explicitly about a
+transport. It is an
 *extension* of what ships today, not a redesign: every authority rule below is already enforced in
 production for at least one surface, and the work is to make new components obey the same rules.
 
@@ -217,10 +222,11 @@ or browser-control surface exists.
   user (phone / browser / desktop — control surfaces, never authority)
         │
         ▼
-  LOCAL PLANNER  (small local model, advisory)
+  PLANNER  (provider-neutral role, advisory — cloud or local backend)
    understands messy Turkish/English · holds the planning conversation
    drafts worker prompts and follow-ups · reads evidence · explains · recommends
    writes no code · runs nothing · holds no credentials
+   a cloud backend receives only a CloudContextProjection, never a LocalContextPack
         │  proposals only — schema-validated, user-confirmed
         ▼
   existing validated paths (POST /api/tasks · clarification answer · typed action)
@@ -282,13 +288,19 @@ as anything else.
 
 ### Local context and external context are different objects
 
-A pack assembled for the local planner and a pack **leaving the host** are two security objects,
-not one type used twice: `LocalContextPack` and `CloudContextProjection`.
+A pack assembled for a process on the authority and a pack **leaving the host** are two security
+objects, not one type used twice: `LocalContextPack` and `CloudContextProjection`.
 
-The local planner may receive rich local context — granted global mind, project mind, Working
+**The boundary follows the endpoint, not the role** (D-2026-08-20-1). A planner backed by a
+loopback local runtime may receive rich local context — granted global mind, project mind, Working
 Context, task state, evidence, preferences — because it runs on the authority and its provider
-client speaks only to loopback. **Anything bound for a cloud worker, the private Custom GPT, a
-browser skill or any other external model passes through an explicit egress projection.** By
+client speaks only to loopback. **A planner backed by a cloud provider is external, and takes the
+same egress projection as any other external model — being "the planner" grants it nothing.** This
+is the rule that the 2026-08-20 redefinition of M2L makes load-bearing: when the planner role stopped
+implying a local model, "the planner may see local context" stopped being safe as a statement about
+the role and became a statement about the transport. **Anything bound for a cloud planner, a cloud
+worker, the private Custom GPT, a browser skill or any other external model passes through an
+explicit egress projection.** By
 default that carries relevant project plan and context, relevant decisions, the current objective
 and acceptance criteria; it excludes global personal memory, unrelated-project memory, vault paths
 and project filesystem roots, and credentials are structurally absent. Workspace policy may later

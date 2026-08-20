@@ -4344,6 +4344,83 @@ evidence authority has just been shown to have a boundary defect, and widening w
 declare before the thing that answers declarations is proven in production would be building on the
 part that just broke.
 
+## D-2026-08-20-1 — Local-first is about authority, not about where inference happens; M2L becomes a provider-neutral coworker role (EFE DECISION, ACTIVE)
+
+**Decision.** Cofferdam stays local-first in **authority, state, memory, persistence, evidence,
+execution control, orchestration, credentials and scheduling**. It does **not** require its
+high-intelligence reasoning model to be local. M2L is redefined from *Local Planner MVP* to
+**Cloud Coworker Planning and Orchestration**: a provider-neutral **planner role**, not a model. Its
+first backend is expected to be a cloud frontier model. A local general-purpose LLM becomes an
+**optional, specialized capability** and is never a requirement.
+
+**The distinction this entry exists to draw.** "Local-first" had quietly come to mean two different
+things — *Cofferdam decides and remembers on hardware the user owns*, and *the model runs on that
+hardware too*. Only the first is load-bearing. The authority boundary is what makes Cofferdam safe:
+the task lifecycle, the evidence, the memory hashes, the confirmation gates and the credentials all
+stay on the user's machines regardless of which endpoint produced a paragraph of reasoning. Binding
+the second meaning to the first bought no safety and cost the quality of the one job that most needs
+a strong model.
+
+**Why now, on evidence.** Track D ran on the dedicated server and measured rather than guessed.
+Qwen3.5-4B-Q4_K_M is genuinely good: fully GPU-resident on 4 GB with a 16K context, ~45 tok/s, ~4 s
+per bounded decision, 12/12 on a twelve-case planner evaluation. It is **not** a deep development
+planner. Qwen3.5-9B is VRAM-bound at `-ngl 18` — a focused experiment confirmed the ceiling is model
+weights, not KV cache, so moving KV to system RAM freed no layers and cost throughput. Gemma 4 12B
+took 8–9 minutes per planning decision at ~3.4 tok/s. The models that might do better are MoE and
+need a newer llama.cpp for `--n-cpu-moe`, which is not a dependency this milestone should carry. The
+honest reading is that local models are good enough to be *useful* and not good enough to be *the
+deep planner*.
+
+**The GPU is not an argument.** Cofferdam must not keep or use a local LLM merely because the server
+has one. Idle CPU/GPU capacity on the always-on host is acceptable and is not a reason to route work
+badly.
+
+**Provider neutrality is a code rule, not a preference.** M2L core logic never names Claude, Opus,
+OpenAI, Gemini, Qwen or Gemma. Those names live in provider implementations and configuration.
+Claude/Opus-class, OpenAI, Gemini, a future provider and an optional local runtime are all backends
+behind one role, and model selection is provider configuration. The same neutrality applies to the
+worker/coworker side, where Claude, Codex and future systems are bounded adapters.
+
+**The planner is high-intelligence and low-authority.** It may read a bounded context packet,
+reason, use research notes supplied by the Custom GPT, draft a worker prompt, identify ambiguity,
+recommend `ASK_USER`, interpret a worker result and machine evidence, and *propose* memory updates
+and next steps. It may not touch a shell, a filesystem, source, Git, a deployment, sudo, or start a
+worker — and it may not accept its own proposal or widen its own scope. A cloud model is an
+intelligence **worker**, never the authority.
+
+**Canonical memory stays local and Cofferdam-owned.** Cloud coworkers may summarize discussions,
+interpret completed work, produce narrative project summaries and propose updates to Markdown. They
+do not become the memory authority. The existing distinction between **Global Mind**, **Project
+Mind** and **Working Context** is preserved and is not collapsed because a single vault would be
+convenient. Obsidian remains a human-facing viewer/editor over Markdown that stays readable without
+it — never a runtime dependency. Operational/derived history may be persisted automatically with
+provenance because it describes an already-recorded event, and model-written narrative is marked as
+model-generated rather than machine-observed; authority-bearing memory — preferences, architecture
+decisions, requirement changes, objective changes — continues through the existing
+proposal/accept/hash-bound path.
+
+**The initial development mode stays confirmation-gated.** Intent → planner drafts the worker
+prompt → Cofferdam persists it → **explicit user confirmation** → worker executes → Cofferdam
+gathers output and machine evidence → planner evaluates → handoff persisted → **stop**. Bounded
+multi-step loops remain a later, explicitly authorized capability with an objective, a step limit, an
+allowed scope and stop conditions. They are not implied by this entry.
+
+**The Acer server's role is the always-on control plane**, not a model host: Cofferdam Core, Task
+Core, Working Context, canonical Mind, M2K evidence and evaluation, coworker adapters, persistent
+jobs, and later routines, artifacts, retrieval and voice. Optional local AI sits alongside those
+rather than justifying them.
+
+**What this does not change.** D-2026-08-11-2 still holds — the planner is advisory and every
+consequence passes through an existing validated, user-confirmed path. D-2026-08-11-10 still holds —
+the provider client is replaceable; this entry only clarifies that a provider may be a cloud endpoint
+as well as a loopback runtime. The local runtime and model artifacts stay installed and are not
+removed by this decision.
+
+**Superseded assumption, recorded rather than erased.** The prior expectation that M2L's primary
+planner would be a locally-running LLM is no longer authoritative. The Track D benchmark that
+disproved it happened, produced useful numbers, and is summarized in `ROADMAP.md` under M2L rather
+than deleted.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

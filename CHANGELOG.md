@@ -6,6 +6,28 @@ release.
 
 ## [Unreleased]
 
+### Changed
+
+- **M2L is now Cloud Coworker Planning and Orchestration, not a Local Planner MVP.**
+  Local-first was quietly doing two jobs: *Cofferdam decides and remembers on hardware you own*, and
+  *the model runs there too*. Only the first is load-bearing, and tying the second to it cost the
+  quality of the one job that most needs a strong model. Track D measured the gap rather than
+  guessing it — Qwen3.5-4B is genuinely good at bounded decisions and genuinely not a deep
+  development planner, the 9B is VRAM-bound on this hardware, and a 12B took 8–9 minutes per
+  planning decision. So M2L becomes a **provider-neutral planner role** whose first backend is
+  expected to be a cloud frontier model, while authority, state, memory, evidence, credentials,
+  scheduling and execution control stay local. A local model remains an optional backend and an
+  optional specialized capability; it is not kept merely because the server has a GPU.
+
+  The security consequence is the part worth reading: `DESIGN.md` used to say the planner may
+  receive rich local context *because it speaks only to loopback*. That was safe while "planner"
+  implied "local". It is not safe now, so the rule was rewritten to follow the **endpoint** rather
+  than the role — a cloud-backed planner takes the same `CloudContextProjection` as any other
+  external model, and being the planner grants it nothing.
+
+  Documentation only. No planner code, no provider backend, nothing deployed. Recorded as
+  `DECISIONS.md` D-2026-08-20-1.
+
 ### Added
 
 - **M2K PR26 — the same mistake, in the half we thought was safe.**
