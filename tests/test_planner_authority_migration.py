@@ -239,8 +239,12 @@ class ForwardMigration(MigrationHarness):
 
         write_v1(self.dir)
         authority = PlannerAuthorityService(store=PlannerStore(self.dir))
+        # The round trip a surface performs: read the gate, take the fingerprint
+        # it displays, submit it back with the decision.
+        displayed = authority.gate("plan_aaaaaaaaaaaaaaaaaaaaaaaaaa")
         gate = authority.approve_prepared_worker_prompt(
             "plan_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+            expected_subject_fingerprint=displayed.subject_fingerprint,
             provenance=AuthorityProvenance.internal_test(),
         )
         self.assertEqual(gate.state, GATE_STATE_APPROVED)

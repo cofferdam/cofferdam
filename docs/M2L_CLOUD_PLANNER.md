@@ -230,19 +230,59 @@ in under an approval somebody gave for the text they read. Own tag rather than
 `cofferdam/hashing.py`, for the reason Mind gives: that serialization is a frozen contract belonging
 to a different purpose.
 
-A caller may pass `expected_subject_fingerprint` to say *this is what I am authorizing*; a mismatch
-is refused as stale. And the read model publishes `binds_current_subject`, so a future dispatcher can
-prove **"the prompt I am about to dispatch is exactly the prompt the user approved."** If the prompt
-changes, the approval still says truthfully what was approved — it just no longer binds what is
-there now.
+And the read model publishes `binds_current_subject`, so a future dispatcher can prove **"the prompt
+I am about to dispatch is exactly the prompt the user approved."** If the prompt changes, the
+approval still says truthfully what was approved — it just no longer binds what is there now.
+
+### The expected fingerprint is required
+
+`expected_subject_fingerprint` is a **required argument on every authority operation** — answer,
+approve and reject alike — with no default and no "use whatever is current" fallback. `None` and the
+empty string are refused as malformed rather than read as "unspecified".
+
+That is the difference between two properties which are easy to confuse:
+
+| | how it is guaranteed |
+|---|---|
+| the stored event binds the subject that existed **when the write happened** | the fingerprint column alone |
+| the person intended to authorize the subject **they were shown** | only the caller can assert it, by naming the digest it displayed |
+
+A caller that names nothing is not saying *"I approve this text"* — it is saying *"I approve whatever
+is there"*, and the gap between those is exactly where a stale view becomes an approval nobody gave.
+Leaving it optional would delegate stale-view protection to every future caller forever; this module
+is the canonical authority primitive, so the boundary is enforced here once.
+
+The round trip:
+
+```
+read gate  →  display subject + subject_fingerprint
+           →  submit (planner_request_id, authority action, expected_subject_fingerprint)
+           →  service re-derives the current fingerprint and compares
+           →  mismatch: refused as stale, nothing written
+```
+
+Three different causes produce the same refusal, and all three deserve it: the subject changed, the
+caller held a digest for another request, or it held one for the other action on this request. In
+every case the decision would attach to something the person did not read.
+
+**The check runs before the terminal-decision short-circuit.** A retry does not get a free pass: an
+approval resubmitted against a subject that has since moved is a stale view whether or not a decision
+already exists, and short-circuiting on the existing row would answer *"already approved"* to a
+caller looking at different text.
+
+The same rule applies to an answer, in its own terms: an answer is authority for **this exact
+persisted question**, not for whatever question currently belongs to that request id. And to a
+rejection, which is a considered judgement of a specific prompt rather than a standing objection that
+outlives what it objected to.
 
 ### Terminal, append-only, never overwritten
 
 One decision per gate, enforced by a unique index rather than a check-then-write — of two decisions
-racing, exactly one `INSERT` wins. A repeat of the *same* decision returns the existing state
-truthfully (a double tap is one approval); a *contradicting* one is refused. `approve → reject`,
-`reject → approve` and a second, different answer are all refusals, not updates. The table is never
-`UPDATE`d or `DELETE`d from.
+racing, exactly one `INSERT` wins. A repeat of the *same* decision **carrying the same fingerprint**
+returns the existing state truthfully (a double tap is one approval); a *contradicting* one is
+refused; a *stale* one is refused before either is considered. `approve → reject`, `reject → approve`
+and a second, different answer are all refusals, not updates. The table is never `UPDATE`d or
+`DELETE`d from.
 
 Correcting a decision is deliberately absent. It needs an explicit superseding-authority workflow
 with its own record of who changed their mind; reusing `approve` for it would be the silent rewrite

