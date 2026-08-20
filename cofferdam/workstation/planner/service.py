@@ -37,13 +37,20 @@ def _utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-class ProjectionSource(Protocol):
-    """Whatever produces the external-safe context. Injected, never built here.
+class ContextSource(Protocol):
+    """Builds the rich local pack for the active workspace."""
 
-    Typed as a protocol so the service does not import the projector directly
+    def build(self, current_message: object, **kwargs: Any) -> object:
+        ...  # pragma: no cover - structural
+
+
+class ProjectionSource(Protocol):
+    """Turns a local pack into the bounded object eligible to leave the host.
+
+    Typed as protocols so the service does not import either component directly
     and cannot be tempted to construct one with its own policy. The real
-    ``ContextProjector`` satisfies it; so does a test double, and the integration
-    test uses the real one precisely because the policy is the point.
+    ``ContextBuilder`` and ``ContextProjector`` satisfy them, and the integration
+    test uses the real ones precisely because the policy is the point.
     """
 
     def project(self, pack: object, *, budget_bytes: Optional[int] = ...) -> CloudContextProjection:
@@ -70,10 +77,14 @@ class PlannerService:
         *,
         store: PlannerStore,
         planner: DevelopmentPlanner,
+        context: ContextSource,
+        projector: ProjectionSource,
         clock=_utc_now,
     ) -> None:
         self._store = store
         self._planner = planner
+        self._context = context
+        self._projector = projector
         self._clock = clock
 
     # -- startup
@@ -90,7 +101,6 @@ class PlannerService:
     def prepare_development_step(
         self,
         *,
-        projection: CloudContextProjection,
         user_intent: str,
         current_objective: Optional[str] = None,
         plan_checkpoint: Optional[str] = None,
@@ -101,11 +111,19 @@ class PlannerService:
     ) -> PlanningOutcome:
         """Ask the planner for one step, durably.
 
-        ``projection`` is required and typed. There is no parameter here for a
-        path, a working directory, a command, a model or a provider flag — the
-        provider is host-configured, and a caller chooses none of it.
+        **Cofferdam owns the context pipeline, not the caller.** A caller
+        supplies semantic development intent; this method builds the local pack
+        and projects it. The earlier shape took a ready-made
+        ``CloudContextProjection`` as an argument, which quietly put the caller
+        in charge of what left the host — the one decision the egress boundary
+        exists to make for them. There is likewise no parameter here for a path,
+        a working directory, a command, a model or a provider flag.
         """
+        pack = self._context.build(user_intent)
+        projection = self._projector.project(pack)
         if not isinstance(projection, CloudContextProjection):
+            # A projector that returned something else is a defect, not a
+            # caller error — but it is still the boundary, so it still refuses.
             raise PlannerContextRefused(
                 "an external planner requires a CloudContextProjection",
                 detail=type(projection).__name__,
@@ -188,6 +206,7 @@ class PlannerService:
 
 __all__ = [
     "PLANNER_REQUEST_ID_PREFIX",
+    "ContextSource",
     "PlannerService",
     "PlanningOutcome",
     "ProjectionSource",

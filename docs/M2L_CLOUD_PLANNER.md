@@ -139,6 +139,12 @@ a reference to mutable local sources could not later prove what the model was gi
 projection-derived, so it carries only what was already eligible to leave. It is deliberately *not*
 on the routine read model — a caller that wants the whole context has to ask for it.
 
+**Cofferdam owns the context pipeline, not the caller.** `PlannerService.prepare_development_step`
+takes semantic intent — user intent, research notes, prompt-writing guidance, authority boundary —
+and builds the local pack and projects it *itself*. It does **not** accept a ready-made
+`CloudContextProjection`. An earlier shape did, which quietly put the caller in charge of what left
+the host: the one decision the egress boundary exists to make for them.
+
 **Read surface.** `PlannerService.get(...)` / `.recent(...)` return a `PlannerRecord` whose
 `to_dict()` is an allowlist, not a dump: `needs_user_input` and `has_prepared_prompt` are derived,
 provider and context provenance are nested, and the request payload, raw envelope and session id are
@@ -158,6 +164,16 @@ Both smokes ran against the real subscription-authenticated CLI with `--model op
   criteria, verification, stop conditions and expected report. Durably persisted; read-back matched.
 - **`ASK_USER`** — an unresolved architecture choice. It refused to pick, asked in Turkish, and
   carried no worker prompt.
+- **The full vertical slice** — active workspace → real `ContextBuilder` → non-empty
+  `LocalContextPack` → real `ContextProjector` → non-empty `CloudContextProjection` → Opus →
+  validated result → `planner.sqlite3` → read-back. Runs under
+  `COFFERDAM_LIVE_PLANNER=1`; skipped otherwise, so the suite needs no network.
+
+**A finding worth keeping.** The first live run returned `ASK_USER` because the fixture had no
+active workspace: the pack held only the user message, and the policy correctly excluded it, so an
+empty projection reached the model. The model declined to invent requirements — correct, but that is
+*model* restraint. The host guarantee is narrower and is what the tests assert: Cofferdam sends the
+empty projection faithfully, with its omission reasons, and fabricates nothing to fill it.
 
 ## Still deferred
 

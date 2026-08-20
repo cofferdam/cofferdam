@@ -97,19 +97,50 @@ def a_result(action=ACTION_STOP, **kw) -> PlannerResult:
     return PlannerResult(**values)
 
 
+class FakeContext:
+    """Stands in for ContextBuilder. The real one is used in the integration test."""
+
+    def __init__(self):
+        self.messages = []
+
+    def build(self, current_message, **kwargs):
+        self.messages.append(current_message)
+        return {"local_pack": True, "message": current_message}
+
+
+class FakeProjector:
+    """Stands in for ContextProjector."""
+
+    def __init__(self, projection=None, returns=None):
+        self._projection = projection
+        self._returns = returns
+        self.packs = []
+
+    def project(self, pack, **kwargs):
+        self.packs.append(pack)
+        if self._returns is not None:
+            return self._returns
+        return self._projection or a_projection()
+
+
 class StoreHarness(unittest.TestCase):
     def setUp(self):
         self._tmp = TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.dir = Path(self._tmp.name)
         self.store = PlannerStore(self.dir)
+        self.context = FakeContext()
+        self.projector = FakeProjector()
 
-    def service(self, planner) -> PlannerService:
-        return PlannerService(store=self.store, planner=planner)
+    def service(self, planner, projector=None) -> PlannerService:
+        return PlannerService(
+            store=self.store, planner=planner,
+            context=self.context, projector=projector or self.projector,
+        )
 
     def run_once(self, planner, **kw):
         return self.service(planner).prepare_development_step(
-            projection=a_projection(), user_intent="bir seyler yapalim", **kw
+            user_intent="bir seyler yapalim", **kw
         )
 
 
@@ -363,14 +394,33 @@ class ReadSurface(StoreHarness):
 
 
 class EgressAndNoDispatch(StoreHarness):
-    def test_a_non_projection_is_refused_by_the_service(self):
+    def test_a_projector_returning_a_local_pack_is_refused(self):
+        """The boundary holds even when the defect is inside Cofferdam."""
+
         class LocalContextPack:
             parts = ()
 
+        bad = FakeProjector(returns=LocalContextPack())
         with self.assertRaises(PlannerContextRefused):
-            self.service(FakePlanner(result=a_result())).prepare_development_step(
-                projection=LocalContextPack(), user_intent="x"
-            )
+            self.service(
+                FakePlanner(result=a_result()), projector=bad
+            ).prepare_development_step(user_intent="x")
+
+    def test_the_service_owns_building_and_projecting(self):
+        """A caller supplies intent; Cofferdam decides what leaves the host."""
+        import inspect
+
+        params = set(
+            inspect.signature(PlannerService.prepare_development_step).parameters
+        )
+        self.assertNotIn("projection", params)
+        self.assertIn("user_intent", params)
+
+        planner = FakePlanner(result=a_result())
+        self.run_once(planner)
+        self.assertEqual(self.context.messages, ["bir seyler yapalim"])
+        self.assertEqual(len(self.projector.packs), 1)
+        self.assertEqual(self.projector.packs[0]["message"], "bir seyler yapalim")
 
     def test_the_provider_receives_only_the_projection(self):
         planner = FakePlanner(result=a_result())
@@ -408,8 +458,76 @@ class EgressAndNoDispatch(StoreHarness):
             inspect.signature(PlannerService.prepare_development_step).parameters
         )
         for forbidden in ("model", "executable", "cwd", "command", "argv", "env",
-                          "provider", "tools", "mcp_config", "path"):
+                          "provider", "tools", "mcp_config", "path", "projection"):
             self.assertNotIn(forbidden, params, f"service accepts {forbidden}")
+
+
+# -- the empty-context regression --------------------------------------------
+
+
+class EmptyContextIsNotFabricated(StoreHarness):
+    """What the host guarantees when there is nothing useful to send.
+
+    Found the hard way: the first live run produced an empty projection because
+    no workspace was active, and the policy correctly excluded the only part
+    left. Opus answered ASK_USER — good restraint, but *model* restraint, and a
+    host must not rely on a model's judgement for a safety property.
+
+    So what is asserted here is the half Cofferdam owns: an empty projection is
+    still sent as an empty projection, faithfully, and Cofferdam invents no
+    context to fill it. What the model then decides is deliberately not pinned —
+    the architecture defines no host rule that empty context must produce
+    ASK_USER, and inventing one here would be asserting a guarantee that does
+    not exist.
+    """
+
+    def empty_projection(self):
+        from cofferdam.workstation.context.projection.model import ProjectionOmission
+
+        return a_projection(
+            parts=(),
+            omissions=(
+                ProjectionOmission(
+                    source_ref="user:current_message",
+                    reason="policy_excluded",
+                    source_kind="user_instruction",
+                ),
+            ),
+        )
+
+    def test_cofferdam_invents_no_context_to_fill_an_empty_projection(self):
+        planner = FakePlanner(result=a_result())
+        service = PlannerService(
+            store=self.store, planner=planner, context=self.context,
+            projector=FakeProjector(projection=self.empty_projection()),
+        )
+        service.prepare_development_step(user_intent="ne yapalim?")
+
+        sent = planner.calls[0].to_prompt_payload()["project_context"]
+        self.assertEqual(sent["parts"], [], "context appeared from nowhere")
+        self.assertEqual(len(sent["omissions"]), 1)
+        self.assertEqual(sent["omissions"][0]["reason"], "policy_excluded")
+
+    def test_the_omission_reaches_the_model_rather_than_being_hidden(self):
+        """The model is told what was withheld, so it can ask rather than guess."""
+        planner = FakePlanner(result=a_result())
+        PlannerService(
+            store=self.store, planner=planner, context=self.context,
+            projector=FakeProjector(projection=self.empty_projection()),
+        ).prepare_development_step(user_intent="ne yapalim?")
+        self.assertIn(
+            "policy_excluded",
+            json.dumps(planner.calls[0].to_prompt_payload(), ensure_ascii=False),
+        )
+
+    def test_an_empty_projection_is_still_durably_snapshotted(self):
+        planner = FakePlanner(result=a_result())
+        outcome = PlannerService(
+            store=self.store, planner=planner, context=self.context,
+            projector=FakeProjector(projection=self.empty_projection()),
+        ).prepare_development_step(user_intent="ne yapalim?")
+        packet = self.store.request_payload(outcome.planner_request_id)
+        self.assertEqual(packet["project_context"]["parts"], [])
 
 
 # -- 32-33. the neighbours ---------------------------------------------------

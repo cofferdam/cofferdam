@@ -60,7 +60,13 @@ from .protocol import (
     PlanningTurn,
     ProviderExecution,
 )
-from .service import PlannerService, PlanningOutcome, new_planner_request_id
+from .service import (
+    ContextSource,
+    PlannerService,
+    PlanningOutcome,
+    ProjectionSource,
+    new_planner_request_id,
+)
 from .store import (
     PLANNER_SCHEMA_VERSION,
     STATUS_FAILED,
@@ -94,10 +100,12 @@ __all__ = [
     "PlannerResultMissing",
     "PlannerTimeout",
     "PlannerUnavailable",
+    "ContextSource",
     "PlannerRecord",
     "PlannerService",
     "PlannerStore",
     "PlanningOutcome",
+    "ProjectionSource",
     "PlanningTurn",
     "STATUS_FAILED",
     "STATUS_INTERRUPTED",
