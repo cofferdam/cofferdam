@@ -421,8 +421,37 @@ class WorkerAdapterBoundary(ContainmentHarness):
         )
         granted = argv[argv.index("--allowedTools") + 1 : argv.index("--disallowedTools")]
         self.assertEqual(
-            set(granted), {"Read", "Write", "Edit", "Glob", "Grep", "TodoWrite"}
+            set(granted),
+            {
+                "Read(/work/**)",
+                "Write(/work/**)",
+                "Edit(/work/**)",
+                "Glob(/work/**)",
+                "Grep(/work/**)",
+            },
         )
+
+    def test_every_granted_tool_is_scoped_to_the_worktree(self):
+        """A grant that names no path is a grant over everything mounted."""
+        argv = cli.build_interior_argv(
+            interior_cli="/opt/claude-cli", interior_worktree="/work"
+        )
+        granted = argv[argv.index("--allowedTools") + 1 : argv.index("--disallowedTools")]
+        self.assertTrue(granted)
+        for tool in granted:
+            self.assertTrue(
+                tool.endswith("(/work/**)"),
+                f"{tool} is granted without a path scope",
+            )
+
+    def test_the_scope_follows_the_interior_worktree_constant(self):
+        """The scope is derived, so it cannot point at a path that moved."""
+        argv = cli.build_interior_argv(
+            interior_cli="/opt/claude-cli", interior_worktree="/elsewhere"
+        )
+        granted = argv[argv.index("--allowedTools") + 1 : argv.index("--disallowedTools")]
+        self.assertIn("Read(/elsewhere/**)", granted)
+        self.assertNotIn("Read(/work/**)", granted)
 
     def test_the_worker_commits_under_its_own_identity(self):
         self.assertEqual(cli.GIT_ENVIRONMENT["GIT_AUTHOR_NAME"], "Cofferdam Worker")

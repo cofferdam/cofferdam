@@ -449,18 +449,74 @@ program starts and says nothing about what it does once running — an intent fi
 The credential must be in the namespace for the CLI to sign in, so anything there that can run code
 can take it.
 
-The shipped profile therefore grants **file tools only**: `Read/Write/Edit/Glob/Grep/TodoWrite`, no
-`Bash`, no `Task`, no `WebFetch`. Three layers, in order of what each is worth:
+The shipped profile therefore grants **file tools only**, and each one is scoped to the worktree:
+`Read(/work/**)`, `Write(/work/**)`, `Edit(/work/**)`, `Glob(/work/**)`, `Grep(/work/**)`. Three
+layers, in order of what each is worth:
 
-1. **No command tool** — no process, no socket. This removes the *exfiltration path* and is
-   load-bearing.
-2. **Path-denied file tools** — `--disallowedTools "Read(/home/worker/**)"` etc. Verified
-   mechanically enforced against the installed runtime. (Without it, `Read` is **not** confined to
-   the working directory — also tested: the model read a file in the worker home on the first ask.)
+1. **No command tool** — no process, no socket. This removes the *exfiltration path* and is the
+   load-bearing layer.
+2. **File tools scoped to `/work`** — a positive grant, plus a `--disallowedTools
+   "Read(/home/worker/**)"` deny rule behind it as defense in depth.
 3. **Output scrubbing** — the final message is the one channel that leaves a namespace by design.
+   It is a filter on what gets *stored*, **not** the credential boundary. The guarantee is that the
+   model cannot obtain the credential through its tools; scrubbing exists for the case where
+   provider or runtime metadata carries sensitive material by accident.
 
-Layer 2 is a permission rule and is treated as one: verified, and placed *behind* layer 1 rather
-than in place of it.
+Only layer 1 is a statement about capability. Layer 2 is a permission rule, layer 3 is a filter, and
+neither is asked to carry the boundary alone.
+
+### Path aliases — is authorization lexical or canonical?
+
+A project repository is model-controlled input and may already contain Git-tracked symlinks. So a
+`/work/**` grant is worth exactly what the permission engine's *matching* is worth: if it matched the
+string it was handed, `/work/apparently-safe → /home/worker/<credential>` would launder the
+credential directory into scope.
+
+Tested behaviourally against CLI 2.1.221, with a fake sentinel planted in the worker home, an
+unrestricted control process shown to follow every alias to it first, and the alias attempted only
+then:
+
+| alias | result |
+|---|---|
+| `/home/worker/.claude/<sentinel>` — direct | refused |
+| `/work/../home/worker/...` and `/work/./../home/worker/...` | refused |
+| `/work/project-info.txt → /home/worker/...` — symlink escape | refused |
+| `/work/a → /work/b → /home/worker/...` — chain | refused |
+| `../home/worker/...` — relative escape | refused |
+| `/proc/self/root/home/worker/...`, `/proc/self/cwd/...` | refused |
+| **`/work/host-link → /etc/hostname`** — *lexically in scope* | **refused** |
+| write through a dangling escape, and through an escaping *directory* link | refused |
+| `/work/docs.md → README.md`, `nested/up.md → ../README.md` — safe internal | readable |
+
+The last-but-two row is the one that settles it. `/work/host-link` is lexically inside `/work/**`; a
+lexical matcher would have allowed it. **The engine authorizes the resolved target.**
+
+Because of that, **no worktree symlink preflight ships**. The containment it would add already
+exists a layer down, and sandbox code duplicating an enforced guarantee is a liability that has to be
+maintained and can drift. `tests/test_worker_path_aliases.py` is what fails if a CLI upgrade ever
+changes that answer — which is the event that would make a preflight necessary.
+
+The measurement also corrected the *previous* posture. Before scoping, the grant was
+"everywhere except one known directory", and under it the model read `/etc/hostname` and
+`/usr/lib/os-release` on the first ask. Nothing there is a secret — the mount namespace is why — but
+the policy expressed *deny one place* where the intent was *allow one place*, and those differ on
+every path nobody thought to name.
+
+### The tool list is the runtime's, not the profile's wish
+
+`--allowedTools` grants *permission*; it does not decide which tools exist. Reading the session's own
+`init` event showed a worker holding `Artifact`, `PushNotification`, `RemoteTrigger`, `CronCreate`,
+`SendMessage`, `Monitor`, `DesignSync`, `ToolSearch`, `NotebookEdit`, `EnterWorktree` and the `Task*`
+family — while the profile listed six file tools. Several of those reach off this machine or outlive
+the dispatch.
+
+`DENIED_TOOLS` now names the whole non-file surface, and the result is checked against the runtime
+rather than reasoned about: the `init` event reports exactly `["Edit", "Glob", "Grep", "Read",
+"Write"]`, with no MCP server and no slash command.
+
+**Controller network access is not model network authority.** Cofferdam's own process must reach
+Anthropic for a worker to run at all; nothing about that requires the *model* to hold a tool that
+leaves the machine. The two get confused precisely because they share a process.
 
 ### Project checks run somewhere else entirely
 

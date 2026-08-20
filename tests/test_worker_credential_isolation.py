@@ -142,7 +142,14 @@ class TheShippedProfileGrantsNoCommandTool(SentinelHarness):
 
     def test_only_file_tools_are_granted(self):
         self.assertEqual(
-            set(self.granted()), {"Read", "Write", "Edit", "Glob", "Grep", "TodoWrite"}
+            set(self.granted()),
+            {
+                "Read(/work/**)",
+                "Write(/work/**)",
+                "Edit(/work/**)",
+                "Glob(/work/**)",
+                "Grep(/work/**)",
+            },
         )
 
     def test_command_tools_are_denied_by_name_as_well(self):

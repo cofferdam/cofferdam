@@ -49,18 +49,72 @@ Three layers, and what each is worth
 
 1. **No command tool.** No Bash means no process, no socket, no ``curl``. This is
    the layer that removes the *exfiltration path*, and it is the load-bearing one.
-2. **Path-denied file tools.** :data:`DENIED_PATHS` denies ``Read``/``Glob``/
-   ``Grep`` on the worker home. Tested and **mechanically enforced**: asked for a
-   benign file there, the CLI answered "access denied" and the file did not
-   reach the model.
+2. **File tools scoped to the worktree.** :data:`PROFILE_TOOLS` grants each file
+   tool only over ``/work/**`` — a positive boundary, not a hole punched in a
+   universal grant. :data:`DENIED_PATHS` additionally denies the worker home.
 3. **Output scrubbing.** The final message is scrubbed before Cofferdam stores
    it, because a final message is the one channel that survives a namespace.
 
-Layer 2 is a permission rule and is treated as one: it was verified against the
-installed runtime rather than trusted, and it sits *behind* layer 1 rather than
-in place of it. ``Read`` is otherwise **not** confined to the working directory
-by this CLI — that was tested too, and without a deny rule the model read a file
-in the worker home on the first ask.
+Only layer 1 is a guarantee about *capability*. Layer 2 is a permission rule and
+layer 3 is a filter; neither is asked to carry the boundary alone.
+
+Why the grant is positive, and what that changed
+------------------------------------------------
+
+The first version of this profile granted ``Read``/``Glob``/``Grep`` unscoped and
+subtracted the worker home with :data:`DENIED_PATHS`. That is the "everywhere
+except one known directory" shape, and an adversarial run showed what it costs:
+with it in force the model read ``/etc/hostname`` and ``/usr/lib/os-release`` on
+the first ask. Nothing there is a secret — the namespace is why — but the policy
+was expressing *deny one place* when the intent was *allow one place*, and those
+differ on every path nobody thought to name.
+
+Scoping the grant to ``/work/**`` was verified rather than assumed. Under it,
+worktree reads, writes, edits, globs and greps all still work, and paths outside
+the worktree are refused: ``Claude requested permissions to read from
+/etc/hostname, but you haven't granted it yet``.
+
+Path authorization is by **resolved target**, and that was measured
+-------------------------------------------------------------------
+
+A repository is model-controlled input and may carry Git-tracked symlinks, so
+whether the permission engine matches the *lexical* path or the *canonical* one
+decides whether ``/work/anything`` can be an alias for the credential. This was
+tested behaviourally against the installed CLI with a fake sentinel, never
+assumed:
+
+* ``/work/project-info.txt`` → ``/home/worker/.claude/...`` — **refused**;
+* ``/work/a`` → ``/work/b`` → the same target (a chain) — **refused**;
+* a *relative* escape, ``../home/worker/...`` — **refused**;
+* ``/work/../home/worker/...`` and ``/work/./../home/worker/...`` — **refused**;
+* ``/proc/self/root/home/worker/...`` and ``/proc/self/cwd/...`` — **refused**;
+* and the discriminator that makes the rest mean something: ``/work/host-link``
+  → ``/etc/hostname`` is *lexically inside* ``/work/**`` and was **still
+  refused** under the scoped grant.
+
+That last one is the proof. A lexical matcher would have allowed it. The engine
+resolves the link and authorizes the target, so a symlink cannot launder a path
+into scope — which is also why no worktree symlink preflight is shipped here:
+the containment it would add already exists, and unnecessary sandbox code is its
+own liability. Safe *internal* links keep working: ``docs.md`` → ``README.md``
+and ``nested/up.md`` → ``../README.md`` both read normally.
+
+The tool list is the runtime's, not this file's wish
+-----------------------------------------------------
+
+``--allowedTools`` is a *permission* allowlist and does not decide which tools
+exist. The session's ``init`` event does, and reading it exposed a surface much
+wider than this profile had accounted for: ``Artifact``, ``PushNotification``,
+``RemoteTrigger``, ``CronCreate``/``CronDelete``/``CronList``, ``SendMessage``,
+``Monitor``, ``DesignSync``, ``ToolSearch``, ``NotebookEdit``, ``EnterWorktree``
+and the ``Task*`` family were all live in the worker's session while this profile
+listed six tools.
+
+Several of those are outward-facing — ``Artifact`` publishes a page, ``ToolSearch``
+loads deferred tool schemas, ``NotebookEdit`` writes files outside the scoped
+grant. So :data:`DENIED_TOOLS` now names the whole non-file surface, and the
+result is checked against the runtime rather than reasoned about: the ``init``
+event reports exactly ``["Edit", "Glob", "Grep", "Read", "Write"]``.
 
 What is still absent
 --------------------
@@ -93,47 +147,97 @@ SEARCH_DIRECTORIES: Tuple[str, ...] = (
 #: field a caller learns to send and the second is "which tools".
 PROFILE_MODEL = "sonnet"
 
-#: Built-in tools the worker may have at all.
+#: The file tools a worker gets, and the only paths it gets them over.
 #:
-#: **No ``Bash``**, and no other command tool. See the module docstring: a
-#: prefix allowlist over interpreters is not a boundary, and the credential lives
-#: in this namespace. Everything here is a file tool.
+#: Names without paths, because the interior worktree is a sandbox constant that
+#: :func:`build_interior_argv` pairs each of them with. Writing
+#: ``Read(/work/**)`` here as well would be the same fact in two places, and the
+#: copy is what drifts.
+#:
+#: **No ``Bash``**, and no other command tool. See the module docstring: a prefix
+#: allowlist over interpreters is not a boundary, and the credential lives in
+#: this namespace. Everything here is a file tool.
 PROFILE_TOOLS: Tuple[str, ...] = (
     "Read",
     "Write",
     "Edit",
     "Glob",
     "Grep",
-    "TodoWrite",
 )
 
-#: Command tools, denied by name as well as omitted from the grant.
+#: Everything the installed runtime offers that this worker must not have.
 #:
-#: An allowlist grants nothing it does not name, so this is a second statement of
-#: the same decision — in the form a reviewer scanning for "can this run
-#: something" will actually find.
+#: Not a restatement of the allowlist. ``--allowedTools`` grants *permission*; it
+#: does not remove a tool from the session, and the ``init`` event showed all of
+#: these live in a worker session that had been granted six file tools. Naming
+#: them here removes them, which the same event then confirms.
+#:
+#: Three groups, for three reasons:
+#:
+#: * command tools — an arbitrary-code launcher in the credential namespace;
+#: * outward-facing tools — ``Artifact`` publishes, ``PushNotification`` and
+#:   ``RemoteTrigger`` and ``CronCreate`` reach off the machine or outlive the
+#:   dispatch, and controller network access must not become model network
+#:   authority;
+#: * file tools outside the scoped grant — ``NotebookEdit`` writes, and
+#:   ``EnterWorktree`` moves the ground the scope is measured from.
 DENIED_TOOLS: Tuple[str, ...] = (
+    # Command execution and delegation.
     "Bash",
     "BashOutput",
     "KillShell",
     "Task",
+    "Skill",
+    "SlashCommand",
+    # Network and anything that outlives or escapes this dispatch.
     "WebFetch",
     "WebSearch",
+    "Artifact",
+    "PushNotification",
+    "RemoteTrigger",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "ScheduleWakeup",
+    "Monitor",
+    "DesignSync",
+    "SendMessage",
+    "SendUserFile",
+    "ToolSearch",
+    "ListMcpResources",
+    "ReadMcpResource",
+    "McpInput",
+    # File and workspace tools outside the scoped grant.
+    "NotebookEdit",
+    "EnterWorktree",
+    "ExitWorktree",
+    # Session bookkeeping a bounded headless worker has no use for.
+    "TaskCreate",
+    "TaskGet",
+    "TaskList",
+    "TaskOutput",
+    "TaskStop",
+    "TaskUpdate",
+    "ReportFindings",
+    "AskUserQuestion",
 )
 
-#: Paths the file tools may not touch, as ``--disallowedTools`` patterns.
+#: The worker home denied outright, on top of the scoped grant above.
 #:
-#: The worker home is where the CLI keeps the credential it signed in with. This
-#: rule is **verified enforced** against the installed runtime, not assumed: with
-#: it, a request for a benign file there is refused by the CLI with "access
-#: denied"; without it, the same request succeeds on the first ask.
+#: Defense in depth and nothing more. The positive ``/work/**`` grant is what
+#: keeps the credential directory out of reach; this rule would keep it out of
+#: reach if that grant were ever widened by mistake. Both were measured: the
+#: scoped grant refuses these paths, and so does this rule, with the two
+#: producing distinguishable messages.
 #:
-#: It is layer two of three and is not asked to carry the boundary alone — see
-#: the module docstring.
+#: The doubled-slash variants are here because a permission pattern is matched
+#: after normalization but written by hand, and ``//home`` costs nothing to name.
 DENIED_PATHS: Tuple[str, ...] = (
     "Read(/home/worker/**)",
     "Glob(/home/worker/**)",
     "Grep(/home/worker/**)",
+    "Write(/home/worker/**)",
+    "Edit(/home/worker/**)",
     "Read(//home/worker/**)",
     "Glob(//home/worker/**)",
     "Grep(//home/worker/**)",
@@ -226,6 +330,17 @@ def resolve_cli_directory(executable: Path) -> Path:
     return Path(os.path.realpath(executable))
 
 
+def scoped_tools(interior_worktree: str) -> Tuple[str, ...]:
+    """:data:`PROFILE_TOOLS`, each bound to the worktree it may operate on.
+
+    ``Read`` becomes ``Read(/work/**)``. The scope comes from the sandbox's
+    interior constant rather than from a literal here, so a worktree that ever
+    appeared somewhere else could not leave a grant pointing at the old place.
+    """
+    scope = interior_worktree.rstrip("/")
+    return tuple(f"{tool}({scope}/**)" for tool in PROFILE_TOOLS)
+
+
 def build_interior_argv(*, interior_cli: str, interior_worktree: str) -> List[str]:
     """The CLI command line as it exists *inside* the namespace.
 
@@ -235,7 +350,9 @@ def build_interior_argv(*, interior_cli: str, interior_worktree: str) -> List[st
 
     ``--add-dir`` is absent and its absence is load-bearing: the worker's
     reachable filesystem is decided by the mount namespace, and a flag that
-    could widen it from inside would make the outer boundary advisory.
+    could widen it from inside would make the outer boundary advisory. The
+    granted tools are scoped to ``interior_worktree`` for the same reason one
+    layer up — a grant that names no path is a grant over everything mounted.
     """
     return [
         interior_cli,
@@ -247,7 +364,7 @@ def build_interior_argv(*, interior_cli: str, interior_worktree: str) -> List[st
         "--permission-mode",
         PROFILE_PERMISSION_MODE,
         "--allowedTools",
-        *PROFILE_TOOLS,
+        *scoped_tools(interior_worktree),
         "--disallowedTools",
         *DENIED_TOOLS,
         *DENIED_PATHS,
@@ -281,4 +398,5 @@ __all__ = [
     "build_interior_argv",
     "find_executable",
     "resolve_cli_directory",
+    "scoped_tools",
 ]
