@@ -81,6 +81,67 @@ class PlannerContextRefused(PlannerError):
     reason_code = "planner_context_refused"
 
 
+# -- human authority ----------------------------------------------------------
+#
+# These are refusals to record a *person's decision*, which makes them a
+# different kind of failure from everything above: nothing here says a planning
+# turn went wrong. They say Cofferdam will not write an authority record that
+# would not be true. Every one of them leaves the gate exactly as it was.
+
+
+class PlannerAuthorityError(PlannerError):
+    """Base for every refusal on the human authority path."""
+
+    reason_code = "planner_authority_error"
+
+
+class PlannerAuthorityInvalid(PlannerAuthorityError):
+    """The submitted decision was not one this host could record truthfully.
+
+    An answer that is empty or over the bound, a provenance source this build may
+    not attribute, an action word outside the closed vocabulary. Refused rather
+    than trimmed: a truncated answer is a different answer from the one somebody
+    gave, and attributing a decision to the wrong surface makes the provenance
+    worse than absent.
+    """
+
+    reason_code = "planner_authority_invalid"
+
+
+class PlannerAuthorityRefused(PlannerAuthorityError):
+    """The action does not belong to the gate this planner result derives.
+
+    Approving a question, answering a prepared prompt, deciding anything about a
+    ``STOP`` or about an invocation that never succeeded. The persisted result
+    determines the vocabulary, and a caller does not get to reinterpret it.
+    """
+
+    reason_code = "planner_authority_refused"
+
+
+class PlannerAuthorityStale(PlannerAuthorityError):
+    """The subject moved out from under the decision being submitted.
+
+    The caller named the fingerprint it believed it was authorizing and the
+    persisted result no longer hashes to it. The same refusal Mind's base hash
+    makes: what somebody read is not what would now be authorized, and re-reading
+    is the entire point.
+    """
+
+    reason_code = "planner_authority_stale"
+
+
+class PlannerAuthorityConflict(PlannerAuthorityError):
+    """A terminal decision already exists and this one contradicts it.
+
+    Never resolved by overwriting. An approval that becomes a rejection because
+    somebody sent a second request is a history that lost the first decision, and
+    the whole reason these records are durable is so that they cannot.
+    """
+
+    reason_code = "planner_authority_conflict"
+
+
 __all__ = [
     "PlannerError",
     "PlannerUnavailable",
@@ -90,4 +151,9 @@ __all__ = [
     "PlannerResultMissing",
     "PlannerResultInvalid",
     "PlannerContextRefused",
+    "PlannerAuthorityError",
+    "PlannerAuthorityInvalid",
+    "PlannerAuthorityRefused",
+    "PlannerAuthorityStale",
+    "PlannerAuthorityConflict",
 ]
