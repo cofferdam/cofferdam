@@ -129,6 +129,29 @@ class NoShellExecutionTests(unittest.TestCase):
                 continue
             if path.name == "wrapper.py" and path.parent.name == "sessions":
                 continue
+            if path.name == "claude_code.py" and path.parent.name == "providers":
+                # M2L PR1c-a. The planner provider, and the narrowest process
+                # owner in this file: it starts one CLI, with **no tools at
+                # all**, and reads its stdout.
+                #
+                # Scoped by (name, parent) rather than by filename, so a future
+                # `claude_code.py` elsewhere is still caught.
+                #
+                # What it gives up is smaller than what it keeps. The argv is
+                # constants plus host-owned configuration — `tests/
+                # test_planner_contracts.py` asserts from the constructed
+                # command line that no request text reaches it, that `--tools`
+                # is always `""`, and that `--mcp-config` never appears. The
+                # request travels on stdin, so user and Custom-GPT prose never
+                # enters a command line. `shell=False`, a timeout, a
+                # code-owned working directory that is refused if it has
+                # acquired a `.mcp.json` or a `CLAUDE.md`, and no child that
+                # outlives the call.
+                #
+                # It signals nothing: `os.kill`, `signal`, `SIGTERM`, `SIGKILL`
+                # and `terminate()` are absent, asserted directly in
+                # `tests/test_planner_contracts.py` rather than left to habit.
+                continue
             if path.name == "hostclient.py" and path.parent.name == "claude_agent_sdk":
                 continue
             if (

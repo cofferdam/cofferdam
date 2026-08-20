@@ -1126,6 +1126,10 @@ One **role**, one authority boundary, advisory throughout (D-2026-08-11-2, D-202
 - **The planner is provider-neutral** (D-2026-08-20-1). Claude/Opus-class, OpenAI, Gemini, a future
   provider, or an optional local model are all backends behind one role. Core logic never names a
   vendor; model selection is provider configuration.
+- **Implemented foundation (PR1c-a):** [`docs/M2L_CLOUD_PLANNER.md`](docs/M2L_CLOUD_PLANNER.md)
+  — the provider-neutral planner role, the closed `PlannerResult`, the two-gate validation
+  boundary, the no-tools provider invocation and the controlled working directory. Persistence,
+  the read surface and the live smokes are PR1c-b.
 - **Provider capability evidence:** [`docs/M2L_CLAUDE_CAPABILITY_AUDIT.md`](docs/M2L_CLAUDE_CAPABILITY_AUDIT.md)
   (M2L PR1b, 2026-08-20) records what is actually usable from the headless server — the
   enforceable no-tools boundary, provider-side result schema, Opus-class selection, and which
