@@ -52,13 +52,14 @@ outside the branch policy, and the last two have no code path here at all.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from ....worker import sandbox, worktree
+from ....worker import checks, sandbox, worktree
 from ...models import EVENT_PROGRESS, MAX_OUTPUT_CHARS, bounded_text
 from ..protocol import (
     AdapterCapabilities,
@@ -103,19 +104,20 @@ exists in your filesystem. You are on branch {branch}, cut from {base}.
 Your job is the approved development step given below the separator. Do that
 step and nothing beyond it.
 
-You may: read and edit files here, run the project's own tests and checks,
-inspect Git state, and create a commit on this branch.
+You have file tools only: read, write, edit, glob and grep, all within this
+directory. You have no shell and cannot run commands — that is deliberate, not a
+malfunction. After you finish, Cofferdam runs the project's own checks itself in
+a separate sandbox and makes the commit; you do not need to do either, and you
+cannot.
 
-You must not: merge anything, switch or create other branches, push to a
-protected branch, deploy, restart services, install packages, or start another
-agent. If the step seems to require any of those, stop and report that instead.
+So: make the edits the step calls for, and stop. Do not try to run tests, do not
+try to commit, and do not report that you did either.
 
 If the step is ambiguous or you cannot complete it safely, stop and say so
 plainly. An honest incomplete report is worth more than a confident wrong one.
 
-When you finish, report: what you changed, what you ran, what the results were,
-and whether you committed. Do not claim a test passed unless you ran it and saw
-it pass.
+When you finish, report which files you changed and why. Do not claim any test
+passed — you did not run one, and Cofferdam will.
 """
 
 
@@ -131,6 +133,7 @@ class ClaudeCodeWorkerAdapter(TaskAdapter):
         *,
         state_dir: Optional[Path] = None,
         timeout_seconds: float = cli.PROFILE_TIMEOUT_SECONDS,
+        project_check: Optional[str] = None,
     ) -> None:
         # Resolved from host configuration when nobody said, never from a
         # request. It decides where worktrees and worker homes are created, and
@@ -141,6 +144,16 @@ class ClaudeCodeWorkerAdapter(TaskAdapter):
             state_dir if state_dir is not None else worktree.default_state_dir()
         )
         self._timeout = float(timeout_seconds)
+        # Which host-owned check runs after the edits: a key into the closed
+        # table in `worker.checks`, never a command.
+        #
+        # Named `project_check` rather than `check_id`, deliberately. M2K
+        # reserves that vocabulary for *criterion* evaluation — the thing that
+        # decides whether acceptance criteria are met — and this is not that. A
+        # project's own test command run as an observation beside a dispatch must
+        # not borrow the name of the thing that judges acceptance, because the
+        # whole point of the boundary is that this result does not judge it.
+        self._project_check = project_check
         self._lock = threading.RLock()
         self._processes: Dict[str, subprocess.Popen] = {}
         self._cancelled: set = set()
@@ -229,7 +242,48 @@ class ClaudeCodeWorkerAdapter(TaskAdapter):
         result, failure = self._run(context.task_id, plan, payload)
         elapsed_ms = int((time.time() - started) * 1000)
 
-        return self._outcome(context, tree, result, failure, elapsed_ms)
+        if failure is not None:
+            return self._outcome(context, tree, None, failure, elapsed_ms, None, None)
+
+        # -- phase two: the project's own checks, in a namespace with no
+        # -- credential and no network. Cofferdam runs this; the worker could
+        # -- not have, and that is what makes the result an observation.
+        check = checks.run(worktree=tree.path, check=self._project_check)
+
+        # -- phase three: the commit, also host-owned. A model holding a
+        # -- provider credential should not be the thing authoring commits.
+        commit, commit_failure = self._commit(tree, check)
+
+        return self._outcome(
+            context, tree, result, commit_failure, elapsed_ms, check, commit
+        )
+
+    def _commit(self, tree, check):
+        """Commit the worker's edits. Runs whether or not the check passed.
+
+        A failing check is information, not a reason to throw the work away: the
+        branch is isolated, nothing downstream consumes it automatically, and a
+        commit is what makes the attempt reviewable at all. The check result
+        travels beside it rather than gating it.
+        """
+        try:
+            message = (
+                "worker: approved development step\n\n"
+                f"Checks: {check.check} "
+                f"{'exited 0' if check.exit_zero else 'did not exit 0'}.\n"
+                "Authored by a Cofferdam development worker; not reviewed."
+            )
+            return (
+                worktree.commit_all(
+                    tree,
+                    message=message,
+                    author=cli.GIT_AUTHOR_NAME,
+                    email=cli.GIT_AUTHOR_EMAIL,
+                ),
+                None,
+            )
+        except worktree.WorktreeError as exc:
+            return None, ("worker_commit_failed", exc.detail or str(exc))
 
     def _home_directory(self, task_id: str) -> Path:
         return self._state_dir / "worker-homes" / task_id
@@ -330,6 +384,8 @@ class ClaudeCodeWorkerAdapter(TaskAdapter):
         result: Optional[Dict[str, Any]],
         failure: Optional[Tuple[str, str]],
         elapsed_ms: int,
+        check: Optional["checks.CheckResult"] = None,
+        commit: Optional[str] = None,
     ) -> AdapterOutcome:
         """Turn what happened into events and one requested state.
 
@@ -374,16 +430,29 @@ class ClaudeCodeWorkerAdapter(TaskAdapter):
 
         events.append(
             AdapterEvent(
-                event_type=EVENT_PROGRESS,
-                text=_observation_line(observed),
+                event_type=EVENT_PROGRESS, text=_observation_line(observed)
             ).bounded()
         )
+        if check is not None:
+            events.append(
+                AdapterEvent(
+                    event_type=EVENT_PROGRESS,
+                    text=(
+                        f"Cofferdam ran {check.check} in a credential-free "
+                        f"sandbox: {'exited 0' if check.exit_zero else 'did not exit 0'}."
+                    ),
+                    detail=check.failure,
+                ).bounded()
+            )
         return AdapterOutcome(
             events=tuple(events),
             requested_state="completed",
-            # The worker's own account of what it did. A **claim**, and it stays
-            # one: nothing here checks it, and PR1f is where it meets evidence.
-            final_result=bounded_text(summary, MAX_OUTPUT_CHARS),
+            # Two different kinds of sentence, kept apart in the text itself.
+            # What the worker said is a claim; what Cofferdam ran is an
+            # observation. PR1f is where the pair becomes a verdict.
+            final_result=bounded_text(
+                _compose_result(_scrub(summary), check, commit), MAX_OUTPUT_CHARS
+            ),
         )
 
 
@@ -413,6 +482,50 @@ def delivered_prompt(payload: str) -> str:
     """
     _, separator, prompt = payload.partition(PROMPT_SEPARATOR)
     return prompt if separator else payload
+
+
+#: Shapes a provider credential takes, scrubbed from anything Cofferdam stores.
+#:
+#: Layer three, and the smallest of the three. The worker has no way to *send*
+#: a credential, but its final message is the one channel that leaves the
+#: namespace by design — so the text is filtered before it is persisted. This is
+#: defence in depth over a per-dispatch credential copy, not the boundary.
+_SECRET_PATTERNS = (
+    re.compile(r"sk-ant-[A-Za-z0-9_\-]{8,}"),
+    re.compile(r"\bsk-[A-Za-z0-9]{20,}"),
+    re.compile(r"[A-Za-z0-9_\-]{12,}\.[A-Za-z0-9_\-]{12,}\.[A-Za-z0-9_\-]{12,}"),
+    re.compile(r'"(?:access|refresh)Token"\s*:\s*"[^"]+"', re.IGNORECASE),
+)
+
+
+def _scrub(text: Optional[str]) -> Optional[str]:
+    """Remove credential-shaped strings from worker output before it is stored."""
+    if not text:
+        return text
+    cleaned = text
+    for pattern in _SECRET_PATTERNS:
+        cleaned = pattern.sub("[redacted]", cleaned)
+    return cleaned
+
+
+def _compose_result(summary, check, commit) -> str:
+    """The worker's claim and Cofferdam's observations, labelled as such."""
+    parts = ["WORKER REPORT (a claim by the worker, not verified):", summary or "(none)"]
+    parts.append("")
+    parts.append("COFFERDAM OBSERVED:")
+    if check is not None:
+        parts.append(
+            f"- check {check.check}: "
+            + ("exited 0" if check.exit_zero else "did not exit 0")
+            + (f" ({check.failure})" if check.failure else "")
+        )
+        if check.output.strip():
+            parts.append("- check output:")
+            parts.append(check.output[:4000])
+    parts.append(
+        "- commit: " + (commit if commit else "no commit (the worker changed nothing)")
+    )
+    return "\n".join(parts)
 
 
 def _parse_result(stdout: Optional[str]) -> Optional[Dict[str, Any]]:

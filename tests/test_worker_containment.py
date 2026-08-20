@@ -406,18 +406,23 @@ class WorkerAdapterBoundary(ContainmentHarness):
         self.assertIn("-p", argv)
         self.assertNotIn("--prompt", argv)
 
-    def test_dangerous_commands_are_denied_by_name(self):
+    def test_no_command_tool_is_granted_at_all(self):
+        """Replaces an earlier denylist test. There are no commands to deny."""
         argv = cli.build_interior_argv(
             interior_cli="/opt/claude-cli", interior_worktree="/work"
         )
-        rendered = " ".join(argv)
-        for denied in ("sudo", "systemctl", "pip install", "git merge"):
-            self.assertIn(denied, rendered, f"{denied} is not in the denylist")
+        granted = argv[argv.index("--allowedTools") + 1 : argv.index("--disallowedTools")]
+        self.assertNotIn("Bash", granted)
+        self.assertFalse(any(tool.startswith("Bash") for tool in granted))
 
-    def test_no_merge_or_deploy_command_is_allowed(self):
-        allowed = " ".join(cli.BASH_ALLOWLIST)
-        for forbidden in ("merge", "deploy", "systemctl", "sudo", "slot"):
-            self.assertNotIn(forbidden, allowed)
+    def test_the_worker_cannot_merge_or_deploy_because_it_cannot_run_anything(self):
+        argv = cli.build_interior_argv(
+            interior_cli="/opt/claude-cli", interior_worktree="/work"
+        )
+        granted = argv[argv.index("--allowedTools") + 1 : argv.index("--disallowedTools")]
+        self.assertEqual(
+            set(granted), {"Read", "Write", "Edit", "Glob", "Grep", "TodoWrite"}
+        )
 
     def test_the_worker_commits_under_its_own_identity(self):
         self.assertEqual(cli.GIT_ENVIRONMENT["GIT_AUTHOR_NAME"], "Cofferdam Worker")

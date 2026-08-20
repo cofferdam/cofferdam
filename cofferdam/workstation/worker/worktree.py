@@ -297,6 +297,49 @@ def _existing_worktree(root: Path, destination: Path, branch: str) -> Optional[s
     return (merge_base.stdout or "").strip()
 
 
+def commit_all(
+    worktree: DevelopmentWorktree, *, message: str, author: str, email: str
+) -> Optional[str]:
+    """Commit whatever the worker changed. **Cofferdam runs this, not the model.**
+
+    The worker has no command tool, so it cannot commit for itself — and that is
+    the right shape rather than a limitation to work around. A commit is a
+    durable statement about a repository, the identity on it is evidence, and
+    neither should be produced by a process holding a provider credential.
+
+    ``message`` is code-owned text from the adapter. The author is forced to the
+    worker identity, so ``git log`` never attributes a model's change to the
+    operator. Returns the new commit id, or ``None`` when there was nothing to
+    commit — which is a real outcome and not a failure.
+    """
+    status = _git(worktree.path, ["status", "--porcelain"])
+    if status.returncode != 0:
+        raise WorktreeError("the worktree status could not be read")
+    if not (status.stdout or "").strip():
+        return None
+
+    _require(_git(worktree.path, ["add", "-A"]), "the worker's changes could not be staged")
+    result = _git(
+        worktree.path,
+        [
+            "-c", f"user.name={author}",
+            "-c", f"user.email={email}",
+            "commit", "-m", message,
+        ],
+    )
+    if result.returncode != 0:
+        raise WorktreeError(
+            "the worker's changes could not be committed",
+            detail=(result.stderr or "").strip()[:400],
+        )
+    return head_commit(worktree.path)
+
+
+def working_tree_dirty(worktree: DevelopmentWorktree) -> bool:
+    result = _git(worktree.path, ["status", "--porcelain"])
+    return result.returncode == 0 and bool((result.stdout or "").strip())
+
+
 def remove(worktree: DevelopmentWorktree) -> None:
     """Detach one worktree. **Never deletes the branch or its commits.**
 
@@ -345,6 +388,7 @@ __all__ = [
     "default_state_dir",
     "WorktreeError",
     "branch_name",
+    "commit_all",
     "canonical_state",
     "head_commit",
     "is_git_repository",
@@ -352,5 +396,6 @@ __all__ = [
     "remove",
     "worker_branches",
     "worktree_path",
+    "working_tree_dirty",
     "worktrees_root",
 ]

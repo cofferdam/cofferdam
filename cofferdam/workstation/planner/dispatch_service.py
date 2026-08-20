@@ -139,7 +139,11 @@ class DispatchView:
                 "completed_at": getattr(task, "completed_at", None),
                 "latest_activity": getattr(task, "latest_activity", None),
                 "final_result": getattr(task, "final_result", None),
-                "failure": getattr(task, "failure", None),
+                # Flattened rather than passed through. The status surface this
+                # feeds is JSON, and a read model that cannot be serialized is
+                # not a read model — found by the service-level smoke, which
+                # tried to serialize it and could not.
+                "failure": _failure_dict(getattr(task, "failure", None)),
             },
             "worktree": self.worktree,
             # What a Stop button should render. Derived from the live state
@@ -384,6 +388,27 @@ class WorkerDispatchService:
             if found is not None:
                 return found
         return None
+
+
+def _failure_dict(failure) -> Optional[Dict[str, Any]]:
+    """A task failure as plain data, or ``None``.
+
+    Uses the object's own ``to_dict`` when it has one and falls back to a
+    bounded pair of strings, so a future failure type cannot make this surface
+    unserializable again.
+    """
+    if failure is None:
+        return None
+    converter = getattr(failure, "to_dict", None)
+    if callable(converter):
+        try:
+            return converter()
+        except Exception:  # pragma: no cover - a defensive fallback
+            pass
+    return {
+        "code": str(getattr(failure, "code", "") or "")[:200] or None,
+        "message": str(getattr(failure, "message", "") or "")[:1000] or None,
+    }
 
 
 def _branch_for(task_id: str) -> Optional[str]:

@@ -19,19 +19,48 @@ that cannot run a command; one permits ``claude-code-worker`` and gets a
 development worker. Neither is a mode of the other, and there is no field
 anywhere that turns the first into the second.
 
-Why a shell is acceptable here and not there
---------------------------------------------
+Why this profile has **no Bash**, after all
+-------------------------------------------
 
-Because the boundary moved. The CLI adapter's guarantee is *this process has no
-tool that runs commands*. This adapter's guarantee is *this process cannot reach
-anything but its own worktree* — an unprivileged ``bubblewrap`` namespace in
-which the rest of the machine is absent rather than denied (see
-:mod:`...worker.sandbox`). The tool allowlist below is the second layer, not the
-only one, and it is the layer that would be worth little on its own.
+The first version of this file granted Bash under a command-prefix allowlist —
+``git``, ``python3``, ``pytest``, ``make`` — and called those bounded commands.
+An adversarial test against that design, with a fake sentinel credential in the
+exact location the real one occupies, showed they are nothing of the kind:
 
-That ordering matters for a reader deciding whether this is safe: if the
-containment were removed, this profile would not be enough, and the adapter
-refuses to start rather than running without it.
+* a shell in the namespace read the credential file directly;
+* ``python3 -c``, an *allowed* prefix, read it;
+* sandboxed project code opened a socket and sent the sentinel to a local
+  listener, which logged it.
+
+``python3``, ``pytest`` and ``make`` are **arbitrary-code launchers**. A prefix
+allowlist decides which program starts and says nothing about what that program
+does once running — so the allowlist was an intent filter wearing the costume of
+a boundary. The credential must be in this namespace for the CLI to sign in,
+which means anything here that can run code can take it.
+
+So project code does not run here any more. It runs in :mod:`...worker.checks` —
+a second namespace with **no credential mounted and no network** — under a
+command chosen from a host-owned table rather than by a model. The two
+capabilities that were fused are separated: the Claude control process may
+authenticate, project code may execute, neither gets the other's privilege.
+
+Three layers, and what each is worth
+------------------------------------
+
+1. **No command tool.** No Bash means no process, no socket, no ``curl``. This is
+   the layer that removes the *exfiltration path*, and it is the load-bearing one.
+2. **Path-denied file tools.** :data:`DENIED_PATHS` denies ``Read``/``Glob``/
+   ``Grep`` on the worker home. Tested and **mechanically enforced**: asked for a
+   benign file there, the CLI answered "access denied" and the file did not
+   reach the model.
+3. **Output scrubbing.** The final message is scrubbed before Cofferdam stores
+   it, because a final message is the one channel that survives a namespace.
+
+Layer 2 is a permission rule and is treated as one: it was verified against the
+installed runtime rather than trusted, and it sits *behind* layer 1 rather than
+in place of it. ``Read`` is otherwise **not** confined to the working directory
+by this CLI — that was tested too, and without a deny rule the model read a file
+in the worker home on the first ask.
 
 What is still absent
 --------------------
@@ -66,10 +95,9 @@ PROFILE_MODEL = "sonnet"
 
 #: Built-in tools the worker may have at all.
 #:
-#: ``Bash`` is here and its scope is not open — see :data:`BASH_ALLOWLIST`. The
-#: rest are the same file tools the CLI adapter grants, and they are bounded by
-#: the namespace rather than by the tool: ``Read`` cannot reach a path that is
-#: not mounted.
+#: **No ``Bash``**, and no other command tool. See the module docstring: a
+#: prefix allowlist over interpreters is not a boundary, and the credential lives
+#: in this namespace. Everything here is a file tool.
 PROFILE_TOOLS: Tuple[str, ...] = (
     "Read",
     "Write",
@@ -79,65 +107,44 @@ PROFILE_TOOLS: Tuple[str, ...] = (
     "TodoWrite",
 )
 
-#: The command prefixes the worker may run, as ``--allowedTools`` patterns.
+#: Command tools, denied by name as well as omitted from the grant.
 #:
-#: A development step needs to inspect Git, run the project's checks, and read
-#: the tree. It does not need a package installer, a network fetcher, a
-#: privilege escalation or a service manager, and none is here.
-#:
-#: This is an allowlist of *prefixes*, so ``Bash(git *)`` permits ``git status``
-#: and ``git commit`` and does not permit ``gitfoo``. It is enforced by the CLI,
-#: which makes it a real boundary and not the only one — a command that slipped
-#: through still runs in a namespace containing one worktree.
-BASH_ALLOWLIST: Tuple[str, ...] = (
-    "Bash(git *)",
-    "Bash(python3 *)",
-    "Bash(python -m *)",
-    "Bash(pytest *)",
-    "Bash(ls *)",
-    "Bash(cat *)",
-    "Bash(head *)",
-    "Bash(tail *)",
-    "Bash(grep *)",
-    "Bash(find *)",
-    "Bash(wc *)",
-    "Bash(diff *)",
-    "Bash(mkdir *)",
-    "Bash(make *)",
-    "Bash(npm test*)",
-    "Bash(npm run *)",
+#: An allowlist grants nothing it does not name, so this is a second statement of
+#: the same decision — in the form a reviewer scanning for "can this run
+#: something" will actually find.
+DENIED_TOOLS: Tuple[str, ...] = (
+    "Bash",
+    "BashOutput",
+    "KillShell",
+    "Task",
+    "WebFetch",
+    "WebSearch",
 )
 
-#: Denied by name as well as omitted from the allowlist, because defence in
-#: depth costs nothing here and the list documents intent to a reader.
+#: Paths the file tools may not touch, as ``--disallowedTools`` patterns.
 #:
-#: ``sudo`` and the service tools cannot work inside the namespace anyway; they
-#: are named so that their absence is a decision somebody wrote down rather than
-#: an accident of which prefixes happened to be allowed.
-BASH_DENYLIST: Tuple[str, ...] = (
-    "Bash(sudo *)",
-    "Bash(su *)",
-    "Bash(systemctl *)",
-    "Bash(apt *)",
-    "Bash(apt-get *)",
-    "Bash(pip install *)",
-    "Bash(curl *)",
-    "Bash(wget *)",
-    "Bash(ssh *)",
-    "Bash(scp *)",
-    "Bash(docker *)",
-    "Bash(git merge *)",
-    "Bash(git push --force*)",
-    "Bash(git rebase *)",
-    "Bash(git reset --hard*)",
+#: The worker home is where the CLI keeps the credential it signed in with. This
+#: rule is **verified enforced** against the installed runtime, not assumed: with
+#: it, a request for a benign file there is refused by the CLI with "access
+#: denied"; without it, the same request succeeds on the first ask.
+#:
+#: It is layer two of three and is not asked to carry the boundary alone — see
+#: the module docstring.
+DENIED_PATHS: Tuple[str, ...] = (
+    "Read(/home/worker/**)",
+    "Glob(/home/worker/**)",
+    "Grep(/home/worker/**)",
+    "Read(//home/worker/**)",
+    "Glob(//home/worker/**)",
+    "Grep(//home/worker/**)",
 )
 
 #: ``acceptEdits`` rather than ``bypassPermissions``.
 #:
 #: The stronger-sounding mode is the wrong choice even inside containment: it
-#: would make the allowlist above decorative, and the two layers are worth more
-#: than one. Edits are accepted without a prompt because a headless run has
-#: nobody to answer one; commands are governed by the allowlist.
+#: would make the tool list above decorative, and there are no commands left for
+#: it to bypass. Edits are accepted without a prompt because a headless run has
+#: nobody to answer one.
 PROFILE_PERMISSION_MODE = "acceptEdits"
 
 #: Bounds. Larger than the CLI adapter's, because a development step legitimately
@@ -241,9 +248,9 @@ def build_interior_argv(*, interior_cli: str, interior_worktree: str) -> List[st
         PROFILE_PERMISSION_MODE,
         "--allowedTools",
         *PROFILE_TOOLS,
-        *BASH_ALLOWLIST,
         "--disallowedTools",
-        *BASH_DENYLIST,
+        *DENIED_TOOLS,
+        *DENIED_PATHS,
         "--strict-mcp-config",
         "--setting-sources",
         "",
@@ -257,8 +264,8 @@ def build_interior_argv(*, interior_cli: str, interior_worktree: str) -> List[st
 
 
 __all__ = [
-    "BASH_ALLOWLIST",
-    "BASH_DENYLIST",
+    "DENIED_PATHS",
+    "DENIED_TOOLS",
     "EXECUTABLE_NAME",
     "FORBIDDEN_FLAGS",
     "GIT_AUTHOR_EMAIL",

@@ -127,6 +127,21 @@ class NoShellExecutionTests(unittest.TestCase):
                 continue
             if "claude_code" in path.parts or "claude_code_worker" in path.parts:
                 continue
+            if path.name == "checks.py" and path.parent.name == "worker":
+                # M2L PR1e amendment. The credential-free check sandbox, and the
+                # reason it must be host-owned rather than adapter-owned is the
+                # finding that produced it: with project code running in the
+                # Claude namespace, an allowed `python3` read the provider
+                # credential and a socket sent it to a listener.
+                #
+                # So project code runs here instead, and this file is the only
+                # thing that starts it. Narrower than every entry above: the
+                # command is a literal tuple looked up by id in a closed table
+                # (`CHECK_COMMANDS`) — never caller or model text — `shell=False`,
+                # a timeout, an output cap, an environment of seven literal keys,
+                # and a namespace with `--unshare-net` and no credential bound.
+                # It signals nothing and starts nothing that outlives the call.
+                continue
             if path.name == "worktree.py" and path.parent.name == "worker":
                 # M2L PR1e. The host's own worktree operations, and the third
                 # non-adapter file allowed a process — for exactly the reason

@@ -429,14 +429,60 @@ paths on this workstation.
 If containment is unavailable the adapter reports itself unavailable and `start` refuses. **There is
 no uncontained fallback.**
 
-### Worker tool policy
+### Worker tool policy — no shell, and why
 
 A separate adapter (`claude-code-worker`), not a mode of the existing one — widening the old profile
-would retroactively grant a shell to every task any phone can already create. Its own profile:
-`Read/Write/Edit/Glob/Grep/TodoWrite` plus a Bash **prefix allowlist** (`git`, `python3`, `pytest`,
-`make`, …) and a denylist naming `sudo`, `systemctl`, `apt`, `pip install`, `curl`, `git merge`.
-`acceptEdits` rather than `bypassPermissions`, deliberately: the stronger-sounding mode would make
-the allowlist decorative, and two layers are worth more than one.
+would retroactively grant a shell to every task any phone can already create.
+
+The first version of this profile granted Bash under a command-prefix allowlist (`git`, `python3`,
+`pytest`, `make`) and called those *bounded commands*. **That was wrong, and it was tested rather
+than argued.** With a fake sentinel credential in the exact location the real one occupies:
+
+| attempt | result |
+|---|---|
+| a shell reading `$HOME/.claude/.credentials.json` | **leaked** |
+| `python3 -c` — an *allowed* prefix | **leaked** |
+| project code opening a socket to a local listener | **exfiltrated**, listener logged it |
+
+`python3`, `pytest` and `make` are **arbitrary-code launchers**. A prefix allowlist decides which
+program starts and says nothing about what it does once running — an intent filter, not a boundary.
+The credential must be in the namespace for the CLI to sign in, so anything there that can run code
+can take it.
+
+The shipped profile therefore grants **file tools only**: `Read/Write/Edit/Glob/Grep/TodoWrite`, no
+`Bash`, no `Task`, no `WebFetch`. Three layers, in order of what each is worth:
+
+1. **No command tool** — no process, no socket. This removes the *exfiltration path* and is
+   load-bearing.
+2. **Path-denied file tools** — `--disallowedTools "Read(/home/worker/**)"` etc. Verified
+   mechanically enforced against the installed runtime. (Without it, `Read` is **not** confined to
+   the working directory — also tested: the model read a file in the worker home on the first ask.)
+3. **Output scrubbing** — the final message is the one channel that leaves a namespace by design.
+
+Layer 2 is a permission rule and is treated as one: verified, and placed *behind* layer 1 rather
+than in place of it.
+
+### Project checks run somewhere else entirely
+
+Project code executes in a **second** bubblewrap sandbox with a deliberately different shape:
+
+| | Claude phase | check phase |
+|---|---|---|
+| provider credential | present (must sign in) | **absent** |
+| network | shared (must reach the API) | **disabled** (`--unshare-net`) |
+| what runs | the CLI, file tools only | project code |
+| who chose the command | nobody — no Bash | host-owned table, by id |
+
+`CHECK_COMMANDS` is closed and code-owned. `make` and `npm test` are **excluded on purpose**: their
+recipes are repository text, in a worktree the model just wrote to. `python3 -m unittest` is the
+default because it is stdlib and needs nothing installed.
+
+The commit is host-owned too — `worktree.commit_all`, authored as `Cofferdam Worker`. The worker
+cannot commit for itself, which is the right shape rather than a limitation: a commit is durable
+evidence and should not be produced by a process holding a provider credential.
+
+A check result reports `exit_zero`, **not** `passed`. M2K owns the vocabulary of acceptance; this is
+one command's exit status observed beside a dispatch.
 
 MCP is off (`--strict-mcp-config`, no `--mcp-config`). No settings file is read
 (`--setting-sources ""`), so a `.claude/settings.json` in the worktree cannot widen the profile — and
@@ -460,6 +506,17 @@ there now"*.
 A finished worker is a finished **process**. "Tests passed" is a worker *claim*; what Cofferdam
 observed by running Git itself is reported separately, and the read model carries
 `worker_completion_is_not_acceptance`. Reconciling the two is PR1f.
+
+---
+
+### Git credentials — the direction, not the implementation
+
+Push and PR creation stay unimplemented, and the reason is now a design decision rather than an
+open question: **the operator's GitHub token must not be mounted into the worker namespace.** The
+preferred shape is a host-owned publisher — Cofferdam verifies the project and branch, uses a
+separately held repo-scoped credential (a deploy key or GitHub App), pushes the already-authorized
+branch and opens the PR. The worker never receives that credential. Building that publisher is its
+own PR.
 
 ---
 
