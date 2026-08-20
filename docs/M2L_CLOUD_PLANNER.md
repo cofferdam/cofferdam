@@ -175,11 +175,133 @@ empty projection reached the model. The model declined to invent requirements �
 *model* restraint. The host guarantee is narrower and is what the tests assert: Cofferdam sends the
 empty projection faithfully, with its omission reasons, and fabricates nothing to fill it.
 
+---
+
+## The human authority gate (PR1d)
+
+> **A model result is never rewritten into human authority.**
+
+A `PlannerResult` says what the *planner* decided. An answer, an approval or a rejection is what a
+*person* decided, and it is a separate authority-bearing record in a separate table
+(`planner_authority_events`). Nothing on the human path ever updates a planner row: `action` never
+becomes `approved`, a rejection never blanks `worker_prompt`, an answer never overwrites
+`user_question`. *What was proposed* and *what was authorized* are two facts, and the question people
+actually ask later needs both.
+
+### Three things that are not each other
+
+| | values |
+|---|---|
+| **invocation lifecycle** — what the *call* did | `pending` `running` `succeeded` `failed` `interrupted` |
+| **planner action** — what the *model* decided | `ASK_USER` `PREPARE_WORKER_PROMPT` `STOP` |
+| **human gate** — what the *person* decided | `awaiting_answer` `answered` · `awaiting_confirmation` `approved` `rejected` · `not_required` |
+
+`STOP`, `failed` and `rejected` are three different sentences: a model declining to plan, a provider
+breaking, and a person refusing a prepared prompt. Three words, kept.
+
+### The gate is derived, never chosen
+
+`derive_gate` is the only mapping from a persisted result to the decision it awaits, and no method
+takes a parameter that could reinterpret one action as the other:
+
+| persisted result | gate | permitted |
+|---|---|---|
+| `ASK_USER` + a question | `answer` | `answer` |
+| `PREPARE_WORKER_PROMPT` + a prompt | `confirmation` | `approve`, `reject` |
+| `STOP` | none — `planner_stopped` | — |
+| `failed` / `interrupted` | none — `invocation_did_not_succeed` | — |
+| missing its artefact | none — `result_incomplete` | — |
+| a result schema this build does not speak | none — `result_schema_unsupported` | — |
+
+### Hash-bound authority
+
+A decision commits to the exact model output it authorized:
+
+```
+SHA256( "cofferdam.planner.authority.subject.v1"
+        || lp(planner_request_id) || lp(result_schema_version)
+        || lp(action) || lp(subject_bytes) )
+```
+
+Length-prefixed so fields cannot alias, action bound in so a question and a prompt cannot collide,
+request id bound in so two turns that produced identical text do not share a fingerprint, and the
+subject hashed **as stored** — not normalized, so a change Cofferdam considered cosmetic cannot ride
+in under an approval somebody gave for the text they read. Own tag rather than
+`cofferdam/hashing.py`, for the reason Mind gives: that serialization is a frozen contract belonging
+to a different purpose.
+
+A caller may pass `expected_subject_fingerprint` to say *this is what I am authorizing*; a mismatch
+is refused as stale. And the read model publishes `binds_current_subject`, so a future dispatcher can
+prove **"the prompt I am about to dispatch is exactly the prompt the user approved."** If the prompt
+changes, the approval still says truthfully what was approved — it just no longer binds what is
+there now.
+
+### Terminal, append-only, never overwritten
+
+One decision per gate, enforced by a unique index rather than a check-then-write — of two decisions
+racing, exactly one `INSERT` wins. A repeat of the *same* decision returns the existing state
+truthfully (a double tap is one approval); a *contradicting* one is refused. `approve → reject`,
+`reject → approve` and a second, different answer are all refusals, not updates. The table is never
+`UPDATE`d or `DELETE`d from.
+
+Correcting a decision is deliberately absent. It needs an explicit superseding-authority workflow
+with its own record of who changed their mind; reusing `approve` for it would be the silent rewrite
+this layer exists to prevent.
+
+`CHECK` constraints carry the rule into the schema: `authority_action` has three legal values, and
+**there is no row shape in this database that spells `dispatch`**.
+
+### Approval does not dispatch. An answer does not replan.
+
+`PlannerAuthorityService` is constructed with the store and a clock — no provider, no context
+builder, no projector. So these are not promises kept by a careful code path; they are properties of
+the object's dependencies. There is nothing there to start.
+
+Asserted directly: approving creates no Task Core task, selects no adapter, starts no subprocess
+(the test makes `subprocess` raise), writes no file, and leaves the planner row byte-identical.
+Answering does not invoke the planner again and creates no new planner request.
+
+An answer is **semantic data and stays data**. Prose, a code snippet, a URL, a line that reads exactly
+like a shell command — all of it goes into a column and comes back out of one. Nothing parses it as
+argv, a provider flag, an MCP method or a path.
+
+### Provenance, stated narrowly
+
+`actor` is a one-value vocabulary — a human decision cannot be attributed to `system`, `planner` or
+`adapter`, because there is no such value to write. `source` is which trusted surface asserted it,
+code-owned and closed, never read from a request body: `local_call`, `internal_test`, and
+`workstation_pwa` **reserved and unwritable** until a route exists.
+
+What a record claims is that a decision of this category arrived through this surface at this time.
+It does **not** claim a particular person authenticated, because nothing on this host proves that
+yet. There is no name, email, token or address field — and none one could be put in.
+
+### Storage
+
+`planner.sqlite3` **v1 → v2**, additive only: one new table, no column changed, no value rewritten.
+A v2 database holding no decisions is a v1 database with an empty table beside it. Forward-only
+refusal is unchanged and now happens **before** any DDL runs — the earlier ordering created tables
+and then refused, which modified the thing it was declining to touch. Task Core's schema is
+untouched at 11.
+
+### No network surface
+
+PR1d stays internal: planner-domain service methods only, no HTTP route, no bridge endpoint, no
+public exposure. `PlannerService` is not wired into the workstation app at all — there is no
+`app.state.planner` — so a device-token route would have had to first mount the whole planner
+(provider, code-owned working directory, subscription CLI) into the always-on daemon. That is a much
+larger authority expansion than a confirmation gate, and it is a deployment-shaped decision that
+belongs to its own PR. A route added now would answer 503 to everything.
+
+---
+
 ## Still deferred
 
-User confirmation/answer API · worker dispatch · worker result evaluation · next-step planner pass ·
-Project Handoff · Custom GPT integration · phone/PWA UI · bounded autonomous loop · routines ·
-artifacts · MCP server · connectors · deployment.
+Consuming an answer by creating a follow-up planner invocation · dispatching an approved prompt ·
+worker result ingestion/evaluation · a private device-token confirmation route · Project Handoff ·
+Custom GPT integration · phone/PWA UI · bounded autonomous loop · routines · artifacts · MCP server ·
+connectors · deployment.
 
 The first product mode stays **prepare a prompt, then wait for the user**. There is no autonomous
-continuation anywhere in this milestone.
+continuation anywhere in this milestone — and now there is a durable record of the waiting, and of
+what the user said.

@@ -20,6 +20,14 @@ column would make those two indistinguishable a week later.
 Crash truth: a request row is committed **before** the provider is invoked, so an
 invocation that dies mid-flight is visible as ``running`` with no result rather
 than as something that never happened. Nothing here reruns it.
+
+A third thing is kept apart, in its own table (PR1d): **what a person decided.**
+``planner_authority_events`` holds answers, approvals and rejections. It is not
+columns on ``planner_requests``, and that is the whole point — a human decision
+recorded on the model's own row would overwrite the evidence of what the model
+produced, and *what was proposed* and *what was authorized* are two facts a
+person needs both of. Nothing in this module ever updates a planner row from an
+authority event.
 """
 
 from __future__ import annotations
@@ -40,7 +48,12 @@ DATABASE_FILENAME = "planner.sqlite3"
 
 #: This database's own version, independent of Task Core's. Forward-only: a file
 #: written by a newer build is refused rather than written to.
-PLANNER_SCHEMA_VERSION = 1
+#:
+#: v1 → v2 (PR1d) adds ``planner_authority_events`` and nothing else. No column
+#: on ``planner_requests`` changed, no value was rewritten, and every v1 row
+#: reads back identically — a v2 database holding no authority events is a v1
+#: database with an empty table beside it.
+PLANNER_SCHEMA_VERSION = 2
 
 STATUS_PENDING = "pending"
 STATUS_RUNNING = "running"
@@ -116,6 +129,54 @@ CREATE INDEX IF NOT EXISTS planner_requests_created
     ON planner_requests (created_at);
 CREATE INDEX IF NOT EXISTS planner_requests_status
     ON planner_requests (status);
+
+-- What a *person* decided. A separate table, not columns above, because a
+-- planner result is model-authored data and an approval is human authority, and
+-- writing the second over the first destroys the only record of what was
+-- actually proposed.
+--
+-- Append-only: nothing here is ever UPDATEd or DELETEd. The unique index on
+-- `planner_request_id` is what makes a gate terminal — of two decisions racing
+-- on the same request exactly one INSERT succeeds and the other is told what
+-- already happened. That is the compare-and-set Mind's proposal transitions get
+-- from a conditional UPDATE, expressed as a constraint instead, because here
+-- there is no prior row to compare against.
+--
+-- `subject_fingerprint` binds the decision to the exact model output authorized.
+-- A dispatcher recomputes it from what it is holding; if it differs, this record
+-- does not authorize that.
+--
+-- The CHECK constraints are not belt-and-braces. `authority_action` has three
+-- legal values and none of them is an execution word: there is no row shape in
+-- this database that spells `dispatch`, and a future writer that tried would be
+-- refused by SQLite rather than by a code path somebody could forget.
+CREATE TABLE IF NOT EXISTS planner_authority_events (
+    authority_event_id    TEXT PRIMARY KEY,
+    planner_request_id    TEXT NOT NULL,
+    gate_kind             TEXT NOT NULL,
+    authority_action      TEXT NOT NULL,
+    subject_fingerprint   TEXT NOT NULL,
+    result_schema_version INTEGER NOT NULL,
+    answer_text           TEXT,
+    rejection_reason      TEXT,
+    actor                 TEXT NOT NULL,
+    source                TEXT NOT NULL,
+    recorded_at           TEXT NOT NULL,
+
+    FOREIGN KEY (planner_request_id)
+        REFERENCES planner_requests (planner_request_id),
+
+    CHECK (gate_kind IN ('answer', 'confirmation')),
+    CHECK (authority_action IN ('answer', 'approve', 'reject')),
+    CHECK (actor = 'user'),
+    -- An answer carries text and the other two never do; a reason belongs only
+    -- to a refusal. One artefact per authority action, at the storage layer.
+    CHECK ((authority_action = 'answer') = (answer_text IS NOT NULL)),
+    CHECK (rejection_reason IS NULL OR authority_action = 'reject')
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS planner_authority_one_per_request
+    ON planner_authority_events (planner_request_id);
 """
 
 
@@ -135,6 +196,11 @@ class PlannerRecord:
     started_at: Optional[str]
     completed_at: Optional[str]
     user_intent: str
+    #: Which result contract the stored result speaks. Published because a
+    #: reader deciding whether it may act on a result needs to know that before
+    #: it reads one, and because the human authority gate refuses to bind a
+    #: decision to a result whose contract this build does not speak.
+    result_schema_version: Optional[int] = None
     action: Optional[str] = None
     summary: Optional[str] = None
     confidence: Optional[float] = None
@@ -178,6 +244,7 @@ class PlannerRecord:
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "user_intent": self.user_intent,
+            "result_schema_version": self.result_schema_version,
             "action": self.action,
             "summary": self.summary,
             "confidence": self.confidence,
@@ -209,9 +276,58 @@ class PlannerRecord:
         }
 
 
+@dataclass(frozen=True)
+class AuthorityEvent:
+    """One durable human decision, exactly as the table holds it.
+
+    A plain record, deliberately. What the decision *means* — which gate state it
+    produces, which actions were permitted to reach it, whether it still binds
+    what is persisted now — lives in :mod:`.authority`, so that the storage layer
+    stays a storage layer and the semantics have one home rather than two that
+    can drift.
+    """
+
+    authority_event_id: str
+    planner_request_id: str
+    gate_kind: str
+    authority_action: str
+    subject_fingerprint: str
+    result_schema_version: int
+    actor: str
+    source: str
+    recorded_at: str
+    answer_text: Optional[str] = None
+    rejection_reason: Optional[str] = None
+
+    def to_dict(self, *, include_answer: bool = True) -> Dict[str, Any]:
+        """The safe shape. ``subject_fingerprint`` is published on purpose.
+
+        Unlike Mind's ``target_binding_hash`` — an opaque fingerprint of a *host
+        location* a client is never told about — this digest covers model output
+        the reader is already holding. Publishing it hands over nothing new and
+        is what lets a later dispatcher prove the prompt it has is the prompt
+        somebody approved.
+        """
+        payload: Dict[str, Any] = {
+            "authority_event_id": self.authority_event_id,
+            "planner_request_id": self.planner_request_id,
+            "gate_kind": self.gate_kind,
+            "authority_action": self.authority_action,
+            "authorized_subject_fingerprint": self.subject_fingerprint,
+            "result_schema_version": self.result_schema_version,
+            "decided_at": self.recorded_at,
+            "provenance": {"actor": self.actor, "source": self.source},
+            "rejection_reason": self.rejection_reason,
+        }
+        if include_answer:
+            payload["answer"] = self.answer_text
+        return payload
+
+
 _READ_COLUMNS = (
     "planner_request_id, workspace_id, project_id, status, created_at, started_at, "
-    "completed_at, user_intent, action, summary, confidence, worker_prompt, "
+    "completed_at, user_intent, result_schema_version, action, summary, "
+    "confidence, worker_prompt, "
     "user_question, decision_basis, provider_id, requested_model, actual_model, "
     "duration_ms, input_tokens, output_tokens, "
     "provider_reported_cost_estimate_usd, projection_policy_id, "
@@ -243,38 +359,64 @@ class PlannerStore:
         connection.execute("PRAGMA foreign_keys=ON")
         return connection
 
+    def _stored_version(self, connection: sqlite3.Connection) -> Optional[int]:
+        """The version on disk, or ``None`` for a database that has no schema yet."""
+        present = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'"
+        ).fetchone()
+        if present is None:
+            return None
+        row = connection.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return int(row["value"])
+        except (TypeError, ValueError):
+            raise PlannerStoreUnavailable(
+                "the planner database records an unreadable schema version"
+            )
+
     def _initialize(self) -> None:
+        """Open, refuse a future database, migrate forward, never backward.
+
+        The version is read **before** any DDL runs. The earlier ordering created
+        the tables first and then refused, which meant merely opening a database
+        from a newer build left tables behind in it — a refusal that modified the
+        thing it was refusing to touch.
+
+        v1 → v2 is additive: ``planner_authority_events`` appears, no existing
+        column or value is altered, and every v1 planner row reads back
+        unchanged. So the migration *is* the ``CREATE TABLE IF NOT EXISTS``, and
+        the version bump follows it. A crash between the two leaves a database
+        with the new table and the old version number, which the next open fixes
+        by doing exactly the same idempotent thing again.
+        """
         with self._lock, self._connect() as connection:
+            found = self._stored_version(connection)
+            if found is not None and found > PLANNER_SCHEMA_VERSION:
+                # Forward-only, for the same reason Task Core is: an older build
+                # writing rows a newer schema defined is how a rollback becomes
+                # data loss.
+                raise PlannerStoreUnavailable(
+                    "the planner database was written by a newer version of "
+                    "Cofferdam"
+                )
+
             connection.executescript(_SCHEMA)
-            row = connection.execute(
-                "SELECT value FROM schema_meta WHERE key = 'schema_version'"
-            ).fetchone()
-            if row is None:
+
+            if found is None:
                 connection.execute(
-                    "INSERT INTO schema_meta (key, value) VALUES "
+                    "INSERT OR REPLACE INTO schema_meta (key, value) VALUES "
                     "('schema_version', ?)",
                     (str(PLANNER_SCHEMA_VERSION),),
                 )
-            else:
-                try:
-                    found = int(row["value"])
-                except (TypeError, ValueError):
-                    raise PlannerStoreUnavailable(
-                        "the planner database records an unreadable schema version"
-                    )
-                if found > PLANNER_SCHEMA_VERSION:
-                    # Forward-only, for the same reason Task Core is: an older
-                    # build writing rows a newer schema defined is how a
-                    # rollback becomes data loss.
-                    raise PlannerStoreUnavailable(
-                        "the planner database was written by a newer version of "
-                        "Cofferdam"
-                    )
-                if found < PLANNER_SCHEMA_VERSION:
-                    connection.execute(
-                        "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
-                        (str(PLANNER_SCHEMA_VERSION),),
-                    )
+            elif found < PLANNER_SCHEMA_VERSION:
+                connection.execute(
+                    "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                    (str(PLANNER_SCHEMA_VERSION),),
+                )
         try:
             os.chmod(self._path, 0o600)
         except OSError:  # pragma: no cover - best effort on odd filesystems
@@ -467,6 +609,118 @@ class PlannerStore:
             ).fetchone()
         return int(row["value"])
 
+    # -- human authority ------------------------------------------------------
+    #
+    # Two methods, one INSERT and one SELECT. There is deliberately no update and
+    # no delete: an authority row is a durable statement about what a person did,
+    # and neither correcting it in place nor removing it is something this build
+    # is allowed to do quietly.
+
+    def record_authority_event(
+        self,
+        *,
+        authority_event_id: str,
+        planner_request_id: str,
+        gate_kind: str,
+        authority_action: str,
+        subject_fingerprint: str,
+        result_schema_version: int,
+        actor: str,
+        source: str,
+        recorded_at: str,
+        answer_text: Optional[str] = None,
+        rejection_reason: Optional[str] = None,
+        expected_action: Optional[str] = None,
+    ) -> Optional[AuthorityEvent]:
+        """Write one decision, or report the decision that was already there.
+
+        Returns the stored row on success and ``None`` when a terminal decision
+        already existed — the caller reads it back and decides whether that is an
+        idempotent retry or a contradiction.
+
+        **The exclusivity is SQLite's, not a preceding read.** Two approvals
+        arriving together both reach the ``INSERT``; the unique index on
+        ``planner_request_id`` lets exactly one through and gives the other an
+        ``IntegrityError``. A check-then-write would have a window between the
+        check and the write, and a double tap is precisely the traffic that finds
+        it.
+
+        ``expected_action`` is re-verified **inside** the transaction against the
+        planner row, so a decision cannot be recorded against a result whose
+        action is not the one the caller validated against. In this build a
+        succeeded planner row is already terminal and cannot move, which makes
+        this belt-and-braces today and the thing that stays correct the day
+        something else can write there.
+        """
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT status, action FROM planner_requests "
+                    "WHERE planner_request_id = ?",
+                    (planner_request_id,),
+                ).fetchone()
+                if row is None:
+                    raise PlannerStoreUnavailable(
+                        "no planner request to record a decision against"
+                    )
+                if expected_action is not None and row["action"] != expected_action:
+                    raise PlannerStoreUnavailable(
+                        "the planner result changed while the decision was in flight"
+                    )
+                connection.execute(
+                    "INSERT INTO planner_authority_events ("
+                    "authority_event_id, planner_request_id, gate_kind, "
+                    "authority_action, subject_fingerprint, result_schema_version, "
+                    "answer_text, rejection_reason, actor, source, recorded_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        authority_event_id,
+                        planner_request_id,
+                        gate_kind,
+                        authority_action,
+                        subject_fingerprint,
+                        int(result_schema_version),
+                        answer_text,
+                        rejection_reason,
+                        actor,
+                        source,
+                        recorded_at,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                # Either the unique index (a decision already exists) or a CHECK
+                # (a row shape this database does not have). Both roll back
+                # whole; the caller distinguishes them by reading back.
+                connection.execute("ROLLBACK")
+                if self._authority_row(connection, planner_request_id) is not None:
+                    return None
+                raise
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+            connection.execute("COMMIT")
+            stored = self._authority_row(connection, planner_request_id)
+        return stored
+
+    @staticmethod
+    def _authority_row(
+        connection: sqlite3.Connection, planner_request_id: str
+    ) -> Optional["AuthorityEvent"]:
+        row = connection.execute(
+            "SELECT authority_event_id, planner_request_id, gate_kind, "
+            "authority_action, subject_fingerprint, result_schema_version, "
+            "answer_text, rejection_reason, actor, source, recorded_at "
+            "FROM planner_authority_events WHERE planner_request_id = ?",
+            (planner_request_id,),
+        ).fetchone()
+        return AuthorityEvent(**dict(row)) if row else None
+
+    def authority_event(self, planner_request_id: str) -> Optional["AuthorityEvent"]:
+        """The terminal decision on this request, if a person has made one."""
+        with self._lock, self._connect() as connection:
+            return self._authority_row(connection, planner_request_id)
+
 
 __all__ = [
     "DATABASE_FILENAME",
@@ -478,6 +732,7 @@ __all__ = [
     "STATUS_FAILED",
     "STATUS_INTERRUPTED",
     "TERMINAL_STATUSES",
+    "AuthorityEvent",
     "PlannerRecord",
     "PlannerStore",
     "PlannerStoreUnavailable",
