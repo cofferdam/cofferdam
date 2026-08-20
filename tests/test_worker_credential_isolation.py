@@ -220,6 +220,46 @@ class TheCheckSandboxHasNoCredential(SentinelHarness):
                                 env={"PATH": "/usr/bin:/bin"})
         self.assertIn("HOME=/tmp", result.stdout)
 
+    def test_run_returns_a_result_for_a_passing_check(self):
+        """Exercises `run()` end to end, not just `build_plan`.
+
+        Added because the first version of this suite tested the *plan* and
+        never the return path, so a rename that broke `CheckResult`'s
+        construction passed every test here and only surfaced in the live smoke
+        as an adapter TypeError.
+        """
+        (self.work / "test_ok.py").write_text(
+            "import unittest\n\n\nclass T(unittest.TestCase):\n"
+            "    def test_ok(self):\n        self.assertEqual(1, 1)\n"
+        )
+        result = checks.run(worktree=self.work)
+        self.assertTrue(result.ran, result.failure)
+        self.assertTrue(result.exit_zero, result.output)
+        self.assertEqual(result.check, checks.DEFAULT_CHECK_ID)
+        self.assertIn("exit_zero", result.to_dict())
+        self.assertEqual(result.to_dict()["observed_by"], "cofferdam")
+
+    def test_run_reports_a_failing_check_truthfully(self):
+        (self.work / "test_bad.py").write_text(
+            "import unittest\n\n\nclass T(unittest.TestCase):\n"
+            "    def test_bad(self):\n        self.assertEqual(1, 2)\n"
+        )
+        result = checks.run(worktree=self.work)
+        self.assertTrue(result.ran)
+        self.assertFalse(result.exit_zero)
+
+    def test_run_says_so_when_there_is_no_check(self):
+        result = checks.run(worktree=self.work, check="none")
+        self.assertFalse(result.ran)
+        self.assertFalse(result.exit_zero)
+        self.assertIsNotNone(result.failure)
+
+    def test_a_check_result_never_claims_acceptance(self):
+        """`exit_zero`, not `passed`. M2K owns the acceptance vocabulary."""
+        result = checks.run(worktree=self.work, check="none")
+        self.assertFalse(hasattr(result, "passed"))
+        self.assertNotIn("passed", result.to_dict())
+
     def test_a_plan_carrying_a_credential_path_is_refused(self):
         """The assertion runs on every launch, not only here."""
         with self.assertRaises(checks.CheckUnavailable):

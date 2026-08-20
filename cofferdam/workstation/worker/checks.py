@@ -295,7 +295,7 @@ def run(*, worktree: Path, check: Optional[str] = None) -> CheckResult:
 
     output = ((completed.stdout or "") + (completed.stderr or ""))[:MAX_CHECK_OUTPUT]
     return CheckResult(
-        check_id=resolved,
+        check=resolved,
         ran=True,
         exit_code=completed.returncode,
         output=output,
