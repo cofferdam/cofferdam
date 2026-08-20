@@ -978,7 +978,15 @@ class Cancellation(TaskTestCase):
             # what this guard is actually about.
             for never in ("pkill", "killall", "psutil"):
                 self.assertNotIn(never, source, str(path) + " uses " + never)
-            if "claude_code" in path.parts:
+            if "claude_code" in path.parts or "claude_code_worker" in path.parts:
+                # M2L PR1e's development worker owns a process for the same
+                # reason the CLI adapter does, and stops it under the *stricter*
+                # of the two rules on this page: it signals only the object its
+                # own `Popen` returned, so there is no pid, no group and no name
+                # to get wrong. What the SDK adapter needed a group for —
+                # reaching a CLI started inside its child — this adapter gets
+                # from the kernel instead: `--die-with-parent` on the namespace,
+                # asserted in `tests/test_worker_containment.py`.
                 continue
             # The Agent SDK launcher (M2I PR2) owns one child process, for the
             # same reason the CLI adapter owns one: the SDK cannot be given a

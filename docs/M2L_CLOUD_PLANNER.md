@@ -335,12 +335,141 @@ belongs to its own PR. A route added now would answer 503 to everything.
 
 ---
 
+## The bounded development worker (PR1e)
+
+The first PR in which Cofferdam may consume a human-approved prompt and do real development work.
+
+### The dispatch gate
+
+Every condition is a **hard refusal**, checked before anything is created:
+
+```
+invocation succeeded
++ action == PREPARE_WORKER_PROMPT
++ human gate == approved
++ binds_current_subject == true
++ fingerprint recomputed now == the approved fingerprint
++ project resolves and permits the worker adapter
+        ↓
+one bounded worker dispatch
+```
+
+The fingerprint is recomputed by the dispatch layer rather than taken from the gate — an
+independent arrival at the same number by the layer that is about to *act* on it, so a future change
+to how the authority layer derives its value cannot silently widen what may run.
+
+### The signature is the security property
+
+```python
+dispatch_approved_worker_prompt(planner_request_id, *, provenance)
+```
+
+No `prompt`. No `cwd`, `repository`, `worktree`, `branch`, `command`, `argv`, `executable`, `model`,
+`tools`, `mcp_config` or `adapter`. **Approve prompt A, dispatch prompt B is not something to
+validate against — it is not expressible.**
+
+### Execution ownership: Task Core
+
+The planner was deliberately *not* a `TaskAdapter` because it owns no lifecycle. A coding worker
+does — queued/running/completed/failed/cancelled, cancellation, events — so Task Core is the right
+owner, and `TaskContext` already carries exactly what a worker may know: a `project_id`, a
+**server-resolved** `project_root`, and the prompt. No second job system was created.
+
+### Four facts, four owners
+
+```
+planner result   →  what the model proposed        (PR1c)
+authority event  →  what the person authorized     (PR1d)
+dispatch         →  what Cofferdam handed a worker (PR1e, planner.sqlite3 v3)
+task             →  what the worker did            (Task Core)
+```
+
+`planner_worker_dispatches` is a *linkage*, not a copy: no state column, no result. Duplicating Task
+Core's lifecycle would create two answers to "is it running" that drift apart.
+
+### Cross-database idempotency
+
+`planner.sqlite3` and `tasks.sqlite3` have no shared transaction, so "check → create task → link"
+has a crash window. The fix is not a lock: the Task Core request key is **derived** rather than
+minted — a pure function of `(planner_request_id, approved fingerprint, worker kind)` — so a retry
+computes the same key, Task Core returns the task it already made, and the linkage is written for
+that same task. Nothing launches twice because the second attempt never asks for a second task. The
+mechanism is Task Core's own `client_request_id`, which has existed since M2F.
+
+### Project isolation
+
+```
+planner request → workspace_id → Workspace → project_id → TaskProject → verified root
+```
+
+Every hop is host-owned configuration. The caller supplies none of it.
+
+### Worktree and branch
+
+Cofferdam cuts the worktree; the worker starts inside one already authorized. Under
+`state/worker-worktrees/<project>/<task>` — outside every project checkout — on branch
+`cofferdam/worker/<task_id>`. Model text cannot become a ref: there is no argument it could arrive
+in. The canonical checkout keeps its branch, its commit and its clean status; `git worktree add`
+writes bookkeeping under `.git/worktrees/`, which is how Git registers a linked worktree and is
+stated rather than hidden.
+
+### Host-level containment
+
+**This is the part that is not a sentence in a prompt.** The `claude-code` adapter stays safe by
+having no Bash. A development worker needs a shell, so the boundary moves from *which tools exist*
+to *what the process can reach*: an unprivileged `bubblewrap` namespace in which the authorized
+worktree is present and the rest of the machine is **absent, not denied**.
+
+Verified against the installed CLI (2.1.221) before it was designed: the subscription login
+authenticates inside it, DNS resolves, and `/home` does not exist — so `/home/nrgis/cofferdam`, the
+slots, and every other project are unreachable. The worker gets a *synthetic* home holding a
+credential copy and an empty CLI state file, because the real `~/.claude.json` records eight project
+paths on this workstation.
+
+If containment is unavailable the adapter reports itself unavailable and `start` refuses. **There is
+no uncontained fallback.**
+
+### Worker tool policy
+
+A separate adapter (`claude-code-worker`), not a mode of the existing one — widening the old profile
+would retroactively grant a shell to every task any phone can already create. Its own profile:
+`Read/Write/Edit/Glob/Grep/TodoWrite` plus a Bash **prefix allowlist** (`git`, `python3`, `pytest`,
+`make`, …) and a denylist naming `sudo`, `systemctl`, `apt`, `pip install`, `curl`, `git merge`.
+`acceptEdits` rather than `bypassPermissions`, deliberately: the stronger-sounding mode would make
+the allowlist decorative, and two layers are worth more than one.
+
+MCP is off (`--strict-mcp-config`, no `--mcp-config`). No settings file is read
+(`--setting-sources ""`), so a `.claude/settings.json` in the worktree cannot widen the profile — and
+a project `CLAUDE.md` is read by the model as project input, which is the intended asymmetry with
+the planner. Commits are authored as `Cofferdam Worker`, never as the operator.
+
+### Exact prompt traceability
+
+```
+persisted worker_prompt  =  authority subject  =  dispatch digest  =  what the worker received
+```
+
+The approved prompt is appended to a code-owned execution contract **byte for byte**, after a
+constant separator, so `delivered_prompt(payload)` recovers exactly what was approved.
+`dispatched_prompt()` re-verifies the stored prompt against the digest recorded at dispatch and
+returns `None` on mismatch — the honest answer to *"what did you send"* is never *"here is what is
+there now"*.
+
+### Worker completion is not acceptance
+
+A finished worker is a finished **process**. "Tests passed" is a worker *claim*; what Cofferdam
+observed by running Git itself is reported separately, and the read model carries
+`worker_completion_is_not_acceptance`. Reconciling the two is PR1f.
+
+---
+
 ## Still deferred
 
-Consuming an answer by creating a follow-up planner invocation · dispatching an approved prompt ·
-worker result ingestion/evaluation · a private device-token confirmation route · Project Handoff ·
-Custom GPT integration · phone/PWA UI · bounded autonomous loop · routines · artifacts · MCP server ·
-connectors · deployment.
+M2K verification of worker results · planner evaluation after a worker · next-step planning ·
+consuming an ASK_USER answer into a follow-up invocation · Git push and PR creation from the worker
+· a private device-token confirmation/dispatch route · the "What is Cofferdam doing?" panel · Custom
+GPT integration · Codex worker selection · bounded multi-step loop · A/B self-update and rollback ·
+deployment.
 
 The first product mode stays **prepare a prompt, then wait for the user**. There is no autonomous
 continuation anywhere in this milestone — and now there is a durable record of the waiting, and of

@@ -102,9 +102,18 @@ class Enablement(unittest.TestCase):
         would still not be able to name what runs.
 
         The list grew by one in M2I when the Agent SDK adapter gained its own
-        switch. That is the shape this test is protecting — one boolean per
-        opt-in adapter — so the addition is recorded rather than the assertion
-        loosened to "all of them are booleans".
+        switch, and by one again in M2L PR1e for the development worker. That is
+        the shape this test is protecting — one boolean per opt-in adapter — so
+        each addition is recorded rather than the assertion loosened to "all of
+        them are booleans".
+
+        PR1e is the case that shows why the boolean rule earns its keep. The
+        worker adapter needs a directory to create worktrees in, and the obvious
+        move was a ``worker_state_dir`` parameter here. That would have put the
+        first *location* on the code-owned adapter table. It resolves the
+        directory itself instead — from host configuration, in
+        ``worker.worktree.default_state_dir`` — and this signature stayed
+        booleans.
         """
         import inspect
 
@@ -114,6 +123,7 @@ class Enablement(unittest.TestCase):
             [
                 "enable_claude_agent_sdk_adapter",
                 "enable_claude_code_adapter",
+                "enable_claude_code_worker_adapter",
                 "enable_validation_adapter",
             ],
         )

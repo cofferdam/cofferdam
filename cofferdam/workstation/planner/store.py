@@ -53,7 +53,11 @@ DATABASE_FILENAME = "planner.sqlite3"
 #: on ``planner_requests`` changed, no value was rewritten, and every v1 row
 #: reads back identically — a v2 database holding no authority events is a v1
 #: database with an empty table beside it.
-PLANNER_SCHEMA_VERSION = 2
+#:
+#: v2 → v3 (PR1e) adds ``planner_worker_dispatches``, on the same terms:
+#: additive only, nothing existing altered. A v3 database with no dispatches is
+#: a v2 database with an empty table beside it.
+PLANNER_SCHEMA_VERSION = 3
 
 STATUS_PENDING = "pending"
 STATUS_RUNNING = "running"
@@ -177,6 +181,55 @@ CREATE TABLE IF NOT EXISTS planner_authority_events (
 
 CREATE UNIQUE INDEX IF NOT EXISTS planner_authority_one_per_request
     ON planner_authority_events (planner_request_id);
+
+-- That an approved prompt was handed to a worker. A third fact, kept apart from
+-- the first two for the reason the second was kept apart from the first:
+-- approval is what a person authorized, dispatch is what Cofferdam then did with
+-- it, and completion is what the worker made of it. Collapsing any pair loses
+-- the ability to say which one failed.
+--
+-- The row is a *linkage*, not a copy of Task Core. There is no state column, no
+-- started_at, no result: Task Core owns the execution lifecycle and duplicating
+-- it here would create two answers to "is it running" that drift apart. What is
+-- here is what Task Core cannot know — which approved planner subject this
+-- execution is discharging, and the fingerprint that was verified when it began.
+--
+-- `subject_fingerprint` is stored again rather than joined, deliberately. A
+-- dispatcher must be able to prove, from this row alone, that what it launched
+-- was what a person approved; a value reachable only by following a foreign key
+-- into another table is a value that a later schema change could quietly
+-- reinterpret.
+--
+-- Unique on `planner_request_id`: one approved planner result yields at most one
+-- logical dispatch. Fan-out, a second competing worker and automatic rerun are
+-- all absent, and their absence is a constraint rather than a policy somebody
+-- has to remember.
+CREATE TABLE IF NOT EXISTS planner_worker_dispatches (
+    dispatch_id           TEXT PRIMARY KEY,
+    planner_request_id    TEXT NOT NULL,
+    authority_event_id    TEXT NOT NULL,
+    subject_fingerprint   TEXT NOT NULL,
+    worker_prompt_sha256  TEXT NOT NULL,
+    project_id            TEXT NOT NULL,
+    workspace_id          TEXT,
+    adapter_id            TEXT NOT NULL,
+    task_id               TEXT NOT NULL,
+    request_key           TEXT NOT NULL,
+    branch                TEXT,
+    actor                 TEXT NOT NULL,
+    source                TEXT NOT NULL,
+    created_at            TEXT NOT NULL,
+
+    FOREIGN KEY (planner_request_id)
+        REFERENCES planner_requests (planner_request_id),
+
+    CHECK (actor = 'user')
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS planner_dispatch_one_per_request
+    ON planner_worker_dispatches (planner_request_id);
+CREATE UNIQUE INDEX IF NOT EXISTS planner_dispatch_by_task
+    ON planner_worker_dispatches (task_id);
 """
 
 
@@ -322,6 +375,54 @@ class AuthorityEvent:
         if include_answer:
             payload["answer"] = self.answer_text
         return payload
+
+
+@dataclass(frozen=True)
+class WorkerDispatch:
+    """One approved planner subject, handed to one worker execution.
+
+    A linkage row and nothing more. What the worker is *doing* lives in Task
+    Core, which owns the lifecycle; asking this record for a status would be
+    asking the wrong table, and there is no status column here to ask.
+    """
+
+    dispatch_id: str
+    planner_request_id: str
+    authority_event_id: str
+    subject_fingerprint: str
+    worker_prompt_sha256: str
+    project_id: str
+    workspace_id: Optional[str]
+    adapter_id: str
+    task_id: str
+    request_key: str
+    actor: str
+    source: str
+    created_at: str
+    branch: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "dispatch_id": self.dispatch_id,
+            "planner_request_id": self.planner_request_id,
+            "authority_event_id": self.authority_event_id,
+            "approved_subject_fingerprint": self.subject_fingerprint,
+            "worker_prompt_sha256": self.worker_prompt_sha256,
+            "project_id": self.project_id,
+            "workspace_id": self.workspace_id,
+            "adapter_id": self.adapter_id,
+            "task_id": self.task_id,
+            "branch": self.branch,
+            "provenance": {"actor": self.actor, "source": self.source},
+            "created_at": self.created_at,
+        }
+
+
+_DISPATCH_COLUMNS = (
+    "dispatch_id, planner_request_id, authority_event_id, subject_fingerprint, "
+    "worker_prompt_sha256, project_id, workspace_id, adapter_id, task_id, "
+    "request_key, branch, actor, source, created_at"
+)
 
 
 _READ_COLUMNS = (
@@ -721,6 +822,85 @@ class PlannerStore:
         with self._lock, self._connect() as connection:
             return self._authority_row(connection, planner_request_id)
 
+    # -- worker dispatch ------------------------------------------------------
+
+    def record_dispatch(self, dispatch: "WorkerDispatch") -> Optional["WorkerDispatch"]:
+        """Link one approved subject to one worker execution, or report the link.
+
+        Returns the stored row, or ``None`` when a dispatch already existed —
+        the same shape :meth:`record_authority_event` uses, and for the same
+        reason: the caller reads back and decides whether that is an idempotent
+        retry or a conflict, rather than this method guessing.
+        """
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    "INSERT INTO planner_worker_dispatches (" + _DISPATCH_COLUMNS + ") "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        dispatch.dispatch_id,
+                        dispatch.planner_request_id,
+                        dispatch.authority_event_id,
+                        dispatch.subject_fingerprint,
+                        dispatch.worker_prompt_sha256,
+                        dispatch.project_id,
+                        dispatch.workspace_id,
+                        dispatch.adapter_id,
+                        dispatch.task_id,
+                        dispatch.request_key,
+                        dispatch.branch,
+                        dispatch.actor,
+                        dispatch.source,
+                        dispatch.created_at,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                connection.execute("ROLLBACK")
+                if self._dispatch_row(connection, dispatch.planner_request_id) is not None:
+                    return None
+                raise
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+            connection.execute("COMMIT")
+            return self._dispatch_row(connection, dispatch.planner_request_id)
+
+    @staticmethod
+    def _dispatch_row(
+        connection: sqlite3.Connection, planner_request_id: str
+    ) -> Optional["WorkerDispatch"]:
+        row = connection.execute(
+            "SELECT " + _DISPATCH_COLUMNS + " FROM planner_worker_dispatches "
+            "WHERE planner_request_id = ?",
+            (planner_request_id,),
+        ).fetchone()
+        return WorkerDispatch(**dict(row)) if row else None
+
+    def dispatch(self, planner_request_id: str) -> Optional["WorkerDispatch"]:
+        """The dispatch for one planner request, if one was ever made."""
+        with self._lock, self._connect() as connection:
+            return self._dispatch_row(connection, planner_request_id)
+
+    def dispatch_by_task(self, task_id: str) -> Optional["WorkerDispatch"]:
+        """The dispatch that produced one task. The reverse link, for recovery."""
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT " + _DISPATCH_COLUMNS + " FROM planner_worker_dispatches "
+                "WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return WorkerDispatch(**dict(row)) if row else None
+
+    def recent_dispatches(self, limit: int = 50) -> tuple:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT " + _DISPATCH_COLUMNS + " FROM planner_worker_dispatches "
+                "ORDER BY created_at DESC LIMIT ?",
+                (min(int(limit), 200),),
+            ).fetchall()
+        return tuple(WorkerDispatch(**dict(row)) for row in rows)
+
 
 __all__ = [
     "DATABASE_FILENAME",
@@ -734,6 +914,7 @@ __all__ = [
     "TERMINAL_STATUSES",
     "AuthorityEvent",
     "PlannerRecord",
+    "WorkerDispatch",
     "PlannerStore",
     "PlannerStoreUnavailable",
 ]

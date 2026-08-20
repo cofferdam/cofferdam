@@ -125,7 +125,25 @@ class NoShellExecutionTests(unittest.TestCase):
         for path in _python_sources():
             if path.name == "base.py" and path.parent.name == "adapters":
                 continue
-            if "claude_code" in path.parts:
+            if "claude_code" in path.parts or "claude_code_worker" in path.parts:
+                continue
+            if path.name == "worktree.py" and path.parent.name == "worker":
+                # M2L PR1e. The host's own worktree operations, and the third
+                # non-adapter file allowed a process — for exactly the reason
+                # `gitbaseline.py` and `gitrange.py` are, one paragraph down.
+                #
+                # A development worker writes to a repository, and the only safe
+                # version of that is one where **Cofferdam** decided where. If
+                # the adapter cut its own worktree, the worker's own integration
+                # would be choosing the directory a model may edit; the point of
+                # this file is that it does not.
+                #
+                # Narrower than any adapter above it: every argv is a literal
+                # list built in the module, `shell=False`, a timeout, the working
+                # directory is a root the project registry already verified, and
+                # nothing formats, joins or interpolates a caller value into an
+                # argument. It signals nothing — no `os.kill`, no `terminate`, no
+                # process name — because it starts nothing that outlives the call.
                 continue
             if path.name == "wrapper.py" and path.parent.name == "sessions":
                 continue

@@ -171,11 +171,15 @@ class MigrationHarness(unittest.TestCase):
 
 
 class ForwardMigration(MigrationHarness):
-    def test_a_v1_database_opens_and_becomes_v2(self):
+    def test_a_v1_database_opens_and_migrates_forward(self):
+        """To whatever the current version is — v2 when this was written, and
+        more since. What this file pins is that a *v1* database still opens and
+        keeps its rows, not which number it lands on; the version each hop adds
+        is pinned by that hop's own migration test."""
         write_v1(self.dir)
         store = PlannerStore(self.dir)
         self.assertEqual(store.schema_version(), PLANNER_SCHEMA_VERSION)
-        self.assertEqual(PLANNER_SCHEMA_VERSION, 2)
+        self.assertGreaterEqual(PLANNER_SCHEMA_VERSION, 2)
 
     def test_every_v1_row_survives_byte_for_byte(self):
         path = write_v1(self.dir)
@@ -269,7 +273,9 @@ class ForwardMigration(MigrationHarness):
         for _ in range(3):
             PlannerStore(self.dir)
         self.assertEqual(snapshot(path), after_first)
-        self.assertEqual(PlannerStore(self.dir).schema_version(), 2)
+        self.assertEqual(
+            PlannerStore(self.dir).schema_version(), PLANNER_SCHEMA_VERSION
+        )
 
     def test_a_crash_between_the_table_and_the_bump_is_recoverable(self):
         """Additive DDL then a version bump: doing it twice is doing it once."""
@@ -285,7 +291,7 @@ class ForwardMigration(MigrationHarness):
         connection.close()
 
         store = PlannerStore(self.dir)
-        self.assertEqual(store.schema_version(), 2)
+        self.assertEqual(store.schema_version(), PLANNER_SCHEMA_VERSION)
         self.assertEqual(len(snapshot(path)), len(V1_ROWS))
 
 
