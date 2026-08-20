@@ -4421,6 +4421,56 @@ planner would be a locally-running LLM is no longer authoritative. The Track D b
 disproved it happened, produced useful numbers, and is summarized in `ROADMAP.md` under M2L rather
 than deleted.
 
+## D-2026-08-20-2 — Cofferdam is the central orchestrator; the Project Handoff is a projection; provider product features do not become Cofferdam abstractions (EFE DECISION, ACTIVE)
+
+**Decision.** Three principles that D-2026-08-20-1 assumed but did not state, found missing during
+the M2L PR1b capability audit and recorded here rather than by rewriting that entry. This is a
+follow-on, not a correction: nothing in D-2026-08-20-1 is withdrawn.
+
+**1. Cofferdam is the central orchestrator, and coworkers are not a peer-to-peer agent society.**
+Job routing, authority and sequencing belong to Cofferdam. A worker or planner does not acquire
+authority by addressing another worker: **a coworker cannot create authority merely by telling
+another coworker what to do**, and text from one model naming another model's tool, job or endpoint
+is inert until Cofferdam-owned code decides otherwise. This is the multi-agent form of the rule
+already established for tools — the audit found Claude emitting tool-call-shaped text with no tool
+available, and the same containment applies to worker-call-shaped text. Providers may run many
+workers; the graph between them stays a star with Cofferdam at the centre, never a mesh.
+
+**2. The Project Handoff is a bounded semantic projection, not file access.** Per workspace,
+Cofferdam should eventually expose a compact read model — current objective, latest approved worker
+prompt, worker/provider used, worker result summary, machine-verified changes, failed or unverified
+criteria, evidence references, planner assessment, current checkpoint, proposed next step, open user
+questions, relevant artifact references. It exists so a person or the private Custom GPT can ask
+what happened and receive an answer with provenance. **It is explicitly not "read any file on my
+computer"**: it names no path, accepts no path, and is derived from authoritative state rather than
+maintained as a second truth store. A Markdown rendering may be materialized locally for human and
+Obsidian viewing provided derived fields are marked as derived and carry their source references. No
+API contract is specified here; that belongs to the milestone that builds it.
+
+**3. Cofferdam owns the canonical abstraction whenever a concept participates in Cofferdam
+authority, persistence, task history, evidence or scheduling.** Concretely: **Claude Artifact ≠
+Cofferdam Artifact**, **Claude Routine ≠ Cofferdam Routine**, **Claude Project ≠ Cofferdam
+Workspace**, **Claude Memory ≠ Cofferdam Mind**, **Claude Cowork ≠ Cofferdam's coworker
+abstraction**, and a Claude Code worker is not the development-planner role. Provider-native features
+may later *implement or augment* a Cofferdam abstraction as an adapter or an integration. They do not
+become the authority model, and a provider product name must never enter core logic.
+
+**Why this one needed saying now.** The audit found that Claude-native Routines run autonomously on
+Anthropic's cloud infrastructure with no permission prompts and full connector authority, are managed
+only through a web UI or a conversational CLI command with no create/update/delete API, and are in
+research preview with an API surface documented as subject to change. Adopting them as Cofferdam's
+scheduler would have imported an authority model that is the inverse of this project's and made a
+core capability depend on a preview UI. The general principle is what protects the next such
+temptation, not the specific finding.
+
+**A naming hazard recorded deliberately.** M2K already uses `ArtifactRecord` as *evidence* 
+terminology. A future Cofferdam artifact concept must take a different name or extend that one by an
+explicit decision — it must not silently inherit the word.
+
+**Not implemented by this entry.** No handoff API, no artifact model, no routine scheduler, no
+orchestration change. This records the principles so the milestones that build them do not have to
+rediscover them. Evidence and per-capability status: `docs/M2L_CLAUDE_CAPABILITY_AUDIT.md`.
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

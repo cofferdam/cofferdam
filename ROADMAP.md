@@ -1126,6 +1126,10 @@ One **role**, one authority boundary, advisory throughout (D-2026-08-11-2, D-202
 - **The planner is provider-neutral** (D-2026-08-20-1). Claude/Opus-class, OpenAI, Gemini, a future
   provider, or an optional local model are all backends behind one role. Core logic never names a
   vendor; model selection is provider configuration.
+- **Provider capability evidence:** [`docs/M2L_CLAUDE_CAPABILITY_AUDIT.md`](docs/M2L_CLAUDE_CAPABILITY_AUDIT.md)
+  (M2L PR1b, 2026-08-20) records what is actually usable from the headless server — the
+  enforceable no-tools boundary, provider-side result schema, Opus-class selection, and which
+  provider product surfaces are UI-only. PR1c's invocation boundary comes from it.
 - **The first backend is expected to be cloud**, because deep development planning is where model
   quality shows and Track D measured local candidates falling short of it (see below). This is a
   preference backed by evidence, not a permanent exclusion of local planners.
