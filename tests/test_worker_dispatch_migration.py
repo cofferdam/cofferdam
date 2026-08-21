@@ -152,9 +152,10 @@ class ForwardMigration(MigrationHarness):
         the version this build writes is exactly the kind of fact that deserves a
         single test whose failure means *somebody changed the schema*.
 
-        v4 is PR1f's ``planner_worker_reconciliations``.
+        v4 is PR1f's ``planner_worker_reconciliations``; v5 is PR1h's
+        ``planner_publications``.
         """
-        self.assertEqual(PLANNER_SCHEMA_VERSION, 4)
+        self.assertEqual(PLANNER_SCHEMA_VERSION, 5)
 
     def test_every_planner_row_survives(self):
         path = write_v2(self.dir)

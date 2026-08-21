@@ -65,7 +65,14 @@ DATABASE_FILENAME = "planner.sqlite3"
 #: records what a later process observed, and the second written onto the first
 #: would overwrite the evidence of what was actually dispatched. That is the same
 #: reasoning that kept ``planner_authority_events`` off ``planner_requests``.
-PLANNER_SCHEMA_VERSION = 4
+#:
+#: v4 → v5 (PR1h) adds ``planner_publications`` — what was pushed and which pull
+#: request it became. Additive on the same terms, and again a separate table:
+#: *approved*, *dispatched*, *committed* and *published* are four different
+#: facts with four different moments, and a publication column on the dispatch
+#: row would make "this was authorized" and "this reached GitHub" share a
+#: lifetime. They do not.
+PLANNER_SCHEMA_VERSION = 5
 
 STATUS_PENDING = "pending"
 STATUS_RUNNING = "running"
@@ -279,6 +286,60 @@ CREATE TABLE IF NOT EXISTS planner_worker_reconciliations (
 
 CREATE INDEX IF NOT EXISTS planner_reconciliation_by_task
     ON planner_worker_reconciliations (task_id);
+
+-- What Cofferdam pushed, and which pull request it became.
+--
+-- v5, additive. One row per dispatch: a dispatch produces at most one published
+-- branch and at most one pull request, and the unique index is what makes that
+-- a constraint rather than a convention somebody has to remember. Re-running the
+-- publisher updates this row; it never inserts a second.
+--
+-- **No credential column, and no place to add one.** The publishing token lives
+-- in one 0600 file outside every database, and nothing about it -- not its
+-- value, not a hash of it, not its path -- belongs in a row that a read model
+-- selects from.
+--
+-- `commit_sha` is the exact local commit that was published, recorded so the
+-- chain planner_request -> approval fingerprint -> dispatch -> task -> commit ->
+-- branch -> PR number is answerable without asking GitHub for "the latest PR".
+CREATE TABLE IF NOT EXISTS planner_publications (
+    publication_id     TEXT PRIMARY KEY,
+    dispatch_id        TEXT NOT NULL,
+    planner_request_id TEXT NOT NULL,
+    task_id            TEXT NOT NULL,
+    project_id         TEXT NOT NULL,
+    workspace_id       TEXT,
+
+    repository         TEXT NOT NULL,
+    branch             TEXT NOT NULL,
+    base_branch        TEXT NOT NULL,
+    commit_sha         TEXT NOT NULL,
+
+    state              TEXT NOT NULL,
+    push_state         TEXT,
+    pull_request_number INTEGER,
+    pull_request_url   TEXT,
+    pull_request_state TEXT,
+
+    failure_reason     TEXT,
+    failure_detail     TEXT,
+    needs_attention    INTEGER NOT NULL DEFAULT 0,
+
+    actor              TEXT NOT NULL,
+    source             TEXT NOT NULL,
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL,
+
+    FOREIGN KEY (dispatch_id)
+        REFERENCES planner_worker_dispatches (dispatch_id),
+
+    CHECK (actor = 'cofferdam')
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS planner_publication_one_per_dispatch
+    ON planner_publications (dispatch_id);
+CREATE INDEX IF NOT EXISTS planner_publication_by_task
+    ON planner_publications (task_id);
 """
 
 
@@ -521,6 +582,85 @@ class DispatchReconciliation:
             "detail": self.detail,
             "task_state": self.task_state,
         }
+
+
+
+@dataclass(frozen=True)
+class Publication:
+    """What Cofferdam pushed for one dispatch, and what it became on GitHub.
+
+    A fact about an **external** system, kept apart from the dispatch that
+    authorized it. Approval, dispatch, commit and publication are four moments;
+    merging any of them into one row would make a question like "was this
+    approved but never published" unanswerable.
+
+    Carries no credential and no host path. ``repository`` is ``owner/repo`` —
+    a name, not a location, and not a URL with anything embedded in it.
+    """
+
+    publication_id: str
+    dispatch_id: str
+    planner_request_id: str
+    task_id: str
+    project_id: str
+    workspace_id: Optional[str]
+    repository: str
+    branch: str
+    base_branch: str
+    commit_sha: str
+    state: str
+    actor: str
+    source: str
+    created_at: str
+    updated_at: str
+    push_state: Optional[str] = None
+    pull_request_number: Optional[int] = None
+    pull_request_url: Optional[str] = None
+    pull_request_state: Optional[str] = None
+    failure_reason: Optional[str] = None
+    failure_detail: Optional[str] = None
+    needs_attention: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        """The safe read shape. No path, no credential, no remote URL."""
+        return {
+            "publication_id": self.publication_id,
+            "dispatch_id": self.dispatch_id,
+            "task_id": self.task_id,
+            "project_id": self.project_id,
+            "repository": self.repository,
+            "branch": self.branch,
+            "base_branch": self.base_branch,
+            "commit": self.commit_sha,
+            "state": self.state,
+            "push_state": self.push_state,
+            "pull_request": (
+                None
+                if self.pull_request_number is None
+                else {
+                    "number": self.pull_request_number,
+                    "url": self.pull_request_url,
+                    "state": self.pull_request_state,
+                }
+            ),
+            "failure": (
+                None
+                if self.failure_reason is None
+                else {"reason": self.failure_reason, "detail": self.failure_detail}
+            ),
+            "needs_attention": bool(self.needs_attention),
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+_PUBLICATION_COLUMNS = (
+    "publication_id, dispatch_id, planner_request_id, task_id, project_id, "
+    "workspace_id, repository, branch, base_branch, commit_sha, state, "
+    "push_state, pull_request_number, pull_request_url, pull_request_state, "
+    "failure_reason, failure_detail, needs_attention, actor, source, "
+    "created_at, updated_at"
+)
 
 
 _RECONCILIATION_COLUMNS = (
@@ -1081,6 +1221,108 @@ class PlannerStore:
             ).fetchall()
         return tuple(WorkerDispatch(**dict(row)) for row in rows)
 
+    def upsert_publication(self, publication: "Publication") -> "Publication":
+        """Create or update the one publication row for a dispatch.
+
+        Upsert rather than insert-only, because a publication genuinely has
+        stages — pushed, then a PR — and re-running the publisher after a crash
+        must land on the *same* row. The unique index on ``dispatch_id`` is what
+        makes "the same row" a database guarantee rather than a convention: there
+        is no shape of this table that holds two publications for one dispatch.
+
+        Deliberately different from :meth:`record_reconciliation`, which keeps
+        its first answer. A reconciliation is one observation of a moment that
+        has passed; a publication is a live relationship with an external system
+        whose later state is the truer one.
+        """
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    "INSERT INTO planner_publications (" + _PUBLICATION_COLUMNS + ") "
+                    "VALUES (" + ", ".join("?" * 22) + ") "
+                    "ON CONFLICT (dispatch_id) DO UPDATE SET "
+                    "  repository = excluded.repository,"
+                    "  branch = excluded.branch,"
+                    "  base_branch = excluded.base_branch,"
+                    "  commit_sha = excluded.commit_sha,"
+                    "  state = excluded.state,"
+                    "  push_state = excluded.push_state,"
+                    "  pull_request_number = excluded.pull_request_number,"
+                    "  pull_request_url = excluded.pull_request_url,"
+                    "  pull_request_state = excluded.pull_request_state,"
+                    "  failure_reason = excluded.failure_reason,"
+                    "  failure_detail = excluded.failure_detail,"
+                    "  needs_attention = excluded.needs_attention,"
+                    "  updated_at = excluded.updated_at",
+                    (
+                        publication.publication_id,
+                        publication.dispatch_id,
+                        publication.planner_request_id,
+                        publication.task_id,
+                        publication.project_id,
+                        publication.workspace_id,
+                        publication.repository,
+                        publication.branch,
+                        publication.base_branch,
+                        publication.commit_sha,
+                        publication.state,
+                        publication.push_state,
+                        publication.pull_request_number,
+                        publication.pull_request_url,
+                        publication.pull_request_state,
+                        publication.failure_reason,
+                        publication.failure_detail,
+                        int(publication.needs_attention),
+                        publication.actor,
+                        publication.source,
+                        publication.created_at,
+                        publication.updated_at,
+                    ),
+                )
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+            connection.execute("COMMIT")
+            stored = self._publication_row(connection, publication.dispatch_id)
+        return stored if stored is not None else publication
+
+    @staticmethod
+    def _publication_row(
+        connection: sqlite3.Connection, dispatch_id: str
+    ) -> Optional["Publication"]:
+        row = connection.execute(
+            "SELECT " + _PUBLICATION_COLUMNS
+            + " FROM planner_publications WHERE dispatch_id = ?",
+            (dispatch_id,),
+        ).fetchone()
+        return Publication(**dict(row)) if row else None
+
+    def publication(self, dispatch_id: str) -> Optional["Publication"]:
+        """The publication for one dispatch, if it was ever attempted."""
+        with self._lock, self._connect() as connection:
+            return self._publication_row(connection, dispatch_id)
+
+    def publication_by_task(self, task_id: str) -> Optional["Publication"]:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT " + _PUBLICATION_COLUMNS
+                + " FROM planner_publications WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return Publication(**dict(row)) if row else None
+
+    def unfinished_publications(self, limit: int = 50) -> tuple:
+        """Publications that never reached a terminal state. The recovery query."""
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT " + _PUBLICATION_COLUMNS + " FROM planner_publications "
+                "WHERE state NOT IN ('published', 'refused') ORDER BY created_at "
+                "LIMIT ?",
+                (min(int(limit), 200),),
+            ).fetchall()
+        return tuple(Publication(**dict(row)) for row in rows)
+
     def recent_dispatches(self, limit: int = 50) -> tuple:
         with self._lock, self._connect() as connection:
             rows = connection.execute(
@@ -1094,6 +1336,7 @@ class PlannerStore:
 __all__ = [
     "DATABASE_FILENAME",
     "DispatchReconciliation",
+    "Publication",
     "PLANNER_SCHEMA_VERSION",
     "PLANNER_STATUSES",
     "STATUS_PENDING",

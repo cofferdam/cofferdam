@@ -812,13 +812,112 @@ own PR.
 
 ---
 
+## The host-owned Git publisher (PR1h)
+
+The worker finishes with a commit on a local branch and no way to share it. The publisher is what
+sends it — and it is a **host** authority, not the worker's.
+
+### Three credentials, and they stay three
+
+| | grants | lives in | reachable by a model? |
+|---|---|---|---|
+| Claude provider | running a model | `state/claude-worker/config` | yes — it must be |
+| **Git publisher** | pushing a branch, opening a PR | `state/git-publisher/git-credentials` | **never** |
+| human approval | that a dispatch may happen at all | `planner_authority_events` | n/a |
+
+Collapsing any two would mean a model that can edit a repository could also publish to it.
+
+### Why not the operator's `gh` login
+
+Inspected rather than assumed: it is a **classic** token with `gist`, `read:org`, `repo` and
+`workflow`. `repo` alone is full control of every repository the account can reach; `workflow` can
+rewrite CI. A publisher needs to push one branch and open one PR.
+
+So the publisher gets a **fine-grained token** scoped to the target repository with exactly
+*Contents: read and write* and *Pull requests: read and write*. Not requested: administration,
+workflows, environments, deployments, secrets, org administration. A GitHub App would be narrower
+still and is the right answer past a couple of repositories — it is not the right answer for the
+first one, because an App registration plus a private key on this host is a larger secret-handling
+surface than the thing it protects. That trade is written down so it can be revisited rather than
+rediscovered.
+
+### The secret never reaches argv, a URL, or an environment
+
+Stored in **Git's own credentials format**, 0600, created with that mode rather than chmod-ed
+afterwards. Git reads it via `-c credential.helper=store --file=<path>` — the *path* is in argv, the
+secret is not. The push URL stays plain, so it can appear in an error message or a read model
+harmlessly.
+
+The GitHub API side uses `urllib` with an `Authorization` header: the secret exists only in this
+process's memory, no child inherits it, and — the part that matters most — **`gh` is never invoked**,
+so there is no path by which the operator's keyring could be used instead.
+
+`HOME` is pointed at `/nonexistent` for every Git call, so a credential helper configured in the
+operator's `~/.gitconfig` cannot be picked up.
+
+### Nothing about where it publishes comes from a caller
+
+    publish(dispatch_id)
+
+No repository, remote, branch, base, commit, path or argv. The identity chain is:
+
+    dispatch → project_id → host registry → verified root → that checkout's own `origin` → owner/repo
+
+The remote is read from the repository with `git remote get-url origin`, deliberately **not** from a
+registry field — a configurable remote would be a caller-editable value deciding where an
+authenticated push goes. A URL that does not parse is refused, never guessed, and one carrying
+embedded userinfo is refused rather than stripped.
+
+### The gates, all before the first external write
+
+Approved `PREPARE_WORKER_PROMPT` · approval fingerprint binds this dispatch · worker task terminal ·
+worktree present and on its own derived branch · `HEAD` authored by the worker identity · branch
+passes the publisher's own policy · commit unchanged since any previous publication. A publish that
+will be refused costs nothing on GitHub.
+
+### Branch policy
+
+Only `cofferdam/worker/<task_id>`. `main`, `master`, `production`, `release`, `gh-pages` and friends
+are refused twice over — by the prefix and by an explicit protected list. The refspec is
+**constructed**, `refs/heads/<b>:refs/heads/<b>`, which removes a whole family of mistakes at once:
+no wildcard, no `+` force prefix, no empty source (that is how a ref gets deleted), no `--tags`, no
+`--mirror`. There is no force flag anywhere in the module, asserted against the string constants that
+become argv rather than against the source text.
+
+### Idempotency is a property of the operations
+
+Push is fast-forward-only to an exact refspec, so re-running it either does nothing or fails — it can
+never overwrite. The PR is looked up by exact `head`/`base` on an exact repository, never by "the
+latest PR", so re-running finds the first one. GitHub's 422 *already exists* is treated as the
+idempotent success it is.
+
+Both crash windows are tested against a **real bare repository**: push-then-crash is discovered by
+`ls-remote` and reconciled; PR-then-crash is linked rather than duplicated. Reconciliation **never
+pushes** — a publication interrupted before its push stays interrupted and waits for an explicit
+call, which is PR1f's doctrine across a network boundary.
+
+### `publisher_auth_required` is not a worker failure
+
+A missing or unusable publishing credential is reported as its own condition. The worker's commit is
+finished and safe on a local branch; the only thing that failed is Cofferdam's ability to send it.
+There is no fallback to the operator's credential — that would be the separation quietly not
+existing.
+
+### Traceability
+
+`planner_request_id → approval fingerprint → dispatch_id → task_id → commit → branch → PR number`,
+all durable in `planner_publications` (schema **v5**, additive, one row per dispatch enforced by a
+unique index, with a foreign key onto the dispatch so a publication cannot dangle). No credential
+column, and no host path.
+
+Cofferdam **does not merge**. The read model says so in a field.
+
+---
+
 ## Still deferred
 
 **Explicit human-authorized retry.** PR1f reconciles and stops. Re-running an interrupted step is a
 new authorization, not a continuation of the old one, and it needs its own gate.
-
-**Host-owned Git publisher** — push and PR creation, with a scoped credential the worker never
-receives. The direction is settled above; building it is the next PR.
 
 Also: M2K verification of worker results · planner evaluation after a worker · next-step planning ·
 consuming an ASK_USER answer into a follow-up invocation · a private device-token
