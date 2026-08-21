@@ -762,6 +762,43 @@ A fresh session reports `login_required` until somebody logs it in. The operator
 imported, and on this host it was already invalid — importing it would have produced a session that
 looked ready and failed on first use.
 
+### The never-bind exception, and why it is narrow
+
+`<state_dir>` is on `NEVER_BIND` because it holds the task and planner databases, every project's
+worktrees and the phase journals. The worker's own Claude config root lives under it, so exactly one
+leaf is exempt — recognised by its **code-owned suffix** (`claude-worker/config`), not by being the
+value that was passed in. `state` itself, `state/claude-worker`, `state/tasks.sqlite3` and anything
+deeper are all still refused.
+
+This was found by the **live smoke**, not by a unit test: every unit test used a temporary state
+directory that happened to sit under nothing forbidden, so the plan built fine and the first real run
+against the host's own state directory was refused by the sandbox's own invariant. The regression
+test now builds a plan under a real `NEVER_BIND` path.
+
+### What the live validation showed
+
+Three real invocations on one persistent session, with a full service-object reconstruction before
+the third:
+
+| | result |
+|---|---|
+| first invocation | authenticated, `["Edit","Glob","Grep","Read","Write"]` |
+| second invocation | authenticated, **no login in between**, same config root |
+| reconstruction → third | authenticated, **no login required** |
+| operator `~/.claude` | **byte-identical throughout**, and a different file from the worker's |
+| session lock | second controller refused while held; usable again once released |
+| real access token | absent from every transcript and every argv |
+
+**Refresh/rotation:** the access token did not need refreshing during the window, so no rotation was
+observed — and it is not forced, because forcing one would mean manipulating a real credential. What
+*was* observed is the property that matters: the CLI's own state writes (`.claude.json`, and a backup
+per invocation) landed in the canonical store and were still there after the reconstruction. There is
+exactly one location for a rotation to land in, and no copy anywhere for it to diverge from.
+
+The full disposable-repository chain then ran on this session end to end — approved prompt delivered
+byte-for-byte, project isolation held, credential-free checks passed, host-owned commit created,
+durable read-back correct — together with the PR1f crash-window regression in the same run.
+
 ---
 
 ### Git credentials — the direction, not the implementation

@@ -293,6 +293,23 @@ def build_plan(
     return plan
 
 
+def _is_session_config(path: str) -> bool:
+    """Whether a path is *the* worker Claude config root, by its code-owned shape.
+
+    Structural rather than a string compare against whatever was passed in. The
+    two trailing components are module constants, so the only paths this accepts
+    are ones :func:`~.session.config_directory` could have produced — which is
+    what keeps the never-bind exception from becoming "any path the caller
+    nominated".
+    """
+    parts = Path(path).parts
+    return (
+        len(parts) >= 2
+        and parts[-1] == session.CONFIG_DIRNAME
+        and parts[-2] == session.SESSION_DIRNAME
+    )
+
+
 def _assert_contained(plan: SandboxPlan) -> None:
     """Check the built vector against the invariants, before it is ever run.
 
@@ -301,9 +318,29 @@ def _assert_contained(plan: SandboxPlan) -> None:
     somebody runs the code by another path.
     """
     bound = plan.bound_host_paths()
+    session_config = str(plan.session_config)
     for forbidden in NEVER_BIND:
         for path in bound:
             if path == forbidden or path.startswith(forbidden.rstrip("/") + "/"):
+                if path == session_config and _is_session_config(path):
+                    # The one deliberate exception, and it is deliberately
+                    # narrow. ``state`` is on the never-bind list because it
+                    # holds Cofferdam's databases, every project's worktrees and
+                    # the phase journals — none of which a worker may see. But
+                    # the worker's *own* Claude config root lives under it, and
+                    # binding exactly that leaf exposes none of the rest.
+                    #
+                    # Recognised by its code-owned suffix rather than by being
+                    # the value that was passed in, so this cannot be widened by
+                    # handing ``build_plan`` a different directory: a plan naming
+                    # ``state`` itself, or ``state/claude-worker``, or any other
+                    # path under it still fails here.
+                    #
+                    # Found by the live smoke rather than by a unit test, because
+                    # every unit test used a temporary state directory that was
+                    # not under a never-bind path. The regression test now uses
+                    # one that is.
+                    continue
                 raise SandboxUnavailable(
                     "the containment plan would expose a path it must not",
                     detail=forbidden,

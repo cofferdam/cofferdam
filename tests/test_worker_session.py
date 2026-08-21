@@ -106,6 +106,67 @@ class TheOperatorCredentialIsNeverCopied(SessionHarness):
         for bound in plan.bound_host_paths():
             self.assertFalse(bound == operator or bound.startswith(operator + "/"))
 
+    def test_a_session_under_a_never_bind_path_still_builds(self):
+        """The real layout: the session lives *inside* `state`, which is never-bind.
+
+        This is the defect the live smoke found and no unit test did. Every other
+        test here uses a temporary state directory that happens to sit under
+        nothing forbidden, so the plan built fine and the first real run against
+        `~/cofferdam/state/claude-worker/config` was refused by the sandbox's own
+        invariant.
+
+        The exception is narrow — see `_is_session_config` — and the two tests
+        below pin both halves of it.
+        """
+        forbidden_root = Path(sandbox.NEVER_BIND[2])  # .../cofferdam/state
+        state_dir = forbidden_root / "pr1g-regression"
+        config = session.config_directory(state_dir)
+        work = self.dir / "work"
+        work.mkdir()
+        with mock.patch.object(sandbox, "find_bwrap", return_value=Path("/usr/bin/bwrap")):
+            with mock.patch.object(Path, "is_dir", return_value=True):
+                plan = sandbox.build_plan(
+                    worktree=work, cli_directory=Path("/usr"),
+                    command=("/bin/true",), session_config=config,
+                )
+        self.assertIn(str(config), plan.bound_host_paths())
+
+    def test_the_never_bind_exception_covers_only_the_config_leaf(self):
+        """`state` itself, and everything else under it, is still refused."""
+        forbidden_root = Path(sandbox.NEVER_BIND[2])
+        work = self.dir / "work"
+        work.mkdir()
+        for attempt in (
+            forbidden_root,
+            forbidden_root / "claude-worker",
+            forbidden_root / "tasks.sqlite3",
+            forbidden_root / "worktrees" / "alpha",
+            forbidden_root / "claude-worker" / "config" / "nested",
+        ):
+            with self.subTest(path=str(attempt)):
+                with mock.patch.object(
+                    sandbox, "find_bwrap", return_value=Path("/usr/bin/bwrap")
+                ):
+                    with mock.patch.object(Path, "is_dir", return_value=True):
+                        with self.assertRaises(sandbox.SandboxUnavailable):
+                            sandbox.build_plan(
+                                worktree=work, cli_directory=Path("/usr"),
+                                command=("/bin/true",), session_config=attempt,
+                            )
+
+    def test_the_exception_is_recognised_structurally_not_by_the_argument(self):
+        """A caller-nominated directory cannot borrow the exception."""
+        self.assertTrue(
+            sandbox._is_session_config("/anywhere/claude-worker/config")
+        )
+        for rejected in (
+            "/anywhere/claude-worker",
+            "/anywhere/config",
+            "/anywhere/other/config",
+            "/anywhere/claude-worker/config/deeper",
+        ):
+            self.assertFalse(sandbox._is_session_config(rejected), rejected)
+
     def test_an_expired_session_does_not_fall_back_to_the_operator(self):
         """The fallback that would silently reintroduce the whole defect."""
         session.prepare(self.state_dir)  # no credential at all

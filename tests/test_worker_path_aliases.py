@@ -58,7 +58,7 @@ from tempfile import TemporaryDirectory
 from typing import Dict, List, Optional, Tuple
 
 from cofferdam.workstation.tasks.adapters.claude_code_worker import cli
-from cofferdam.workstation.worker import sandbox, session
+from cofferdam.workstation.worker import sandbox, session, worktree
 
 #: Not a credential, and not named like one. See the module docstring.
 SENTINEL = "NOTESENTINEL-A4T9-KEEPOUT"
