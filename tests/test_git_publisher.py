@@ -258,11 +258,22 @@ class TheWorkerNeverSeesThePublisherToken(PublisherHarness):
         self.assertIn("DENIED", output)
 
     def test_the_check_plan_names_no_publisher_path(self):
+        """Asserted on every host, including runners with no bubblewrap.
+
+        `checks.build_plan` fails closed without the executable -- correct, and
+        the reason this errored on CI. The *lookup* is stubbed rather than the
+        test skipped: this asserts that the credential-free check sandbox names
+        no publisher path, and a runner is exactly where that most needs to hold.
+        Same remedy as `SandboxPlanIsBounded` and the PR1g session tests.
+        """
         from cofferdam.workstation.worker import checks
 
         work = self.dir / "work"
         work.mkdir()
-        rendered = " ".join(checks.build_plan(worktree=work, command=("true",)))
+        with mock.patch.object(
+            checks.shutil, "which", return_value="/usr/bin/bwrap"
+        ):
+            rendered = " ".join(checks.build_plan(worktree=work, command=("true",)))
         self.assertNotIn(str(credential.publisher_root(self.state_dir)), rendered)
         self.assertNotIn("git-publisher", rendered)
 
