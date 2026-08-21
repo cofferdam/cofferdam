@@ -619,23 +619,33 @@ class ThePr1eBoundariesAreUnchanged(SessionHarness):
         self.assertIn("--strict-mcp-config", argv)
         self.assertNotIn("--mcp-config", argv)
 
-    def test_the_controller_still_has_network_and_the_checks_do_not(self):
-        from cofferdam.workstation.worker import checks
+    def check_argv(self):
+        """A check plan on any host, including one with no bubblewrap.
 
-        plan = self.plan()
-        self.assertNotIn("--unshare-net", plan.argv)
-        work = self.dir / "work"
-        self.assertIn(
-            "--unshare-net", checks.build_plan(worktree=work, command=("true",))
-        )
-
-    def test_the_check_sandbox_binds_no_claude_session(self):
+        `checks.build_plan` refuses to build anything when it cannot find the
+        executable — correct fail-closed behaviour, and the reason these two
+        tests errored on every CI runner. The *lookup* is stubbed rather than the
+        tests being skipped: these assert the credential-free and no-network
+        properties of the check sandbox, and a runner is exactly where those most
+        need to hold. Same remedy as `SandboxPlanIsBounded` in
+        `test_worker_containment.py`.
+        """
         from cofferdam.workstation.worker import checks
 
         work = self.dir / "work"
         work.mkdir(exist_ok=True)
-        argv = checks.build_plan(worktree=work, command=("true",))
-        rendered = " ".join(argv)
+        with mock.patch.object(
+            checks.shutil, "which", return_value="/usr/bin/bwrap"
+        ):
+            return checks.build_plan(worktree=work, command=("true",))
+
+    def test_the_controller_still_has_network_and_the_checks_do_not(self):
+        plan = self.plan()
+        self.assertNotIn("--unshare-net", plan.argv)
+        self.assertIn("--unshare-net", self.check_argv())
+
+    def test_the_check_sandbox_binds_no_claude_session(self):
+        rendered = " ".join(self.check_argv())
         self.assertNotIn(str(session.config_directory(self.state_dir)), rendered)
         self.assertNotIn("claude-worker", rendered)
         self.assertNotIn(".claude", rendered)
