@@ -30,7 +30,7 @@ from cofferdam.workstation.tasks.adapters.claude_code_worker import (
     delivered_prompt,
 )
 from cofferdam.workstation.tasks.identity import new_task_id
-from cofferdam.workstation.worker import sandbox, worktree
+from cofferdam.workstation.worker import sandbox, session, worktree
 
 
 def git(repo: Path, *arguments: str) -> str:
@@ -218,21 +218,54 @@ class SandboxPlanIsBounded(ContainmentHarness):
 
     def plan(self, tree=None):
         tree = tree or self.cut(self.repo_a, "alpha")
-        home = sandbox.build_home(self.dir / "home")
+        config = session.prepare(self.dir / "state")
         with unittest.mock.patch.object(
             sandbox, "find_bwrap", return_value=self.STUB_BWRAP
         ):
             return tree, sandbox.build_plan(
-                worktree=tree.path, home=home, cli_directory=Path("/usr"),
-                command=("/bin/echo", "hello"),
+                worktree=tree.path, cli_directory=Path("/usr"),
+                command=("/bin/echo", "hello"), session_config=config,
             )
 
-    def test_only_the_worktree_and_the_worker_home_are_writable(self):
+    def test_only_the_worktree_and_the_claude_session_are_writable(self):
+        """PR1g changed *what* the second writable path is, not how many.
+
+        It used to be a per-dispatch synthetic home holding a credential copy.
+        It is now the one durable Claude config root — see `worker.session` for
+        why the copy had to go.
+        """
         tree, plan = self.plan()
         writable = {
             plan.argv[i + 1] for i, token in enumerate(plan.argv) if token == "--bind"
         }
-        self.assertEqual(writable, {str(tree.path.resolve()), str(plan.home)})
+        self.assertEqual(
+            writable, {str(tree.path.resolve()), str(plan.session_config)}
+        )
+
+    def test_the_interior_home_is_a_tmpfs_not_a_host_directory(self):
+        """Nothing persists beside the config root, and nothing host-side backs it."""
+        _, plan = self.plan()
+        argv = list(plan.argv)
+        tmpfs = {argv[i + 1] for i, token in enumerate(argv) if token == "--tmpfs"}
+        self.assertIn(sandbox.INTERIOR_HOME, tmpfs)
+
+    def test_the_operator_credential_is_never_bound(self):
+        """The whole point of PR1g, asserted on the vector that actually runs."""
+        _, plan = self.plan()
+        operator = os.path.expanduser("~/.claude")
+        for bound in plan.bound_host_paths():
+            self.assertFalse(
+                bound == operator or bound.startswith(operator + "/"),
+                f"{bound} exposes the operator's Claude session",
+            )
+
+    def test_the_session_is_bound_writable_so_a_refresh_survives(self):
+        """Read-only here would fail a long run when the token refreshed."""
+        _, plan = self.plan()
+        argv = list(plan.argv)
+        index = argv.index(str(plan.session_config))
+        self.assertEqual(argv[index - 1], "--bind")
+        self.assertEqual(argv[index + 1], session.INTERIOR_CONFIG)
 
     def test_project_b_is_not_bound_at_all(self):
         self.assertTrue((self.repo_b / "PROJECT_B.txt").is_file())
@@ -260,19 +293,12 @@ class SandboxPlanIsBounded(ContainmentHarness):
         forbidden = Path(sandbox.NEVER_BIND[0])
         if not forbidden.exists():  # pragma: no cover - host dependent
             self.skipTest("that path does not exist on this host")
-        home = sandbox.build_home(self.dir / "home")
+        config = session.prepare(self.dir / "state")
         with self.assertRaises(sandbox.SandboxUnavailable):
             sandbox.build_plan(
-                worktree=forbidden, home=home, cli_directory=Path("/usr"),
-                command=("/bin/true",),
+                worktree=forbidden, cli_directory=Path("/usr"),
+                command=("/bin/true",), session_config=config,
             )
-
-    def test_the_synthetic_home_holds_no_other_project_history(self):
-        """The real ~/.claude.json records every project this machine has seen."""
-        home = sandbox.build_home(self.dir / "home")
-        state = (home / ".claude.json").read_text()
-        self.assertEqual(state.strip(), "{}")
-        self.assertNotIn("cofferdam", state)
 
     def test_the_environment_is_built_by_selection(self):
         _, plan = self.plan()
@@ -287,7 +313,8 @@ class SandboxPlanIsBounded(ContainmentHarness):
     def test_the_plan_takes_no_caller_supplied_bind(self):
         parameters = set(inspect.signature(sandbox.build_plan).parameters)
         self.assertEqual(
-            parameters, {"worktree", "home", "cli_directory", "command"}
+            parameters,
+            {"worktree", "cli_directory", "command", "session_config"},
         )
         for forbidden in ("binds", "extra_binds", "ro_binds", "policy", "profile"):
             self.assertNotIn(forbidden, parameters)
@@ -299,10 +326,10 @@ class SandboxActuallyContains(ContainmentHarness):
 
     def run_contained(self, script: str) -> str:
         tree = self.cut(self.repo_a, "alpha")
-        home = sandbox.build_home(self.dir / "home")
+        config = session.prepare(self.dir / "state")
         plan = sandbox.build_plan(
-            worktree=tree.path, home=home, cli_directory=Path("/usr"),
-            command=("/bin/sh", "-c", script),
+            worktree=tree.path, cli_directory=Path("/usr"),
+            command=("/bin/sh", "-c", script), session_config=config,
         )
         result = subprocess.run(
             list(plan.argv), capture_output=True, text=True, timeout=60,

@@ -58,7 +58,7 @@ from tempfile import TemporaryDirectory
 from typing import Dict, List, Optional, Tuple
 
 from cofferdam.workstation.tasks.adapters.claude_code_worker import cli
-from cofferdam.workstation.worker import sandbox
+from cofferdam.workstation.worker import sandbox, session
 
 #: Not a credential, and not named like one. See the module docstring.
 SENTINEL = "NOTESENTINEL-A4T9-KEEPOUT"
@@ -309,9 +309,9 @@ class TheAliasesAreRealBeforeAnythingIsDenied(unittest.TestCase):
         """Step 6 is only meaningful if `/proc` is there. It is — asserted, not assumed."""
         plan = sandbox.build_plan(
             worktree=self.work,
-            home=self.home,
             cli_directory=Path("/usr/bin"),
             command=("true",),
+            session_config=session.prepare(Path(self._tmp.name) / "state"),
         )
         self.assertIn("--proc", plan.argv)
         self.assertEqual(plan.argv[plan.argv.index("--proc") + 1], "/proc")
@@ -410,19 +410,33 @@ class LiveAliasBoundary(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        """Probe the **real** worker session, in its production layout.
+
+        PR1g moved the credential out of a per-dispatch home and into one durable
+        config root bound at ``/home/worker/.claude``. So the sentinel is planted
+        *in that root*, on this host, and removed again in `tearDownClass`: it is
+        the only way to aim the probe at the exact path class the real credential
+        now occupies. Planting it in a temporary directory instead would test a
+        layout that no longer ships.
+        """
         executable = cli.find_executable()
         if executable is None:  # pragma: no cover - host dependent
             raise unittest.SkipTest("the Claude CLI is not installed")
-        if sandbox.default_credentials() is None:  # pragma: no cover
-            raise unittest.SkipTest("no CLI credential, so no worker can sign in")
+        cls.state_dir = worktree.default_state_dir()
+        found = session.status(cls.state_dir, cli_present=True)
+        if not found.usable:  # pragma: no cover - host dependent
+            raise unittest.SkipTest(
+                "Cofferdam's Claude worker session is not logged in: " + found.status
+            )
 
         cls._tmp = TemporaryDirectory()
         root = Path(cls._tmp.name)
         cls.home, cls.work = build_alias_fixture(root)
-        # The real credential, so the CLI can authenticate. Never a target: every
-        # probe above aims at the sentinel beside it.
-        sandbox.build_home(cls.home)
-        cls.notes = cls.home / ".claude" / "build-notes.txt"
+        cls.session_config = session.config_directory(cls.state_dir)
+        # The sentinel goes beside the real credential, in the real config root.
+        cls.notes = cls.session_config / "build-notes.txt"
+        cls.notes.write_text(NOTES_BODY, encoding="utf-8")
+        os.chmod(cls.notes, 0o600)
         cls.notes_before = cls.notes.read_text()
 
         interior = cli.build_interior_argv(
@@ -436,9 +450,9 @@ class LiveAliasBoundary(unittest.TestCase):
 
         plan = sandbox.build_plan(
             worktree=cls.work,
-            home=cls.home,
             cli_directory=cli.resolve_cli_directory(executable),
             command=tuple(interior),
+            session_config=cls.session_config,
         )
         done = subprocess.run(
             list(plan.argv),
@@ -454,6 +468,13 @@ class LiveAliasBoundary(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        # The sentinel lived in real host state for the length of this class.
+        # Removed unconditionally, so a failing assertion cannot leave a stray
+        # file in Cofferdam's Claude session directory.
+        try:
+            cls.notes.unlink()
+        except (OSError, AttributeError):  # pragma: no cover - already gone
+            pass
         cls._tmp.cleanup()
 
     @staticmethod
@@ -609,7 +630,7 @@ class LiveAliasBoundary(unittest.TestCase):
         """Checked on the host, not inferred from what the model reported."""
         planted = [
             str(path)
-            for path in self.home.rglob("*")
+            for path in self.session_config.rglob("*")
             if path.is_file() and WRITE_MARKER in path.read_text(errors="ignore")
         ]
         self.assertEqual(planted, [], "a /work path became a write outside the worktree")

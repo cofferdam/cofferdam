@@ -31,20 +31,24 @@ knew about it is gone. Recovery is not re-execution — see :mod:`.reconcile`.
 
 from __future__ import annotations
 
-from . import journal, reconcile, sandbox, worktree
+from . import journal, reconcile, sandbox, session, worktree
 from .sandbox import SandboxPlan, SandboxUnavailable
 from .worktree import DevelopmentWorktree, WorktreeError
 
 from .reconcile import Reconciliation
+from .session import SessionStatus, WorkerSessionUnavailable
 
 __all__ = [
     "DevelopmentWorktree",
     "Reconciliation",
     "SandboxPlan",
+    "SessionStatus",
+    "WorkerSessionUnavailable",
     "SandboxUnavailable",
     "WorktreeError",
     "journal",
     "reconcile",
     "sandbox",
+    "session",
     "worktree",
 ]

@@ -212,10 +212,91 @@ class NoShellExecutionTests(unittest.TestCase):
                 # `tests/test_git_range_capture.py` assert that from the callable
                 # surface.
                 continue
+            if path.name == "session.py" and path.parent.name == "worker":
+                # M2L PR1g. One call: `claude auth status` against Cofferdam's
+                # own config root, to answer "is the worker signed in" without
+                # reading a credential. Narrower than the Git probes above — a
+                # two-element constant argv with no interpolation, `shell=False`,
+                # an environment built from four literal keys, `stdin=DEVNULL`, a
+                # timeout, and only three named fields kept from the output.
+                # `TheNarrowSubprocessExemptions` below asserts each of those
+                # rather than trusting this comment.
+                continue
+            if path.name == "auth.py" and path.parent.name == "worker":
+                # M2L PR1g. The one-time operator login, and the only file here
+                # that inherits an environment — deliberately, because an
+                # interactive sign-in legitimately needs a terminal, a display
+                # and a browser opener. It is an operator-invoked entry point,
+                # never imported by the daemon (asserted below), and the two
+                # variables that decide *which account session* is touched are
+                # overridden rather than inherited.
+                continue
             source = path.read_text(encoding="utf-8")
             if "subprocess." in source:
                 offenders.append(path.name)
         self.assertEqual(offenders, [], f"subprocess used outside adapter code: {offenders}")
+
+    def test_the_worker_session_probe_is_as_narrow_as_its_exemption_claims(self):
+        """The bound on PR1g's exemption, asserted from the source that runs.
+
+        An allowlist entry is worth what its justification is worth, so the
+        claims in the comment above are checked here instead of being believed.
+        """
+        import inspect
+
+        from cofferdam.workstation.worker import session
+
+        source = inspect.getsource(session.probe)
+        self.assertIn('"auth", "status"', source)
+        self.assertIn("stdin=subprocess.DEVNULL", source)
+        self.assertIn("timeout=timeout", source)
+        self.assertNotIn("shell=True", source)
+        self.assertNotIn("Popen", source)
+        # The environment is four literal keys, not `os.environ`.
+        self.assertNotIn("os.environ", source)
+        self.assertIn('"PATH": "/usr/bin:/bin"', source)
+
+    def test_the_worker_auth_tool_is_never_imported_by_the_daemon(self):
+        """Its broader exemption is only defensible because nothing loads it."""
+        root = Path(__file__).resolve().parents[1] / "cofferdam"
+        importers = []
+        for path in root.rglob("*.py"):
+            if path.name == "auth.py" and path.parent.name == "worker":
+                continue
+            source = path.read_text(encoding="utf-8")
+            if "worker.auth" in source or "from .auth import" in source:
+                importers.append(str(path.relative_to(root)))
+        self.assertEqual(importers, [], f"the login tool is imported by {importers}")
+
+    def test_the_login_tool_never_handles_a_credential(self):
+        """It sets two variables and execs. It does not read what comes back.
+
+        Scans the *code*, with docstrings and comments stripped. The first
+        version of this scanned raw text and failed on its own prose — the module
+        docstring says it does not type a password, which is exactly the word
+        being searched for. A structural check has to look at structure.
+        """
+        import ast
+
+        from cofferdam.workstation.worker import auth
+
+        tree = ast.parse(Path(auth.__file__).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            # Drop every docstring so prose cannot satisfy or fail this test.
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef)):
+                if (
+                    node.body
+                    and isinstance(node.body[0], ast.Expr)
+                    and isinstance(node.body[0].value, ast.Constant)
+                    and isinstance(node.body[0].value.value, str)
+                ):
+                    node.body = node.body[1:]
+        code = ast.unparse(tree)
+        for forbidden in (
+            "password", "cookie", "accessToken", "refreshToken",
+            "credentials.json", "getpass",
+        ):
+            self.assertNotIn(forbidden, code, forbidden)
 
     def test_action_schemas_expose_no_command_like_field(self) -> None:
         """The action schemas declare no command-like field, and forbid extras.
