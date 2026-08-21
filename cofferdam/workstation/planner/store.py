@@ -1221,6 +1221,23 @@ class PlannerStore:
             ).fetchall()
         return tuple(WorkerDispatch(**dict(row)) for row in rows)
 
+    def recent_for_project(self, project_id: str, limit: int = 20) -> tuple:
+        """The most recent planner requests **for one project**.
+
+        Scoped in the SQL rather than by filtering a global listing. The
+        difference is not performance: a filtered global read has to page
+        through other projects' rows to find this one's, and a paging bug there
+        is a bug that shows one project's work under another's name. Selecting
+        by project makes that shape impossible.
+        """
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT " + _READ_COLUMNS + " FROM planner_requests "
+                "WHERE project_id = ? ORDER BY created_at DESC LIMIT ?",
+                (str(project_id), min(int(limit), 200)),
+            ).fetchall()
+        return tuple(PlannerRecord(**dict(row)) for row in rows)
+
     def upsert_publication(self, publication: "Publication") -> "Publication":
         """Create or update the one publication row for a dispatch.
 

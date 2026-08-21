@@ -118,6 +118,7 @@ packages = [
     "cofferdam.workstation.context.projection",
     "cofferdam.workstation.mediasearch",
     "cofferdam.workstation.mind",
+    "cofferdam.workstation.operations",
     "cofferdam.workstation.planner",
     "cofferdam.workstation.planner.providers",
     "cofferdam.workstation.publisher",

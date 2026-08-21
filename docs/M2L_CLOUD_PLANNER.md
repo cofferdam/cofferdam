@@ -935,3 +935,72 @@ nothing to settle them.
 The first product mode stays **prepare a prompt, then wait for the user**. There is no autonomous
 continuation anywhere in this milestone — and now there is a durable record of the waiting, and of
 what the user said.
+
+---
+
+## "What is Cofferdam doing right now?" (M2M PR1)
+
+Five components own pieces of that answer — the planner owns whether a plan is being made, the
+authority gate owns whether a person decided, Task Core owns whether a worker is running, worker
+recovery owns what a restart found, the publisher owns whether anything reached GitHub. Each is
+right about its own piece; none can answer the whole question.
+
+### A projection, not a lifecycle
+
+`cofferdam/workstation/operations/` joins them and **owns no state**. No table, no status column, no
+cache, no writer. Every phase is *derived* on each read from whoever owns the fact, joined on ids
+that are already durable:
+
+    planner_request → authority_event → dispatch → task → reconciliation
+                                                        → publication
+
+That is the safety property. A stored operational status is a second opinion about facts that
+already have owners, and the moment it exists it can be stale or written by the wrong thing. A
+derived phase cannot disagree with the systems it summarises, because there is nothing stored to
+disagree with. `test_the_same_read_twice_reflects_a_change_in_between` is the proof.
+
+### The phases
+
+`idle` · `planner_preparing` · `awaiting_user_answer` · `awaiting_approval` · `rejected` · `stopped`
+· `worker_queued` · `worker_running` · `recovery_required` · `recovery_reconciled` ·
+`worker_interrupted` · `commit_ready` · `publishing` · `pr_ready` · `failed` · `cancelled` ·
+`auth_required` · `needs_attention`
+
+These do not duplicate the vocabularies they read. `worker_running` is not a copy of Task Core's
+`running`; it is the *rendering* of it, in a vocabulary that also has room for "waiting for you to
+approve a prompt" — which Task Core has no concept of, because no task exists yet.
+
+Derivation is **latest-fact-first**: a published dispatch is not also "awaiting approval" because an
+approval row still exists. Every phase carries `because`, naming the row that produced it.
+
+### Ordered by attention, not by time
+
+`rank()` sorts by *how much a person is needed*. A project waiting on an answer outranks one that is
+merely running; a failure outranks both. That judgement lives here, once, rather than in every client
+that ever renders this.
+
+Each phase carries a plain sentence — "A pull request is open and ready for your review" — so a
+cockpit never has to show `failed` and leave a person guessing.
+
+### Machine facts and model claims stay apart
+
+`machine` holds what Cofferdam observed by running Git or reading its own rows. `claims` holds what a
+model said, labelled `model_authored` and bounded. A claim **never** decides a phase: a worker
+reporting "every test passes" beside a `contradictory` reconciliation still reads
+`needs_attention`. `worker_completion_is_not_acceptance` is stated in every payload.
+
+### Prompts are addressable, not carried
+
+A status read happens often and a prompt is large, so the approved text is not in the payload — only
+`prompt_available` and the ids to ask with. `WorkerDispatchService.dispatched_prompt` remains the
+retrieval path.
+
+### Actions are declared, not implemented
+
+`AVAILABLE_ACTIONS` maps each phase to the controls that would be *meaningful* in it — answer,
+approve, reject, cancel, inspect prompt, inspect result, publish, open PR, reconcile, sign in — so a
+future cockpit renders the same buttons Cofferdam would accept instead of discovering a refusal after
+a tap. **Availability, not authority**: nothing in this package can perform any of them, asserted by
+test.
+
+No route, no PWA, no Custom GPT Action. Those are next, and they consume this.
