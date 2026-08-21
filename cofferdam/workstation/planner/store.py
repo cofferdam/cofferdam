@@ -57,7 +57,15 @@ DATABASE_FILENAME = "planner.sqlite3"
 #: v2 → v3 (PR1e) adds ``planner_worker_dispatches``, on the same terms:
 #: additive only, nothing existing altered. A v3 database with no dispatches is
 #: a v2 database with an empty table beside it.
-PLANNER_SCHEMA_VERSION = 3
+#:
+#: v3 → v4 (PR1f) adds ``planner_worker_reconciliations`` — what a restart found
+#: when it came back to a dispatch nobody was running. Additive on the same
+#: terms, and deliberately a *separate table* rather than columns on the dispatch
+#: row: a dispatch records what was authorized and handed over, a reconciliation
+#: records what a later process observed, and the second written onto the first
+#: would overwrite the evidence of what was actually dispatched. That is the same
+#: reasoning that kept ``planner_authority_events`` off ``planner_requests``.
+PLANNER_SCHEMA_VERSION = 4
 
 STATUS_PENDING = "pending"
 STATUS_RUNNING = "running"
@@ -230,6 +238,47 @@ CREATE UNIQUE INDEX IF NOT EXISTS planner_dispatch_one_per_request
     ON planner_worker_dispatches (planner_request_id);
 CREATE UNIQUE INDEX IF NOT EXISTS planner_dispatch_by_task
     ON planner_worker_dispatches (task_id);
+
+-- What a restart found when it came back to a dispatch nobody was running.
+--
+-- v4, and additive: no existing column moves and no existing row is rewritten,
+-- so a v3 database reads back unchanged and gains an empty table. The version
+-- bump follows the DDL for the reason v1 -> v2 gives above.
+--
+-- **One row per dispatch, and it is `INSERT OR IGNORE`.** Reconciliation is
+-- idempotent by construction rather than by a flag: a daemon restarted ten
+-- times in a row classifies the same dispatch ten times and records the first
+-- answer. Overwriting would let a *later* restart — one that runs after
+-- somebody has moved the worktree, say — replace a truthful earlier reading
+-- with a worse one, and the earliest post-crash observation is the closest to
+-- what actually happened.
+--
+-- No path column. The worktree location is a pure function of the project and
+-- task ids that are already here, so storing it would be a second copy of a
+-- derived value and the copy is what goes stale.
+CREATE TABLE IF NOT EXISTS planner_worker_reconciliations (
+    dispatch_id        TEXT PRIMARY KEY,
+    task_id            TEXT NOT NULL,
+    project_id         TEXT NOT NULL,
+    outcome            TEXT NOT NULL,
+    furthest_phase     TEXT,
+    open_intents       TEXT,
+    recovered_commit   TEXT,
+    checks_observed    INTEGER NOT NULL DEFAULT 0,
+    check_exit_zero    INTEGER,
+    changed_files      INTEGER NOT NULL DEFAULT 0,
+    worktree_retained  INTEGER NOT NULL DEFAULT 0,
+    needs_attention    INTEGER NOT NULL DEFAULT 0,
+    detail             TEXT,
+    task_state         TEXT,
+    reconciled_at      TEXT NOT NULL,
+
+    FOREIGN KEY (dispatch_id)
+        REFERENCES planner_worker_dispatches (dispatch_id)
+);
+
+CREATE INDEX IF NOT EXISTS planner_reconciliation_by_task
+    ON planner_worker_reconciliations (task_id);
 """
 
 
@@ -422,6 +471,62 @@ _DISPATCH_COLUMNS = (
     "dispatch_id, planner_request_id, authority_event_id, subject_fingerprint, "
     "worker_prompt_sha256, project_id, workspace_id, adapter_id, task_id, "
     "request_key, branch, actor, source, created_at"
+)
+
+
+@dataclass(frozen=True)
+class DispatchReconciliation:
+    """What a restart found, and what it did about it. One row per dispatch.
+
+    Facts, deliberately not a verdict. ``outcome`` says what the machine state
+    turned out to be; ``task_state`` says what Task Core's lifecycle settled on.
+    They are stored side by side rather than merged because they answer different
+    questions — "was there a commit" and "is this task finished" — and a single
+    column would force one of them to stand in for the other.
+    """
+
+    dispatch_id: str
+    task_id: str
+    project_id: str
+    outcome: str
+    reconciled_at: str
+    furthest_phase: Optional[str] = None
+    open_intents: Optional[str] = None
+    recovered_commit: Optional[str] = None
+    checks_observed: int = 0
+    check_exit_zero: Optional[int] = None
+    changed_files: int = 0
+    worktree_retained: int = 0
+    needs_attention: int = 0
+    detail: Optional[str] = None
+    task_state: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """The safe shape. No path, the same rule the dispatch view follows."""
+        return {
+            "outcome": self.outcome,
+            "reconciled_at": self.reconciled_at,
+            "furthest_phase": self.furthest_phase,
+            "open_intents": [
+                part for part in (self.open_intents or "").split(",") if part
+            ],
+            "recovered_commit": self.recovered_commit,
+            "checks_observed": bool(self.checks_observed),
+            "check_exit_zero": (
+                None if self.check_exit_zero is None else bool(self.check_exit_zero)
+            ),
+            "changed_files": self.changed_files,
+            "worktree_retained": bool(self.worktree_retained),
+            "needs_attention": bool(self.needs_attention),
+            "detail": self.detail,
+            "task_state": self.task_state,
+        }
+
+
+_RECONCILIATION_COLUMNS = (
+    "dispatch_id, task_id, project_id, outcome, furthest_phase, open_intents, "
+    "recovered_commit, checks_observed, check_exit_zero, changed_files, "
+    "worktree_retained, needs_attention, detail, task_state, reconciled_at"
 )
 
 
@@ -892,6 +997,90 @@ class PlannerStore:
             ).fetchone()
         return WorkerDispatch(**dict(row)) if row else None
 
+    def record_reconciliation(
+        self, reconciliation: "DispatchReconciliation"
+    ) -> "DispatchReconciliation":
+        """Store what a restart found. **First answer wins; never overwritten.**
+
+        ``INSERT OR IGNORE`` and then read back, so the return value is always
+        what the database holds rather than what this call tried to write. That
+        makes the whole recovery pass idempotent without a flag: restarting ten
+        times classifies ten times and records once.
+
+        Keeping the *first* answer is the deliberate half. A later restart runs
+        against a world that has had more time to change — somebody may have
+        moved the worktree, or pruned a branch — so the earliest post-crash
+        reading is the one closest to what actually happened, and letting a
+        later one replace it would quietly trade a good observation for a worse
+        one.
+        """
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    "INSERT OR IGNORE INTO planner_worker_reconciliations ("
+                    + _RECONCILIATION_COLUMNS
+                    + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        reconciliation.dispatch_id,
+                        reconciliation.task_id,
+                        reconciliation.project_id,
+                        reconciliation.outcome,
+                        reconciliation.furthest_phase,
+                        reconciliation.open_intents,
+                        reconciliation.recovered_commit,
+                        int(reconciliation.checks_observed),
+                        reconciliation.check_exit_zero,
+                        int(reconciliation.changed_files),
+                        int(reconciliation.worktree_retained),
+                        int(reconciliation.needs_attention),
+                        reconciliation.detail,
+                        reconciliation.task_state,
+                        reconciliation.reconciled_at,
+                    ),
+                )
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+            connection.execute("COMMIT")
+            stored = self._reconciliation_row(connection, reconciliation.dispatch_id)
+        return stored if stored is not None else reconciliation
+
+    @staticmethod
+    def _reconciliation_row(
+        connection: sqlite3.Connection, dispatch_id: str
+    ) -> Optional["DispatchReconciliation"]:
+        row = connection.execute(
+            "SELECT " + _RECONCILIATION_COLUMNS
+            + " FROM planner_worker_reconciliations WHERE dispatch_id = ?",
+            (dispatch_id,),
+        ).fetchone()
+        return DispatchReconciliation(**dict(row)) if row else None
+
+    def reconciliation(self, dispatch_id: str) -> Optional["DispatchReconciliation"]:
+        """What a restart recorded about this dispatch, if one ever did."""
+        with self._lock, self._connect() as connection:
+            return self._reconciliation_row(connection, dispatch_id)
+
+    def dispatches_for_tasks(self, task_ids) -> tuple:
+        """The dispatches behind a set of task ids. The recovery pass's query.
+
+        Takes ids rather than a state, because *which* tasks need reconciling is
+        Task Core's judgement and not this store's — asking here would mean
+        duplicating the lifecycle's opinion in a second place.
+        """
+        ids = [str(task_id) for task_id in task_ids][:200]
+        if not ids:
+            return ()
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT " + _DISPATCH_COLUMNS + " FROM planner_worker_dispatches "
+                "WHERE task_id IN (" + placeholders + ") ORDER BY created_at",
+                ids,
+            ).fetchall()
+        return tuple(WorkerDispatch(**dict(row)) for row in rows)
+
     def recent_dispatches(self, limit: int = 50) -> tuple:
         with self._lock, self._connect() as connection:
             rows = connection.execute(
@@ -904,6 +1093,7 @@ class PlannerStore:
 
 __all__ = [
     "DATABASE_FILENAME",
+    "DispatchReconciliation",
     "PLANNER_SCHEMA_VERSION",
     "PLANNER_STATUSES",
     "STATUS_PENDING",
