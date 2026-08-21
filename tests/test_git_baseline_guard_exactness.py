@@ -207,11 +207,19 @@ class TheExceptedFileIsStillChecked(unittest.TestCase):
         had to be argued for, and a third still fails here. The rest of this
         module proves the guards themselves are real by writing a rogue file and
         requiring every one of them to reject it.
+
+        M2L PR1e's development worker is skipped by the scan rather than added to
+        the list, and the distinction is the whole point of this test. It is an
+        **adapter** that owns a process — the category the ``claude_code``
+        exclusion already covers — not a host Git probe. The assertion below
+        still says exactly what it said before: the files claiming to be
+        host-owned Git probes are those two and no others.
         """
         offenders = sorted(
             path.name
             for path in TASKS_PACKAGE.rglob("*.py")
             if "claude_code" not in path.parts
+            and "claude_code_worker" not in path.parts
             and path.name not in ("hostclient.py",)
             and "subprocess" in python_code_only(path.read_text("utf-8"))
         )

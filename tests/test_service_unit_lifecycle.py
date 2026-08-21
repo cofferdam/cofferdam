@@ -473,7 +473,11 @@ class ProcessTerminationTests(unittest.TestCase):
         its own group is untouched, and that nothing is left unreaped.
         """
         for path in _python_sources():
-            if "claude_code" in path.parts:
+            if "claude_code" in path.parts or "claude_code_worker" in path.parts:
+                # M2L PR1e. Same ownership rule as the CLI adapter, applied to
+                # the contained development worker: it signals only the child it
+                # started, and the namespace's `--die-with-parent` covers what a
+                # single signal would miss.
                 continue
             if path.name == "wrapper.py" and path.parent.name == "sessions":
                 continue

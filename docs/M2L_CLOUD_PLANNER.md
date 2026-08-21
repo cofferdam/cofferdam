@@ -335,12 +335,254 @@ belongs to its own PR. A route added now would answer 503 to everything.
 
 ---
 
+## The bounded development worker (PR1e)
+
+The first PR in which Cofferdam may consume a human-approved prompt and do real development work.
+
+### The dispatch gate
+
+Every condition is a **hard refusal**, checked before anything is created:
+
+```
+invocation succeeded
++ action == PREPARE_WORKER_PROMPT
++ human gate == approved
++ binds_current_subject == true
++ fingerprint recomputed now == the approved fingerprint
++ project resolves and permits the worker adapter
+        ↓
+one bounded worker dispatch
+```
+
+The fingerprint is recomputed by the dispatch layer rather than taken from the gate — an
+independent arrival at the same number by the layer that is about to *act* on it, so a future change
+to how the authority layer derives its value cannot silently widen what may run.
+
+### The signature is the security property
+
+```python
+dispatch_approved_worker_prompt(planner_request_id, *, provenance)
+```
+
+No `prompt`. No `cwd`, `repository`, `worktree`, `branch`, `command`, `argv`, `executable`, `model`,
+`tools`, `mcp_config` or `adapter`. **Approve prompt A, dispatch prompt B is not something to
+validate against — it is not expressible.**
+
+### Execution ownership: Task Core
+
+The planner was deliberately *not* a `TaskAdapter` because it owns no lifecycle. A coding worker
+does — queued/running/completed/failed/cancelled, cancellation, events — so Task Core is the right
+owner, and `TaskContext` already carries exactly what a worker may know: a `project_id`, a
+**server-resolved** `project_root`, and the prompt. No second job system was created.
+
+### Four facts, four owners
+
+```
+planner result   →  what the model proposed        (PR1c)
+authority event  →  what the person authorized     (PR1d)
+dispatch         →  what Cofferdam handed a worker (PR1e, planner.sqlite3 v3)
+task             →  what the worker did            (Task Core)
+```
+
+`planner_worker_dispatches` is a *linkage*, not a copy: no state column, no result. Duplicating Task
+Core's lifecycle would create two answers to "is it running" that drift apart.
+
+### Cross-database idempotency
+
+`planner.sqlite3` and `tasks.sqlite3` have no shared transaction, so "check → create task → link"
+has a crash window. The fix is not a lock: the Task Core request key is **derived** rather than
+minted — a pure function of `(planner_request_id, approved fingerprint, worker kind)` — so a retry
+computes the same key, Task Core returns the task it already made, and the linkage is written for
+that same task. Nothing launches twice because the second attempt never asks for a second task. The
+mechanism is Task Core's own `client_request_id`, which has existed since M2F.
+
+### Project isolation
+
+```
+planner request → workspace_id → Workspace → project_id → TaskProject → verified root
+```
+
+Every hop is host-owned configuration. The caller supplies none of it.
+
+### Worktree and branch
+
+Cofferdam cuts the worktree; the worker starts inside one already authorized. Under
+`state/worker-worktrees/<project>/<task>` — outside every project checkout — on branch
+`cofferdam/worker/<task_id>`. Model text cannot become a ref: there is no argument it could arrive
+in. The canonical checkout keeps its branch, its commit and its clean status; `git worktree add`
+writes bookkeeping under `.git/worktrees/`, which is how Git registers a linked worktree and is
+stated rather than hidden.
+
+### Host-level containment
+
+**This is the part that is not a sentence in a prompt.** The `claude-code` adapter stays safe by
+having no Bash. A development worker needs a shell, so the boundary moves from *which tools exist*
+to *what the process can reach*: an unprivileged `bubblewrap` namespace in which the authorized
+worktree is present and the rest of the machine is **absent, not denied**.
+
+Verified against the installed CLI (2.1.221) before it was designed: the subscription login
+authenticates inside it, DNS resolves, and `/home` does not exist — so `/home/nrgis/cofferdam`, the
+slots, and every other project are unreachable. The worker gets a *synthetic* home holding a
+credential copy and an empty CLI state file, because the real `~/.claude.json` records eight project
+paths on this workstation.
+
+If containment is unavailable the adapter reports itself unavailable and `start` refuses. **There is
+no uncontained fallback.**
+
+### Worker tool policy — no shell, and why
+
+A separate adapter (`claude-code-worker`), not a mode of the existing one — widening the old profile
+would retroactively grant a shell to every task any phone can already create.
+
+The first version of this profile granted Bash under a command-prefix allowlist (`git`, `python3`,
+`pytest`, `make`) and called those *bounded commands*. **That was wrong, and it was tested rather
+than argued.** With a fake sentinel credential in the exact location the real one occupies:
+
+| attempt | result |
+|---|---|
+| a shell reading `$HOME/.claude/.credentials.json` | **leaked** |
+| `python3 -c` — an *allowed* prefix | **leaked** |
+| project code opening a socket to a local listener | **exfiltrated**, listener logged it |
+
+`python3`, `pytest` and `make` are **arbitrary-code launchers**. A prefix allowlist decides which
+program starts and says nothing about what it does once running — an intent filter, not a boundary.
+The credential must be in the namespace for the CLI to sign in, so anything there that can run code
+can take it.
+
+The shipped profile therefore grants **file tools only**, and each one is scoped to the worktree:
+`Read(/work/**)`, `Write(/work/**)`, `Edit(/work/**)`, `Glob(/work/**)`, `Grep(/work/**)`. Three
+layers, in order of what each is worth:
+
+1. **No command tool** — no process, no socket. This removes the *exfiltration path* and is the
+   load-bearing layer.
+2. **File tools scoped to `/work`** — a positive grant, plus a `--disallowedTools
+   "Read(/home/worker/**)"` deny rule behind it as defense in depth.
+3. **Output scrubbing** — the final message is the one channel that leaves a namespace by design.
+   It is a filter on what gets *stored*, **not** the credential boundary. The guarantee is that the
+   model cannot obtain the credential through its tools; scrubbing exists for the case where
+   provider or runtime metadata carries sensitive material by accident.
+
+Only layer 1 is a statement about capability. Layer 2 is a permission rule, layer 3 is a filter, and
+neither is asked to carry the boundary alone.
+
+### Path aliases — is authorization lexical or canonical?
+
+A project repository is model-controlled input and may already contain Git-tracked symlinks. So a
+`/work/**` grant is worth exactly what the permission engine's *matching* is worth: if it matched the
+string it was handed, `/work/apparently-safe → /home/worker/<credential>` would launder the
+credential directory into scope.
+
+Tested behaviourally against CLI 2.1.221, with a fake sentinel planted in the worker home, an
+unrestricted control process shown to follow every alias to it first, and the alias attempted only
+then:
+
+| alias | result |
+|---|---|
+| `/home/worker/.claude/<sentinel>` — direct | refused |
+| `/work/../home/worker/...` and `/work/./../home/worker/...` | refused |
+| `/work/project-info.txt → /home/worker/...` — symlink escape | refused |
+| `/work/a → /work/b → /home/worker/...` — chain | refused |
+| `../home/worker/...` — relative escape | refused |
+| `/proc/self/root/home/worker/...`, `/proc/self/cwd/...` | refused |
+| **`/work/host-link → /etc/hostname`** — *lexically in scope* | **refused** |
+| write through a dangling escape, and through an escaping *directory* link | refused |
+| `/work/docs.md → README.md`, `nested/up.md → ../README.md` — safe internal | readable |
+
+The last-but-two row is the one that settles it. `/work/host-link` is lexically inside `/work/**`; a
+lexical matcher would have allowed it. **The engine authorizes the resolved target.**
+
+Because of that, **no worktree symlink preflight ships**. The containment it would add already
+exists a layer down, and sandbox code duplicating an enforced guarantee is a liability that has to be
+maintained and can drift. `tests/test_worker_path_aliases.py` is what fails if a CLI upgrade ever
+changes that answer — which is the event that would make a preflight necessary.
+
+The measurement also corrected the *previous* posture. Before scoping, the grant was
+"everywhere except one known directory", and under it the model read `/etc/hostname` and
+`/usr/lib/os-release` on the first ask. Nothing there is a secret — the mount namespace is why — but
+the policy expressed *deny one place* where the intent was *allow one place*, and those differ on
+every path nobody thought to name.
+
+### The tool list is the runtime's, not the profile's wish
+
+`--allowedTools` grants *permission*; it does not decide which tools exist. Reading the session's own
+`init` event showed a worker holding `Artifact`, `PushNotification`, `RemoteTrigger`, `CronCreate`,
+`SendMessage`, `Monitor`, `DesignSync`, `ToolSearch`, `NotebookEdit`, `EnterWorktree` and the `Task*`
+family — while the profile listed six file tools. Several of those reach off this machine or outlive
+the dispatch.
+
+`DENIED_TOOLS` now names the whole non-file surface, and the result is checked against the runtime
+rather than reasoned about: the `init` event reports exactly `["Edit", "Glob", "Grep", "Read",
+"Write"]`, with no MCP server and no slash command.
+
+**Controller network access is not model network authority.** Cofferdam's own process must reach
+Anthropic for a worker to run at all; nothing about that requires the *model* to hold a tool that
+leaves the machine. The two get confused precisely because they share a process.
+
+### Project checks run somewhere else entirely
+
+Project code executes in a **second** bubblewrap sandbox with a deliberately different shape:
+
+| | Claude phase | check phase |
+|---|---|---|
+| provider credential | present (must sign in) | **absent** |
+| network | shared (must reach the API) | **disabled** (`--unshare-net`) |
+| what runs | the CLI, file tools only | project code |
+| who chose the command | nobody — no Bash | host-owned table, by id |
+
+`CHECK_COMMANDS` is closed and code-owned. `make` and `npm test` are **excluded on purpose**: their
+recipes are repository text, in a worktree the model just wrote to. `python3 -m unittest` is the
+default because it is stdlib and needs nothing installed.
+
+The commit is host-owned too — `worktree.commit_all`, authored as `Cofferdam Worker`. The worker
+cannot commit for itself, which is the right shape rather than a limitation: a commit is durable
+evidence and should not be produced by a process holding a provider credential.
+
+A check result reports `exit_zero`, **not** `passed`. M2K owns the vocabulary of acceptance; this is
+one command's exit status observed beside a dispatch.
+
+MCP is off (`--strict-mcp-config`, no `--mcp-config`). No settings file is read
+(`--setting-sources ""`), so a `.claude/settings.json` in the worktree cannot widen the profile — and
+a project `CLAUDE.md` is read by the model as project input, which is the intended asymmetry with
+the planner. Commits are authored as `Cofferdam Worker`, never as the operator.
+
+### Exact prompt traceability
+
+```
+persisted worker_prompt  =  authority subject  =  dispatch digest  =  what the worker received
+```
+
+The approved prompt is appended to a code-owned execution contract **byte for byte**, after a
+constant separator, so `delivered_prompt(payload)` recovers exactly what was approved.
+`dispatched_prompt()` re-verifies the stored prompt against the digest recorded at dispatch and
+returns `None` on mismatch — the honest answer to *"what did you send"* is never *"here is what is
+there now"*.
+
+### Worker completion is not acceptance
+
+A finished worker is a finished **process**. "Tests passed" is a worker *claim*; what Cofferdam
+observed by running Git itself is reported separately, and the read model carries
+`worker_completion_is_not_acceptance`. Reconciling the two is PR1f.
+
+---
+
+### Git credentials — the direction, not the implementation
+
+Push and PR creation stay unimplemented, and the reason is now a design decision rather than an
+open question: **the operator's GitHub token must not be mounted into the worker namespace.** The
+preferred shape is a host-owned publisher — Cofferdam verifies the project and branch, uses a
+separately held repo-scoped credential (a deploy key or GitHub App), pushes the already-authorized
+branch and opens the PR. The worker never receives that credential. Building that publisher is its
+own PR.
+
+---
+
 ## Still deferred
 
-Consuming an answer by creating a follow-up planner invocation · dispatching an approved prompt ·
-worker result ingestion/evaluation · a private device-token confirmation route · Project Handoff ·
-Custom GPT integration · phone/PWA UI · bounded autonomous loop · routines · artifacts · MCP server ·
-connectors · deployment.
+M2K verification of worker results · planner evaluation after a worker · next-step planning ·
+consuming an ASK_USER answer into a follow-up invocation · Git push and PR creation from the worker
+· a private device-token confirmation/dispatch route · the "What is Cofferdam doing?" panel · Custom
+GPT integration · Codex worker selection · bounded multi-step loop · A/B self-update and rollback ·
+deployment.
 
 The first product mode stays **prepare a prompt, then wait for the user**. There is no autonomous
 continuation anywhere in this milestone — and now there is a durable record of the waiting, and of

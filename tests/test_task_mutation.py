@@ -506,7 +506,15 @@ class CancellationGuard(TaskTestCase):
             # No exception, in any file, ever. This is the breadth rule.
             for never in ("pkill", "killall"):
                 self.assertNotIn(never, source, str(path) + " uses " + never)
-            if "claude_code" in path.parts or path.name in self.PROCESS_AWARE_FILES:
+            if (
+                "claude_code" in path.parts
+                # M2L PR1e. The development worker owns one process and stops
+                # only the object its own `Popen` returned — no pid, no group,
+                # no process name. The broad words (`pkill`, `killall`,
+                # `psutil`) stay forbidden for it as for every file here.
+                or "claude_code_worker" in path.parts
+                or path.name in self.PROCESS_AWARE_FILES
+            ):
                 continue
             for forbidden in ("os.kill", "signal", "subprocess"):
                 self.assertNotIn(forbidden, source, str(path) + " uses " + forbidden)
@@ -642,6 +650,12 @@ class ContentLeakGuard(TaskTestCase):
                 )
                 if (
                     "claude_code" not in path.parts
+                    # M2L PR1e's development worker names `stdout`/`stderr` for
+                    # the same reason: they are its child's pipes. It has no
+                    # `print(`, no `logging` and no `logger` — and its stderr
+                    # goes into a bounded failure message rather than anywhere
+                    # that outlives the task.
+                    and "claude_code_worker" not in path.parts
                     and path.name not in pipe_owners
                 ):
                     forbidden_here += ("stdout", "stderr")

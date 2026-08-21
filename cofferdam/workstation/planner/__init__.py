@@ -74,6 +74,21 @@ from .authority import (
     new_authority_event_id,
 )
 from .authority_service import PlannerAuthorityService, PlannerGateView
+from .dispatch import (
+    WORKER_KIND_CLAUDE_CODE,
+    WORKER_KINDS,
+    DispatchDecision,
+    dispatch_request_key,
+    evaluate_dispatch,
+    new_dispatch_id,
+    worker_prompt_digest,
+)
+from .dispatch_service import (
+    WORKER_ADAPTER_ID,
+    DispatchView,
+    WorkerDispatchRefused,
+    WorkerDispatchService,
+)
 from .contract import PLANNER_CONTRACT
 from .errors import (
     PlannerAuthorityConflict,
@@ -126,6 +141,7 @@ from .store import (
     AuthorityEvent,
     PlannerRecord,
     PlannerStore,
+    WorkerDispatch,
 )
 
 __all__ = [
@@ -182,6 +198,8 @@ __all__ = [
     "PlannerTimeout",
     "PlannerUnavailable",
     "ContextSource",
+    "DispatchDecision",
+    "DispatchView",
     "PlannerGateView",
     "PlannerRecord",
     "PlannerService",
@@ -201,4 +219,14 @@ __all__ = [
     "valid_fingerprint",
     "ProviderExecution",
     "validate_planner_result",
+    "WORKER_ADAPTER_ID",
+    "WORKER_KINDS",
+    "WORKER_KIND_CLAUDE_CODE",
+    "WorkerDispatch",
+    "WorkerDispatchRefused",
+    "WorkerDispatchService",
+    "dispatch_request_key",
+    "evaluate_dispatch",
+    "new_dispatch_id",
+    "worker_prompt_digest",
 ]

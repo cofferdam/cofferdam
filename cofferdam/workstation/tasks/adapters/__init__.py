@@ -42,6 +42,8 @@ from .claude_agent_sdk import ClaudeAgentSdkAdapter
 from .claude_code import ADAPTER_ID as CLAUDE_CODE_ADAPTER_ID
 from .claude_code import ClaudeCodeAdapter
 from .claude_code import cli as claude_code_cli
+from .claude_code_worker import ADAPTER_ID as CLAUDE_CODE_WORKER_ADAPTER_ID
+from .claude_code_worker import ClaudeCodeWorkerAdapter
 from .protocol import (
     AdapterCapabilities,
     AdapterEvent,
@@ -140,6 +142,7 @@ def build_registry(
     enable_validation_adapter: bool = False,
     enable_claude_code_adapter: bool = False,
     enable_claude_agent_sdk_adapter: bool = False,
+    enable_claude_code_worker_adapter: bool = False,
 ) -> AdapterRegistry:
     """The adapter table for this process.
 
@@ -188,15 +191,31 @@ def build_registry(
         adapters.append(
             ClaudeAgentSdkAdapter(cli_path=claude_code_cli.find_executable())
         )
+    if enable_claude_code_worker_adapter:
+        # The third switch, and the one that matters most. This adapter gives a
+        # model a shell — bounded by an allowlist, and contained by a mount
+        # namespace — inside an isolated worktree it may commit to. It is off by
+        # default, it is separate from the other two rather than a mode of them,
+        # and a project must still list `claude-code-worker` before any task can
+        # use it.
+        #
+        # Constructed with no argument, like the other two. Where its worktrees
+        # go is resolved inside the adapter from host configuration — see
+        # ``worker.worktree.default_state_dir`` — rather than passed in here,
+        # because this function takes booleans and nothing else and a path
+        # parameter would be the first location on the code-owned table.
+        adapters.append(ClaudeCodeWorkerAdapter())
     return AdapterRegistry(tuple(adapters))
 
 
 __all__ = [
     "CLAUDE_AGENT_SDK_ADAPTER_ID",
     "CLAUDE_CODE_ADAPTER_ID",
+    "CLAUDE_CODE_WORKER_ADAPTER_ID",
     "VALIDATION_ADAPTER_ID",
     "ClaudeAgentSdkAdapter",
     "ClaudeCodeAdapter",
+    "ClaudeCodeWorkerAdapter",
     "AdapterCapabilities",
     "AdapterEvent",
     "AdapterOutcome",
