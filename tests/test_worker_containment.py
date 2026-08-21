@@ -16,6 +16,7 @@ import inspect
 import os
 import subprocess
 import unittest
+import unittest.mock
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -198,13 +199,33 @@ class WorktreesAreProjectScoped(ContainmentHarness):
 
 
 class SandboxPlanIsBounded(ContainmentHarness):
+    """What the built argument vector exposes — asserted on every host.
+
+    Deliberately *not* skipped where ``bwrap`` is missing, unlike
+    :class:`SandboxActuallyContains` below which has to execute one. These are
+    the ``NEVER_BIND`` assertions — the security invariants — and a CI runner
+    with no bubblewrap is exactly where they most need to hold.
+
+    ``build_plan`` refuses to build anything at all when it cannot find the
+    executable, which is the right fail-closed behaviour and the reason these
+    six tests errored on every runner before this. So the *lookup* is stubbed to
+    a fixed path rather than the guarantee being waived: the vector under test is
+    then identical everywhere, including on a host where ``bwrap`` happens to
+    live somewhere unusual.
+    """
+
+    STUB_BWRAP = Path("/usr/bin/bwrap")
+
     def plan(self, tree=None):
         tree = tree or self.cut(self.repo_a, "alpha")
         home = sandbox.build_home(self.dir / "home")
-        return tree, sandbox.build_plan(
-            worktree=tree.path, home=home, cli_directory=Path("/usr"),
-            command=("/bin/echo", "hello"),
-        )
+        with unittest.mock.patch.object(
+            sandbox, "find_bwrap", return_value=self.STUB_BWRAP
+        ):
+            return tree, sandbox.build_plan(
+                worktree=tree.path, home=home, cli_directory=Path("/usr"),
+                command=("/bin/echo", "hello"),
+            )
 
     def test_only_the_worktree_and_the_worker_home_are_writable(self):
         tree, plan = self.plan()
