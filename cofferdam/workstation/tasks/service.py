@@ -1854,6 +1854,73 @@ class TaskService:
         self.evaluate_closed_turns()
         return settled
 
+    def tasks_awaiting_recovery(self) -> List[TaskRow]:
+        """Tasks :meth:`recover_after_restart` parked for somebody to settle.
+
+        Task Core's half of reconciliation ends at ``recovery_required``: it can
+        say *this stopped and needs a decision*, and it deliberately cannot say
+        what the decision is, because that depends on what the adapter was doing
+        — a worktree, a commit, a half-written file — none of which the lifecycle
+        owner knows anything about.
+
+        So this is a read, and the decision belongs to whoever owns the work. For
+        development workers that is
+        :meth:`WorkerDispatchService.reconcile_after_restart`.
+        """
+        return self._store.tasks_awaiting_recovery()
+
+    def settle_recovered_task(
+        self, task_id: str, *, detail: Optional[str] = None
+    ) -> Optional[str]:
+        """End one reconciled task truthfully. Returns the state it settled in.
+
+        ``interrupted``, and **never** ``completed``. The graph has no
+        ``recovery_required → completed`` edge and this method does not want one:
+        that edge would let a restart assert Cofferdam watched a worker succeed,
+        which by definition it did not — the process died before anything
+        observed it end. What was recovered from the machine (a commit, preserved
+        edits) is recorded by the caller beside the task, where it is a fact
+        rather than a verdict.
+
+        **Only from ``recovery_required``.** A task that has moved on since the
+        parking pass is returned as-is and not touched, which is what keeps a
+        person's cancellation dominant: if somebody cancelled during the outage,
+        ``cancelled`` is a terminal state, this does nothing to it, and no amount
+        of evidence on disk promotes it into something else.
+        """
+        row = self._store.get(task_id)
+        if row is None:
+            return None
+        if row.state != STATE_RECOVERY_REQUIRED:
+            # Already settled, cancelled, or never parked. Left alone.
+            return row.state
+        try:
+            updated = self._store.transition(
+                task_id,
+                STATE_INTERRUPTED,
+                event_type=EVENT_TASK_INTERRUPTED,
+                actor=ACTOR_SYSTEM,
+                source=SOURCE_RESTART_RECOVERY,
+                expected_state=STATE_RECOVERY_REQUIRED,
+                text=(
+                    detail
+                    or "Cofferdam restarted while this task was running. "
+                    "It was reconciled, not resumed."
+                ),
+                failure=None,
+            )
+        except (IllegalTransition, TaskError):  # pragma: no cover - defensive
+            return row.state
+        self._audit(
+            "task_interrupted",
+            STATE_INTERRUPTED,
+            task_id=updated.task_id,
+            adapter_id=updated.adapter_id,
+            project_id=updated.project_id,
+            correlation_id=updated.correlation_id,
+        )
+        return updated.state
+
     # -- deterministic criterion evaluation (M2K PR7) ------------------------
 
     def evaluate_closed_turns(self, task_id: Optional[str] = None) -> int:

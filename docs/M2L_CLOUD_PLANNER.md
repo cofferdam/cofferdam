@@ -561,7 +561,111 @@ there now"*.
 
 A finished worker is a finished **process**. "Tests passed" is a worker *claim*; what Cofferdam
 observed by running Git itself is reported separately, and the read model carries
-`worker_completion_is_not_acceptance`. Reconciling the two is PR1f.
+`worker_completion_is_not_acceptance`. Reconciling the two is M2K's, and is still deferred.
+
+---
+
+## Surviving a restart (PR1f)
+
+PR1e ran a whole dispatch inside one synchronous `start()` and declared `recover_after_restart =
+False`. A daemon restart mid-worker therefore left a task row saying `running` — which PR1e's own
+doctrine calls *not evidence that anything is running* — beside a worktree, possibly some edits and
+possibly a commit, with nothing able to say which.
+
+### Recovery is not re-execution
+
+The rule the whole PR is built on. A person approved **one** development step; a daemon that comes
+back up and re-sends it is performing a second one on the strength of the first approval. So
+recovery never launches a worker, re-sends a prompt, reruns a check, makes a commit, creates a
+worktree, resets a working tree or deletes anything. It **classifies** and records.
+
+That is the shape `MindService.recover_after_restart` already uses for an interrupted memory apply,
+and it is deliberately the same one.
+
+### Two halves, two owners
+
+| | decides | how |
+|---|---|---|
+| Task Core | *that* a task stopped and needs a decision | `recover_after_restart()` parks it in `recovery_required` |
+| Dispatch layer | *what* the decision is | `WorkerDispatchService.reconcile_after_restart()` |
+
+No second scanner: the dispatch layer reads the task ids Task Core already parked. Task Core is not
+taught what a worktree or a commit is, which is the coupling the adapter boundary exists to prevent.
+The adapter's `recover()` hook stays unwired and unused — the capability flag changes the *target
+state*, nothing more.
+
+### Durable phase markers, and the ordering that makes them work
+
+`worker/journal.py` appends one fsync'd line per phase, at a path derived from the same
+`(project_id, task_id)` pair the worktree is derived from — beside the worktrees, never inside one,
+because a model-writable file must not be the evidence of what the model did.
+
+For every externally visible operation: **record the intent → perform it → record the result.**
+
+    prepared → worker_running → worker_returned → checks_running → checks_completed
+             → commit_pending → committed
+
+A pair opened and never closed means *this may or may not have happened, go and look* — which is
+exactly the question the reconciler then answers against Git. `commit_pending` is written **before**
+`git commit` runs, and that single ordering is why a restart cannot produce a duplicate commit.
+
+### Git is the authority; the journal is a lead
+
+A `committed` entry naming a commit is never believed on its own. If Git does not have that commit
+on this dispatch's branch the answer is `contradictory`, not "committed". The `prepared` entry
+records the base commit, which is the one value that cannot be re-derived later — the project's
+`HEAD` moves — and it makes "did this dispatch commit anything" an exact comparison instead of an
+inference.
+
+### What a restart can conclude
+
+| outcome | what it means |
+|---|---|
+| `never_started` | no worktree, no journal |
+| `no_work_found` | worktree at its base, nothing changed |
+| `partial_work_preserved` | uncommitted edits — **kept**, not reset or committed |
+| `commit_recovered` | the commit is real, is this dispatch's, and was not repeated |
+| `worktree_missing` | recorded but gone. Not recreated |
+| `worktree_mismatched` | somebody else's. Left untouched |
+| `contradictory` | records and repository disagree |
+| `undetermined` | Cofferdam could not read enough to say |
+
+`undetermined` is a distinct answer on purpose: *could not determine* is not *nothing happened*.
+
+### Nothing is ever reconciled to `completed`
+
+There is no `recovery_required → completed` edge in the transition graph, and PR1f does not add one.
+`completed` asserts Cofferdam observed a worker run to a successful end; after a crash it did not.
+A recovered commit settles as **`interrupted` with the commit recorded beside it** — the pair of
+facts a person actually needs: *the run was interrupted, and the work was not lost.* Adding that
+edge would let a restart manufacture the one claim nobody was there to verify.
+
+### Cancellation stays dominant
+
+`settle_recovered_task` only moves a task out of `recovery_required`. A task cancelled during the
+outage is terminal, is not read into the pass at all, and no amount of evidence on disk promotes it.
+
+### Checks are reported, not repeated
+
+A check command is code-owned and runs with no network, which makes rerunning it *probably* safe —
+and "probably" is the wrong standard for something that runs unattended against a project's own test
+suite, which may write files or bind a port. An unfinished check is reported as needing attention.
+
+### Nothing is deleted
+
+Interrupted worktrees, branches and journals are all retained; `worktree_retained` is exposed so a
+later cleanup policy has something truthful to read. A preserved worktree may hold the only copy of
+useful partial work.
+
+### What the status screen can say
+
+`DispatchView` gains `restart_occurred`, `recovery` (outcome, phase, open intents, recovered commit,
+check result, changed-file count), `partial_work_preserved`, `worktree_retained`, `recovered_commit`
+and a plain `sentence` — so the future panel says *"This worker had already committed before
+Cofferdam restarted"* rather than `failed`. Still no host path anywhere in the routine read.
+
+`planner.sqlite3` moves to **v4**: one additive `planner_worker_reconciliations` table, forward-only,
+`INSERT OR IGNORE` so the first post-crash answer is the one kept.
 
 ---
 
@@ -578,11 +682,24 @@ own PR.
 
 ## Still deferred
 
-M2K verification of worker results · planner evaluation after a worker · next-step planning ·
-consuming an ASK_USER answer into a follow-up invocation · Git push and PR creation from the worker
-· a private device-token confirmation/dispatch route · the "What is Cofferdam doing?" panel · Custom
-GPT integration · Codex worker selection · bounded multi-step loop · A/B self-update and rollback ·
-deployment.
+**Explicit human-authorized retry.** PR1f reconciles and stops. Re-running an interrupted step is a
+new authorization, not a continuation of the old one, and it needs its own gate.
+
+**Host-owned Git publisher** — push and PR creation, with a scoped credential the worker never
+receives. The direction is settled above; building it is the next PR.
+
+Also: M2K verification of worker results · planner evaluation after a worker · next-step planning ·
+consuming an ASK_USER answer into a follow-up invocation · a private device-token
+confirmation/dispatch route · the "What is Cofferdam doing?" panel · Custom GPT integration · Codex
+worker selection · bounded multi-step loop · A/B self-update and rollback · deployment.
+
+**Not yet wired into the daemon.** `service.py` does not construct the planner stack and does not
+register the worker adapter, so nothing in the running daemon creates a worker task or calls
+`reconcile_after_restart()` — the recovery API is exercised by whoever builds the stack. Task Core
+degrades correctly meanwhile: with the adapter unregistered, `recover_after_restart` finds no
+adapter, so tasks settle as `interrupted` exactly as before. Whoever wires the planner in must call
+`reconcile_after_restart()` at start-up, or worker tasks will park in `recovery_required` with
+nothing to settle them.
 
 The first product mode stays **prepare a prompt, then wait for the user**. There is no autonomous
 continuation anywhere in this milestone — and now there is a durable record of the waiting, and of

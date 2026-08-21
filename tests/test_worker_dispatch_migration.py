@@ -139,10 +139,22 @@ class MigrationHarness(unittest.TestCase):
 
 
 class ForwardMigration(MigrationHarness):
-    def test_a_v2_database_becomes_v3(self):
+    def test_a_v2_database_becomes_current(self):
         write_v2(self.dir)
         self.assertEqual(PlannerStore(self.dir).schema_version(), PLANNER_SCHEMA_VERSION)
-        self.assertEqual(PLANNER_SCHEMA_VERSION, 3)
+
+    def test_the_current_planner_schema_version(self):
+        """**The one place a planner schema bump has to be typed.**
+
+        Every other assertion in this file compares against the constant, so a
+        bump lands here and nowhere else. That is deliberate: a literal repeated
+        across a suite turns one intentional change into a scavenger hunt, and
+        the version this build writes is exactly the kind of fact that deserves a
+        single test whose failure means *somebody changed the schema*.
+
+        v4 is PR1f's ``planner_worker_reconciliations``.
+        """
+        self.assertEqual(PLANNER_SCHEMA_VERSION, 4)
 
     def test_every_planner_row_survives(self):
         path = write_v2(self.dir)
@@ -186,16 +198,18 @@ class ForwardMigration(MigrationHarness):
         for _ in range(3):
             PlannerStore(self.dir)
         self.assertEqual(snapshot(path, "planner_requests"), after_first)
-        self.assertEqual(PlannerStore(self.dir).schema_version(), 3)
+        self.assertEqual(
+            PlannerStore(self.dir).schema_version(), PLANNER_SCHEMA_VERSION
+        )
 
-    def test_a_v1_database_migrates_straight_to_v3(self):
-        """Two versions in one open. Neither hop invents anything."""
+    def test_a_v1_database_migrates_straight_to_current(self):
+        """Every version in one open. No hop invents anything."""
         from .test_planner_authority_migration import write_v1
 
         path = write_v1(self.dir)
         before = snapshot(path, "planner_requests")
         store = PlannerStore(self.dir)
-        self.assertEqual(store.schema_version(), 3)
+        self.assertEqual(store.schema_version(), PLANNER_SCHEMA_VERSION)
         self.assertEqual(snapshot(path, "planner_requests"), before)
         self.assertEqual(snapshot(path, "planner_authority_events"), [])
         self.assertEqual(snapshot(path, "planner_worker_dispatches"), [])

@@ -45,9 +45,11 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from ..tasks.errors import ProjectDisabled, ProjectRootInvalid, ProjectUnknown
+from ..worker import reconcile
 from .authority import AuthorityProvenance, derive_gate
 from .dispatch import (
     REFUSE_NO_REQUEST,
@@ -61,7 +63,7 @@ from .dispatch import (
     worker_prompt_digest,
 )
 from .errors import PlannerAuthorityInvalid, PlannerError
-from .store import PlannerStore, WorkerDispatch
+from .store import DispatchReconciliation, PlannerStore, WorkerDispatch
 
 #: The adapter this build dispatches to. Code-owned, and there is no parameter
 #: anywhere above that selects one — "which agent runs my approved prompt" is
@@ -108,6 +110,10 @@ class DispatchView:
     planner_summary: Optional[str]
     task: Optional[Any] = None
     worktree: Optional[Dict[str, Any]] = None
+    #: What a restart found, if this dispatch ever survived one. Durable and
+    #: read back rather than recomputed: it is a record of what was true just
+    #: after the crash, and re-deriving it now would answer a different question.
+    reconciliation: Optional[Any] = None
 
     @property
     def task_id(self) -> str:
@@ -149,12 +155,36 @@ class DispatchView:
             # What a Stop button should render. Derived from the live state
             # rather than stored, so it cannot disagree with reality.
             "cancellable": state in ("running", "starting", "created"),
-            # PR1f's boundary, stated in the read model so nothing downstream has
-            # to rediscover it: a finished worker is a finished *process*, not an
-            # accepted change.
+            # The boundary, stated in the read model so nothing downstream has to
+            # rediscover it: a finished worker is a finished *process*, not an
+            # accepted change. PR1f does not soften this — a *recovered* worker
+            # is even further from accepted, because nothing observed it finish.
             "worker_completion_is_not_acceptance": True,
             "human_action_needed": False,
         }
+
+        # -- restart facts. Absent entirely when this dispatch never survived a
+        # -- restart, so a routine read is unchanged and a client can treat the
+        # -- key's presence as the question "was this interrupted".
+        found = self.reconciliation
+        if found is not None:
+            payload["recovery"] = found.to_dict()
+            payload["recovery"]["sentence"] = RECOVERY_SENTENCES.get(
+                found.outcome
+            )
+            payload["restart_occurred"] = True
+            payload["human_action_needed"] = bool(found.needs_attention)
+            # Hoisted to the top level because these are the two questions asked
+            # of an unattended run — *is my work still there* and *did anything
+            # land* — and a client should not have to know the shape of the
+            # recovery block to answer them.
+            payload["partial_work_preserved"] = (
+                found.outcome == reconcile.OUTCOME_PARTIAL_WORK_PRESERVED
+            )
+            payload["worktree_retained"] = bool(found.worktree_retained)
+            payload["recovered_commit"] = found.recovered_commit
+        else:
+            payload["restart_occurred"] = False
         return payload
 
 
@@ -189,6 +219,7 @@ class WorkerDispatchService:
             planner_summary=getattr(record, "summary", None),
             task=self._task(dispatch.task_id),
             worktree={"branch": dispatch.branch, "project_id": dispatch.project_id},
+            reconciliation=self._store.reconciliation(dispatch.dispatch_id),
         )
 
     def dispatched_prompt(self, planner_request_id: str) -> Optional[str]:
@@ -327,6 +358,182 @@ class WorkerDispatchService:
             worktree={"branch": dispatch.branch, "project_id": dispatch.project_id},
         )
 
+    # -- recovery ------------------------------------------------------------
+
+    def reconcile_after_restart(self, *, state_dir=None) -> Dict[str, int]:
+        """Settle every worker dispatch a restart left in ``recovery_required``.
+
+        **Nothing is re-executed.** No worker is launched, no prompt is re-sent,
+        no check is rerun, no commit is made, no worktree is created, reset or
+        deleted. Each dispatch is *classified* from durable state plus Git — see
+        :mod:`...worker.reconcile` — the classification is recorded, and the task
+        is moved to the terminal state that classification actually supports.
+
+        Where this sits, and why it is not in Task Core
+        ------------------------------------------------
+
+        Task Core's own :meth:`TaskService.recover_after_restart` already ran, at
+        start-up, before this. It did the part that is genuinely its own: it
+        found tasks the database still believed were unfinished and, because this
+        adapter now declares ``recover_after_restart``, parked them in
+        ``recovery_required`` — the state its docstring describes as *waiting for
+        a decision this milestone does not implement*.
+
+        This method is that decision, and it lives here because everything it
+        needs to make it lives here. Task Core knows about tasks; it does not
+        know what a dispatch is, which planner result authorized one, where a
+        worktree was cut or what a worker commit looks like. Moving this in there
+        would mean teaching the lifecycle owner about development workers, which
+        is the coupling the adapter boundary exists to prevent.
+
+        So the two halves are: Task Core decides *that* a task stopped and needs
+        a decision; the dispatch layer decides *what the decision is*. Neither
+        duplicates the other, and there is no second scanner — this reads the
+        task ids Task Core already parked.
+
+        Why no task is ever reconciled to ``completed``
+        -----------------------------------------------
+
+        There is no such edge in the transition graph, and that is correct rather
+        than an obstacle to work around. ``completed`` asserts Cofferdam observed
+        a worker run to a successful end. After a crash it did not — the worker's
+        own report was never captured, and a commit existing is not the execution
+        contract being satisfied. A dispatch whose commit is recovered therefore
+        settles as ``interrupted`` *with the commit recorded beside it*, which is
+        the pair of facts a person actually needs: the run was interrupted, and
+        the work was not lost.
+
+        Adding a ``recovery_required → completed`` edge would let a restart
+        manufacture the one claim nobody was there to verify.
+
+        Idempotent, and bounded. Reconciliations are ``INSERT OR IGNORE`` keyed by
+        dispatch, so restarting repeatedly records the first answer and no more;
+        and once the task leaves ``recovery_required`` it is terminal, so the
+        second pass finds nothing to do at all.
+        """
+        directory = Path(state_dir) if state_dir is not None else _default_state_dir()
+        tally: Dict[str, int] = {}
+
+        parked = self._recovery_required_tasks()
+        if not parked:
+            return tally
+
+        for dispatch in self._store.dispatches_for_tasks(
+            [row.task_id for row in parked]
+        ):
+            if dispatch.adapter_id != WORKER_ADAPTER_ID:
+                # Another adapter's task that happens to have a dispatch row is
+                # not this method's to settle.
+                continue
+            outcome = self._reconcile_one(dispatch, directory)
+            tally[outcome] = tally.get(outcome, 0) + 1
+        return tally
+
+    def _recovery_required_tasks(self) -> List[Any]:
+        """The tasks Task Core parked. Read from it, never re-derived here."""
+        lister = getattr(self._tasks, "tasks_awaiting_recovery", None)
+        if lister is None:  # pragma: no cover - a double may not expose it
+            return []
+        try:
+            return list(lister())
+        except Exception:  # pragma: no cover - start-up must not fail
+            return []
+
+    def _reconcile_one(self, dispatch, state_dir: Path) -> str:
+        """Classify one dispatch, record it, settle its task. Never raises."""
+        try:
+            project_root = self._recovery_project_root(dispatch)
+        except Exception:
+            project_root = None
+
+        if project_root is None:
+            # The project no longer resolves. Cofferdam cannot inspect the
+            # worktree, so it says so rather than guessing that nothing happened.
+            found = reconcile.Reconciliation(
+                outcome=reconcile.OUTCOME_UNDETERMINED,
+                detail="this dispatch's project no longer resolves on this host",
+            )
+        else:
+            found = reconcile.classify(
+                project_id=dispatch.project_id,
+                task_id=dispatch.task_id,
+                project_root=project_root,
+                state_dir=state_dir,
+            )
+
+        settled = self._settle_task(dispatch, found)
+        self._store.record_reconciliation(
+            DispatchReconciliation(
+                dispatch_id=dispatch.dispatch_id,
+                task_id=dispatch.task_id,
+                project_id=dispatch.project_id,
+                outcome=found.outcome,
+                furthest_phase=found.furthest_phase,
+                open_intents=",".join(found.open_intents) or None,
+                recovered_commit=found.recovered_commit,
+                checks_observed=int(found.checks_observed),
+                check_exit_zero=(
+                    None if found.check_exit_zero is None else int(found.check_exit_zero)
+                ),
+                changed_files=int(found.changed_files),
+                worktree_retained=int(found.worktree_retained),
+                needs_attention=int(found.needs_attention),
+                detail=found.detail,
+                task_state=settled,
+                reconciled_at=self._clock(),
+            )
+        )
+        return found.outcome
+
+    def _recovery_project_root(self, dispatch) -> Optional[Path]:
+        """Re-resolve this dispatch's project through the durable registry.
+
+        **The project id comes from the dispatch row, never from a caller**, and
+        it is turned into a directory by the same Task Core registry a live
+        dispatch uses. Recovery accepts no path from anywhere: a recovery-time
+        path parameter would be the one place in this feature where a location
+        could be supplied from outside, which is exactly the property PR1e spent
+        its effort removing.
+
+        The workspace layer is deliberately *not* consulted here. A workspace is
+        the identity a plan was built under and it can be switched between the
+        dispatch and the restart; the project id recorded on the dispatch row is
+        the thing that was actually worked in, and that is what must be inspected.
+        """
+        registry = self._tasks.projects
+        if callable(registry):  # pragma: no cover - a double may expose a method
+            registry = registry()
+        project = registry.get(dispatch.project_id)
+        root = getattr(project, "root", None)
+        return Path(root) if root is not None else None
+
+    def _settle_task(self, dispatch, found) -> Optional[str]:
+        """Move the task out of ``recovery_required`` to what the evidence says.
+
+        Two destinations only, and ``completed`` is not one of them — see
+        :meth:`reconcile_after_restart`. ``interrupted`` is the honest terminal
+        state for a run the daemon stopped underneath, and it is what every
+        outcome here settles as; the *difference* between outcomes is carried by
+        the reconciliation record beside it, not by inventing lifecycle states
+        Task Core does not have.
+
+        A task that is no longer in ``recovery_required`` is left completely
+        alone. That is what keeps a **cancellation** dominant: a person who
+        cancelled during the outage owns that decision, and a recovery pass that
+        promoted `cancelled` into something else on the strength of files on disk
+        would be overruling the one authority this system treats as final.
+        """
+        settle = getattr(self._tasks, "settle_recovered_task", None)
+        if settle is None:  # pragma: no cover - a double may not expose it
+            return None
+        try:
+            return settle(
+                dispatch.task_id,
+                detail=_recovery_sentence(found),
+            )
+        except Exception:  # pragma: no cover - start-up must not fail
+            return None
+
     def _resolve_project(self, decision: DispatchDecision):
         """Project identity from durable state, through host-owned configuration.
 
@@ -388,6 +595,59 @@ class WorkerDispatchService:
             if found is not None:
                 return found
         return None
+
+
+#: What a status screen should be able to say instead of "failed".
+#:
+#: Step 17's requirement, and the reason this table is data rather than a chain
+#: of ``if`` in a template: the sentence a person reads after an unattended
+#: overnight run is the entire product of this milestone, and it should be
+#: reviewable in one place next to the outcome it belongs to.
+RECOVERY_SENTENCES: Dict[str, str] = {
+    reconcile.OUTCOME_NEVER_STARTED: (
+        "Cofferdam restarted before this worker began. Nothing was run and "
+        "nothing was changed."
+    ),
+    reconcile.OUTCOME_NO_WORK_FOUND: (
+        "Cofferdam restarted while this worker was running. Its worktree was "
+        "prepared but nothing had been changed in it."
+    ),
+    reconcile.OUTCOME_PARTIAL_WORK_PRESERVED: (
+        "Cofferdam restarted while this worker was editing. The unfinished "
+        "changes are preserved in its worktree and were not committed, reset "
+        "or discarded."
+    ),
+    reconcile.OUTCOME_COMMIT_RECOVERED: (
+        "This worker had already committed before Cofferdam restarted. The "
+        "commit was found and recorded; it was not made a second time. The run "
+        "itself was interrupted and its result was never verified."
+    ),
+    reconcile.OUTCOME_WORKTREE_MISSING: (
+        "Cofferdam restarted while this worker was running and its worktree is "
+        "no longer on disk. Nothing was recreated and nothing was rerun."
+    ),
+    reconcile.OUTCOME_WORKTREE_MISMATCHED: (
+        "Cofferdam found something other than this dispatch's worktree where "
+        "it belongs. It was left untouched and this needs a person."
+    ),
+    reconcile.OUTCOME_CONTRADICTORY: (
+        "Cofferdam's record of this worker and the repository disagree. "
+        "Nothing was changed and this needs a person."
+    ),
+    reconcile.OUTCOME_UNDETERMINED: (
+        "Cofferdam could not determine what this worker had done before the "
+        "restart. Nothing was rerun and nothing was removed."
+    ),
+}
+
+
+def _recovery_sentence(found) -> str:
+    """The plain sentence for one outcome. Never a bare "failed"."""
+    return RECOVERY_SENTENCES.get(
+        found.outcome,
+        "Cofferdam restarted while this worker was running. It was reconciled, "
+        "not resumed.",
+    )
 
 
 def _failure_dict(failure) -> Optional[Dict[str, Any]]:

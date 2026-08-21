@@ -91,6 +91,7 @@ from .models import (
     SOURCE_COFFERDAM,
     STATE_COMPLETED,
     STATE_CREATED,
+    STATE_RECOVERY_REQUIRED,
     TERMINAL_STATES,
     EvidenceReference,
     TaskEvent,
@@ -5149,6 +5150,28 @@ class TaskStore:
                 "SELECT * FROM tasks WHERE state NOT IN (" + placeholders + ")"
                 " ORDER BY created_at ASC",
                 tuple(sorted(TERMINAL_STATES)),
+            ).fetchall()
+            return [_row_to_task(row) for row in rows]
+
+    def tasks_awaiting_recovery(self) -> List[TaskRow]:
+        """Every task parked in ``recovery_required``, oldest first.
+
+        The read side of the one non-terminal state that is not running.
+        :meth:`TaskService.recover_after_restart` puts a task here when its
+        adapter declares it can be reconciled; whoever owns that reconciliation
+        reads them back with this and settles them.
+
+        Deliberately a query for *one state* rather than a filter over
+        :meth:`non_terminal_tasks`: those two mean different things. That one
+        asks "what does the database still believe is unfinished", which is a
+        question about a restart that has not happened yet. This one asks "what
+        did a restart already decide needs a decision", which is a question about
+        one that has.
+        """
+        with self._read() as connection:
+            rows = connection.execute(
+                "SELECT * FROM tasks WHERE state = ? ORDER BY created_at ASC",
+                (STATE_RECOVERY_REQUIRED,),
             ).fetchall()
             return [_row_to_task(row) for row in rows]
 

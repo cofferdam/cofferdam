@@ -59,7 +59,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from ....worker import checks, sandbox, worktree
+from ....worker import checks, journal, sandbox, worktree
 from ...models import EVENT_PROGRESS, MAX_OUTPUT_CHARS, bounded_text
 from ..protocol import (
     AdapterCapabilities,
@@ -172,7 +172,25 @@ class ClaudeCodeWorkerAdapter(TaskAdapter):
             clarifications=False,
             approvals=False,
             structured_progress=False,
-            recover_after_restart=False,
+            # PR1f. **This does not mean the work resumes**, and the flag's name
+            # invites exactly that misreading. All Task Core does with it is
+            # choose a target state: a task whose adapter declares this is parked
+            # in `recovery_required` instead of being settled as `interrupted`,
+            # which makes it visible to a pass that can go and look at what
+            # actually happened on disk.
+            #
+            # The `recover()` hook on the protocol stays unimplemented here and
+            # Task Core never calls it. Reconciliation lives in
+            # `WorkerDispatchService.reconcile_after_restart`, because deciding
+            # what an interrupted dispatch *was* needs the dispatch, the project
+            # registry and Git — none of which an adapter method is given.
+            #
+            # Declaring it is only honest because `start` now writes the phase
+            # journal below. Without those markers a restart could not tell a
+            # commit that was attempted from one that never was, and parking a
+            # task for a reconciler that cannot reconcile it would be worse than
+            # settling it as interrupted.
+            recover_after_restart=True,
         )
 
     def available(self) -> bool:
@@ -237,10 +255,29 @@ class ClaudeCodeWorkerAdapter(TaskAdapter):
                 "the worker containment could not be built", detail=exc.detail or str(exc)
             )
 
+        # From here on every externally visible phase is bracketed: the intent is
+        # recorded durably, the operation runs, the observed result is recorded.
+        # A crash between the two halves is what makes a phase *a question* for
+        # `worker.reconcile` rather than an unknown — see `worker.journal`.
+        note = self._note(context)
+        note(
+            journal.PHASE_PREPARED,
+            base_commit=tree.base_commit,
+            detail=tree.branch,
+        )
+
         payload = build_worker_payload(context.prompt, tree)
         started = time.time()
+        note(journal.PHASE_WORKER_RUNNING)
         result, failure = self._run(context.task_id, plan, payload)
         elapsed_ms = int((time.time() - started) * 1000)
+        # Recorded for a failed worker too. "The worker ran and did not finish"
+        # and "the worker never ran" are different facts, and recovery is the
+        # thing that needs them apart.
+        note(
+            journal.PHASE_WORKER_RETURNED,
+            failure_code=failure[0] if failure is not None else None,
+        )
 
         if failure is not None:
             return self._outcome(context, tree, None, failure, elapsed_ms, None, None)
@@ -248,15 +285,47 @@ class ClaudeCodeWorkerAdapter(TaskAdapter):
         # -- phase two: the project's own checks, in a namespace with no
         # -- credential and no network. Cofferdam runs this; the worker could
         # -- not have, and that is what makes the result an observation.
+        note(journal.PHASE_CHECKS_RUNNING)
         check = checks.run(worktree=tree.path, check=self._project_check)
+        note(
+            journal.PHASE_CHECKS_COMPLETED,
+            check=check.check,
+            exit_zero=check.exit_zero,
+        )
 
         # -- phase three: the commit, also host-owned. A model holding a
         # -- provider credential should not be the thing authoring commits.
+        #
+        # `commit_pending` is written **before** `git commit` runs, and that
+        # ordering is the whole reason a restart cannot produce a duplicate
+        # commit: a crash in this window leaves an open intent, and recovery
+        # answers it by asking Git rather than by committing again.
+        note(journal.PHASE_COMMIT_PENDING)
         commit, commit_failure = self._commit(tree, check)
+        note(journal.PHASE_COMMITTED, commit=commit)
 
         return self._outcome(
             context, tree, result, commit_failure, elapsed_ms, check, commit
         )
+
+    def _note(self, context: TaskContext):
+        """A journal writer bound to one dispatch. Never raises — see the module.
+
+        Bound here rather than passed around so that no call site can write a
+        phase for a different task: both ids come from the context this dispatch
+        was built from.
+        """
+
+        def note(phase: str, **facts) -> None:
+            journal.record(
+                self._state_dir,
+                context.project_id,
+                context.task_id,
+                phase,
+                **facts,
+            )
+
+        return note
 
     def _commit(self, tree, check):
         """Commit the worker's edits. Runs whether or not the check passed.
