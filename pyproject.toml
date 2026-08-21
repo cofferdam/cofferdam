@@ -120,6 +120,7 @@ packages = [
     "cofferdam.workstation.mind",
     "cofferdam.workstation.planner",
     "cofferdam.workstation.planner.providers",
+    "cofferdam.workstation.publisher",
     "cofferdam.workstation.registries",
     "cofferdam.workstation.runtime",
     "cofferdam.workstation.sessions",

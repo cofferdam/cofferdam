@@ -231,6 +231,23 @@ class NoShellExecutionTests(unittest.TestCase):
                 # variables that decide *which account session* is touched are
                 # overridden rather than inherited.
                 continue
+            if path.parent.name == "publisher" and path.name in ("github.py", "remote.py"):
+                # M2L PR1h. The host-owned Git publisher, and the *only* files
+                # here that run `git` against a network remote.
+                #
+                # Narrow in the ways that matter, and `ThePublisherGitCallsAreNarrow`
+                # below asserts each rather than trusting this comment: constant
+                # argv lists with no interpolation of caller or model data; the
+                # branch validated by `publishable_branch` before it can reach a
+                # refspec; no `shell=True`, no `Popen`, no `os.environ`; an
+                # environment of literal keys with HOME pointed away from the
+                # operator's so no configured credential helper can be picked up;
+                # a timeout; DEVNULL stdin; and no force, delete, wildcard or tag
+                # flag anywhere in the module.
+                #
+                # The credential reaches git through `credential.helper=store
+                # --file=`, so the path is in argv and the secret never is.
+                continue
             source = path.read_text(encoding="utf-8")
             if "subprocess." in source:
                 offenders.append(path.name)
@@ -258,14 +275,33 @@ class NoShellExecutionTests(unittest.TestCase):
 
     def test_the_worker_auth_tool_is_never_imported_by_the_daemon(self):
         """Its broader exemption is only defensible because nothing loads it."""
+        import ast
+
         root = Path(__file__).resolve().parents[1] / "cofferdam"
         importers = []
         for path in root.rglob("*.py"):
             if path.name == "auth.py" and path.parent.name == "worker":
                 continue
-            source = path.read_text(encoding="utf-8")
-            if "worker.auth" in source or "from .auth import" in source:
-                importers.append(str(path.relative_to(root)))
+            # Parsed, not grepped. The first version searched raw text and was
+            # tripped by a docstring in an unrelated module that merely *named*
+            # `worker.auth` to say it was separate from it -- the same mistake
+            # `test_the_login_tool_never_handles_a_credential` had to fix.
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except SyntaxError:  # pragma: no cover - not our source
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    module = node.module or ""
+                    names = {alias.name for alias in node.names}
+                    if module.endswith("worker.auth") or (
+                        module.endswith("worker") and "auth" in names
+                    ):
+                        importers.append(str(path.relative_to(root)))
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.name.endswith("worker.auth"):
+                            importers.append(str(path.relative_to(root)))
         self.assertEqual(importers, [], f"the login tool is imported by {importers}")
 
     def test_the_login_tool_never_handles_a_credential(self):
@@ -297,6 +333,62 @@ class NoShellExecutionTests(unittest.TestCase):
             "credentials.json", "getpass",
         ):
             self.assertNotIn(forbidden, code, forbidden)
+
+    def test_the_publisher_git_calls_are_narrow(self):
+        """The bound on PR1h's exemption, asserted from the source that runs."""
+        import inspect
+
+        from cofferdam.workstation.publisher import github, remote
+
+        for module in (github, remote):
+            source = Path(module.__file__).read_text(encoding="utf-8")
+            with self.subTest(module=module.__name__):
+                self.assertNotIn("shell=True", source)
+                self.assertNotIn("Popen", source)
+                self.assertNotIn("os.environ", source)
+                self.assertIn("stdin=subprocess.DEVNULL", source)
+                self.assertIn('"PATH": "/usr/bin:/bin"', source)
+                # HOME is pointed away from the operator's, so a credential
+                # helper configured in their ~/.gitconfig cannot be used.
+                self.assertIn('"HOME": "/nonexistent"', source)
+                self.assertIn('"GIT_TERMINAL_PROMPT": "0"', source)
+
+        # Checked against the *string constants that become argv*, not against
+        # the source text. A comment in `push` lists the flags it does not use,
+        # and a text scan matches that comment -- which is the same
+        # prose-versus-code confusion two other tests in this file already had
+        # to be rewritten to avoid.
+        import ast
+
+        pushing = ast.parse(inspect.getsource(github.push).lstrip())
+        literals = {
+            node.value
+            for node in ast.walk(pushing)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+        for forbidden in (
+            "--force", "-f", "--force-with-lease", "--delete", "--mirror",
+            "--tags", "--all", "--set-upstream", "-u", "--prune",
+        ):
+            self.assertNotIn(forbidden, literals, forbidden)
+
+        # The branch is validated before it can become part of a refspec.
+        source = inspect.getsource(github.push)
+        self.assertLess(
+            source.index("publishable_branch("), source.index("refspec ="),
+        )
+
+    def test_the_publisher_never_shells_out_to_gh(self):
+        """`gh` would fall back to the operator's keyring. It is never invoked."""
+        import ast
+
+        from cofferdam.workstation.publisher import credential, github, remote, service
+
+        for module in (credential, github, remote, service):
+            tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    self.assertNotEqual(node.value, "gh", module.__name__)
 
     def test_action_schemas_expose_no_command_like_field(self) -> None:
         """The action schemas declare no command-like field, and forbid extras.
