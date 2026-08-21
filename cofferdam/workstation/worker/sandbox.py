@@ -24,18 +24,23 @@ written down. Inside it: the subscription login authenticates, DNS resolves, and
 is absent. The difference matters: a denial can be misconfigured, and a path
 that was never mounted cannot be.
 
-The synthetic home, and why the real one is not bound
------------------------------------------------------
+The Claude session, and why nothing is copied into the namespace
+-----------------------------------------------------------------
 
-The CLI needs a home directory to authenticate. Binding the operator's would
-hand the worker ``~/.claude.json`` — which on this workstation records eight
-project paths including the production slots — plus every other dotfile. So the
-worker gets a *constructed* home containing exactly two things: a read-only bind
-of the credential file, and a fresh empty CLI state file it may write.
+The CLI needs somewhere to keep its credentials. PR1e gave each dispatch a fresh
+home with a **copy** of the operator's, and that copy caused a real outage: the
+worker refreshed the token in its copy, the provider rotated the refresh token,
+the copy was discarded and the operator's file was left holding a superseded one.
+Both sessions then failed. See :mod:`.session`.
 
-That is the same distinction the CLI adapter draws when it passes ``HOME`` and
-nothing else: **Cofferdam grants reachability, never possession.** Here it is
-narrower still, because reachability itself is scoped to one file.
+So the namespace now binds **one durable directory** — Cofferdam's own Claude
+config root — read-write, at :data:`~.session.INTERIOR_CONFIG`, with
+``CLAUDE_CONFIG_DIR`` pointing at it. A refresh lands somewhere that survives,
+which is the entire fix. ``HOME`` beside it is a **tmpfs**: genuinely disposable,
+no host path behind it, nothing to leak and nothing to go stale.
+
+The operator's ``~/.claude`` is not bound, not read and not copied. It is absent
+from the namespace exactly like every other project on this machine.
 
 What this module is not
 -----------------------
@@ -54,6 +59,8 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+from . import session
 
 #: The containment program. One name, not configurable, for the reason the CLI
 #: adapter gives about its own executable: a configurable program name is an
@@ -116,6 +123,11 @@ ENVIRONMENT: Dict[str, str] = {
     "PYTHONIOENCODING": "utf-8",
     "CLAUDE_CODE_ENTRYPOINT": "cofferdam-worker",
     "TMPDIR": "/tmp",
+    # The whole state root, relocated onto the one durable directory Cofferdam
+    # owns. Measured against CLI 2.1.221: with this set the CLI reads its
+    # credential from here and writes every other piece of state here too,
+    # leaving HOME untouched — which is what lets HOME above be a tmpfs.
+    "CLAUDE_CONFIG_DIR": session.INTERIOR_CONFIG,
 }
 
 
@@ -158,10 +170,12 @@ class SandboxPlan:
     """
 
     worktree: Path
-    home: Path
     cli_directory: Path
     argv: Tuple[str, ...]
     environment: Dict[str, str]
+    #: The durable Claude session bound into this plan. One directory, host
+    #: owned, shared by every dispatch — see :mod:`.session`.
+    session_config: Path
 
     @property
     def interior_worktree(self) -> str:
@@ -182,55 +196,12 @@ class SandboxPlan:
         return tuple(found)
 
 
-def build_home(directory: Path, *, credentials: Optional[Path] = None) -> Path:
-    """Construct the worker's synthetic home. Copies one file, and no more.
-
-    The credential file is **copied** rather than bound read-only, and that is a
-    deliberate trade. The CLI refreshes its own token, so a read-only bind
-    produces a worker that fails partway through a long run when the refresh is
-    denied. A copy into a 0600 file inside a per-dispatch directory keeps the
-    blast radius to one dispatch and keeps the operator's own credential file
-    from being written by a model's process.
-
-    Nothing else from the real home is reproduced. In particular there is no
-    ``.claude.json`` copy: the worker gets an empty one, so it cannot read which
-    other projects exist on this machine.
-    """
-    home = Path(directory)
-    (home / ".claude").mkdir(parents=True, exist_ok=True)
-    state = home / ".claude.json"
-    if not state.exists():
-        state.write_text("{}\n", encoding="utf-8")
-        os.chmod(state, 0o600)
-
-    source = credentials if credentials is not None else default_credentials()
-    if source is not None and source.is_file():
-        target = home / ".claude" / ".credentials.json"
-        shutil.copyfile(source, target)
-        os.chmod(target, 0o600)
-    try:
-        os.chmod(home, 0o700)
-    except OSError:  # pragma: no cover - odd filesystems
-        pass
-    return home
-
-
-def default_credentials() -> Optional[Path]:
-    """The operator's CLI credential file, if it exists.
-
-    Located rather than configured, and read only to be copied. Cofferdam does
-    not parse it, does not know its format, and stores nothing from it.
-    """
-    candidate = Path(os.path.expanduser("~/.claude/.credentials.json"))
-    return candidate if candidate.is_file() else None
-
-
 def build_plan(
     *,
     worktree: Path,
-    home: Path,
     cli_directory: Path,
     command: Tuple[str, ...],
+    session_config: Path,
 ) -> SandboxPlan:
     """The complete contained command line, every element decided here.
 
@@ -240,10 +211,14 @@ def build_plan(
 
     Three properties this construction has, which a test asserts:
 
-    * the only writable host paths are the worktree and the synthetic home;
+    * the only writable host paths are the worktree and the Claude session;
     * no path in :data:`NEVER_BIND` appears anywhere in the vector;
     * ``/home`` as the host knows it is not bound at all, so the operator's
       directory and every other project are absent rather than protected.
+
+    ``home`` is **not** a parameter. ``HOME`` inside the namespace is a tmpfs, so
+    there is no host directory behind it to name — see the module docstring on
+    why the credential stopped living there.
     """
     executable = find_bwrap()
     if executable is None:
@@ -252,12 +227,14 @@ def build_plan(
         )
 
     worktree = Path(worktree).resolve()
-    home = Path(home).resolve()
     cli_directory = Path(cli_directory).resolve()
+    session_config = Path(session_config).resolve()
     if not worktree.is_dir():
         raise SandboxUnavailable("the authorized worktree is not a directory")
-    if not home.is_dir():
-        raise SandboxUnavailable("the worker home was not prepared")
+    if not session_config.is_dir():
+        raise SandboxUnavailable(
+            "Cofferdam's Claude worker session directory does not exist"
+        )
 
     argv: List[str] = [
         str(executable),
@@ -289,7 +266,15 @@ def build_plan(
         # files do not outlive it and never touch the host's /tmp.
         "--tmpfs", "/tmp",
         "--ro-bind", str(cli_directory), INTERIOR_CLI,
-        "--bind", str(home), INTERIOR_HOME,
+        # HOME is a tmpfs, not a host directory. Nothing the CLI writes beside
+        # its config root outlives the dispatch, and no host path is exposed
+        # through it. PR1e bound a real directory here because the credential
+        # copy lived in it; there is no copy any more.
+        "--tmpfs", INTERIOR_HOME,
+        # The one persistent thing, mounted **read-write** because a token
+        # refresh must land somewhere that survives — which is the entire point
+        # of PR1g. Ordered after the tmpfs above so it appears inside it.
+        "--bind", str(session_config), session.INTERIOR_CONFIG,
         "--bind", str(worktree), INTERIOR_WORKTREE,
         "--chdir", INTERIOR_WORKTREE,
     ]
@@ -299,13 +284,30 @@ def build_plan(
 
     plan = SandboxPlan(
         worktree=worktree,
-        home=home,
         cli_directory=cli_directory,
         argv=tuple(argv),
         environment=dict(ENVIRONMENT),
+        session_config=session_config,
     )
     _assert_contained(plan)
     return plan
+
+
+def _is_session_config(path: str) -> bool:
+    """Whether a path is *the* worker Claude config root, by its code-owned shape.
+
+    Structural rather than a string compare against whatever was passed in. The
+    two trailing components are module constants, so the only paths this accepts
+    are ones :func:`~.session.config_directory` could have produced — which is
+    what keeps the never-bind exception from becoming "any path the caller
+    nominated".
+    """
+    parts = Path(path).parts
+    return (
+        len(parts) >= 2
+        and parts[-1] == session.CONFIG_DIRNAME
+        and parts[-2] == session.SESSION_DIRNAME
+    )
 
 
 def _assert_contained(plan: SandboxPlan) -> None:
@@ -316,9 +318,29 @@ def _assert_contained(plan: SandboxPlan) -> None:
     somebody runs the code by another path.
     """
     bound = plan.bound_host_paths()
+    session_config = str(plan.session_config)
     for forbidden in NEVER_BIND:
         for path in bound:
             if path == forbidden or path.startswith(forbidden.rstrip("/") + "/"):
+                if path == session_config and _is_session_config(path):
+                    # The one deliberate exception, and it is deliberately
+                    # narrow. ``state`` is on the never-bind list because it
+                    # holds Cofferdam's databases, every project's worktrees and
+                    # the phase journals — none of which a worker may see. But
+                    # the worker's *own* Claude config root lives under it, and
+                    # binding exactly that leaf exposes none of the rest.
+                    #
+                    # Recognised by its code-owned suffix rather than by being
+                    # the value that was passed in, so this cannot be widened by
+                    # handing ``build_plan`` a different directory: a plan naming
+                    # ``state`` itself, or ``state/claude-worker``, or any other
+                    # path under it still fails here.
+                    #
+                    # Found by the live smoke rather than by a unit test, because
+                    # every unit test used a temporary state directory that was
+                    # not under a never-bind path. The regression test now uses
+                    # one that is.
+                    continue
                 raise SandboxUnavailable(
                     "the containment plan would expose a path it must not",
                     detail=forbidden,
@@ -328,9 +350,10 @@ def _assert_contained(plan: SandboxPlan) -> None:
         for index, token in enumerate(plan.argv)
         if token == "--bind" and index + 1 < len(plan.argv)
     }
-    if writable != {str(plan.home), str(plan.worktree)}:
+    expected = {str(plan.worktree), str(plan.session_config)}
+    if writable != expected:
         raise SandboxUnavailable(
-            "a worker may write only in its worktree and its own home",
+            "a worker may write only in its worktree and its Claude session",
             detail=", ".join(sorted(writable)),
         )
 
@@ -359,9 +382,7 @@ __all__ = [
     "SandboxPlan",
     "SandboxUnavailable",
     "available",
-    "build_home",
     "build_plan",
-    "default_credentials",
     "describe",
     "find_bwrap",
 ]

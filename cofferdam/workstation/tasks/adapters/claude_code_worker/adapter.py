@@ -15,7 +15,8 @@ a refusal if it fails:
 1. **containment is confirmed**, not assumed. No ``bubblewrap`` means no worker.
 2. **an isolated worktree is cut** by Cofferdam from the core-resolved project
    root, on a code-owned branch, outside every project checkout.
-3. **a synthetic home is built** holding a credential copy and nothing else.
+3. **Cofferdam's own Claude session is required to be usable** — one durable
+   config root it owns, never a copy of the operator's credential (:mod:`...worker.session`).
 
 Only then is a process started, inside a namespace where the rest of the machine
 is absent rather than denied.
@@ -59,7 +60,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from ....worker import checks, journal, sandbox, worktree
+from ....worker import checks, journal, sandbox, session, worktree
 from ...models import EVENT_PROGRESS, MAX_OUTPUT_CHARS, bounded_text
 from ..protocol import (
     AdapterCapabilities,
@@ -211,8 +212,10 @@ class ClaudeCodeWorkerAdapter(TaskAdapter):
         """Prepare containment, then run one worker inside it.
 
         Every failure before the process starts leaves nothing running, and the
-        ordering is what makes that true: containment is checked, the worktree is
-        cut and the home is built before anything is launched.
+        ordering is what makes that true: containment is checked, the Claude
+        session is checked, and the worktree is cut before anything is launched.
+        An unauthenticated session therefore costs a refusal, not a half-run
+        dispatch with a branch and a worktree behind it.
         """
         contained, reason = sandbox.available()
         if not contained:
@@ -223,6 +226,15 @@ class ClaudeCodeWorkerAdapter(TaskAdapter):
         executable = cli.find_executable()
         if executable is None:
             raise AdapterRefusal("the Claude Code CLI is not installed on this host")
+
+        # Checked **before** a worktree is cut and before anything is launched.
+        # An unauthenticated session is a condition a person fixes, not a failure
+        # to discover halfway through a dispatch, and refusing here leaves no
+        # worktree, no branch and no process behind.
+        try:
+            session_config = session.require_usable(self._state_dir)
+        except session.WorkerSessionUnavailable as exc:
+            raise AdapterRefusal(str(exc), detail=exc.status)
 
         try:
             tree = worktree.prepare(
@@ -237,11 +249,9 @@ class ClaudeCodeWorkerAdapter(TaskAdapter):
                 detail=exc.detail or str(exc),
             )
 
-        home = sandbox.build_home(self._home_directory(context.task_id))
         try:
             plan = sandbox.build_plan(
                 worktree=tree.path,
-                home=home,
                 cli_directory=cli.resolve_cli_directory(executable),
                 command=tuple(
                     cli.build_interior_argv(
@@ -249,6 +259,7 @@ class ClaudeCodeWorkerAdapter(TaskAdapter):
                         interior_worktree=sandbox.INTERIOR_WORKTREE,
                     )
                 ),
+                session_config=session_config,
             )
         except sandbox.SandboxUnavailable as exc:
             raise AdapterRefusal(
@@ -269,7 +280,16 @@ class ClaudeCodeWorkerAdapter(TaskAdapter):
         payload = build_worker_payload(context.prompt, tree)
         started = time.time()
         note(journal.PHASE_WORKER_RUNNING)
-        result, failure = self._run(context.task_id, plan, payload)
+        # Serialized across dispatches: two CLI processes refreshing one token
+        # file could each rotate it and leave the loser holding a superseded one
+        # -- the very defect PR1g exists to fix. The lock covers the Claude
+        # invocation and nothing else; the checks and the commit touch no
+        # credential and must not be serialized behind it.
+        try:
+            with session.held(self._state_dir):
+                result, failure = self._run(context.task_id, plan, payload)
+        except session.WorkerSessionUnavailable as exc:
+            result, failure = None, ("worker_session_busy", str(exc))
         elapsed_ms = int((time.time() - started) * 1000)
         # Recorded for a failed worker too. "The worker ran and did not finish"
         # and "the worker never ran" are different facts, and recovery is the
@@ -354,9 +374,6 @@ class ClaudeCodeWorkerAdapter(TaskAdapter):
         except worktree.WorktreeError as exc:
             return None, ("worker_commit_failed", exc.detail or str(exc))
 
-    def _home_directory(self, task_id: str) -> Path:
-        return self._state_dir / "worker-homes" / task_id
-
     def _run(
         self, task_id: str, plan: sandbox.SandboxPlan, payload: str
     ) -> Tuple[Optional[Dict[str, Any]], Optional[Tuple[str, str]]]:
@@ -396,9 +413,20 @@ class ClaudeCodeWorkerAdapter(TaskAdapter):
 
         parsed = _parse_result(stdout)
         if parsed is None:
+            combined = stderr or stdout or ""
+            # An unusable session is not an implementation failure, and calling
+            # it one sends a person to debug code when what they need is a login.
+            # Classified from the CLI's own words — see `session`, which also
+            # explains why a non-auth failure must never be relabelled this way.
+            auth = session.classify_auth_failure(combined)
+            if auth is not None:
+                return None, (
+                    "worker_auth_required",
+                    _scrub(session.SENTENCES.get(auth, combined))[:500],
+                )
             return None, (
                 "worker_envelope_invalid",
-                (stderr or stdout or "the worker produced no readable result")[:500],
+                _scrub(combined or "the worker produced no readable result")[:500],
             )
         return parsed, None
 
@@ -490,11 +518,28 @@ class ClaudeCodeWorkerAdapter(TaskAdapter):
         assert result is not None
         summary = result.get("result")
         if result.get("is_error"):
+            # The CLI reports an unusable session *inside* a well-formed result
+            # envelope, so this is the path a dead session actually takes — it is
+            # how PR1f's validation saw `worker_reported_error: Failed to
+            # authenticate`. Classified here too, or the one failure a person can
+            # actually fix would keep arriving labelled as the model's mistake.
+            auth = session.classify_auth_failure(str(summary or ""))
+            if auth is not None:
+                return AdapterOutcome(
+                    events=tuple(events),
+                    requested_state="failed",
+                    failure_code="worker_auth_required",
+                    failure_message=session.SENTENCES.get(
+                        auth, "Cofferdam's Claude worker session needs login."
+                    ),
+                )
             return AdapterOutcome(
                 events=tuple(events),
                 requested_state="failed",
                 failure_code="worker_reported_error",
-                failure_message=bounded_text(summary, 1000) or "the worker reported an error",
+                failure_message=(
+                    bounded_text(_scrub(summary), 1000) or "the worker reported an error"
+                ),
             )
 
         events.append(

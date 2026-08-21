@@ -669,6 +669,138 @@ Cofferdam restarted"* rather than `failed`. Still no host path anywhere in the r
 
 ---
 
+## Cofferdam's own Claude session (PR1g)
+
+### The outage this fixes
+
+PR1e gave every dispatch a fresh synthetic home and **copied** the operator's
+`~/.claude/.credentials.json` into it. The copy was deliberate — the CLI refreshes its own token and a
+read-only bind would fail a long run midway — but it created a divergence nobody owned:
+
+1. the worker refreshes the token **in its copy**;
+2. the provider **rotates the refresh token**, invalidating the previous one;
+3. the copy is discarded with the dispatch;
+4. the operator's file still holds the superseded refresh token.
+
+Observed for real during PR1f validation: one worker run succeeded, the next failed, and then
+`claude -p` on the host failed too — *OAuth session expired and could not be refreshed*. Both
+sessions dead, requiring an interactive re-login.
+
+**The fix is not better copying. It is not copying.**
+
+### What the CLI actually does, measured
+
+Against 2.1.221, not assumed:
+
+| question | answer |
+|---|---|
+| does `CLAUDE_CONFIG_DIR` relocate state? | **entirely** — credentials read from there, `.claude.json`, `projects/`, `sessions/`, `backups/` all written there |
+| does anything land in `HOME`? | **nothing** |
+| no credential at all | `Not logged in · Please run /login` |
+| credential present but unusable | `Failed to authenticate: OAuth session expired and could not be refreshed` |
+| is there a safe status command? | `claude auth status` → `{loggedIn, authMethod, apiProvider}`, no token material |
+
+Two distinct failure texts is what makes `login_required` and `session_expired` honest answers rather
+than one guess.
+
+### The design
+
+One durable, code-owned config root: `<state_dir>/claude-worker/config`, mode 0700, bound
+**read-write** into the namespace at `/home/worker/.claude` with `CLAUDE_CONFIG_DIR` pointing at it. A
+refresh lands somewhere that survives — the entire fix.
+
+`HOME` beside it becomes a **tmpfs**: genuinely disposable, no host directory behind it. `build_home`
+and `default_credentials` are deleted rather than left as traps, and `build_plan` no longer takes a
+`home` parameter at all.
+
+The interior path is under `/home/worker/` on purpose — it keeps the credential inside the path class
+the file-tool deny rules already name, so PR#77's alias tests keep testing the thing they were written
+to test.
+
+### The operator's session is not touched
+
+Nothing reads `~/.claude`. Not to copy, not to migrate, **not as a fallback**. A fallback would
+silently reintroduce the rotation bug at the least observable moment — unattended, at night. An
+expired worker session is a typed refusal that names itself.
+
+### One-time bootstrap
+
+```
+python -m cofferdam.workstation.worker.auth status
+python -m cofferdam.workstation.worker.auth login
+```
+
+`login` hands the terminal to the real `claude auth login` with `CLAUDE_CONFIG_DIR` pointed at the
+worker's root, and gets out of the way. Cofferdam types no password, drives no browser, handles no
+cookie and never reads the token that comes back. Inherited `ANTHROPIC_API_KEY` and
+`CLAUDE_CODE_OAUTH_TOKEN` are dropped so an ambient key cannot authenticate as somebody else.
+
+No HTTP route. A remote endpoint that could start a login is one that could start a login for
+somebody else's account.
+
+### Serialized, because sharing was not proven safe
+
+Two CLI processes refreshing one token file could each rotate it, leaving the loser holding a
+superseded one — the same defect indoors. An `flock` beside the config root is held for the length of
+each Claude invocation. `flock` rather than a pidfile: the kernel releases it when the holder dies, so
+a killed daemon does not wedge the session. It covers the Claude phase only — the checks and the
+commit touch no credential and are not serialized behind it.
+
+### `worker_auth_required` is not `implementation_failed`
+
+A dead session now produces its own failure code, classified from the CLI's own words on both paths a
+real one takes — the raw stderr path and the parsed-envelope path, which is how PR1f's validation
+actually saw it (`worker_reported_error: Failed to authenticate`). A non-auth failure is **never**
+relabelled this way: mislabelling in that direction sends a person to a login screen for a bug.
+
+The session is checked **before** a worktree is cut, so an unauthenticated dispatch costs a refusal
+rather than a stray branch.
+
+### No migration
+
+A fresh session reports `login_required` until somebody logs it in. The operator's token is not
+imported, and on this host it was already invalid — importing it would have produced a session that
+looked ready and failed on first use.
+
+### The never-bind exception, and why it is narrow
+
+`<state_dir>` is on `NEVER_BIND` because it holds the task and planner databases, every project's
+worktrees and the phase journals. The worker's own Claude config root lives under it, so exactly one
+leaf is exempt — recognised by its **code-owned suffix** (`claude-worker/config`), not by being the
+value that was passed in. `state` itself, `state/claude-worker`, `state/tasks.sqlite3` and anything
+deeper are all still refused.
+
+This was found by the **live smoke**, not by a unit test: every unit test used a temporary state
+directory that happened to sit under nothing forbidden, so the plan built fine and the first real run
+against the host's own state directory was refused by the sandbox's own invariant. The regression
+test now builds a plan under a real `NEVER_BIND` path.
+
+### What the live validation showed
+
+Three real invocations on one persistent session, with a full service-object reconstruction before
+the third:
+
+| | result |
+|---|---|
+| first invocation | authenticated, `["Edit","Glob","Grep","Read","Write"]` |
+| second invocation | authenticated, **no login in between**, same config root |
+| reconstruction → third | authenticated, **no login required** |
+| operator `~/.claude` | **byte-identical throughout**, and a different file from the worker's |
+| session lock | second controller refused while held; usable again once released |
+| real access token | absent from every transcript and every argv |
+
+**Refresh/rotation:** the access token did not need refreshing during the window, so no rotation was
+observed — and it is not forced, because forcing one would mean manipulating a real credential. What
+*was* observed is the property that matters: the CLI's own state writes (`.claude.json`, and a backup
+per invocation) landed in the canonical store and were still there after the reconstruction. There is
+exactly one location for a rotation to land in, and no copy anywhere for it to diverge from.
+
+The full disposable-repository chain then ran on this session end to end — approved prompt delivered
+byte-for-byte, project isolation held, credential-free checks passed, host-owned commit created,
+durable read-back correct — together with the PR1f crash-window regression in the same run.
+
+---
+
 ### Git credentials — the direction, not the implementation
 
 Push and PR creation stay unimplemented, and the reason is now a design decision rather than an
