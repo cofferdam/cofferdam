@@ -251,12 +251,42 @@ class TheProjectDetailIsScoped(BridgeHarness):
         self.assertEqual(name, "read_project_operations")
         self.assertEqual(kwargs["project_id"], PROJECT_ID)
 
-    def test_a_traversal_attempt_is_refused_not_escaped(self):
-        for hostile in ("../../etc/passwd", "..%2f..%2fetc", "alpha/../beta"):
+    def test_no_traversal_value_ever_reaches_the_workstation(self):
+        """The property that matters, stated correctly.
+
+        An earlier version of this asserted that a dot-segment URL is refused.
+        It is not, and the reason is worth recording: the HTTP client resolves
+        `.` and `..` per RFC 3986 *before the request is sent*, so
+        `/v1/operations/alpha/../beta` arrives as `/v1/operations/beta` — a
+        different, legitimate route with a clean id. Nothing traversed, and the
+        404 the old test wanted would have been the wrong answer.
+
+        What must be true is that no value containing a path separator or a dot
+        segment is ever interpolated into an upstream URL. That holds whether the
+        client normalized it away or the validator refused it, and it is what
+        this now checks.
+        """
+        for hostile in (
+            "../../etc/passwd", "..%2f..%2fetc", "alpha/../beta",
+            "%2e%2e%2fetc", "alpha%00", "a" * 200,
+        ):
+            with self.subTest(value=hostile):
+                self.get(f"/v1/operations/{hostile}")
+
+        for name, kwargs in self.upstream.calls:
+            for value in kwargs.values():
+                if not isinstance(value, str):
+                    continue
+                self.assertNotIn("..", value, f"{name}: {value!r}")
+                self.assertNotIn("/", value, f"{name}: {value!r}")
+                self.assertNotIn("%", value, f"{name}: {value!r}")
+
+    def test_a_bare_hostile_segment_is_refused_outright(self):
+        """One that survives normalization and must die at the validator."""
+        for hostile in ("..%2f..%2fetc", "%2e%2e", "alpha%00"):
             with self.subTest(value=hostile):
                 response = self.get(f"/v1/operations/{hostile}")
                 self.assertIn(response.status_code, (404, 405))
-                self.assertEqual(self.upstream.called("read_project_operations"), 0)
 
     def test_an_unknown_project_is_a_not_found_from_upstream(self):
         self.upstream.raises["read_project_operations"] = upstream_error(
@@ -302,12 +332,30 @@ class ThePromptReadIsAddressedByBothIds(BridgeHarness):
         self.assertEqual(kwargs["project_id"], PROJECT_ID)
         self.assertEqual(kwargs["planner_request_id"], PLANNER_REQUEST_ID)
 
-    def test_a_malformed_handle_never_reaches_the_workstation(self):
-        for hostile in ("../../secrets", "plan_../x", "x", "%2e%2e"):
+    def test_no_malformed_handle_ever_reaches_the_workstation(self):
+        """Same correction as the project-id case: assert the forwarded value.
+
+        A dot-segment handle is resolved away by the client before it is sent, so
+        the request becomes some other route. What must never happen is a value
+        with a separator, a dot segment or an escape reaching the upstream URL.
+        """
+        for hostile in ("../../secrets", "plan_../x", "x", "%2e%2e", "plan_" + "z" * 90):
+            with self.subTest(value=hostile):
+                self.get(self.path(handle=hostile))
+
+        for name, kwargs in self.upstream.calls:
+            for value in kwargs.values():
+                if not isinstance(value, str):
+                    continue
+                self.assertNotIn("..", value, f"{name}: {value!r}")
+                self.assertNotIn("/", value, f"{name}: {value!r}")
+
+    def test_a_handle_that_survives_normalization_is_refused(self):
+        for hostile in ("x", "plan_short", "not-a-handle", "%2e%2e"):
             with self.subTest(value=hostile):
                 response = self.get(self.path(handle=hostile))
                 self.assertIn(response.status_code, (404, 405))
-        self.assertEqual(self.upstream.called("read_operation_prompt"), 0)
+                self.assertEqual(self.upstream.called("read_operation_prompt"), 0)
 
     def test_a_foreign_handle_is_a_plain_not_found(self):
         self.upstream.raises["read_operation_prompt"] = upstream_error(
@@ -358,7 +406,9 @@ class TheResultReadSeparatesFactFromClaim(BridgeHarness):
         self.assertTrue(payload["worker_completion_is_not_acceptance"])
 
     def test_a_malformed_dispatch_handle_never_reaches_upstream(self):
-        self.get(self.path(handle="../../etc"))
+        for hostile in ("x", "not-a-handle", "%2e%2e"):
+            with self.subTest(value=hostile):
+                self.get(self.path(handle=hostile))
         self.assertEqual(self.upstream.called("read_operation_result"), 0)
 
 
