@@ -36,6 +36,11 @@ try:
 except ImportError:  # pragma: no cover - the extras are absent
     TestClient = None
 
+try:
+    import yaml
+except ImportError:  # pragma: no cover - PyYAML is a dev extra
+    yaml = None
+
 if TestClient is not None:
     from cofferdam.actions_bridge.config import load_bridge_config
     from cofferdam.actions_bridge.service import OPERATION_IDS, create_bridge_app
@@ -580,9 +585,14 @@ class EveryRefusalCodeTheRoutesEmitIsTranslated(unittest.TestCase):
         )
         self.assertIn("ApiError", raised)
 
+    @unittest.skipIf(yaml is None, "PyYAML is not installed (dev extra)")
     def test_the_contract_declares_the_status_the_bridge_returns(self):
-        """The published schema and the runtime must agree."""
-        import yaml
+        """The published schema and the runtime must agree.
+
+        Gated on PyYAML the way the contract suite is: the stdlib-only runner
+        has no parser for the schema, and the two guards above -- which do the
+        load-bearing work -- need nothing beyond stdlib and still run there.
+        """
         from pathlib import Path
 
         from cofferdam.actions_bridge.errors import from_upstream_code, status_for
