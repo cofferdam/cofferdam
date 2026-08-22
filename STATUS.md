@@ -1,20 +1,55 @@
 # Status
 
-Accurate as of **2026-08-13**. **M2J is complete**: all seven sub-phases are merged and deployed,
-and production is normalized on PR4 (`44e4994`). See *M2J closeout* immediately below. The queue
-from here is **M2K → M2L → M2M**.
+Accurate as of **2026-08-22**. **M2J and M2K are closed; the active lane is M2L → M2M.**
 
-**M2I.5 is complete**: PR #34 is merged as `2386a54`, production
-normalization completed, and the live host runs that commit with the Claude Code adapter, the
-Claude Agent SDK adapter, explicit host-owned delegated-adapter selection, Task Core as authority,
-the private Custom GPT Actions bridge, same-session clarification continuation and follow-up,
-structured single-choice `AskUserQuestion` with Cofferdam-minted option ids, a tailnet-private
-PWA/API, and only the narrow Actions bridge public.
+**The current objective is the development-control path.** Cofferdam is becoming the always-on
+development control plane for multiple projects: an instruction arrives on a conversational
+surface, Cofferdam resolves bounded authoritative project context, a provider-neutral cloud planner
+prepares the next worker prompt, Cofferdam persists it, **a person confirms it explicitly**, a
+bounded worker runs in an isolated worktree, and machine-grounded changes, tests and publication
+state come back alongside the exact prompt that produced them. The planner is high-intelligence and
+**low-authority**: state, evidence, credentials, execution and memory stay local (D-2026-08-20-1,
+D-2026-08-20-2).
 
-**The work after it was replanned on 2026-08-11**: M2J is preserved and reshaped, and the queue was
-**M2J → M2K → M2L → M2M** with two isolated parallel tracks. M2J is now complete, so the
-remaining queue is **M2K → M2L → M2M**. See [`ROADMAP.md`](ROADMAP.md) and
-[`DECISIONS.md`](DECISIONS.md) D-2026-08-11-1 … -12 and D-2026-08-12-1; the planning package is
+**M2K is closed for forward progress** — it no longer supplies the next task, and it is not
+reopened merely because an item once belonged to it. **That is not a claim that every historical
+M2K item shipped.** PR1–PR26 are merged and recorded below, and three things M2K's own scope names
+were **never built**: the deterministic check runner, risk levels, and machine failure reason codes
+at the adapter and observer boundaries. Those stay **deferred and remembered**; pull one forward
+only when it is a concrete blocker for M2L, M2M or another near-term capability. Decided as
+[`DECISIONS.md`](DECISIONS.md) D-2026-08-22-1.
+
+**Merged since M2K:** M2L PR1a–PR1h (#72–#80) and M2M PR1–PR5 (#81–#85) — provider-neutral
+`DevelopmentPlanner` contracts, the durable planner store, the human authority gate, bounded worker
+dispatch and after-restart reconciliation, persistent worker and planner Claude sessions, a
+host-owned Git publisher, the derived operations read model, its read-only Custom GPT surface,
+remote development-request ingress, and host-owned Claude executable resolution. Neither milestone
+is finished; both have working foundations rather than plans. Detail: [`ROADMAP.md`](ROADMAP.md).
+
+**Production right now.** Slot **A** is active at `d6717ee` (#85) and runs both the workstation and
+the Actions bridge; slot **B** at `621235f` (#84) is the rollback. The tunnel is up, the development
+planner is enabled, and a dedicated planner Claude session is signed in. Task Core is at schema
+**v11** and the planner store at **v6**; both slots speak v6, so the rollback is a slot flip with no
+planner-database downgrade or quarantine.
+
+**The planner has been accepted in production, narrowly.** On 2026-08-22 one real
+`createDevelopmentRequest` reached the development planner. The Actions bridge timed out
+synchronously at ~20 s under its designed `upstream_timeout`; the planner continued and **completed
+durably**. The outcome was `ASK_USER` — `planner_status` `succeeded`, `approved` false,
+`dispatch_id` null, `task_id` null, `prompt_available` false. So a real Opus-class planner runs in
+production and the confirmation boundary held. **No worker ran, nothing was approved and no worker
+prompt was prepared:** the planner asked for scope because the Working Context was empty and this
+file was stale. That request is still waiting for a human answer and is deliberately untouched.
+
+**A/B is for deployment, not for every local iteration.** The paragraph above is a deployment fact,
+not a development rule. Routine work on the workstation does not stage through A/B; the slots exist
+for remote/self-update deployment and rollback.
+
+**Earlier milestones, unchanged.** M2I.5 is complete (PR #34, `2386a54`): both Claude adapters,
+host-owned delegated-adapter selection, Task Core as authority, the private Custom GPT Actions
+bridge, same-session clarification and follow-up, a tailnet-private PWA/API, and only the narrow
+bridge public. The 2026-08-11 replan that produced the **M2J → M2K → M2L → M2M** queue is
+[`DECISIONS.md`](DECISIONS.md) D-2026-08-11-1 … -12 and D-2026-08-12-1; its planning package is
 preserved as history in `handoffs/replan-2026-08-11/`.
 
 ## M2J closeout
@@ -31,8 +66,9 @@ preserved as history in `handoffs/replan-2026-08-11/`.
 | PR3.5.1 | projection sanitizer hardening | `5afaa8e` (#43) |
 | PR4 | read-only project-context surfaces | `44e4994` (#44) |
 
-**Production as normalized on PR4.** Both the workstation and the Actions bridge run `44e4994` on
-slot B; slot A is retained unchanged at `5afaa8e` (PR3.5.1) as the rollback.
+**Production as normalized on PR4.** Both the workstation and the Actions bridge ran `44e4994` on
+slot B; slot A was retained unchanged at `5afaa8e` (PR3.5.1) as the rollback. **That is the PR4
+record, not current production** — for what is deployed today see the opening `# Status` section.
 
 - **Private route:** `GET /api/projects/{project_id}/context`
 - **Public bridge route:** `GET /v1/projects/{project_id}/context`, operationId `getProjectContext`
@@ -133,7 +169,10 @@ bounded unsupported result; none was widened to fit, and no live evidence about 
 The project root also remains a configuration boundary the CLI is asked to respect, **not a kernel
 sandbox**.
 
-Update this file when a category changes, not on every commit.
+Update this file when a category changes, not on every commit. **Keep the opening `# Status` section
+under 4 KiB:** a `CloudContextProjection` carries that section and nothing else from this document,
+so whatever does not fit there is invisible to a planner — see
+[`docs/CLOUD_CONTEXT_PROJECTION.md`](docs/CLOUD_CONTEXT_PROJECTION.md).
 
 ## Merged (on `main`)
 
@@ -795,7 +834,14 @@ real session exactly, with zero mismatches in either direction — see the
 bind logic. Neither does M2B3A, M2B3A.1, M2C, M2D, M2E, M2F, or M2G. **M2H does**, which is why
 the gate closes there.
 
-## In progress (on a branch, not merged)
+## M2K records — the final sub-phases (all merged; written while each was on its branch)
+
+**Every record in this section is merged on `main` now.** Each was written while its branch was
+open, and the sentences saying "on a branch, not merged" describe the moment they were written —
+kept for the same reason the other milestone records are kept, because what each PR *did not* do is
+still current. PR26 merged as `83ff1dd` (#71) and closed the deployment retry it blocked. **M2K is
+closed for forward progress** (D-2026-08-22-1); see the opening `# Status` section for what stays
+deferred.
 
 ### M2K PR26 — terminal-bound committed-range evidence
 
@@ -1561,13 +1607,18 @@ actually running — not PR11 or PR12, which are merged and undeployed.
 
 ## M2K records — the evidence foundation (written while each was on its branch)
 
-M2K is **in progress**: PR1 through PR8 are merged and deployed; PR9 is merged (`b2314f0`, #54) and
+M2K is **closed for forward progress** (D-2026-08-22-1), and **all twenty-six sub-phases are
+merged**: PR1 through PR8 are merged and deployed; PR9 is merged (`b2314f0`, #54) and
 needed no deployment because it changed only documentation; PR10 is merged (`1efd49b`, #55) and
 deployed to slot A on schema v9; PR11 (`3bb9a5b`, #56), PR12 (`2dc4177`, #57), PR13 (`8cd8ba3`, #58),
 PR14 (`064fe51`, #59), PR15 (`12e64cd`, #60), PR16 (`c1d6f1d`, #61), PR17 (`c164383`, #62), PR18
 (`1116b61`, #63), PR19 (`d777e04`, #64), PR20 (`9fbf9a9`, #65), PR21 (`617412c`, #66), PR22
-(`c214d5c`, #67), PR23 (`a1dfd23`, #68), PR24 (`eb70a2b`, #69) and PR25 (`778837d`, #70) are merged;
-PR26 is on a branch. See *In progress* above for PR26.
+(`c214d5c`, #67), PR23 (`a1dfd23`, #68), PR24 (`eb70a2b`, #69), PR25 (`778837d`, #70) and PR26
+(`83ff1dd`, #71) are merged. See *M2K records — the final sub-phases* above for PR14 through PR26.
+
+**Twenty-six merged sub-phases is not the whole milestone.** The deterministic check runner, risk
+levels and the machine failure reason codes M2K's scope names were never built, and closure does
+not claim otherwise — they are deferred, not delivered.
 
 **PR11–PR24 were deployed once, on 2026-08-17, and deliberately rolled back.** The deployment
 succeeded mechanically and its production smoke exposed the PR14 async capture-boundary defect PR25
@@ -3742,10 +3793,15 @@ on 2026-08-11 (see the [M2B record](#m2b--runtime-inventory)).
 
 ## Planned (active roadmap — see [`ROADMAP.md`](ROADMAP.md))
 
-**Replanned 2026-08-11 and recorded as D-2026-08-11-1 … -12.** **M2J is done** (see *M2J closeout*
-above); nothing else below is implemented, and no code was written for any of it. Queued, in order:
+**Replanned 2026-08-11 and recorded as D-2026-08-11-1 … -12.** The queue that replan produced has
+since moved twice, and this section is kept as the record of what each milestone was *scoped* to be
+rather than as a claim about what is unbuilt. **M2J is done** (see *M2J closeout* above). **M2K is
+closed for forward progress** with named hardening deferred (D-2026-08-22-1). **M2L and M2M are the
+active lane and both have merged foundations** — M2L PR1a–PR1h (#72–#80) and M2M PR1–PR5 (#81–#85);
+neither is finished. The M2N-and-later entries below are still unstarted.
 
-- **M2K — evidence and evaluation foundation. Next.** Model-free. Per-turn evidence bundles that
+- **M2K — evidence and evaluation foundation. Closed for forward progress.** Model-free. Per-turn
+  evidence bundles that
   keep worker *claims* and Cofferdam *observations* structurally apart, deterministic criteria
   checks before any model, risk levels derived from code and policy rather than model
   self-selection, and the first machine-observed failure reason codes.
@@ -3759,16 +3815,42 @@ above); nothing else below is implemented, and no code was written for any of it
   **Start with the five-step artifact/change-claims Task Core PR that D-2026-08-09-3 already
   specifies** — it is the foundation the rest of the milestone reads from, and it is deterministic
   and model-free.
-- **M2L — Cloud Coworker Planning and Orchestration.** One **role**, provider-neutral, advisory
+
+  **What of that scope actually shipped, and what did not.** The claim/observation separation, the
+  derived `EvidenceBundle`, machine-owned Git observation, the per-turn baseline and committed
+  range, the frozen criteria snapshot, deterministic criterion evaluation, criterion continuity and
+  the target-turn acceptance aggregate all shipped across PR1–PR26. **The deterministic check
+  runner, risk levels and the machine failure reason codes did not** — nothing in the repository
+  implements them. Closure moves the queue past M2K; it does not convert those three into
+  deliverables (D-2026-08-22-1).
+- **M2L — Cloud Coworker Planning and Orchestration. Active; foundations merged.** One **role**,
+  provider-neutral, advisory
   throughout: Turkish-first conversation, worker-prompt and follow-up drafting, evidence
   interpretation, next-step recommendations, honest refusal. Every consequential proposal is
   explicitly confirmed; there is no autonomous planner → worker continuation in this milestone.
   **Renamed from "Local Planner MVP" on 2026-08-20** (D-2026-08-20-1): the objective is unchanged,
   but the planner is no longer assumed to be a local model. Its first backend is expected to be a
   cloud frontier model; a local model remains an optional backend behind the same role.
-- **M2M — remote operations completion.** A consolidated status overview, the workspace dashboard
+
+  **Merged (#72–#80):** the milestone redefinition (#72) and the Claude capability audit (#73); the
+  provider-neutral planner contracts and first provider (#74); the durable planner store (#75); the
+  human authority gate (#76); bounded worker dispatch (#77) and after-restart reconciliation (#78);
+  a safely persisted worker Claude session (#79); and a host-owned Git publisher for worker branches
+  (#80). **Not built yet:** the per-workspace planner conversation in the PWA, the evaluation
+  narrative over evidence bundles, and the live Turkish end-to-end validation this milestone's
+  release gate names.
+- **M2M — remote operations completion. Active; the read side exists.** A consolidated status
+  overview, the workspace dashboard
   in the existing PWA, deterministic diagnosis synthesis over M2K's reason codes, and retry UX over
   idempotent replays. The PWA and main API stay tailnet-private.
+
+  **Merged (#81–#85):** the derived operations read model that joins five durable owners into one
+  phase (#81); its read-only Custom GPT operations surface (#82); the unknown-operation 404 fix
+  (#83); remote development-request ingress, which is the first time anything outside the
+  workstation can cause a planning turn, plus a dedicated planner Claude session (#84); and
+  host-owned Claude executable resolution (#85). **Not built yet:** the workspace dashboard panel,
+  diagnosis synthesis, `syncWorkspace`, retry UX — and **no remote approve/reject Action exists**,
+  deliberately: approval stays a workstation-side authority surface.
 
 **Before M2J PR1 merges:** the supervised pass over the inherited live-validation debt ran on
 2026-08-11 (D-2026-08-11-12). The blocking set — lifecycle, authority, capability truthfulness and

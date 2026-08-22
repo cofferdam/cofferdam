@@ -4471,6 +4471,46 @@ explicit decision — it must not silently inherit the word.
 orchestration change. This records the principles so the milestones that build them do not have to
 rediscover them. Evidence and per-capability status: `docs/M2L_CLAUDE_CAPABILITY_AUDIT.md`.
 
+## D-2026-08-22-1 — M2K is closed for forward progress, and closure is not completion (EFE DECISION, ACTIVE)
+
+**Decision.** M2K is **closed for forward progress**. It no longer supplies the next task and is not
+reopened or extended merely because an item once belonged to it. The active lane is **M2L → M2M**:
+the confirmation-gated development-control path — instruction → bounded authoritative context →
+provider-neutral cloud planner → persisted worker prompt → **explicit human confirmation** → bounded
+worker in an isolated worktree → machine-grounded result. That gate is unchanged; this entry moves
+the queue, not the authority model.
+
+**Closure is not completion, and the two words are not interchangeable here.** Twenty-six sub-phases
+merged. **Three things M2K's own scope names were never built**: the deterministic check runner,
+risk levels, and machine failure reason codes at the adapter and observer boundaries. Nothing in the
+repository implements them. They are **deferred and remembered, not delivered and not deleted** —
+along with the rest of the evidence/evaluation hardening debt recorded in `ROADMAP.md` under M2K.
+Pull one forward only when it is a concrete blocker for M2L, M2M or another near-term capability,
+and **name the blocker** when you do. A summary that says "M2K is done" is wrong in a way that
+matters, because the next person to read it would assume a check runner exists.
+
+**Why this needed a decision rather than a status edit.** The queue was the *only* forward-progress
+statement in canonical memory, and it still read `M2K → M2L → M2M` while M2L and M2M were being
+built. On 2026-08-22 a real production planning turn returned `ASK_USER` asking what M2K's next
+sub-step was: the bounded `CloudContextProjection` it received truthfully carried the stale queue
+and, being bounded, carried no definition of M2K to go with it. The context pipeline was not at
+fault — it projected exactly what the documents said. Canonical memory was.
+
+**The consequence for how these documents are written.** A bounded projection selects by position,
+not by relevance, so the opening section of `STATUS.md` and the top of `ROADMAP.md` are the whole of
+what a planner sees. **Current forward-progress state belongs there and nowhere else.** Detail below
+the fold is for people and for an explicit `plan_checkpoint`; it is not a substitute for saying the
+current thing first. This is a documentation discipline, not a licence to widen the projection
+budget — the budgets are unchanged by this entry.
+
+**What this does not change.** D-2026-08-11-6 still holds: a worker's final message is only a claim,
+machine observation comes first, and a model may downgrade but never upgrade evidence.
+D-2026-08-11-7 still holds: check-command authority is code-owned or host-owned, and if a check
+runner is ever pulled forward it arrives under that rule unchanged. D-2026-08-20-1 and
+D-2026-08-20-2 still hold: the planner is high-intelligence and low-authority, Cofferdam is the
+central orchestrator, and every consequence passes through an existing validated path. **No
+autonomous planner → worker continuation is authorized by this entry.**
+
 ## OPEN QUESTIONS
 
 - **OQ-2 — no lockfile.** Dependencies declare lower bounds only. Fine for now; revisit when

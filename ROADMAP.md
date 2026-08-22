@@ -5,10 +5,70 @@ remote Claude, then the A/B self-update demonstration, then natural-language rou
 depth follows the post-pivot policy in [`DECISIONS.md`](DECISIONS.md) D-2026-08-01-6. Items
 marked **OPEN QUESTION** are unresolved; each names the experiment that settles it.
 
-**Read [Active implementation order](#active-implementation-order-recorded-2026-08-08-replanned-2026-08-11) first.**
-The M1–M7 sections remain the reference for what each layer *is*, and the M2x sections are the
-record of what shipped; **M2J is complete** and the work actually queued next is
-**M2K → M2L → M2M**, and that section takes precedence wherever the two disagree.
+**[Active implementation order](#active-implementation-order-recorded-2026-08-08-replanned-2026-08-11)
+is the next section, and it takes precedence wherever it and a milestone section disagree.** The
+M1–M7 sections remain the reference for what each layer *is*, and the M2x sections are the record
+of what shipped. **M2J is complete and M2K is closed for forward progress** (D-2026-08-22-1); the
+active lane is **M2L → M2M**, the confirmation-gated development-control path, and substantial
+foundations of both are already merged.
+
+## Active implementation order (recorded 2026-08-08, replanned 2026-08-11)
+
+Where the milestone sections below are the design reference, this is the queue. M2F (Task Core,
+PR #20) and M2G (the Claude Code CLI adapter, PR #21) are merged on `main`; the delegated-task
+lane exists and has been driven from a phone. Client architecture and authority for everything
+below are fixed by [`DECISIONS.md`](DECISIONS.md) D-2026-08-08-1 … -6.
+
+**M2H, M2I, M2I.5 and M2J are complete. M2K is closed for forward progress.** The queue is:
+
+```
+M2J  Workspace, Working Context, mind foundation, Context Builder   COMPLETE (merged + deployed)
+M2K  Evidence & evaluation foundation, + machine reason codes       CLOSED for forward progress
+                                                                    PR1-PR26 merged; check runner,
+                                                                    risk levels, machine reason
+                                                                    codes stay DEFERRED
+M2L  Cloud Coworker Planning and Orchestration                     ACTIVE — #72-#80 merged
+M2M  Remote operations completion                                  ACTIVE — #81-#85 merged
+                                                                    read side + remote ingress
+                                                                    exist; dashboard, diagnosis and
+                                                                    retry UX do not
+──── later, in this order unless evidence reorders it ────
+M2N  Mind retrieval — required (backlinks first, vectors second)
+M2O  Browser and desktop skills, productized from Track B
+M2P  Codex adapter (second delegated worker)
+M2Q  Fast/deep planner routing — only if Track D data justifies it
+──── unchanged, still later ────
+Guardian / A-B slots (M5) · self-update (M6) · Opera Companion · Trust Core re-entry
+```
+
+**M2K is closed, not completed.** Closure means the milestone no longer supplies the next task and
+is not reopened merely because an item once belonged to it. It is **not** a claim that every M2K
+sub-item shipped: three things M2K's own scope names — the deterministic check runner, risk levels,
+and machine failure reason codes at the adapter and observer boundaries — were never built and stay
+deferred. Pull one forward only when it is a concrete blocker, and name the blocker
+(D-2026-08-22-1). M2K's design section below is preserved in full as the reference for what was
+built and what was not.
+
+**M2L and M2M run together rather than in sequence.** M2M's remote read surfaces are how the M2L
+planner is observed and driven from a phone, so the two interleave; the ordering above is priority,
+not a gate. Both converge on one path: instruction → bounded authoritative context →
+provider-neutral cloud planner → persisted worker prompt → **explicit human confirmation** →
+bounded worker in an isolated worktree → machine-grounded changes, tests and publication state
+returned with the exact prompt that produced them.
+
+Two **parallel tracks** run outside the milestone gates, isolated from production — see
+[Parallel tracks](#parallel-tracks-b-and-d-recorded-2026-08-11) below.
+
+Recorded as [`DECISIONS.md`](DECISIONS.md) D-2026-08-11-1 … -12 and D-2026-08-12-1, which are the authority for the
+sections that follow. The planning package that produced them is preserved as history in
+`handoffs/replan-2026-08-11/`; it is a draft that was edited before adoption, not a second
+roadmap.
+
+**Before M2J PR1 merges:** the supervised pass over the inherited live-validation debt listed in
+[`STATUS.md`](STATUS.md) ran on 2026-08-11 (D-2026-08-11-12). The blocking set — lifecycle,
+authority, capability truthfulness and deployment integrity — is **cleared**. The remaining
+media-feature walkthroughs are deferred, non-blocking debt and **do not block** the merge
+(D-2026-08-12-1); they keep explicit states in STATUS rather than being absorbed.
 
 ## Implementation philosophy (binding)
 
@@ -81,42 +141,12 @@ contradicted by experiment):
 
 ---
 
-## Active implementation order (recorded 2026-08-08, replanned 2026-08-11)
+## Milestone definitions — the design reference for the queue
 
-Where the milestone sections below are the design reference, this is the queue. M2F (Task Core,
-PR #20) and M2G (the Claude Code CLI adapter, PR #21) are merged on `main`; the delegated-task
-lane exists and has been driven from a phone. Client architecture and authority for everything
-below are fixed by [`DECISIONS.md`](DECISIONS.md) D-2026-08-08-1 … -6.
-
-**M2H, M2I, M2I.5 and M2J are complete.** The queue from here is:
-
-```
-M2J  Workspace, Working Context, mind foundation, Context Builder   COMPLETE (merged + deployed)
-M2K  Evidence & evaluation foundation, + machine reason codes       (deterministic, model-free)
-M2L  Cloud Coworker Planning and Orchestration                     (advisory, confirm-by-default)
-M2M  Remote operations completion — overview, dashboard, diagnosis
-──── later, in this order unless evidence reorders it ────
-M2N  Mind retrieval — required (backlinks first, vectors second)
-M2O  Browser and desktop skills, productized from Track B
-M2P  Codex adapter (second delegated worker)
-M2Q  Fast/deep planner routing — only if Track D data justifies it
-──── unchanged, still later ────
-Guardian / A-B slots (M5) · self-update (M6) · Opera Companion · Trust Core re-entry
-```
-
-Two **parallel tracks** run outside the milestone gates, isolated from production — see
-[Parallel tracks](#parallel-tracks-b-and-d-recorded-2026-08-11) below.
-
-Recorded as [`DECISIONS.md`](DECISIONS.md) D-2026-08-11-1 … -12 and D-2026-08-12-1, which are the authority for the
-sections that follow. The planning package that produced them is preserved as history in
-`handoffs/replan-2026-08-11/`; it is a draft that was edited before adoption, not a second
-roadmap.
-
-**Before M2J PR1 merges:** the supervised pass over the inherited live-validation debt listed in
-[`STATUS.md`](STATUS.md) ran on 2026-08-11 (D-2026-08-11-12). The blocking set — lifecycle,
-authority, capability truthfulness and deployment integrity — is **cleared**. The remaining
-media-feature walkthroughs are deferred, non-blocking debt and **do not block** the merge
-(D-2026-08-12-1); they keep explicit states in STATUS rather than being absorbed.
+What each milestone *is*, in the order the queue names them. The
+[Active implementation order](#active-implementation-order-recorded-2026-08-08-replanned-2026-08-11)
+above is the authority on which of these is current; a section here is the definition and the record
+of what it shipped, not a statement that it is next.
 
 ### M2H — Supervised Claude Remote Control (Lane A)
 
@@ -341,6 +371,13 @@ downstream reads from.
   confirmation defaults**, never what a task may do.
 
 ### M2K — Evidence and evaluation foundation
+
+> **CLOSED FOR FORWARD PROGRESS (2026-08-22, D-2026-08-22-1).** PR1 through PR26 are merged; this
+> section is preserved as the design reference and the record of what was built. It is **not** a
+> queue any more, and closure is **not** a claim that everything below shipped — the deterministic
+> check runner, risk levels and the machine failure reason codes named in *In scope* were never
+> built, and they stay deferred rather than deleted. Pull one forward only when it is a concrete
+> blocker for M2L, M2M or another near-term capability, and name the blocker.
 
 - **Sub-phases:**
   - **PR1 — adapter-reported change claims + the task-owned artifact foundation.** *Merged as
@@ -1104,6 +1141,16 @@ downstream reads from.
 
 One **role**, one authority boundary, advisory throughout (D-2026-08-11-2, D-2026-08-20-1).
 
+> **ACTIVE — this is the current development lane, and it is not hypothetical.** PR1a through PR1h
+> are merged (#72–#80): the milestone redefinition (#72), the Claude capability audit (#73), the
+> provider-neutral planner contracts and first provider (#74), the durable planner store (#75), the
+> human authority gate (#76), bounded worker dispatch (#77), after-restart reconciliation (#78), a
+> safely persisted worker Claude session (#79), and a host-owned Git publisher for worker branches
+> (#80). A real Opus-class planning turn has completed in production and stopped at the confirmation
+> boundary — see [`STATUS.md`](STATUS.md). **Still unbuilt:** the per-workspace planner conversation
+> in the PWA, the evaluation narrative over evidence bundles, and the live Turkish end-to-end
+> validation this milestone's release gate names.
+
 > **Renamed from "Local Planner MVP" on 2026-08-20** (D-2026-08-20-1). The milestone's objective did
 > not change; the assumption about *where the model runs* did. M2L is a provider-neutral planner
 > role, and its first backend is expected to be a cloud frontier model. The local-model work that
@@ -1152,6 +1199,23 @@ One **role**, one authority boundary, advisory throughout (D-2026-08-11-2, D-202
 - **Review depth:** normal backend, plus the focused review above.
 
 ### M2M — Remote operations completion
+
+> **ACTIVE — the read side already exists.** PR1 through PR5 are merged (#81–#85): the derived
+> operations read model that joins five durable owners into one phase without storing a status
+> (#81), its read-only Custom GPT operations surface (#82), the unknown-operation 404 fix (#83),
+> remote development-request ingress — the first time anything outside this workstation can cause a
+> planning turn — together with a dedicated planner Claude session (#84), and host-owned Claude
+> executable resolution (#85). **Still unbuilt:** the consolidated overview route, the workspace
+> dashboard panel, diagnosis synthesis, `syncWorkspace` and retry UX.
+>
+> **There is no remote approve/reject Action, and its absence is deliberate.** Nothing in the
+> bridge's operation set approves a prepared prompt, dispatches a worker or answers a planner
+> question; approval stays a workstation-side authority surface. The next product objective is to
+> make the remote conversational surface a usable development-control interface — project selection,
+> bounded project briefing, prepare the next step, inspect the exact prepared prompt,
+> machine-grounded changes/tests/PR summaries, and a truthful answer to "what is Cofferdam doing
+> now?" — with approval arriving later through an explicit authority surface rather than by widening
+> a read Action.
 
 - **Objective:** answer "what is Cofferdam doing right now, and what happened while I was away" in
   one glance.
