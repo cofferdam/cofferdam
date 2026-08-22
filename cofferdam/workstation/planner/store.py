@@ -40,7 +40,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from .errors import PlannerError
+from .errors import (
+    PlannerError,
+    PlannerIngressAbandoned,
+    PlannerIngressConflict,
+    PlannerIngressInFlight,
+)
 from .models import PlannerResult
 from .protocol import ProviderExecution
 
@@ -72,7 +77,15 @@ DATABASE_FILENAME = "planner.sqlite3"
 #: facts with four different moments, and a publication column on the dispatch
 #: row would make "this was authorized" and "this reached GitHub" share a
 #: lifetime. They do not.
-PLANNER_SCHEMA_VERSION = 5
+#:
+#: v5 → v6 (M2M PR4) adds ``planner_ingress_receipts`` — the mapping from an
+#: external caller's ``client_request_id`` to the planner request it produced.
+#: Additive on the same terms. It owns **no planner lifecycle state**: no status,
+#: no action, no result, no timestamps of the invocation. It answers one
+#: question, "has this external request id already been turned into a planner
+#: request, and which one", and everything else about that planner request is
+#: read from ``planner_requests`` where it has always lived.
+PLANNER_SCHEMA_VERSION = 6
 
 STATUS_PENDING = "pending"
 STATUS_RUNNING = "running"
@@ -340,6 +353,68 @@ CREATE UNIQUE INDEX IF NOT EXISTS planner_publication_one_per_dispatch
     ON planner_publications (dispatch_id);
 CREATE INDEX IF NOT EXISTS planner_publication_by_task
     ON planner_publications (task_id);
+
+-- Which external request produced which planner request (M2M PR4).
+--
+-- v6, additive. This table exists for exactly one reason: a planning turn spends
+-- a real cloud call, and a Custom GPT Action's round trip is shorter than a
+-- planning turn. So a retry after a timeout is the *normal* case, not the
+-- exceptional one, and without a durable mapping every retry would buy a second
+-- Opus call and a second competing planner row.
+--
+-- **It owns no planner lifecycle state, and there is nowhere to put any.** There
+-- is no status column, no action, no result, no summary, no prompt. A reader
+-- that wants to know what happened follows `planner_request_id` into
+-- `planner_requests`, which has been the owner of that since v1. A second
+-- opinion about a planner's state is exactly what `operations/view.py` refuses
+-- to store, and this table is not going to be the place it creeps back in.
+--
+-- Only a digest of the request is kept, never the request. Comparing is the
+-- whole job, and a column that could describe the instruction would be somebody's
+-- development intent stored a second time with different retention — the same
+-- argument `actions_bridge/idempotency.py` makes for its own digest column.
+--
+-- Three states, and the third is the one worth naming:
+--
+--   claimed    planner_request_id IS NULL      an attempt is in flight
+--   bound      planner_request_id IS NOT NULL  it produced this planner request
+--   abandoned  abandoned_at IS NOT NULL        the daemon died mid-invocation
+--
+-- An abandoned receipt is **not** re-claimable. This host does not know whether
+-- the provider ran before it died, so it will neither claim it did nor spend a
+-- second call asserting it did not — the same doctrine `mark_interrupted`
+-- follows one table over. A genuinely new attempt needs a new client_request_id.
+CREATE TABLE IF NOT EXISTS planner_ingress_receipts (
+    project_id         TEXT NOT NULL,
+    client_request_id  TEXT NOT NULL,
+    request_digest     TEXT NOT NULL,
+    planner_request_id TEXT,
+    claimed_at         TEXT NOT NULL,
+    bound_at           TEXT,
+    abandoned_at       TEXT,
+
+    PRIMARY KEY (project_id, client_request_id),
+
+    FOREIGN KEY (planner_request_id)
+        REFERENCES planner_requests (planner_request_id),
+
+    -- A bound receipt has both halves or neither. A row carrying a bind time and
+    -- no planner request would say "this request completed" while being unable
+    -- to say what it completed into, which is worse than saying nothing.
+    CHECK ((planner_request_id IS NULL) = (bound_at IS NULL)),
+    -- Abandonment is for claims that never bound. Marking a settled receipt
+    -- abandoned would rewrite a true record with a false one.
+    CHECK (abandoned_at IS NULL OR planner_request_id IS NULL)
+);
+
+-- One planner request per receipt, and one receipt per planner request. The
+-- second half is what stops a retry binding to a row that another external
+-- request already owns.
+CREATE UNIQUE INDEX IF NOT EXISTS planner_ingress_one_per_request
+    ON planner_ingress_receipts (planner_request_id)
+    WHERE planner_request_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS planner_ingress_claimed
+    ON planner_ingress_receipts (claimed_at);
 """
 
 
@@ -437,6 +512,45 @@ class PlannerRecord:
                 else None
             ),
         }
+
+
+@dataclass(frozen=True)
+class IngressKey:
+    """Which external request a planner request is being created for.
+
+    Two opaque strings and nothing else. There is no path here, no branch, no
+    command and no model — this names *a request*, not what to do about one, and
+    a type with two string fields is a type an execution primitive cannot arrive
+    in.
+    """
+
+    project_id: str
+    client_request_id: str
+
+
+@dataclass(frozen=True)
+class IngressReceipt:
+    """One external request id, and the planner request it became.
+
+    Deliberately thin. Everything a caller wants to *know* — status, action,
+    prompt, question, failure — is read from the planner record this points at.
+    """
+
+    project_id: str
+    client_request_id: str
+    request_digest: str
+    planner_request_id: Optional[str]
+    claimed_at: str
+    bound_at: Optional[str]
+    abandoned_at: Optional[str]
+
+    @property
+    def bound(self) -> bool:
+        return self.planner_request_id is not None
+
+    @property
+    def abandoned(self) -> bool:
+        return self.abandoned_at is not None
 
 
 @dataclass(frozen=True)
@@ -780,31 +894,68 @@ class PlannerStore:
         projection_policy_id: Optional[str],
         projection_built_at: Optional[str],
         created_at: str,
+        ingress: Optional[IngressKey] = None,
     ) -> None:
         """Commit the request **before** the provider is invoked.
 
         The ordering is the crash-truth property: a row exists, in ``pending``,
         from the moment Cofferdam decided to ask. A process that dies during the
         call leaves evidence that it was asked, which is the honest record.
+
+        ``ingress`` binds an external request id to this planner request **in the
+        same transaction that creates it** (M2M PR4). Binding afterwards was the
+        obvious shape and is wrong: the gap between the two writes would be the
+        entire planning turn, which outlives a Custom GPT Action's round trip, so
+        a perfectly ordinary retry would land in the window and find no mapping
+        to reconcile to. Inside one transaction there is no window — a retry sees
+        either no receipt at all or a receipt that already names this request.
         """
         with self._lock, self._connect() as connection:
-            connection.execute(
-                "INSERT INTO planner_requests (planner_request_id, workspace_id, "
-                "project_id, status, created_at, user_intent, request_payload_json, "
-                "projection_policy_id, projection_built_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    planner_request_id,
-                    workspace_id,
-                    project_id,
-                    STATUS_PENDING,
-                    created_at,
-                    user_intent,
-                    json.dumps(request_payload, ensure_ascii=False),
-                    projection_policy_id,
-                    projection_built_at,
-                ),
-            )
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    "INSERT INTO planner_requests (planner_request_id, workspace_id, "
+                    "project_id, status, created_at, user_intent, request_payload_json, "
+                    "projection_policy_id, projection_built_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        planner_request_id,
+                        workspace_id,
+                        project_id,
+                        STATUS_PENDING,
+                        created_at,
+                        user_intent,
+                        json.dumps(request_payload, ensure_ascii=False),
+                        projection_policy_id,
+                        projection_built_at,
+                    ),
+                )
+                if ingress is not None:
+                    cursor = connection.execute(
+                        "UPDATE planner_ingress_receipts "
+                        "SET planner_request_id = ?, bound_at = ? "
+                        "WHERE project_id = ? AND client_request_id = ? "
+                        "AND planner_request_id IS NULL AND abandoned_at IS NULL",
+                        (
+                            planner_request_id,
+                            created_at,
+                            ingress.project_id,
+                            ingress.client_request_id,
+                        ),
+                    )
+                    if (cursor.rowcount or 0) != 1:
+                        # No open claim to bind to. Either nothing claimed it,
+                        # or something already did — and creating the planner row
+                        # anyway would leave an invocation nothing can reconcile
+                        # a retry to, which is the whole failure this exists to
+                        # prevent. The rollback takes the planner row with it.
+                        raise PlannerStoreUnavailable(
+                            "no open ingress claim to bind this planner request to"
+                        )
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
 
     def mark_running(self, planner_request_id: str, *, started_at: str) -> None:
         with self._lock, self._connect() as connection:
@@ -913,6 +1064,139 @@ class PlannerStore:
                 ),
             )
             return cursor.rowcount or 0
+
+    # -- external request receipts (M2M PR4) ----------------------------------
+
+    def claim_ingress(
+        self,
+        *,
+        project_id: str,
+        client_request_id: str,
+        request_digest: str,
+        claimed_at: str,
+    ) -> Optional[IngressReceipt]:
+        """Take this external request id, or say what already happened under it.
+
+        Returns ``None`` when the claim is ours — the caller may now invoke the
+        planner, and :meth:`create_request` will bind the result. Returns the
+        existing :class:`IngressReceipt` when this exact request already produced
+        a planner request, which the caller answers as a replay.
+
+        Raises rather than guessing in the three cases that are not retries:
+
+        * a different digest under the same id — :class:`PlannerIngressConflict`;
+        * a claim another attempt is holding — :class:`PlannerIngressInFlight`;
+        * a claim a dead process left — :class:`PlannerIngressAbandoned`.
+
+        The whole decision is one ``BEGIN IMMEDIATE``, so two concurrent
+        identical requests serialize at the database rather than at a
+        check-then-act in Python — which is where this would otherwise be wrong
+        exactly when it matters, because "two identical requests at once" is what
+        a retrying client produces.
+
+        There is deliberately **no stale-claim takeover** here, and that is the
+        one place this differs from the Actions bridge's own table. That table
+        maps to a task, and re-running a task that Task Core already refuses is
+        cheap. This one maps to a cloud call. Taking over a claim whose owner may
+        still be mid-invocation would spend a second one, so an interrupted claim
+        is marked abandoned at startup by :meth:`abandon_open_ingress` and is
+        never silently reused.
+        """
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            committed = False
+            try:
+                row = connection.execute(
+                    "SELECT project_id, client_request_id, request_digest, "
+                    "planner_request_id, claimed_at, bound_at, abandoned_at "
+                    "FROM planner_ingress_receipts "
+                    "WHERE project_id = ? AND client_request_id = ?",
+                    (project_id, client_request_id),
+                ).fetchone()
+
+                if row is not None:
+                    receipt = IngressReceipt(**dict(row))
+                    if receipt.request_digest != request_digest:
+                        raise PlannerIngressConflict(
+                            "that client_request_id was already used for a "
+                            "different development request"
+                        )
+                    if receipt.abandoned:
+                        raise PlannerIngressAbandoned(
+                            "an earlier attempt under that client_request_id was "
+                            "interrupted and will not be rerun"
+                        )
+                    if not receipt.bound:
+                        raise PlannerIngressInFlight(
+                            "that development request is being planned right now"
+                        )
+                    return receipt
+
+                connection.execute(
+                    "INSERT INTO planner_ingress_receipts "
+                    "(project_id, client_request_id, request_digest, "
+                    " planner_request_id, claimed_at, bound_at, abandoned_at) "
+                    "VALUES (?, ?, ?, NULL, ?, NULL, NULL)",
+                    (project_id, client_request_id, request_digest, claimed_at),
+                )
+                connection.execute("COMMIT")
+                committed = True
+                return None
+            finally:
+                # ``finally`` rather than ``except``, for the reason the bridge's
+                # own claim documents: the replay return is a success that writes
+                # nothing and an early ``return`` skips an ``except``, which would
+                # leave the transaction open for the next ``BEGIN IMMEDIATE`` to
+                # fail on — a bug that only shows up on the second replay.
+                if not committed:
+                    connection.execute("ROLLBACK")
+
+    def release_ingress(self, *, project_id: str, client_request_id: str) -> None:
+        """Drop an unbound claim after the attempt failed before creating a row.
+
+        Deleted rather than marked, and guarded on ``planner_request_id IS NULL``
+        so it can never remove a receipt that actually produced a planner
+        request. This is only for the window between claiming and creating —
+        a refusal that happens in there cost nothing, so the caller may retry the
+        identical request, and a surviving row would turn that retry into a
+        conflict about a planner call that never happened.
+        """
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "DELETE FROM planner_ingress_receipts "
+                "WHERE project_id = ? AND client_request_id = ? "
+                "AND planner_request_id IS NULL AND abandoned_at IS NULL",
+                (project_id, client_request_id),
+            )
+
+    def abandon_open_ingress(self, *, abandoned_at: str) -> int:
+        """Called at startup, beside :meth:`mark_interrupted`, and for its reason.
+
+        A claim with no planner request belonged to a process that is gone. It
+        cannot be completed, because nothing knows what it was going to produce,
+        and it must not be silently reopened, because this host does not know
+        whether the provider was already invoked and charged.
+        """
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE planner_ingress_receipts SET abandoned_at = ? "
+                "WHERE planner_request_id IS NULL AND abandoned_at IS NULL",
+                (abandoned_at,),
+            )
+            return cursor.rowcount or 0
+
+    def ingress_receipt(
+        self, project_id: str, client_request_id: str
+    ) -> Optional[IngressReceipt]:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT project_id, client_request_id, request_digest, "
+                "planner_request_id, claimed_at, bound_at, abandoned_at "
+                "FROM planner_ingress_receipts "
+                "WHERE project_id = ? AND client_request_id = ?",
+                (project_id, client_request_id),
+            ).fetchone()
+        return IngressReceipt(**dict(row)) if row else None
 
     # -- reads ----------------------------------------------------------------
     def get(self, planner_request_id: str) -> Optional[PlannerRecord]:
@@ -1363,6 +1647,8 @@ __all__ = [
     "STATUS_INTERRUPTED",
     "TERMINAL_STATUSES",
     "AuthorityEvent",
+    "IngressKey",
+    "IngressReceipt",
     "PlannerRecord",
     "WorkerDispatch",
     "PlannerStore",

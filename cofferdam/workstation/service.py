@@ -367,6 +367,12 @@ from .projectcontext import (
     ProjectContextUnavailable,
     serialize_project_context,
 )
+# The planner's error base, imported under a private alias so nothing else in
+# this file starts catching it by a short name. It is the *only* thing this
+# module imports from the planner package at module scope: the ingress, the
+# store and the provider are all imported inside the one function that builds
+# them, so a build with planning disabled loads none of it.
+from .planner.errors import PlannerError as _PlannerError
 from .mind.errors import (
     CODE_APPLY_FAILED,
     CODE_RESOLUTION_UNSUPPORTED,
@@ -636,6 +642,40 @@ _CONTEXT_STATUS = {
     READ_RESPONSE_TOO_LARGE: 500,
 }
 
+#: HTTP status per development-request refusal (M2M PR4). Closed map, no default
+#: leak — an unlisted code falls to 409, which is the honest generic answer for
+#: "the host will not do that right now".
+#:
+#: The three 409s are three different sentences and are kept apart on purpose. A
+#: caller retrying blindly needs to know whether to wait (`in_flight`), to stop
+#: and read (`not_allowed_now`), or to pick a new key (`conflict`, `abandoned`),
+#: and one shared code would flatten all four into "no".
+#:
+#: `planner_unavailable` is 503 rather than 409 because it says nothing about the
+#: caller or the project: this host cannot plan at all right now, and that is a
+#: property of the workstation. Distinguishing it from a project refusal is a
+#: requirement rather than a nicety — a person debugging from a phone must be
+#: able to tell "I named the wrong project" from "sign the planner in".
+_DEVELOPMENT_STATUS = {
+    "development_request_invalid": 422,
+    "development_request_not_allowed_now": 409,
+    "development_request_conflict": 409,
+    "development_request_in_flight": 409,
+    "development_request_abandoned": 409,
+    "development_request_refused": 409,
+    "planner_unavailable": 503,
+    # The planner's own provider session. 503 for the same reason
+    # `planner_unavailable` is -- this workstation cannot plan right now, which
+    # is a property of the host and not of the caller or the project. Kept as
+    # two codes rather than one because they are two different sentences with
+    # two different fixes, and a person reading the second needs to know their
+    # earlier login stopped working rather than that they never did one.
+    "planner_auth_required": 503,
+    "planner_session_expired": 503,
+    "planner_session_error": 503,
+    "planner_store_unavailable": 500,
+}
+
 CALLER_ACTIONS_BRIDGE = "actions_bridge"
 
 #: Caller to the ``origin`` recorded on a task it creates. Both entries are
@@ -787,8 +827,17 @@ def create_app(
     tasks=None,
     workspaces=None,
     mind=None,
+    planner=None,
 ) -> FastAPI:
-    """Build the application. Arguments are injectable for tests."""
+    """Build the application. Arguments are injectable for tests.
+
+    ``planner`` is the development planner provider (M2M PR4). It is injectable
+    for the reason ``adapter`` is: the real one runs a subprocess and costs a
+    cloud call, and a suite that needed either would not be a suite. In
+    production it is ``None`` and the provider is constructed from code-owned
+    defaults inside ``_development_ingress`` — there is no configuration key and
+    no request field that names an executable, a model or a timeout.
+    """
     config = config or load_config()
     config.ensure_dirs()
     token = token or load_or_create_token(config)
@@ -2857,19 +2906,36 @@ def create_app(
     # database, every project truthfully reports `idle`.
     _operations_cache: Dict[str, Any] = {}
 
-    def _operations() -> Any:
+    def _planner_store(*, create: bool):
+        """The planner database, opened once and only when it should be.
+
+        ``create=False`` for every read: a host that has never planned anything
+        does not gain a file merely because something asked what was happening.
+        ``create=True`` only on the one route that is about to write a planner
+        request, which is the first moment the database has a reason to exist.
+        """
+        from .planner.store import DATABASE_FILENAME, PlannerStore
+
+        found = _operations_cache.get("store")
+        if found is not None:
+            return found
+        directory = Path(config.state_dir) / "planner"
+        if not create and not (directory / DATABASE_FILENAME).is_file():
+            return None
+        store = PlannerStore(directory)
+        _operations_cache["store"] = store
+        return store
+
+    def _operations(*, create: bool = False) -> Any:
+        from .operations import OperationsService
+
         found = _operations_cache.get("service")
         if found is not None:
             return found
-        from .operations import OperationsService
-        from .planner.store import DATABASE_FILENAME, PlannerStore
-
-        directory = Path(config.state_dir) / "planner"
-        if not (directory / DATABASE_FILENAME).is_file():
+        store = _planner_store(create=create)
+        if store is None:
             return None
-        service = OperationsService(
-            planner_store=PlannerStore(directory), tasks=tasks
-        )
+        service = OperationsService(planner_store=store, tasks=tasks)
         _operations_cache["service"] = service
         return service
 
@@ -2956,6 +3022,40 @@ def create_app(
             _operations_not_found(exc.detail)
 
     @app.get(
+        "/api/operations/{project_id}/question/{planner_request_id}",
+        dependencies=[Depends(require_task_caller)],
+    )
+    async def read_operation_question(
+        project_id: str, planner_request_id: str
+    ) -> Dict[str, Any]:
+        """The exact pending question, by durable id, for this project only.
+
+        The overview says *that* a question is open; it has never said what the
+        question is. A conversation that reconnects tomorrow could therefore
+        learn only that Cofferdam was waiting on it, which is not enough to
+        answer with.
+
+        **A read, and there is no matching write.** This route retrieves a
+        question. Nothing in this build accepts an answer to one from outside the
+        workstation, and adding the read does not add the write — see
+        `operations/reads.py` on why the two are deliberately separate.
+        """
+        from .operations import reads
+
+        _require_known_project(project_id)
+        service = _operations()
+        if service is None:
+            _operations_not_found(planner_request_id)
+        try:
+            return reads.question(
+                service._store,
+                project_id=project_id,
+                planner_request_id=planner_request_id,
+            ).to_dict()
+        except reads.OperationsNotFound as exc:
+            _operations_not_found(exc.detail)
+
+    @app.get(
         "/api/operations/{project_id}/result/{dispatch_id}",
         dependencies=[Depends(require_task_caller)],
     )
@@ -2978,6 +3078,152 @@ def create_app(
             ).to_dict()
         except reads.OperationsNotFound as exc:
             _operations_not_found(exc.detail)
+
+    # -- remote development requests, planner-only (M2M PR4) -----------------
+    #
+    # The one route in this section that writes, and what it writes is a planner
+    # request. It is on the same `require_task_caller` surface as the reads above
+    # for the same reason: reusing the credential the Actions bridge already
+    # holds beats a second authentication path, and this grants strictly less
+    # than `POST /api/tasks` sitting a few hundred lines up — that one starts an
+    # agent, and this one asks a question of a model that has no tools.
+    #
+    # **What this route cannot reach, structurally.** It calls exactly one
+    # object, `DevelopmentRequestIngress.submit`, whose module imports no
+    # dispatcher, no authority service, no Task Core handle, no publisher and no
+    # adapter registry. There is no approval here, no dispatch, no task, no
+    # answer, no cancellation, no commit, no push and no pull request — not
+    # guarded, absent. `tests/test_development_ingress.py` asserts that from the
+    # ingress module's own imports.
+    #
+    # A `PREPARE_WORKER_PROMPT` result stops at PR1d's human gate. The caller is
+    # told a prompt exists and may read it; nothing downstream of this route can
+    # act on it.
+
+    _ingress_cache: Dict[str, Any] = {}
+
+    def _development_ingress() -> Any:
+        """The ingress, or ``None`` when this host has not enabled planning.
+
+        Built once and cached — eagerly at construction on an enabled host, see
+        the call below the definition. The planner provider is constructed here
+        and nowhere else in this file, and it is constructed from code-owned
+        defaults: no request field names the executable, the model, the timeout
+        or the runtime directory, because none of those is a parameter anywhere
+        between a caller and this line.
+        """
+        if not config.enable_development_planner:
+            return None
+        found = _ingress_cache.get("ingress")
+        if found is not None:
+            return found
+
+        from .planner.ingress import DevelopmentRequestIngress
+        from .planner.providers import ClaudeCodePlanner
+        from .planner.service import _utc_now
+
+        store = _planner_store(create=True)
+        # Settle anything a previous process left open, before the first request
+        # can claim an id. Nothing is resumed: an invocation whose owner is gone
+        # is marked, never rerun — see `PlannerService.reconcile_interrupted`.
+        store.mark_interrupted(completed_at=_utc_now())
+        store.abandon_open_ingress(abandoned_at=_utc_now())
+
+        ingress = DevelopmentRequestIngress(
+            project_context=project_context_service,
+            planner_store=store,
+            planner=(
+                planner
+                if planner is not None
+                # Given the host's state directory and nothing else. That is what
+                # points it at `<state>/claude-planner/config` -- its own session,
+                # not the operator's and not the worker's -- and the provider
+                # refuses rather than running if that session is not signed in.
+                else ClaudeCodePlanner(state_dir=Path(config.state_dir))
+            ),
+            operations=_operations(create=True),
+            clock=_utc_now,
+        )
+        _ingress_cache["ingress"] = ingress
+        return ingress
+
+    # Built here, at construction, rather than on the first request. The startup
+    # reconcile above has to run before anything can claim a request id, and a
+    # lazily built ingress would run it while another request might already be
+    # mid-invocation — marking as interrupted a call that was still going. An
+    # operator who turned planning on has already accepted the database.
+    if config.enable_development_planner:
+        _development_ingress()
+
+    @app.post(
+        "/api/development-requests",
+        status_code=201,
+        dependencies=[Depends(require_task_caller)],
+    )
+    async def create_development_request(request: Request) -> JSONResponse:
+        """Ask the development planner for one step, for one project.
+
+        Four fields, and the list of what is absent is the contract: no path, no
+        repo root, no working directory, no branch, no command, no argv, no
+        environment, no tool list, no MCP configuration, no worker executable, no
+        model, no provider, no planner action, no worker prompt, no subject
+        fingerprint, no dispatch, task or publication id, no context projection
+        and no transcript. They are not validated and rejected — the request
+        schema has no such field, so sending one is a 422 from `_task_body`.
+
+        **The host owns the context.** The caller names a project; Cofferdam
+        resolves it, builds the `LocalContextPack` and projects it through
+        `project_context_external_v1`. There is no field here a
+        `CloudContextProjection` could arrive in, and `DevelopmentRequest` has no
+        constructor that would take a local pack.
+
+        Answers 201 for a request this call planned and 200 for one it found
+        already planned under the same `client_request_id` — the same convention
+        `POST /api/tasks` uses, for the same reason.
+        """
+        ingress = _development_ingress()
+        if ingress is None:
+            raise ApiError(
+                code="development_planner_disabled",
+                message=(
+                    "this workstation has not enabled the development planner"
+                ),
+                status_code=409,
+            )
+        payload = await _task_body(
+            request,
+            {"project_id", "instruction", "client_request_id", "research_notes"},
+        )
+        try:
+            outcome = await run_in_threadpool(
+                ingress.submit,
+                project_id=payload.get("project_id"),
+                instruction=payload.get("instruction"),
+                client_request_id=payload.get("client_request_id"),
+                research_notes=payload.get("research_notes"),
+            )
+        except ProjectContextUnavailable as unavailable:
+            # The project-context vocabulary, unchanged. `project_not_found`,
+            # `project_disabled`, `workspace_not_active` and the rest already
+            # name states an operator can act on, and a second set of words for
+            # the same states would make two surfaces disagree about one host.
+            raise ApiError(
+                code=unavailable.reason,
+                message=unavailable.message,
+                status_code=_CONTEXT_STATUS.get(unavailable.reason, 409),
+            )
+        except _PlannerError as refusal:
+            raise ApiError(
+                code=refusal.reason_code,
+                message=str(refusal),
+                status_code=_DEVELOPMENT_STATUS.get(refusal.reason_code, 409),
+                detail=refusal.detail,
+            )
+        return JSONResponse(
+            outcome.to_dict(),
+            status_code=200 if outcome.replayed else 201,
+            headers={"Cache-Control": "no-store"},
+        )
 
     def _require_known_project(project_id: str) -> None:
         """A project this host has enabled, or a refusal naming nothing else.

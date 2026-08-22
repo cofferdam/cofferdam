@@ -1,14 +1,14 @@
-"""The Actions bridge application: eight operations and one health check.
+"""The Actions bridge application: fifteen operations and one health check.
 
 This process is **not** the Cofferdam daemon, not the PWA, and not a proxy. It
 speaks its own ``/v1`` vocabulary, and every response is assembled in
 :mod:`~cofferdam.actions_bridge.normalize` from named fields. There is no route
 here that forwards a path, a method, a header or a query string to Cofferdam;
-the only way out of this process is the ten fixed methods on
+the only way out of this process is the fixed, named methods on
 :class:`~cofferdam.actions_bridge.internal.InternalTaskClient`.
 
-The eight Actions
------------------
+The eight task Actions
+----------------------
 
 ===========================  =======================================
 ``listProjects``             where a task may run
@@ -21,15 +21,22 @@ The eight Actions
 ``finishTask``               close a session whose work is done
 ===========================  =======================================
 
+Beside them, the operations surface: ``getProjectContext`` (M2J PR4), the four
+read-only operations of M2M PR2/PR3, and M2M PR4's ``readOperationQuestion``
+plus ``createDevelopmentRequest`` — the one Action that asks the development
+planner for a step, and the only mutation here that reaches no worker.
+
 What has no route, and never will
 ---------------------------------
 
-No approval. No tool decision. No permission mode, model, budget, tool list or
-effort. No shell. No path, and therefore no file read, no artifact browse and no
-repository listing. No transcript, no event stream, no provider session id, no
-Remote Control. Several of these exist behind the daemon's own credential and
-are unreachable from here because :func:`require_bridge_key` authenticates
-against a *different* secret than the one the daemon's other routes accept.
+No approval. No dispatch. No answer to a planner's question. No tool decision.
+No permission mode, model, budget, tool list or effort. No shell. No path, and
+therefore no file read, no artifact browse and no repository listing. No
+transcript, no event stream, no provider session id, no Remote Control. No
+publish, no push, no pull request, no merge, no deploy. Several of these exist
+behind the daemon's own credential and are unreachable from here because
+:func:`require_bridge_key` authenticates against a *different* secret than the
+one the daemon's other routes accept.
 
 Body handling
 -------------
@@ -63,6 +70,7 @@ from .errors import (
     CODE_REQUEST_IN_FLIGHT,
     CODE_TOO_LARGE,
     CODE_UNAUTHORIZED,
+    CODE_UPSTREAM_TIMEOUT,
     BridgeError,
     status_for,
 )
@@ -81,6 +89,8 @@ from .internal import (
 )
 from .limits import (
     BRIDGE_API_VERSION,
+    MAX_DEVELOPMENT_INSTRUCTION_CHARS,
+    MAX_DEVELOPMENT_NOTES_CHARS,
     MAX_EXPECTED_OUTPUT_CHARS,
     MAX_FOLLOWUP_TEXT_CHARS,
     MAX_HEADER_BYTES,
@@ -94,8 +104,10 @@ from .normalize import (
     clarification_view,
     created_task_view,
     delegation_for_project,
+    development_request_view,
     display_ref,
     mutation_view,
+    operation_question_view,
     operation_result_view,
     operation_prompt_view,
     operations_overview_view,
@@ -155,6 +167,18 @@ OP_READ_PROJECT_OPERATIONS = "readProjectOperations"
 OP_READ_OPERATION_PROMPT = "readOperationPrompt"
 OP_READ_OPERATION_RESULT = "readOperationResult"
 
+#: M2M PR4. One read and one write.
+#:
+#: ``createDevelopmentRequest`` is the second mutation this bridge has ever had
+#: that is not a task operation, and it is the narrower of the two: ``createTask``
+#: starts an agent with tools in a real project, and this asks a model with no
+#: tools to write something down. There is deliberately no companion Action for
+#: ``answer``, ``approve``, ``reject``, ``dispatch``, ``publish``, ``cancel``,
+#: ``merge`` or ``deploy`` — none of them is in :data:`OPERATION_IDS`, none is a
+#: route, and none has an upstream method to reach.
+OP_READ_OPERATION_QUESTION = "readOperationQuestion"
+OP_CREATE_DEVELOPMENT_REQUEST = "createDevelopmentRequest"
+
 #: A project id as the registry publishes one. No slash, no dot-dot, no percent
 #: — a traversal attempt is refused here rather than escaped and forwarded.
 _PROJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -179,17 +203,34 @@ OPERATION_IDS = (
     OP_READ_PROJECT_OPERATIONS,
     OP_READ_OPERATION_PROMPT,
     OP_READ_OPERATION_RESULT,
+    OP_READ_OPERATION_QUESTION,
+    OP_CREATE_DEVELOPMENT_REQUEST,
 )
 
 #: The operations that change something.
 #:
 #: Not read by the rate limiter — that charges the tighter bucket by HTTP
 #: method, which cannot fall out of step with the routes. This tuple exists so
-#: the OpenAPI conformance test can assert that exactly these five carry
+#: the OpenAPI conformance test can assert that exactly these six carry
 #: ``x-openai-isConsequential: true``: the schema and the code must agree about
 #: which Actions ChatGPT should confirm before calling, and a mismatch would
 #: silently remove a confirmation prompt from something that starts an agent.
-MUTATIONS = frozenset({OP_CREATE_TASK, OP_ANSWER, OP_FOLLOWUP, OP_CANCEL, OP_FINISH})
+#:
+#: ``createDevelopmentRequest`` is here even though it starts nothing. It spends
+#: a real cloud call on the operator's own subscription, and "consequential"
+#: on this contract means "confirm before calling" rather than "dangerous". A
+#: model that could quietly plan five times because it was unsure which project
+#: the user meant is the failure the confirmation prompt exists to prevent.
+MUTATIONS = frozenset(
+    {
+        OP_CREATE_TASK,
+        OP_ANSWER,
+        OP_FOLLOWUP,
+        OP_CANCEL,
+        OP_FINISH,
+        OP_CREATE_DEVELOPMENT_REQUEST,
+    }
+)
 
 
 def _error_response(error: BridgeError, headers: Optional[Dict[str, str]] = None):
@@ -790,6 +831,164 @@ def create_bridge_app(
             internal_client.read_operation_result, resolved, handle
         )
         return _ok(operation_result_view(payload))
+
+    @app.get(
+        "/v1/operations/{project_id}/question/{planner_request_id}",
+        dependencies=[Depends(require_bridge_key)],
+    )
+    async def read_operation_question(
+        request: Request, project_id: str, planner_request_id: str
+    ):
+        """The exact question a planner asked, by project and durable id.
+
+        The overview says a question is open; it has never said what it is. A
+        conversation that reconnects tomorrow needs this to show somebody the
+        sentence they are being asked.
+
+        **A read with no matching write.** There is no Action on this bridge that
+        answers a question, no method on the internal client that does, and no
+        route on the workstation the bridge could reach if there were.
+        """
+        _mark(request, OP_READ_OPERATION_QUESTION)
+        resolved = _project_id(project_id)
+        handle = _handle_id(planner_request_id)
+        payload = await run_in_threadpool(
+            internal_client.read_operation_question, resolved, handle
+        )
+        return _ok(operation_question_view(payload))
+
+    # -- 1c. remote development requests, planner-only (M2M PR4) -------------
+    #
+    # The one write in this section, and what it writes is a planner request.
+    #
+    # **The authority this grants, stated exactly: permission to ask.** There is
+    # no Action here that approves a prepared prompt, dispatches a worker,
+    # creates a task, answers a question, cancels, publishes, pushes, opens a
+    # pull request, merges or deploys. Not guarded — absent. None of them is in
+    # `OPERATION_IDS`, none is a route on this app, none is a method on
+    # `InternalTaskClient`, and none is a path in `ALLOWED_UPSTREAM_ROUTES`.
+    #
+    # A `PREPARE_WORKER_PROMPT` result stops at the workstation's human approval
+    # gate. This surface can learn that a prompt exists and read it back through
+    # `readOperationPrompt`; nothing reachable from here can act on it.
+
+    @app.post("/v1/development-requests", dependencies=[Depends(require_bridge_key)])
+    async def create_development_request(request: Request):
+        """Ask Cofferdam to plan one development step for one project.
+
+        Four fields. What is absent is the contract, and it is absent rather than
+        validated away: no path, repo root, working directory, branch, command,
+        argv, environment, tool list, MCP configuration, worker executable,
+        model, provider, planner action, worker prompt, subject fingerprint,
+        dispatch id, task id, publication id, context projection or transcript.
+        `_bridge_body` refuses an unknown field, so sending one is a 422 rather
+        than a value that gets ignored somewhere later.
+
+        **The caller does not supply context.** It names a project; the
+        workstation resolves it, builds the local pack and projects it through
+        its own egress policy. That is why there is no context field here — not
+        because one is filtered, but because the host is the only thing that
+        decides what leaves it.
+
+        A first call will often time out, and that is the designed behaviour
+        rather than a fault: a planning turn is longer than an Action's round
+        trip. The retry is what completes it, and the retry is safe — the
+        workstation binds the external request id to the planner request inside
+        the transaction that creates it, so a repeat of the identical request
+        reconciles to the original instead of buying a second cloud call.
+        """
+        _mark(request, OP_CREATE_DEVELOPMENT_REQUEST)
+        payload = await _bridge_body(
+            request,
+            allowed={
+                "project_id",
+                "instruction",
+                "client_request_id",
+                "research_notes",
+            },
+        )
+        project_id = payload.get("project_id")
+        if not valid_project_id(project_id):
+            raise BridgeError(
+                code=CODE_NOT_FOUND,
+                message=(
+                    "No such project. Call readOperations and use a project_id "
+                    "from that list."
+                ),
+                status_code=status_for(CODE_NOT_FOUND),
+            )
+        instruction = _required_text(
+            payload, "instruction", MAX_DEVELOPMENT_INSTRUCTION_CHARS
+        )
+        notes = _optional_text(payload, "research_notes", MAX_DEVELOPMENT_NOTES_CHARS)
+        request_key = _request_key(payload)
+
+        # Claimed before the upstream call, so a key reused for a *different*
+        # request is refused here having spent nothing. The workstation enforces
+        # the same rule independently against its own durable receipt; this side
+        # exists so the cheap refusal happens on the cheap side.
+        fresh, _known = _claim(
+            OP_CREATE_DEVELOPMENT_REQUEST, "project:" + project_id, request_key, payload
+        )
+
+        try:
+            result = await run_in_threadpool(
+                internal_client.create_development_request,
+                project_id=project_id,
+                instruction=instruction,
+                client_request_id=request_key,
+                research_notes=notes,
+            )
+        except BridgeError as failure:
+            if fresh:
+                # Only an attempt that held the claim releases it. The
+                # workstation's receipt is the authority on whether a planner
+                # call happened, so dropping this row costs nothing and lets an
+                # identical retry through to be reconciled there.
+                store.release(
+                    operation=OP_CREATE_DEVELOPMENT_REQUEST,
+                    scope="project:" + project_id,
+                    request_id=request_key,
+                )
+            if failure.code == CODE_UPSTREAM_TIMEOUT:
+                # The generic message tells a caller to sync a task, which is the
+                # wrong instruction here and the wrong vocabulary. Planning is
+                # very likely still running, and the right move is the identical
+                # retry rather than a new request.
+                raise BridgeError(
+                    code=CODE_UPSTREAM_TIMEOUT,
+                    message=(
+                        "Cofferdam is still planning this step. Planning takes "
+                        "longer than one call allows. Send the identical request "
+                        "again with the same client_request_id, or call "
+                        "readProjectOperations — nothing was lost and nothing "
+                        "will be planned twice."
+                    ),
+                    status_code=status_for(CODE_UPSTREAM_TIMEOUT),
+                )
+            raise
+        except BaseException:
+            if fresh:
+                store.release(
+                    operation=OP_CREATE_DEVELOPMENT_REQUEST,
+                    scope="project:" + project_id,
+                    request_id=request_key,
+                )
+            raise
+
+        view = development_request_view(result)
+        store.settle(
+            operation=OP_CREATE_DEVELOPMENT_REQUEST,
+            scope="project:" + project_id,
+            request_id=request_key,
+            task_id=view.get("planner_request_id"),
+        )
+        _note(request, None, replayed=bool(view.get("replayed")))
+        # 201 when this call produced the planner request, 200 when it found one
+        # — mirrored from the workstation rather than decided here, so the two
+        # cannot disagree about which happened.
+        upstream_status = result.get("_status") if isinstance(result, dict) else None
+        return _ok(view, status_code=201 if upstream_status == 201 else 200)
 
     # -- 2. create_task -------------------------------------------------------
 

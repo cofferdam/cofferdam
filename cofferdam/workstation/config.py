@@ -50,6 +50,7 @@ ENV_VALIDATION_TASK_ADAPTER = "COFFERDAM_ENABLE_VALIDATION_TASK_ADAPTER"
 ENV_CLAUDE_CODE_ADAPTER = "COFFERDAM_ENABLE_CLAUDE_CODE_ADAPTER"
 ENV_CLAUDE_AGENT_SDK_ADAPTER = "COFFERDAM_ENABLE_CLAUDE_AGENT_SDK_ADAPTER"
 ENV_ACTIONS_BRIDGE_CALLER = "COFFERDAM_ENABLE_ACTIONS_BRIDGE_CALLER"
+ENV_DEVELOPMENT_PLANNER = "COFFERDAM_ENABLE_DEVELOPMENT_PLANNER"
 
 #: Off, and it stays off unless somebody with access to this machine turns it
 #: on. The validation task adapter is a lifecycle exerciser for a validation
@@ -83,6 +84,19 @@ DEFAULT_ENABLE_CLAUDE_AGENT_SDK_ADAPTER = False
 #: See ``docs/ACTIONS_BRIDGE.md``.
 DEFAULT_ENABLE_ACTIONS_BRIDGE_CALLER = False
 
+#: Off, and off for a reason none of the others have: this one spends money.
+#:
+#: The development planner invokes a cloud model on the operator's own
+#: subscription. Every other switch in this file decides whether something can
+#: run locally; this one decides whether a remote caller can cause a billable
+#: call. So it is a deliberate host-owned decision — this flag, a config key,
+#: or an environment variable in the unit — and nothing a client can send.
+#:
+#: Off means the development request route refuses, no planner database is
+#: created, and the operations read surface answers exactly as it does today.
+#: See ``docs/M2L_CLOUD_PLANNER.md``.
+DEFAULT_ENABLE_DEVELOPMENT_PLANNER = False
+
 
 @dataclass(frozen=True)
 class Config:
@@ -106,6 +120,9 @@ class Config:
     #: no route: it decides whether a second internal credential exists, which a
     #: bounded set of task routes may then recognise as the Actions bridge.
     enable_actions_bridge_caller: bool = DEFAULT_ENABLE_ACTIONS_BRIDGE_CALLER
+    #: Server-side only, and the only switch here that authorises spending.
+    #: It grants permission to *plan*: no worker, no dispatch, no approval.
+    enable_development_planner: bool = DEFAULT_ENABLE_DEVELOPMENT_PLANNER
 
     @property
     def secrets_dir(self) -> Path:
@@ -289,6 +306,15 @@ def load_config(home: Optional[Path] = None) -> Config:
                 DEFAULT_ENABLE_ACTIONS_BRIDGE_CALLER,
             ),
             DEFAULT_ENABLE_ACTIONS_BRIDGE_CALLER,
+        ),
+        enable_development_planner=_as_bool(
+            _pick(
+                ENV_DEVELOPMENT_PLANNER,
+                overrides,
+                "enable_development_planner",
+                DEFAULT_ENABLE_DEVELOPMENT_PLANNER,
+            ),
+            DEFAULT_ENABLE_DEVELOPMENT_PLANNER,
         ),
     )
 

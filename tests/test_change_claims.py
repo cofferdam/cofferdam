@@ -405,7 +405,10 @@ class StructuralBoundaryTests(unittest.TestCase):
         from cofferdam.actions_bridge.internal import ALLOWED_UPSTREAM_ROUTES
         from cofferdam.actions_bridge.service import OPERATION_IDS
 
-        self.assertEqual(len(OPERATION_IDS), 14)
+        # 14 through M2M PR2; 16 since M2M PR4. The count is a tripwire, and
+        # what it guards is the loop below: no M2K acceptance vocabulary reaches
+        # the bridge, whatever else is added to it.
+        self.assertEqual(len(OPERATION_IDS), 16)
         for name in OPERATION_IDS:
             self.assertNotIn("rtifact", name)
         for route in ALLOWED_UPSTREAM_ROUTES:

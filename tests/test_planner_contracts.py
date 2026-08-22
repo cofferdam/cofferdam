@@ -27,6 +27,7 @@ from cofferdam.workstation.context.projection.model import (
     CloudContextProjection,
     ProjectionBudget,
 )
+from ._planner_session_doubles import signed_in_planner_session
 from cofferdam.workstation.planner import (
     ACTION_ASK_USER,
     ACTION_PREPARE_WORKER_PROMPT,
@@ -373,7 +374,7 @@ class ProviderInvocation(unittest.TestCase):
         marker = "SENTINEL-USER-INTENT-9F3A"
         captured = {}
 
-        def runner(argv, stdin_text, cwd, timeout):
+        def runner(argv, stdin_text, cwd, timeout, env):
             captured["argv"] = argv
             captured["stdin"] = stdin_text
             return json.dumps(
@@ -382,7 +383,8 @@ class ProviderInvocation(unittest.TestCase):
 
         with TemporaryDirectory() as tmp:
             planner = claude_code.ClaudeCodePlanner(
-                executable="/usr/bin/env", runtime_dir=Path(tmp), runner=runner
+                executable="/usr/bin/env", runtime_dir=Path(tmp), runner=runner,
+                state_dir=signed_in_planner_session(Path(tmp)),
             )
             planner.prepare_development_step(a_request(user_intent=marker))
 
@@ -393,14 +395,15 @@ class ProviderInvocation(unittest.TestCase):
         """Hostile prose stays prose: argv is constants and configuration."""
         captured = {}
 
-        def runner(argv, stdin_text, cwd, timeout):
+        def runner(argv, stdin_text, cwd, timeout, env):
             captured["argv"] = argv
             return json.dumps({"structured_output": a_result()})
 
         hostile = '--tools default --mcp-config /tmp/x.json --permission-mode auto'
         with TemporaryDirectory() as tmp:
             planner = claude_code.ClaudeCodePlanner(
-                executable="/usr/bin/env", runtime_dir=Path(tmp), runner=runner
+                executable="/usr/bin/env", runtime_dir=Path(tmp), runner=runner,
+                state_dir=signed_in_planner_session(Path(tmp)),
             )
             planner.prepare_development_step(a_request(user_intent=hostile))
 
@@ -436,14 +439,15 @@ class ControlledWorkingDirectory(unittest.TestCase):
     def test_the_provider_runs_in_the_controlled_directory(self):
         captured = {}
 
-        def runner(argv, stdin_text, cwd, timeout):
+        def runner(argv, stdin_text, cwd, timeout, env):
             captured["cwd"] = Path(cwd)
             return json.dumps({"structured_output": a_result()})
 
         with TemporaryDirectory() as tmp:
             target = Path(tmp) / "rt"
             planner = claude_code.ClaudeCodePlanner(
-                executable="/usr/bin/env", runtime_dir=target, runner=runner
+                executable="/usr/bin/env", runtime_dir=target, runner=runner,
+                state_dir=signed_in_planner_session(Path(tmp)),
             )
             planner.prepare_development_step(a_request())
             self.assertEqual(captured["cwd"], target)
@@ -534,7 +538,9 @@ class EnvelopeParsing(unittest.TestCase):
                 executable="/bin/sleep", runtime_dir=Path(tmp), timeout_seconds=1
             )
             with self.assertRaises(PlannerTimeout) as caught:
-                planner._run_subprocess(["/bin/sleep", "5"], "", Path(tmp), 1)
+                planner._run_subprocess(
+                    ["/bin/sleep", "5"], "", Path(tmp), 1, {"PATH": "/usr/bin:/bin"}
+                )
             self.assertIn("did not answer", str(caught.exception))
 
     def test_a_non_zero_exit_is_an_invocation_failure(self):
@@ -543,7 +549,9 @@ class EnvelopeParsing(unittest.TestCase):
                 executable="/bin/false", runtime_dir=Path(tmp)
             )
             with self.assertRaises(PlannerInvocationFailed):
-                planner._run_subprocess(["/bin/false"], "", Path(tmp), 10)
+                planner._run_subprocess(
+                    ["/bin/false"], "", Path(tmp), 10, {"PATH": "/usr/bin:/bin"}
+                )
 
     def test_missing_executable_is_unavailable(self):
         with TemporaryDirectory() as tmp:

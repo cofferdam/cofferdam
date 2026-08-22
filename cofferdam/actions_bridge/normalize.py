@@ -922,3 +922,111 @@ def operation_result_view(payload: Any) -> Dict[str, Any]:
         },
         "worker_completion_is_not_acceptance": True,
     }
+
+
+# -- remote development requests, planner-only (M2M PR4) ----------------------
+#
+# The same direction as the read views above: these **re-shape nothing**. The
+# workstation publishes the canonical operational projection and this selects
+# the fields the bridge is willing to publish. In particular, `phase`,
+# `sentence`, `needs_person` and `settled` are passed through as given — a view
+# that recomputed any of them would be a second implementation of the lifecycle
+# logic on the wrong side of the wire.
+
+#: A question is bounded to 2,000 characters by the planner result contract and
+#: to the same number by the workstation's read, so this never clips a valid one.
+#: It is here so a wider bound upstream cannot make this response unbounded.
+MAX_OPERATION_QUESTION_CHARS = 2_000
+
+
+def development_request_view(payload: Any) -> Dict[str, Any]:
+    """What ``createDevelopmentRequest`` returns.
+
+    Three things a client needs and cannot derive: which planner request this
+    produced, whether this call produced it or found it, and what the planner
+    decided. Everything else is the operational projection, unchanged.
+
+    ``authority`` is restated rather than assumed. This is the payload a model
+    reads immediately after asking for work to be planned, and it is exactly the
+    moment a model is most likely to narrate a prepared prompt as though
+    something were now going to happen. The block says, in the response itself,
+    that nothing was approved, dispatched or executed — and it is true by
+    construction, because this route reaches nothing that could do any of them.
+    """
+    if not isinstance(payload, dict):
+        return {}
+
+    published: Dict[str, Any] = {
+        name: payload.get(name) for name in _OPERATION_FIELDS if name in payload
+    }
+    published.setdefault("available_actions", [])
+
+    handles = payload.get("handles")
+    if isinstance(handles, dict):
+        published["handles"] = {
+            name: handles.get(name)
+            for name in (
+                "planner_request_id", "dispatch_id", "task_id",
+                "publication_id", "prompt_available",
+            )
+            if name in handles
+        }
+
+    claims = payload.get("claims")
+    if isinstance(claims, dict):
+        published["claims"] = {
+            "planner_summary": _text(claims.get("planner_summary"), 600),
+            "source": "model_authored",
+        }
+
+    published.update(
+        {
+            "version": BRIDGE_API_VERSION,
+            "project_id": payload.get("project_id"),
+            "planner_request_id": payload.get("planner_request_id"),
+            "replayed": bool(payload.get("replayed")),
+            "planner_action": payload.get("planner_action"),
+            "planner_status": payload.get("planner_status"),
+            "planner_failure_code": payload.get("planner_failure_code"),
+            # Published unconditionally and as constants, not copied from
+            # upstream. A field a daemon could set to `true` is a field a
+            # compromised daemon could set to `true`; these three are false in
+            # this build because no route on this bridge can make them anything
+            # else, and that is a property of the code rather than of a payload.
+            "authority": {
+                "approved": False,
+                "dispatched": False,
+                "executed": False,
+                "note": (
+                    "Cofferdam prepared this. Nothing has been approved, "
+                    "dispatched or executed."
+                ),
+            },
+        }
+    )
+    return published
+
+
+def operation_question_view(payload: Any) -> Dict[str, Any]:
+    """The exact pending question, bounded.
+
+    ``answering_requires_the_workstation`` is a constant rather than a value read
+    from upstream, for the reason the authority block above is: it describes what
+    this bridge can do, and this bridge has no route that answers a question.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    text, clipped_here = clipped(
+        payload.get("question"), MAX_OPERATION_QUESTION_CHARS
+    )
+    return {
+        "project_id": payload.get("project_id"),
+        "planner_request_id": payload.get("planner_request_id"),
+        "question": text,
+        "truncated": bool(payload.get("truncated")) or clipped_here,
+        "planner_summary": _text(payload.get("planner_summary"), 600),
+        "answered": bool(payload.get("answered")),
+        "answered_subject_fingerprint": payload.get("answered_subject_fingerprint"),
+        "answering_requires_the_workstation": True,
+        "source": "model_authored",
+    }

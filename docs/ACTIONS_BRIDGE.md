@@ -1,8 +1,8 @@
 # The private Custom GPT Actions bridge (M2I.5)
 
 A separate, narrow process that lets a **private Custom GPT** delegate work to
-Cofferdam and read back what happened. It publishes eight bounded Actions and
-reaches Cofferdam through ten fixed internal calls.
+Cofferdam and read back what happened. It publishes fifteen bounded Actions and
+reaches Cofferdam through thirteen fixed internal calls.
 
 **Status as of M2I.5 PR2: exposed and connected.** The bridge still binds to
 loopback — that has not changed and must not. What changed is that a Cloudflare
@@ -41,7 +41,7 @@ The bridge is **not**:
 - a provider adapter, a shell runner, a filesystem API, or a transcript API.
 
 It has no route that forwards a caller's path, method, header or query string.
-The only way out of the process is ten named methods on
+The only way out of the process is the fixed, named methods on
 [`InternalTaskClient`](../cofferdam/actions_bridge/internal.py).
 
 ## Trust boundaries
@@ -57,7 +57,9 @@ size and rate limits, and identifier grammars checked before any use.
 
 ### 2. The internal boundary — the bridge to the daemon
 
-The bridge holds a credential the daemon recognises on **ten task routes only**.
+The bridge holds a credential the daemon recognises on **a fixed, listed set of
+routes only** — the task routes, the project-context read, the operations reads,
+and M2M PR4's one development-request write.
 Enforced structurally: the daemon's other ~60 routes use `require_token`, which
 has never heard of the bridge credential, so a bridge request to
 `/api/remote-control/...` is a 401 rather than a check that could be relaxed.
@@ -119,7 +121,7 @@ cannot lock the bridge out mid-flight.
 **Internal token** — delete `secrets/actions-bridge-internal-token` and restart
 the daemon, then restart the bridge. Both processes read the same path.
 
-## The eight Actions
+## The Actions
 
 | operationId | Method | Path | Consequential |
 |---|---|---|---|
@@ -132,16 +134,34 @@ the daemon, then restart the bridge. Both processes read the same path.
 | `sendFollowup` | POST | `/v1/tasks/{task_id}/followup` | **yes** |
 | `cancelTask` | POST | `/v1/tasks/{task_id}/cancel` | **yes** |
 | `finishTask` | POST | `/v1/tasks/{task_id}/finish` | **yes** |
+| `getProjectContext` | GET | `/v1/projects/{project_id}/context` | no |
+| `readOperations` | GET | `/v1/operations` | no |
+| `readProjectOperations` | GET | `/v1/operations/{project_id}` | no |
+| `readOperationPrompt` | GET | `/v1/operations/{project_id}/prompt/{planner_request_id}` | no |
+| `readOperationResult` | GET | `/v1/operations/{project_id}/result/{dispatch_id}` | no |
+| `readOperationQuestion` | GET | `/v1/operations/{project_id}/question/{planner_request_id}` | no |
+| `createDevelopmentRequest` | POST | `/v1/development-requests` | **yes** |
+
+`createDevelopmentRequest` is marked consequential even though it starts nothing.
+It spends a real cloud call on the operator's subscription, and on this contract
+"consequential" means *confirm before calling* rather than *dangerous*.
 
 `x-openai-isConsequential: true` on every write forces ChatGPT to ask before
 calling and suppresses its "always allow" button.
 
 ### What has no Action, and never will
 
-No approval. No tool decision. No permission mode, model, budget, tool list,
-effort or MCP configuration. No shell. No path — and therefore no file read, no
-artifact browse, no repository listing. No transcript, no event stream, no
-provider session id, no Remote Control.
+No approval. No dispatch. No answer to a planner's question. No tool decision.
+No permission mode, model, budget, tool list, effort or MCP configuration. No
+shell. No path — and therefore no file read, no artifact browse, no repository
+listing. No transcript, no event stream, no provider session id, no Remote
+Control. No publish, no push, no pull request, no merge, no deploy.
+
+M2M PR4 adds the one write that is not a task operation, and it reaches a planner
+with no tools rather than a worker. It grants permission to *ask*: a prepared
+worker prompt stops at the workstation's human approval gate, and nothing
+reachable from this process can act on it. See
+[`M2L_CLOUD_PLANNER.md`](M2L_CLOUD_PLANNER.md).
 
 These are not disabled endpoints. They are absent, which is a stronger statement
 than one that refuses.

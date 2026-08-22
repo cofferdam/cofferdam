@@ -1,4 +1,4 @@
-"""The only way the bridge talks to Cofferdam. Ten calls, all of them constants.
+"""The only way the bridge talks to Cofferdam. Thirteen calls, all constants.
 
 This module is the SSRF boundary, and the shape of it is the argument.
 
@@ -14,8 +14,8 @@ Why not a small generic helper with an allowlist
 
 Because an allowlist is a value and a method is a shape. A helper that took a
 path and checked it against a set would be one refactor away from taking a path
-and checking it against a set that had grown; ten methods cannot grow without
-somebody writing an eleventh, in this file, under review.
+and checking it against a set that had grown; a list of named methods cannot
+grow without somebody writing the next one, in this file, under review.
 
 The five things that are structurally impossible here
 -----------------------------------------------------
@@ -25,9 +25,11 @@ The five things that are structurally impossible here
 * **A caller-chosen header.** :meth:`_headers` builds the whole dictionary from
   constants and the internal token. Nothing from a request reaches it.
 * **A caller-chosen method.** Each method names ``GET`` or ``POST`` inline.
-* **A path-traversal segment.** Task, project and question ids are matched
-  against patterns that exclude ``/``, ``.`` and ``%`` before interpolation, and
-  are refused rather than escaped — an id that needs escaping is not an id.
+* **A path-traversal segment.** Task, project, planner-request and question
+  ids are matched
+  against patterns that exclude ``/``, ``.`` and ``%`` before interpolation,
+  and are refused rather than escaped — an id that needs escaping is not an
+  id.
 * **A redirect off-host.** ``follow_redirects=False``. A 3xx from the daemon is
   an upstream fault, not an instruction; following one is how a compromised or
   misconfigured upstream turns a fixed client into an open one.
@@ -87,6 +89,16 @@ ROUTE_PROJECT_OPERATIONS = "/api/operations/{project_id}"
 ROUTE_OPERATION_PROMPT = "/api/operations/{project_id}/prompt/{planner_request_id}"
 ROUTE_OPERATION_RESULT = "/api/operations/{project_id}/result/{dispatch_id}"
 
+#: M2M PR4. One read and one write.
+#:
+#: The write is the only non-task mutation this client has ever had, and it
+#: reaches a planner rather than a worker. There is no companion route for an
+#: answer, an approval, a rejection, a dispatch, a cancellation or a publication
+#: — those do not appear in :data:`ALLOWED_UPSTREAM_ROUTES`, so a future method
+#: that wanted one would have to add it here, in this file, under review.
+ROUTE_OPERATION_QUESTION = "/api/operations/{project_id}/question/{planner_request_id}"
+ROUTE_DEVELOPMENT_REQUESTS = "/api/development-requests"
+
 #: Every upstream route this bridge may ever reach, as templates. A test asserts
 #: that no other ``/api`` string appears in this package.
 ALLOWED_UPSTREAM_ROUTES: Tuple[str, ...] = (
@@ -107,6 +119,9 @@ ALLOWED_UPSTREAM_ROUTES: Tuple[str, ...] = (
     ROUTE_PROJECT_OPERATIONS,
     ROUTE_OPERATION_PROMPT,
     ROUTE_OPERATION_RESULT,
+    # M2M PR4. The pending-question read and the planner-only write.
+    ROUTE_OPERATION_QUESTION,
+    ROUTE_DEVELOPMENT_REQUESTS,
 )
 
 # -- identifier patterns ------------------------------------------------------
@@ -180,7 +195,7 @@ def _checked(value: Any, pattern: re.Pattern, what: str) -> str:
 
 
 class InternalTaskClient:
-    """A fixed, authenticated client for ten Cofferdam task operations.
+    """A fixed, authenticated client for thirteen Cofferdam operations.
 
     Constructed once at startup with the internal token and never handed one
     again. The token lives in a private attribute that no method returns, no
@@ -320,7 +335,7 @@ class InternalTaskClient:
             detail=str(upstream_code) if upstream_code else None,
         )
 
-    # -- the ten operations --------------------------------------------------
+    # -- the thirteen operations --------------------------------------------------
 
     def list_projects(self) -> Dict[str, Any]:
         return self._call("GET", ROUTE_PROJECTS)
@@ -377,6 +392,53 @@ class InternalTaskClient:
                 project_id=project_id, dispatch_id=dispatch_id
             ),
         )
+
+    def read_operation_question(
+        self, project_id: str, planner_request_id: str
+    ) -> Dict[str, Any]:
+        """The exact pending question, addressed by project *and* durable id.
+
+        A read. There is no ``answer_operation_question`` on this client and no
+        upstream route for one — a question can be retrieved from here and
+        answered only on the workstation.
+        """
+        return self._call(
+            "GET",
+            ROUTE_OPERATION_QUESTION.format(
+                project_id=project_id, planner_request_id=planner_request_id
+            ),
+        )
+
+    def create_development_request(
+        self,
+        *,
+        project_id: str,
+        instruction: str,
+        client_request_id: str,
+        research_notes: Optional[str],
+    ) -> Dict[str, Any]:
+        """Ask Cofferdam to plan one development step. **Plan, not run.**
+
+        The body is assembled here from four named parameters — it is not a
+        caller's dictionary forwarded on — so a field the bridge does not know
+        about cannot reach the planner even if something upstream of this method
+        started accepting one. That is the rule :meth:`create_task` already
+        follows, and it matters more here: the far side builds project context
+        from the host's own state, and a request field that could influence what
+        gets built would be a caller deciding what leaves the workstation.
+
+        There is no ``adapter_id`` here, and no equivalent. ``create_task`` has to
+        resolve one because it starts an agent; a planner has no tools, no
+        working directory and nothing to run, so there is nothing to choose.
+        """
+        body: Dict[str, Any] = {
+            "project_id": _checked(project_id, _PROJECT_ID, "project id"),
+            "instruction": instruction,
+            "client_request_id": client_request_id,
+        }
+        if research_notes is not None:
+            body["research_notes"] = research_notes
+        return self._call("POST", ROUTE_DEVELOPMENT_REQUESTS, body=body)
 
     def list_tasks(self, *, limit: int) -> Dict[str, Any]:
         # The only query string in the file, and its one value is an integer

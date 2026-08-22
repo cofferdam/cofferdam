@@ -76,6 +76,21 @@ MAX_FOLLOWUP_TEXT_CHARS = 3_000
 #: A display title, matching Task Core's ``MAX_LABEL_CHARS``.
 MAX_TITLE_CHARS = 120
 
+#: A remote development instruction (M2M PR4). The planner contract allows 8,000
+#: characters of intent; the workstation's ingress allows 4,000 and this matches
+#: it exactly rather than approximating, so a caller is never told a different
+#: number by the two sides of one request.
+#:
+#: Smaller than ``MAX_TASK_TEXT_CHARS`` on purpose, and the gap is the same
+#: argument the module docstring makes about transcripts — more so here, because
+#: the *host* supplies the project context. Anything the caller adds beyond a
+#: bounded intent is duplicate context at best and somebody's chat log at worst.
+MAX_DEVELOPMENT_INSTRUCTION_CHARS = 4_000
+#: Optional bounded research the Custom GPT may have done. Reuses the planner
+#: contract's existing ``research_notes`` field, which the contract prompt already
+#: tells the model to treat as advisory rather than as project authority.
+MAX_DEVELOPMENT_NOTES_CHARS = 4_000
+
 #: The idempotency key. Bounded and pattern-checked — see
 #: :func:`~cofferdam.actions_bridge.idempotency.valid_request_id`.
 MAX_CLIENT_REQUEST_ID_CHARS = 64

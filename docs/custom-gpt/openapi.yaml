@@ -644,6 +644,130 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
 
+  /v1/operations/{project_id}/question/{planner_request_id}:
+    get:
+      operationId: readOperationQuestion
+      summary: The exact question Cofferdam's planner is waiting on.
+      description: >-
+        Use when a project is awaiting_user_answer and you need the actual
+        question, not just that one exists. Read-only. You cannot answer it
+        through this API - the person answers on their workstation. Show the
+        question and say that.
+      x-openai-isConsequential: false
+      parameters:
+        # Inlined, never $ref-ed: the GPT Actions editor skips an operation whose
+        # parameter is a $ref. See getProjectContext for the full account.
+        - name: project_id
+          in: path
+          required: true
+          description: >-
+            A project_id from readOperations. Never a path or a folder name.
+          schema:
+            type: string
+            maxLength: 64
+            pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        - name: planner_request_id
+          in: path
+          required: true
+          description: >-
+            A planner_request_id taken from the handles block of readOperations
+            or returned by createDevelopmentRequest. Never constructed or
+            guessed; a stale or foreign handle is a 404.
+          schema:
+            type: string
+            maxLength: 64
+            pattern: "^[a-z][a-z0-9]{1,15}_[0-9a-zA-Z]{16,32}$"
+      responses:
+        "200":
+          description: The exact pending question.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationQuestion"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: >-
+            No such operation for this project, or that request asked nothing.
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/development-requests:
+    post:
+      operationId: createDevelopmentRequest
+      summary: Ask Cofferdam to plan the next development step for a project.
+      description: >-
+        Planning only. Cofferdam builds the project context itself, asks its
+        development planner, and stores the result. Nothing is approved,
+        dispatched or executed. Use when the user asks Cofferdam to plan or
+        prepare a development step. Ordinary design conversation is not this.
+      x-openai-isConsequential: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateDevelopmentRequest"
+      responses:
+        "201":
+          description: >-
+            The planner ran and the result is stored. Nothing was approved or
+            executed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DevelopmentRequestResult"
+        "200":
+          description: >-
+            This client_request_id had already been planned. Nothing new was
+            asked and the existing result is returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DevelopmentRequestResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: >-
+            Cofferdam will not start this now. Either the project already has an
+            unfinished development step, or this client_request_id is still
+            being planned, or it was used for a different request. Read the code
+            and the message; do not retry with a new id unless it says to.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/UpstreamUnavailable"
+        "503":
+          description: >-
+            Cofferdam's development planner has its own Claude sign-in and it is
+            not usable. planner_auth_required means it has never been signed in;
+            planner_session_expired means it stopped working. Retrying will not
+            help. Tell the user to run the planner sign-in on their workstation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "504":
+          description: >-
+            Still planning. Planning takes longer than one call allows, so this
+            is expected on a first call. Send the identical request again with
+            the same client_request_id, or call readProjectOperations. Nothing
+            was lost and nothing is planned twice.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
 components:
   securitySchemes:
     bridgeKey:
@@ -1270,6 +1394,8 @@ components:
                 - too_large
                 - upstream_timeout
                 - upstream_unavailable
+                - planner_auth_required
+                - planner_session_expired
                 - not_implemented
                 - internal_error
             message:
@@ -1428,6 +1554,156 @@ components:
         approved_subject_fingerprint:
           type: string
           nullable: true
+
+    OperationQuestion:
+      type: object
+      properties:
+        project_id:
+          type: string
+        planner_request_id:
+          type: string
+        question:
+          type: string
+          description: >-
+            The exact question, as the planner wrote it. Show it verbatim.
+        truncated:
+          type: boolean
+        planner_summary:
+          type: string
+          nullable: true
+          description: The planner's own account of why it asked. Model-authored.
+        answered:
+          type: boolean
+          description: >-
+            True once a person answered on the workstation. There is no Action
+            that answers a question.
+        answered_subject_fingerprint:
+          type: string
+          nullable: true
+        answering_requires_the_workstation:
+          type: boolean
+          description: >-
+            Always true. Tell the user to answer on their workstation; do not
+            offer to answer for them and do not treat their reply to you as one.
+        source:
+          type: string
+
+    CreateDevelopmentRequest:
+      type: object
+      additionalProperties: false
+      required: [project_id, instruction, client_request_id]
+      properties:
+        project_id:
+          type: string
+          maxLength: 64
+          description: >-
+            A project_id from readOperations. Never a path or a folder name. Ask
+            which project if the user has not named one unambiguously.
+        instruction:
+          type: string
+          minLength: 1
+          maxLength: 4000
+          description: >-
+            What the user wants planned, in their own terms. Summarise the
+            request; never paste the conversation. Do NOT describe files,
+            branches, commands or context - Cofferdam builds all of that from
+            its own state, and there is no field here for any of it.
+          examples:
+            - "Plan the next step for the remote status screen."
+        research_notes:
+          type: string
+          maxLength: 4000
+          description: >-
+            Optional. Bounded research you did that may help. Advisory only -
+            Cofferdam treats it as an outside opinion, never as a project
+            decision. Leave it out if you have nothing specific.
+        client_request_id:
+          $ref: "#/components/schemas/ClientRequestId"
+
+    DevelopmentRequestResult:
+      type: object
+      description: >-
+        The project's operational state after planning, plus what this call
+        produced. Read phase and sentence rather than inferring state yourself.
+      properties:
+        version:
+          type: integer
+        project_id:
+          type: string
+        planner_request_id:
+          type: string
+          description: >-
+            The durable handle. Use it with readOperationPrompt or
+            readOperationQuestion.
+        replayed:
+          type: boolean
+          description: >-
+            True when this client_request_id had already been planned and
+            nothing new was asked.
+        planner_action:
+          type: string
+          nullable: true
+          description: >-
+            ASK_USER, PREPARE_WORKER_PROMPT or STOP. Null if the planner did not
+            complete - read planner_status and planner_failure_code then.
+        planner_status:
+          type: string
+        planner_failure_code:
+          type: string
+          nullable: true
+        phase:
+          type: string
+        sentence:
+          type: string
+        needs_person:
+          type: boolean
+        busy:
+          type: boolean
+        settled:
+          type: boolean
+        available_actions:
+          type: array
+          items:
+            type: string
+        handles:
+          type: object
+          properties:
+            planner_request_id:
+              type: string
+            dispatch_id:
+              type: string
+              nullable: true
+            task_id:
+              type: string
+              nullable: true
+            publication_id:
+              type: string
+              nullable: true
+            prompt_available:
+              type: boolean
+        claims:
+          type: object
+          properties:
+            planner_summary:
+              type: string
+              nullable: true
+            source:
+              type: string
+        authority:
+          type: object
+          description: >-
+            Always approved false, dispatched false, executed false. Planning
+            never approves or runs anything. Say this to the user after a
+            prepared prompt; do not imply work has started.
+          properties:
+            approved:
+              type: boolean
+            dispatched:
+              type: boolean
+            executed:
+              type: boolean
+            note:
+              type: string
 
     OperationResult:
       type: object

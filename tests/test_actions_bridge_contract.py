@@ -163,6 +163,11 @@ class SchemaValidityTests(unittest.TestCase):
             "FollowupRequest",
             "CancelRequest",
             "FinishRequest",
+            # M2M PR4. Closed for the same reason and one more: the workstation
+            # builds this request's project context from its own state, so a
+            # property this schema admitted would be a caller influencing what
+            # leaves the host.
+            "CreateDevelopmentRequest",
         ]
         for name in request_schemas:
             with self.subTest(schema=name):
@@ -208,6 +213,32 @@ class SchemaValidityTests(unittest.TestCase):
             "option_ids",
             "signal",
             "pid",
+            # M2M PR4. The planner-side primitives, listed here so the same
+            # single assertion covers both surfaces. A development request that
+            # could name one of these would be the caller deciding what the
+            # planner sees or what happens to its answer.
+            "branch",
+            "repo_root",
+            "worker_prompt",
+            "prompt",
+            "planner_action",
+            "action",
+            "subject_fingerprint",
+            "fingerprint",
+            "dispatch_id",
+            "task_id",
+            "publication_id",
+            "projection",
+            "context",
+            "cloud_context",
+            "transcript",
+            "messages",
+            "conversation",
+            "memory",
+            "vault",
+            "provider",
+            "approved",
+            "auto_approve",
         }
         request_schemas = (
             "CreateTaskRequest",
@@ -215,6 +246,7 @@ class SchemaValidityTests(unittest.TestCase):
             "FollowupRequest",
             "CancelRequest",
             "FinishRequest",
+            "CreateDevelopmentRequest",
         )
         for name in request_schemas:
             definition = schema["components"]["schemas"][name]
@@ -256,6 +288,8 @@ class SchemaValidityTests(unittest.TestCase):
     def test_the_declared_text_bounds_match_the_enforced_ones(self) -> None:
         from cofferdam.actions_bridge.limits import (
             MAX_CLIENT_REQUEST_ID_CHARS,
+            MAX_DEVELOPMENT_INSTRUCTION_CHARS,
+            MAX_DEVELOPMENT_NOTES_CHARS,
             MAX_EXPECTED_OUTPUT_CHARS,
             MAX_FOLLOWUP_TEXT_CHARS,
             MAX_RECENT_TASKS,
@@ -280,6 +314,36 @@ class SchemaValidityTests(unittest.TestCase):
         self.assertEqual(request_id["maxLength"], MAX_CLIENT_REQUEST_ID_CHARS)
         limit = schema["paths"]["/v1/tasks"]["get"]["parameters"][0]["schema"]
         self.assertEqual(limit["maximum"], MAX_RECENT_TASKS)
+        development = schema["components"]["schemas"]["CreateDevelopmentRequest"][
+            "properties"
+        ]
+        self.assertEqual(
+            development["instruction"]["maxLength"],
+            MAX_DEVELOPMENT_INSTRUCTION_CHARS,
+        )
+        self.assertEqual(
+            development["research_notes"]["maxLength"], MAX_DEVELOPMENT_NOTES_CHARS
+        )
+
+    def test_the_bridge_instruction_bound_matches_the_workstation(self) -> None:
+        """One number, two processes. A caller must not be told two limits.
+
+        The bridge refuses first and the workstation refuses independently. If
+        the bridge were the looser of the two, a request between the numbers
+        would be accepted here, forwarded, and refused there — a round trip and
+        a confusing error for something the near side could have answered.
+        """
+        from cofferdam.actions_bridge.limits import (
+            MAX_DEVELOPMENT_INSTRUCTION_CHARS,
+            MAX_DEVELOPMENT_NOTES_CHARS,
+        )
+        from cofferdam.workstation.planner.ingress import (
+            MAX_INSTRUCTION_CHARS,
+            MAX_RESEARCH_NOTES_CHARS,
+        )
+
+        self.assertEqual(MAX_DEVELOPMENT_INSTRUCTION_CHARS, MAX_INSTRUCTION_CHARS)
+        self.assertEqual(MAX_DEVELOPMENT_NOTES_CHARS, MAX_RESEARCH_NOTES_CHARS)
 
 
 @unittest.skipIf(

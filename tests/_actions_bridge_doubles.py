@@ -1,10 +1,10 @@
 """Test doubles for the Actions bridge.
 
 :class:`FakeInternalClient` stands in for the real internal client. It has the
-**same ten methods and no others**, which is the property that matters: a test
-that passes against it is a test against the same call surface production uses,
-and a bridge route that reached for an eleventh operation would fail here with
-``AttributeError`` rather than quietly working.
+**same methods and no others**, which is the property that matters: a test that
+passes against it is a test against the same call surface production uses, and a
+bridge route that reached for an operation the real client does not have would
+fail here with ``AttributeError`` rather than quietly working.
 
 It also records every call, so a test can assert what the bridge did *not* do —
 that syncing a running task never asks for a result, that create never sends an
@@ -284,6 +284,93 @@ def operation_prompt(**overrides: Any) -> Dict[str, Any]:
     return payload
 
 
+def operation_question(**overrides: Any) -> Dict[str, Any]:
+    """A pending planner question, in the shape the workstation publishes."""
+    payload: Dict[str, Any] = {
+        "project_id": PROJECT_ID,
+        "planner_request_id": PLANNER_REQUEST_ID,
+        "question": (
+            "Should the new endpoint reuse the existing bearer boundary, or "
+            "carry its own credential?"
+        ),
+        "truncated": False,
+        "planner_summary": "one scoping question before writing a prompt",
+        "answered": False,
+        "answered_subject_fingerprint": None,
+        "answering_requires_the_workstation": True,
+        "source": "model_authored",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def development_request(**overrides: Any) -> Dict[str, Any]:
+    """What the workstation returns from `POST /api/development-requests`.
+
+    The operational projection with three extra fields, exactly as the ingress
+    assembles it. Defaults to the case worth defaulting to: a prepared prompt
+    waiting for a person, which is the shape a client is most likely to
+    misreport as "it is running".
+    """
+    payload: Dict[str, Any] = dict(
+        operations_entry(
+            phase="awaiting_approval",
+            sentence=(
+                "A development step is prepared and waiting for your approval."
+            ),
+            needs_person=True,
+            busy=False,
+            settled=False,
+            rank=4,
+            available_actions=[
+                "approve", "reject", "inspect_prompt", "inspect_result",
+            ],
+        )
+    )
+    payload["handles"] = {
+        "planner_request_id": PLANNER_REQUEST_ID,
+        "dispatch_id": None,
+        "task_id": None,
+        "publication_id": None,
+        "prompt_available": True,
+    }
+    payload["machine"] = {
+        "planner_status": "succeeded",
+        "planner_action": "PREPARE_WORKER_PROMPT",
+        "approved": False,
+        "worker_state": None,
+        "restart": {"occurred": False},
+        "worker_completion_is_not_acceptance": True,
+        "publication": None,
+    }
+    payload["claims"] = {
+        "planner_summary": "add the read surface, then stop for approval",
+        "worker_report": None,
+        "source": "model_authored",
+    }
+    payload.update(
+        {
+            "planner_request_id": PLANNER_REQUEST_ID,
+            "replayed": False,
+            "planner_action": "PREPARE_WORKER_PROMPT",
+            "planner_status": "succeeded",
+            "planner_failure_code": None,
+            "authority": {
+                "approved": False,
+                "dispatched": False,
+                "executed": False,
+                "note": (
+                    "Cofferdam planned this step. Nothing has been approved, "
+                    "dispatched or executed."
+                ),
+            },
+            "_status": 201,
+        }
+    )
+    payload.update(overrides)
+    return payload
+
+
 def operation_result(**overrides: Any) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "project_id": PROJECT_ID,
@@ -332,7 +419,7 @@ def upstream_error(code: str, message: str = "refused") -> BridgeError:
 
 
 class FakeInternalClient:
-    """The ten operations, scripted. Records every call it receives."""
+    """Every internal operation, scripted. Records each call it receives."""
 
     def __init__(self) -> None:
         self.calls: List[Tuple[str, Dict[str, Any]]] = []
@@ -365,6 +452,8 @@ class FakeInternalClient:
         self.project_operations_payload: Dict[str, Any] = operations_entry()
         self.operation_prompt_payload: Dict[str, Any] = operation_prompt()
         self.operation_result_payload: Dict[str, Any] = operation_result()
+        self.operation_question_payload: Dict[str, Any] = operation_question()
+        self.development_request_payload: Dict[str, Any] = development_request()
         #: Set to a ``BridgeError`` to make the next call of that name raise.
         self.raises: Dict[str, BridgeError] = {}
         #: Counts of how many times each operation actually ran.
@@ -380,7 +469,7 @@ class FakeInternalClient:
     def called(self, name: str) -> int:
         return self.counts.get(name, 0)
 
-    # -- the ten -------------------------------------------------------------
+    # -- the operations -------------------------------------------------------------
 
     def list_projects(self) -> Dict[str, Any]:
         self._record("list_projects")
@@ -415,6 +504,35 @@ class FakeInternalClient:
             dispatch_id=dispatch_id,
         )
         return copy.deepcopy(self.operation_result_payload)
+
+    def read_operation_question(
+        self, project_id: str, planner_request_id: str
+    ) -> Dict[str, Any]:
+        self._record(
+            "read_operation_question",
+            project_id=project_id,
+            planner_request_id=planner_request_id,
+        )
+        return copy.deepcopy(self.operation_question_payload)
+
+    # -- remote development requests, planner-only (M2M PR4) -----------------
+
+    def create_development_request(
+        self,
+        *,
+        project_id: str,
+        instruction: str,
+        client_request_id: str,
+        research_notes: Any,
+    ) -> Dict[str, Any]:
+        self._record(
+            "create_development_request",
+            project_id=project_id,
+            instruction=instruction,
+            client_request_id=client_request_id,
+            research_notes=research_notes,
+        )
+        return copy.deepcopy(self.development_request_payload)
 
     def list_tasks(self, *, limit: int) -> Dict[str, Any]:
         self._record("list_tasks", limit=limit)
