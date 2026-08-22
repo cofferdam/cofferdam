@@ -18,7 +18,7 @@ from ..context.projection.model import CloudContextProjection
 from .errors import PlannerContextRefused, PlannerError
 from .models import DevelopmentRequest
 from .protocol import DevelopmentPlanner
-from .store import PlannerRecord, PlannerStore
+from .store import IngressKey, PlannerRecord, PlannerStore
 
 PLANNER_REQUEST_ID_PREFIX = "plan_"
 
@@ -94,8 +94,19 @@ class PlannerService:
         Called at start. It marks, and it does not rerun: re-invoking a provider
         because a process died would spend a second call and assert that the
         first never happened, neither of which this host knows to be true.
+
+        The external request receipts are settled on the same terms and in the
+        same breath (M2M PR4). A claim with no planner request is a claim whose
+        owner is gone; leaving it open would let the next retry reuse it, and
+        reusing it is exactly the second invocation this method exists to refuse.
+        Only the planner rows are counted in the return value, which is what the
+        number has always meant.
         """
-        return self._store.mark_interrupted(completed_at=self._clock())
+        marked = self._store.mark_interrupted(completed_at=self._clock())
+        abandon = getattr(self._store, "abandon_open_ingress", None)
+        if abandon is not None:
+            abandon(abandoned_at=self._clock())
+        return marked
 
     # -- the one operation
     def prepare_development_step(
@@ -108,6 +119,7 @@ class PlannerService:
         research_notes: Optional[str] = None,
         prompt_writing_guidance: Optional[str] = None,
         authority_boundary: Optional[str] = None,
+        ingress: Optional[IngressKey] = None,
     ) -> PlanningOutcome:
         """Ask the planner for one step, durably.
 
@@ -118,6 +130,13 @@ class PlannerService:
         in charge of what left the host — the one decision the egress boundary
         exists to make for them. There is likewise no parameter here for a path,
         a working directory, a command, a model or a provider flag.
+
+        ``ingress`` names the external request this invocation is being made for,
+        so the request row and the mapping a retry reconciles to are written in
+        one transaction (M2M PR4). It is two opaque strings. It selects nothing,
+        enables nothing and is not read by anything below this method — it is
+        forwarded to the store and never consulted here — so it cannot become a
+        route by which a caller influences what is asked or what is sent.
         """
         pack = self._context.build(user_intent)
         projection = self._projector.project(pack)
@@ -154,6 +173,7 @@ class PlannerService:
             projection_policy_id=projection.policy_id,
             projection_built_at=projection.built_at,
             created_at=self._clock(),
+            ingress=ingress,
         )
         self._store.mark_running(request_id, started_at=self._clock())
 

@@ -153,6 +153,26 @@ _UPSTREAM_NOT_FOUND = frozenset(
         # defect lives in the translation between them.
         "project_unknown",
         "operations_not_found",
+        # The same omission again, and this pair has been live since M2J PR4.
+        # `projectcontext.py` answers `project_not_found` when the registry has
+        # no such id -- and, for a disabled project, answers it too, because
+        # `ProjectRegistry.get` raises and the resolver treats a raise as
+        # absence. `workspace_not_configured` is the equivalent for a project
+        # nobody has given a workspace.
+        #
+        # docs/custom-gpt/openapi.yaml declares 404 for exactly those cases on
+        # `getProjectContext`, and the fall-through was publishing 409
+        # `not_allowed_now` -- so a Custom GPT was told to wait and retry
+        # something that will never succeed. Found by M2M PR4's translation
+        # table, which walks every code the new route can produce; the same
+        # walk would have caught it in PR #82 had it existed then.
+        #
+        # The four genuinely-409 context codes -- `project_disabled`,
+        # `workspace_ambiguous`, `workspace_disabled`, `workspace_not_active` --
+        # are deliberately left to the default, which is what the contract
+        # declares for them.
+        "project_not_found",
+        "workspace_not_configured",
     }
 )
 
@@ -173,10 +193,44 @@ _UPSTREAM_INVALID = frozenset(
         "task_followup_invalid",
         "task_request_id_invalid",
         "task_clarification_invalid",
+        # M2M PR4. A malformed project id, an empty or oversize instruction, a
+        # malformed idempotency key. The caller can fix all of these.
+        "development_request_invalid",
+        # M2J PR4's equivalent, listed for the same reason as the two additions
+        # above: the caller sent something that is not an id, and 422 says so
+        # where 409 would tell it to wait.
+        "invalid_project_id",
     }
 )
 
-_UPSTREAM_CONFLICT = frozenset({"task_idempotency_conflict"})
+_UPSTREAM_CONFLICT = frozenset(
+    {
+        "task_idempotency_conflict",
+        # M2M PR4. The same key with a different development request. Listed by
+        # name rather than left to the default for the reason PR #83 exists: a
+        # code that falls through publishes `not_allowed_now`, and "wait and
+        # retry" is the wrong instruction for a key that will never work again.
+        "development_request_conflict",
+    }
+)
+
+#: M2M PR4. Two upstream codes that mean "this exact request is already being
+#: worked on". Mapped to the bridge's own in-flight code rather than to the
+#: `not_allowed_now` default, because a planning turn outlives an Action's round
+#: trip: the *expected* answer to a normal retry is this one, and a caller that
+#: reads it as "no" instead of "not yet" will send a new key and buy a second
+#: cloud call.
+_UPSTREAM_IN_FLIGHT = frozenset({"development_request_in_flight"})
+
+#: M2M PR4. The workstation cannot plan at all right now — no planner is
+#: configured, or its session will not authenticate. Deliberately *not* a
+#: project refusal and not a caller error: mapping it to either would send
+#: somebody looking for a typo in a project name when the fix is on the
+#: workstation. `upstream_unavailable` is the existing code for "this side is
+#: fine and the far side cannot serve you".
+_UPSTREAM_PLANNER_UNAVAILABLE = frozenset(
+    {"planner_unavailable", "development_planner_disabled"}
+)
 
 _UPSTREAM_UNSUPPORTED_SHAPE = frozenset(
     {
@@ -192,6 +246,16 @@ _UPSTREAM_UNSUPPORTED_SHAPE = frozenset(
 #: ``task_illegal_transition``, ``task_result_not_ready``,
 #: ``task_followup_unsupported``, ``task_cancel_unsupported`` — all mean the
 #: same thing to somebody holding a phone in another country: not now.
+#:
+#: Two of M2M PR4's codes land here **on purpose**, named so the decision is
+#: visible rather than accidental — which is the whole lesson of PR #83:
+#:
+#: ``development_request_not_allowed_now``
+#:     the project has a development step that is not finished. Not now, and the
+#:     detail carries the phase and handles so a caller can go and read it.
+#: ``development_request_abandoned``
+#:     a previous attempt under that key was interrupted. Not now under *that
+#:     key*; a new one works, and the message says so.
 _DEFAULT_UPSTREAM = CODE_NOT_ALLOWED_NOW
 
 
@@ -205,6 +269,10 @@ def from_upstream_code(code: Any) -> str:
         return CODE_INVALID_REQUEST
     if code in _UPSTREAM_CONFLICT:
         return CODE_IDEMPOTENCY_CONFLICT
+    if code in _UPSTREAM_IN_FLIGHT:
+        return CODE_REQUEST_IN_FLIGHT
+    if code in _UPSTREAM_PLANNER_UNAVAILABLE:
+        return CODE_UPSTREAM_UNAVAILABLE
     if code in _UPSTREAM_UNSUPPORTED_SHAPE:
         return CODE_UNSUPPORTED_QUESTION_SHAPE
     if code == "unauthorized":

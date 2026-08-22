@@ -1083,3 +1083,182 @@ database" does not answer.
 The planner database is opened lazily and only if it already exists, the rule Mind's store follows: a
 host that has never run a planner does not gain a file because something asked what was happening.
 With no database every project truthfully reports `idle`.
+
+## Remote development requests, planner-only (M2M PR4)
+
+The first time anything outside this workstation can cause a planning turn. **One new write, and it
+reaches a planner rather than a worker.**
+
+### What it grants
+
+Permission to *ask*. Nothing else.
+
+There is no route, no Action, no internal-client method and no allowlisted upstream path for
+approving a prepared prompt, dispatching a worker, creating a Task Core task, answering a planner's
+question, cancelling, publishing, pushing, opening a pull request, merging, deploying, altering
+canonical memory, accepting a memory proposal, choosing a provider or model, choosing tools, or
+choosing a path, branch, command, argv or environment. They are not guarded — they are **absent**,
+and `tests/test_development_ingress.py` asserts that from `planner/ingress.py`'s own imports rather
+than from this paragraph.
+
+A `PREPARE_WORKER_PROMPT` result stops at PR1d's human gate. The response says so, in the payload:
+
+```json
+"authority": {"approved": false, "dispatched": false, "executed": false,
+              "note": "Cofferdam prepared this. Nothing has been approved, dispatched or executed."}
+```
+
+Those three booleans are constants in `normalize.py`, not values copied from upstream. A field a
+daemon could set to `true` is a field a compromised daemon could set to `true`.
+
+### The slice
+
+```
+Custom GPT
+  → POST /v1/development-requests            (bearer, bounded, idempotent, rate-limited)
+  → POST /api/development-requests           (require_task_caller)
+  → DevelopmentRequestIngress.submit
+      → ProjectContextService.resolve        (registry → enabled → the ACTIVE workspace)
+      → ContextBuilder                       (host-owned, reads only)
+      → ContextProjector                     (project_context_external_v1)
+      → PlannerService.prepare_development_step
+          → planner_requests row committed BEFORE the provider is invoked
+          → ClaudeCodePlanner                (no tools, no MCP, inert cwd)
+          → validate_planner_result          (host-side, strict, never a repair)
+  → OperationsService.project                (the canonical projection, unchanged)
+```
+
+### The two new capabilities
+
+| bridge route | answers |
+|---|---|
+| `POST /v1/development-requests` | plan one development step for one project |
+| `GET /v1/operations/{project_id}/question/{planner_request_id}` | the exact question a planner asked |
+
+The question read closes a gap M2M PR2 left: the overview said *that* a question was open and never
+what it was, so a conversation that reconnected the next day could not show somebody the sentence
+they were being asked. It is a read with no write beside it — nothing in this build accepts an answer
+from outside the workstation.
+
+### The request is three fields
+
+`project_id`, `instruction`, `client_request_id`, plus optional `research_notes`.
+
+`research_notes` is **reused, not invented**: `DevelopmentRequest` has carried it since PR1c-a,
+described there as Custom-GPT-supplied advisory context, and the planner contract already tells the
+model to treat it as somebody else's research rather than as project authority. A second free-text
+field would have been a broad context channel wearing a narrow name.
+
+There is no field for a path, repo root, cwd, branch, command, argv, environment, tool list, MCP
+config, worker executable, model, provider, planner action, worker prompt, subject fingerprint,
+dispatch/task/publication id, context projection or transcript. The body allowlist has four names, so
+each of those is a 422 that never reaches the planner.
+
+**The caller cannot supply context.** It names a project; the host resolves it and builds and
+projects the context itself. That is the egress rule from D-2026-08-20-1 expressed as a route shape.
+
+### Project semantics: not the legacy task list
+
+Resolution goes through `ProjectContextService`, the same resolver `getProjectContext` uses — registry
+→ enabled → exactly one enabled workspace → **and it must be the active one**. Five fail-closed
+refusals and not one fallback.
+
+A project may therefore be plannable while `listProjects` will not accept a legacy task for it, which
+is exactly the state `cofferdam` itself was in. A test registers a project with no adapters at all and
+requires both halves: it plans, and the legacy list does not offer it.
+
+The active-workspace rule is what keeps projects apart. Asking for project B while A is active is
+`workspace_not_active`, never A's context labelled as B's — and a test asserts the planner saw
+`SENTINEL-ALPHA` and never `SENTINEL-BETA`.
+
+### One development thread per project
+
+A project whose current phase is not in `phases.SETTLED` refuses a new request with
+`development_request_not_allowed_now`, and the refusal's detail names the phase, the sentence and the
+handles so a caller can go and read the operation that is actually current. Never a fallback to "the
+latest".
+
+The discriminator is the projection's own settled set — `idle`, `rejected`, `stopped`, `cancelled`,
+`pr_ready` — rather than a second opinion about what "finished" means. That deliberately refuses over
+a `failed` or `interrupted` step too: those need a person to look, not to be planned over. Concurrency
+is not designed in this build and the ingress is the wrong layer to invent it in.
+
+### Idempotency, and why the bridge's table is not enough
+
+A planning turn costs a real cloud call and outlives a GPT Action's 45-second round trip. So a
+**timeout on the first call is the normal path**, not an edge case, and the retry that follows must
+not buy a second Opus call.
+
+The bridge's own idempotency table cannot provide that: it releases its claim whenever the upstream
+call fails, including on exactly that timeout. So the durable mapping lives on the workstation, in
+`planner_ingress_receipts` (schema v6):
+
+```
+(project_id, client_request_id) → planner_request_id
+```
+
+It stores a digest of the request and never the request, and it **owns no planner lifecycle state** —
+no status, no action, no result, no prompt. A test reads the table's columns and requires those names
+to be absent. Everything about the planner request is read from `planner_requests`, which has owned it
+since v1.
+
+The binding happens **inside the transaction that creates the planner row**, which is committed before
+the provider is invoked. Binding afterwards was the obvious shape and is wrong: the gap between the
+two writes would be the whole planning turn, so an ordinary retry would land in it and find nothing to
+reconcile to. Inside one transaction there is no such window, and a retry mid-invocation reads the
+real request back and reports `planner_preparing` rather than an error.
+
+| second request | answer |
+|---|---|
+| identical, already planned | `200`, `replayed: true`, same `planner_request_id`, no second call |
+| identical, still planning | `200`, `replayed: true`, `planner_status: running` |
+| identical, in the claim-to-row window | `409 development_request_in_flight` |
+| same key, different request | `409 development_request_conflict`, refused before any call |
+| key whose attempt a crash interrupted | `409 development_request_abandoned` — never silently reused |
+
+The last one follows `mark_interrupted`'s doctrine one table over: this host does not know whether the
+provider ran before it died, so it will neither claim it did nor spend a call asserting it did not. A
+genuinely new attempt needs a new key, which is a decision a person makes rather than a retry loop.
+
+Idempotency is checked **before** the sequencing rule, and it has to be: a retry of a request that
+produced a prepared prompt is by definition a retry into a project that is no longer settled, so the
+other order would refuse every retry of the thing it had just accepted.
+
+### The three results
+
+**`ASK_USER`** — the question is persisted, the phase is `awaiting_user_answer`, and the exact text is
+readable afterwards through `readOperationQuestion`. No answer path is added.
+
+**`PREPARE_WORKER_PROMPT`** — the exact prompt is persisted, the phase is `awaiting_approval`, and the
+gate `derive_gate` produces is `confirmation` / `awaiting_confirmation` with the PR1d subject
+fingerprint over the stored bytes. The response carries `prompt_available` and the handle, never the
+prompt body; `readOperationPrompt` returns the text.
+
+**`STOP`** — persisted and reported as what it is: a *successful invocation* whose action was a refusal
+to plan. `planner_status: succeeded`, `phase: stopped`, `settled: true`, no failure code. A stopped
+step does not block the next request.
+
+A provider failure is none of the three. It is `planner_status: failed` with a `planner_failure_code`,
+and the phase is `failed` — a planner failure is not a worker failure, and there is no worker.
+
+### An unusable planner refuses before anything durable happens
+
+`available()` is checked before the receipt is claimed. Otherwise a host with no planner credential
+would answer its first remote request by creating a `failed` planner row — which is not settled, and
+would therefore refuse every later request until somebody looked at a failure whose only cause was a
+credential the host never had. The refusal names no executable and no path.
+
+### Enabling it
+
+`enable_development_planner`, off by default, set by config key, CLI flag or unit environment
+variable. It is the only switch in `config.py` that authorises *spending*: every other one decides
+whether something may run locally, and this one decides whether a remote caller can cause a billable
+call. Off means the route refuses, no planner database is created, and the read surface answers
+exactly as it does today.
+
+### Rollback note
+
+Schema v6 is additive and every v5 row reads back unchanged, but the store is **forward-only**: a v5
+build opening a v6 database raises `PlannerStoreUnavailable`. Rolling a deployment back past this
+change is therefore a pair — the slot *and* a restored pre-v6 `planner.sqlite3` — on any host that has
+run a development request. A host that never has is unaffected, because the file will not exist.

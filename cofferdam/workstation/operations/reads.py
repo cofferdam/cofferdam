@@ -1,4 +1,4 @@
-"""The two bounded reads a status surface needs beyond the overview.
+"""The three bounded reads a status surface needs beyond the overview.
 
 Why these are separate calls
 -----------------------------
@@ -21,13 +21,22 @@ The refusal is deliberately **not found** rather than *forbidden*. A caller that
 can tell "that id exists but is not yours" apart from "no such id" can enumerate
 other projects' work by watching which error comes back.
 
+Reading a question is not answering one
+----------------------------------------
+
+:func:`question` returns the exact text a planner asked. It is a *read*: it
+writes nothing, records no authority, and there is no function in this module
+that takes an answer. That separation is deliberate and load-bearing — a
+reconnecting client has to be able to show somebody the question they are being
+asked without that act being, or being mistaken for, a reply to it.
+
 Never "the latest"
 ------------------
 
-Both reads resolve a durable id and stop. Neither falls back to the most recent
-anything — a fallback would mean a stale handle silently returning a *different*
-operation's prompt, which is the exact failure that makes a remote surface
-untrustworthy.
+All three reads resolve a durable id and stop. None falls back to the most
+recent anything — a fallback would mean a stale handle silently returning a
+*different* operation's prompt, which is the exact failure that makes a remote
+surface untrustworthy.
 
 Machine facts stay separable
 -----------------------------
@@ -47,6 +56,10 @@ from typing import Any, Dict, Optional
 #: prompt that has grown past this is a prompt worth reading on the workstation.
 MAX_PROMPT_CHARS = 20000
 MAX_RESULT_CHARS = 8000
+#: A question is already bounded to 2000 characters by the planner result
+#: contract, so this never clips a valid one. It is here so that a row written by
+#: some future contract with a wider bound cannot make this read unbounded.
+MAX_QUESTION_CHARS = 2000
 
 
 class OperationsNotFound(Exception):
@@ -94,6 +107,50 @@ class PromptRead:
             # "here is what is there now", so a client must show this.
             "matches_dispatched_digest": self.verified,
             "approved_subject_fingerprint": self.approved_fingerprint,
+        }
+
+
+@dataclass(frozen=True)
+class QuestionRead:
+    """The exact question a planner asked, and whether it is still open.
+
+    ``answered`` is read from the durable authority record, not from the planner
+    row: what the model asked and what a person decided are two facts, kept in
+    two tables precisely so that neither overwrites the other, and this read
+    reports both rather than collapsing them into one.
+
+    There is no field here for an answer to arrive in. That is the shape of the
+    boundary rather than a rule about it — see the module docstring.
+    """
+
+    project_id: str
+    planner_request_id: str
+    question: str
+    truncated: bool
+    #: The model's own words about why it asked. Labelled, because it is a claim.
+    planner_summary: Optional[str]
+    answered: bool
+    #: What the recorded answer bound itself to, once there is one. ``None``
+    #: while the question is open, which is the honest value: a fingerprint is a
+    #: property of a decision, and no decision has been made yet. Published for
+    #: the same reason ``approved_subject_fingerprint`` is — so a reader can see
+    #: that an answer committed to this exact text — and never so that a client
+    #: can construct one.
+    answered_subject_fingerprint: Optional[str]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+            "planner_request_id": self.planner_request_id,
+            "question": self.question,
+            "truncated": self.truncated,
+            "planner_summary": self.planner_summary,
+            "answered": self.answered,
+            "answered_subject_fingerprint": self.answered_subject_fingerprint,
+            # Restated in the payload most likely to be mistaken for a prompt to
+            # reply through. There is no remote answer path in this build.
+            "answering_requires_the_workstation": True,
+            "source": "model_authored",
         }
 
 
@@ -150,6 +207,44 @@ def prompt(store, *, project_id: str, planner_request_id: str) -> PromptRead:
         truncated=truncated,
         verified=verified,
         approved_fingerprint=getattr(authority, "subject_fingerprint", None),
+    )
+
+
+def question(store, *, project_id: str, planner_request_id: str) -> QuestionRead:
+    """The exact pending question for one request, if it belongs to this project.
+
+    Needed because the overview says *that* a question is open and never says
+    what it is — the claims block carries a clipped planner summary, which is the
+    model's account of its own reasoning and not the sentence somebody has to
+    answer. A conversation that reconnects tomorrow could previously learn only
+    that Cofferdam was waiting on it.
+
+    Refuses a request that asked nothing, rather than returning an empty string:
+    "there is no question here" and "the question is blank" are different facts,
+    and a client that cannot tell them apart will render the second as the first.
+    """
+    record = _require_request(store, project_id, planner_request_id)
+    text = getattr(record, "user_question", None)
+    if not (text or "").strip():
+        raise OperationsNotFound(
+            "that request has no question", detail=planner_request_id
+        )
+
+    text = str(text)
+    authority = store.authority_event(planner_request_id)
+    return QuestionRead(
+        project_id=project_id,
+        planner_request_id=planner_request_id,
+        question=text[:MAX_QUESTION_CHARS],
+        truncated=len(text) > MAX_QUESTION_CHARS,
+        planner_summary=_clip(getattr(record, "summary", None), 1000),
+        # Any authority event on a question request is an answer: `derive_gate`
+        # admits only the answer gate for an ASK_USER row, and the table's own
+        # CHECK constraints admit only one event per request.
+        answered=authority is not None,
+        answered_subject_fingerprint=getattr(
+            authority, "subject_fingerprint", None
+        ),
     )
 
 
@@ -266,10 +361,13 @@ def _clip(value: Any, limit: int) -> Optional[str]:
 
 __all__ = [
     "MAX_PROMPT_CHARS",
+    "MAX_QUESTION_CHARS",
     "MAX_RESULT_CHARS",
     "ResultRead",
     "OperationsNotFound",
     "PromptRead",
+    "QuestionRead",
+    "question",
     "result",
     "prompt",
 ]

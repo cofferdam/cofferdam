@@ -119,6 +119,23 @@ class ResolvedContext:
     projection: Any
 
 
+@dataclass(frozen=True)
+class ResolvedProject:
+    """A project id that survived resolution, and what it resolved to.
+
+    Published (M2M PR4) so a second caller — the remote development request
+    ingress — can reuse this module's resolution instead of writing its own. It
+    carries the registry entry because the redaction environment is derived from
+    the project's root, and that derivation stays in this module: the entry is
+    handed straight back to :meth:`ProjectContextService.projector_for` and is
+    not something a caller reads a path out of.
+    """
+
+    project_id: str
+    workspace_id: str
+    project: Any
+
+
 def _valid_project_id(value: object) -> str:
     """An opaque registry id. Not a path, and never treated as one."""
     if not isinstance(value, str):
@@ -293,6 +310,53 @@ class ProjectContextService:
             )
         return project, workspace
 
+    # -- reusable halves (M2M PR4) --------------------------------------------
+    #
+    # Published so the remote development request ingress can go through *this*
+    # resolution and *this* redaction environment rather than assembling its own.
+    # A second resolver would be a second place for the enabled check, the
+    # ambiguity refusal and the active-workspace rule to be forgotten — the same
+    # argument this module's docstring already makes about the Context Builder.
+    #
+    # Neither of these widens anything. `resolve` performs exactly the checks
+    # `project_context` performs and refuses with exactly the same codes, and
+    # `projector_for` takes a project this module resolved rather than a root, a
+    # policy or a rule from anywhere else.
+
+    @property
+    def builder(self):
+        """The host's Context Builder. Read-only, and not replaceable from here."""
+        return self._builder
+
+    def resolve(self, project_id: object) -> ResolvedProject:
+        """A project id → the one enabled, active workspace that may answer it."""
+        identifier = _valid_project_id(project_id)
+        project, workspace = self._resolve(identifier)
+        return ResolvedProject(
+            project_id=identifier,
+            workspace_id=getattr(workspace, "workspace_id", ""),
+            project=project,
+        )
+
+    def projector_for(self, resolved: ResolvedProject) -> ContextProjector:
+        """A projector carrying this project's host-owned redaction environment.
+
+        The environment is assembled by :meth:`_redaction_environment` from
+        configuration this host owns and nothing a caller sent, exactly as it is
+        for :meth:`project_context`.
+        """
+        if not isinstance(resolved, ResolvedProject):
+            raise ProjectContextUnavailable(
+                REASON_PROJECTION_FAILED,
+                "a projector is built for a resolved project, not for an id",
+            )
+        redaction = self._redaction_environment(
+            getattr(resolved.project, "root", None)
+        )
+        if self._clock is not None:
+            return ContextProjector(redaction=redaction, clock=self._clock)
+        return ContextProjector(redaction=redaction)
+
     # -- the one public method ------------------------------------------------
 
     def project_context(self, project_id: object) -> ResolvedContext:
@@ -302,8 +366,7 @@ class ProjectContextService:
         stays one. It is never returned, never stored and never handed to a
         serializer — the only thing that leaves this method is the projection.
         """
-        identifier = _valid_project_id(project_id)
-        project, workspace = self._resolve(identifier)
+        resolved = self.resolve(project_id)
 
         try:
             pack = self._builder.build_without_message()
@@ -312,12 +375,7 @@ class ProjectContextService:
                 REASON_CONTEXT_UNAVAILABLE, "project context could not be assembled"
             )
 
-        redaction = self._redaction_environment(getattr(project, "root", None))
-        projector = (
-            ContextProjector(redaction=redaction, clock=self._clock)
-            if self._clock is not None
-            else ContextProjector(redaction=redaction)
-        )
+        projector = self.projector_for(resolved)
         try:
             projection = projector.project(pack)
         except Exception:
@@ -326,8 +384,8 @@ class ProjectContextService:
             )
 
         return ResolvedContext(
-            workspace_id=getattr(workspace, "workspace_id", ""),
-            project_id=identifier,
+            workspace_id=resolved.workspace_id,
+            project_id=resolved.project_id,
             projection=projection,
         )
 
@@ -432,4 +490,5 @@ __all__ = [
     "ProjectContextService",
     "ProjectContextUnavailable",
     "ResolvedContext",
+    "ResolvedProject",
 ]

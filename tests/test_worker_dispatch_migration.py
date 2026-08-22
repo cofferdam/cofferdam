@@ -153,9 +153,9 @@ class ForwardMigration(MigrationHarness):
         single test whose failure means *somebody changed the schema*.
 
         v4 is PR1f's ``planner_worker_reconciliations``; v5 is PR1h's
-        ``planner_publications``.
+        ``planner_publications``; v6 is M2M PR4's ``planner_ingress_receipts``.
         """
-        self.assertEqual(PLANNER_SCHEMA_VERSION, 5)
+        self.assertEqual(PLANNER_SCHEMA_VERSION, 6)
 
     def test_every_planner_row_survives(self):
         path = write_v2(self.dir)

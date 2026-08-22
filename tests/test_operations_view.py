@@ -376,7 +376,13 @@ class TwoProjectsStaySeparate(OperationsHarness):
         super().setUp()
         self.alpha = self.dispatched("alpha", task_state="running")
         self.beta = self.dispatched("beta", task_state="completed")
-        self.published(self.beta, "published", number=11)
+        # A pull request number that cannot occur by coincidence. `11` was here
+        # and made the substring assertion below time-dependent: `approved_at`
+        # is a live UTC timestamp, so any minute, second, hour or day rendering
+        # as `11` matched it and the test failed for roughly one minute in
+        # sixty. Reproduced on `main` by freezing the clock at 00:11:09 — the
+        # flake predates M2M PR4 and is fixed here because it fires on any PR.
+        self.published(self.beta, "published", number=907341)
 
     def test_each_project_reports_its_own_phase(self):
         self.assertEqual(self.phase_of("alpha"), phases.PHASE_WORKER_RUNNING)
@@ -394,7 +400,7 @@ class TwoProjectsStaySeparate(OperationsHarness):
     def test_beta_s_pull_request_does_not_appear_under_alpha(self):
         alpha = self.ops.project("alpha")
         self.assertIsNone(alpha.machine["publication"])
-        self.assertNotIn("11", json.dumps(alpha.machine))
+        self.assertNotIn("907341", json.dumps(alpha.machine))
 
     def test_the_overview_lists_both_without_merging_them(self):
         overview = self.ops.overview()

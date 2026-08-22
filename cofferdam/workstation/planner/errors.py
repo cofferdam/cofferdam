@@ -142,8 +142,97 @@ class PlannerAuthorityConflict(PlannerAuthorityError):
     reason_code = "planner_authority_conflict"
 
 
+# -- remote development request ingress ---------------------------------------
+#
+# These are refusals to *accept a request at all*, which makes them earlier than
+# everything above: nothing here describes a planning turn, because in every one
+# of these cases no planner was invoked and no planner row exists. They are the
+# door, not the room.
+#
+# The distinction matters for cost. A planning turn spends a real cloud call, so
+# a refusal that arrives after the invocation is a refusal somebody paid for.
+# Each of these fires before that point, and a test asserts it.
+
+
+class PlannerIngressError(PlannerError):
+    """Base for every refusal to accept a remote development request."""
+
+    reason_code = "development_request_refused"
+
+
+class PlannerIngressInvalid(PlannerIngressError):
+    """The request was not shaped like one this host could act on.
+
+    A malformed project id, an empty instruction, an instruction over the bound.
+    Refused rather than trimmed, for the reason an over-long answer is: a
+    shortened instruction is a different instruction from the one somebody sent.
+    """
+
+    reason_code = "development_request_invalid"
+
+
+class PlannerIngressNotAllowedNow(PlannerIngressError):
+    """This project already has an unresolved development step.
+
+    The first remote development workflow is sequential by decision, not by
+    accident. A second request while a question is open, a prompt is awaiting
+    approval or a worker is still in flight would create a competing thread whose
+    authority nobody granted — so it is refused, and the refusal names the
+    operation that is actually current so a caller can go and look at it.
+
+    Deliberately **not** resolved by falling back to "the latest": that is the
+    shape that makes a remote surface untrustworthy, and `operations.reads` gives
+    the same argument for its own refusals.
+    """
+
+    reason_code = "development_request_not_allowed_now"
+
+
+class PlannerIngressConflict(PlannerIngressError):
+    """The same ``client_request_id`` arrived carrying a different request.
+
+    Refused rather than treated as a retry. Returning the first request's planner
+    result for the second instruction would be the worst available answer, and it
+    would do so having spent nothing — the conflict is detected before any
+    provider is touched.
+    """
+
+    reason_code = "development_request_conflict"
+
+
+class PlannerIngressInFlight(PlannerIngressError):
+    """That request is being planned right now.
+
+    The honest answer to a retry that arrives mid-invocation. A planning turn
+    outlives a Custom GPT Action's round trip by design, so this is the *expected*
+    answer to a normal retry rather than an exceptional one, and the caller reads
+    the operations projection instead of sending again.
+    """
+
+    reason_code = "development_request_in_flight"
+
+
+class PlannerIngressAbandoned(PlannerIngressError):
+    """A previous attempt under this id was interrupted, and will not be rerun.
+
+    The same doctrine :meth:`PlannerService.reconcile_interrupted` follows: this
+    host does not know whether the provider ran, so it will neither claim it did
+    nor spend a second call asserting it did not. A genuinely new attempt needs a
+    new ``client_request_id``, which is a decision a person makes rather than one
+    a retry loop makes by itself.
+    """
+
+    reason_code = "development_request_abandoned"
+
+
 __all__ = [
     "PlannerError",
+    "PlannerIngressAbandoned",
+    "PlannerIngressConflict",
+    "PlannerIngressError",
+    "PlannerIngressInFlight",
+    "PlannerIngressInvalid",
+    "PlannerIngressNotAllowedNow",
     "PlannerUnavailable",
     "PlannerInvocationFailed",
     "PlannerTimeout",

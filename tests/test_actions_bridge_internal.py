@@ -351,6 +351,13 @@ class StructuralTests(unittest.TestCase):
         "read_project_operations",
         "read_operation_prompt",
         "read_operation_result",
+        # M2M PR4 — the pending-question read and the planner-only write. Named
+        # individually for the same reason, and the absences beside them are the
+        # point: there is no `answer_`, `approve_`, `reject_`, `dispatch_`,
+        # `publish_` or `merge_` anything on this client, and a future one would
+        # have to be added to this tuple in a reviewed edit.
+        "read_operation_question",
+        "create_development_request",
     )
 
     def test_the_public_operations_are_exactly_the_declared_ones(self) -> None:
@@ -447,6 +454,9 @@ class StructuralTests(unittest.TestCase):
                     "/api/operations/{project_id}",
                     "/api/operations/{project_id}/prompt/{planner_request_id}",
                     "/api/operations/{project_id}/result/{dispatch_id}",
+                    # M2M PR4 — the question read and the development request.
+                    "/api/operations/{project_id}/question/{planner_request_id}",
+                    "/api/development-requests",
                     "/api/task-projects",
                     "/api/tasks",
                     "/api/tasks/{task_id}",
