@@ -28,22 +28,21 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
+from ....claudeauth.executable import (
+    EXECUTABLE_NAME,
+    SEARCH_DIRECTORIES,
+    find_executable as _shared_find_executable,
+)
 
 #: The version whose ``--help`` and stream frames this adapter was written to.
 VERIFIED_CLI_VERSION = "2.1.221"
 
-#: The only program name this adapter will ever look for. Not configurable: a
-#: configurable executable name is an executable field with extra steps, and the
-#: whole safety argument of this milestone is that no such field exists.
-EXECUTABLE_NAME = "claude"
-
-#: Where to look, in order, before falling back to ``PATH``. The npm-style
-#: user-local install is where the workstation's own CLI lives.
-SEARCH_DIRECTORIES: Tuple[str, ...] = (
-    "~/.local/bin",
-    "/usr/local/bin",
-    "/usr/bin",
-)
+# `EXECUTABLE_NAME` and `SEARCH_DIRECTORIES` are re-exported from
+# `claudeauth.executable`, which owns the one resolution policy since the M2M
+# planner-executable hotfix. Not configurable, for the reason this file has
+# always given: a configurable executable name is an executable field with extra
+# steps, and the whole safety argument of this milestone is that no such field
+# exists.
 
 # -- the permission profile --------------------------------------------------
 #
@@ -165,16 +164,7 @@ def find_executable() -> Optional[Path]:
     the same "check closest to the work" rule the project registry uses for
     roots.
     """
-    for directory in SEARCH_DIRECTORIES:
-        candidate = Path(os.path.expanduser(directory)) / EXECUTABLE_NAME
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate
-    found = shutil.which(EXECUTABLE_NAME)
-    if found:
-        candidate = Path(found)
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate
-    return None
+    return _shared_find_executable()
 
 
 def verify_executable(executable: Path) -> bool:

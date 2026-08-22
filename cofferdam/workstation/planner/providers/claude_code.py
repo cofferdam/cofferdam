@@ -47,6 +47,12 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from ...claudeauth.executable import (
+    absolute_executable,
+    describe_resolution,
+    find_executable,
+    verify_executable,
+)
 from ..contract import PLANNER_CONTRACT
 from ..errors import (
     PlannerEnvelopeInvalid,
@@ -69,7 +75,18 @@ from ..protocol import (
 
 PROVIDER_ID = "claude-code"
 
-DEFAULT_EXECUTABLE = "/usr/bin/claude"
+#: **There is no default executable path, and that is the fix.**
+#:
+#: This module used to carry ``DEFAULT_EXECUTABLE = "/usr/bin/claude"``. On a
+#: host where the official installer puts the CLI in ``~/.local/bin`` — the
+#: normal per-user install, and this product is a per-user install — that
+#: constant was simply wrong, ``available()`` returned False forever, and every
+#: remote development request answered 502 without the provider ever running.
+#:
+#: The path now comes from :mod:`...claudeauth.executable`, which is the one
+#: resolution policy in this codebase and was already shared by Remote Control,
+#: the CLI task adapter and the development worker. The planner was the only
+#: consumer that had its own answer, and its own answer was the broken one.
 #: An alias, resolved by the provider to whatever is current. Deliberately not a
 #: dated model name: a marketing string baked into source is a thing that goes
 #: stale silently. The alias is configuration; core logic never sees it.
@@ -232,14 +249,26 @@ class ClaudeCodePlanner(DevelopmentPlanner):
     def __init__(
         self,
         *,
-        executable: str = DEFAULT_EXECUTABLE,
+        executable: Optional[str] = None,
         model: str = DEFAULT_MODEL,
         runtime_dir: Optional[Path] = None,
         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
         runner: Optional[Any] = None,
         state_dir: Optional[Path] = None,
     ) -> None:
-        self._executable = executable
+        # Resolved once, here, from the host — not from a request, not from the
+        # subprocess environment, and not from a constant that assumed an
+        # install location. ``None`` when this host has no runnable CLI, which
+        # `available()` reports and `prepare_development_step` refuses on.
+        #
+        # ``executable`` is an injected override for tests, the same shape
+        # ``runner`` is. It is not reachable from configuration and not from any
+        # request field: nothing between an Actions Bridge body and this line
+        # passes an executable, and `tests/test_planner_executable.py` asserts
+        # that from the constructor signature outward.
+        self._executable: Optional[Path] = absolute_executable(
+            Path(executable) if executable is not None else find_executable()
+        )
         self._model = model
         self._runtime_dir = runtime_dir
         self._timeout = timeout_seconds
@@ -263,11 +292,9 @@ class ClaudeCodePlanner(DevelopmentPlanner):
 
         if self._state_dir is None:
             return planner_session.status(
-                Path("/nonexistent"), cli_present=Path(self._executable).exists()
+                Path("/nonexistent"), cli_present=self.available()
             )
-        return planner_session.status(
-            self._state_dir, cli_present=Path(self._executable).exists()
-        )
+        return planner_session.status(self._state_dir, cli_present=self.available())
 
     def require_session(self) -> Path:
         """The planner's config root, or a typed refusal. **No fallback.**
@@ -287,7 +314,7 @@ class ClaudeCodePlanner(DevelopmentPlanner):
                 detail="this host has no planner session directory configured",
             )
         return planner_session.require_usable(
-            self._state_dir, cli_present=Path(self._executable).exists()
+            self._state_dir, cli_present=self.available()
         )
 
     # -- declarations
@@ -299,12 +326,31 @@ class ClaudeCodePlanner(DevelopmentPlanner):
         )
 
     def available(self) -> bool:
-        return Path(self._executable).exists()
+        """Whether a runnable CLI is resolved **right now**.
+
+        Two conditions, and the second is the one the old code missed: a path
+        was resolved at construction, *and* that path is still a file with the
+        execute bit. ``Path.exists()`` was the previous test and it is too weak
+        — it says yes to a directory and to a non-executable file — but the
+        defect it actually caused was the first condition, which was a guess.
+        """
+        return verify_executable(self._executable)
 
     def unavailable_reason(self) -> Optional[str]:
+        """Why not, in words safe for a local doctor surface.
+
+        Never published to a remote caller: the ingress replaces it with a
+        code-owned ``planner_not_configured``. It names **no path at all** — not
+        the resolved one and not the searched ones. Where Cofferdam looked is
+        available from `describe()`, which is the local doctor surface; a
+        one-line reason does not need it and a reason that carried it would be
+        one more place a host path could travel.
+        """
         if self.available():
             return None
-        return f"planner executable not found at {self._executable}"
+        if self._executable is None:
+            return "no Claude Code CLI was found on this host"
+        return "the resolved Claude Code CLI is no longer runnable"
 
     def describe(self) -> Dict[str, Any]:
         """Non-secret. Reports the session's *status*, never its location.
@@ -315,6 +361,10 @@ class ClaudeCodePlanner(DevelopmentPlanner):
         """
         described = super().describe()
         described["requested_model"] = self._model
+        # Whether a CLI was resolved, never where. An operator needs to tell
+        # "no CLI on this host" from "the CLI is there and the session is not
+        # signed in"; neither answer requires publishing a host path.
+        described["executable"] = describe_resolution()
         found = self.session_status()
         described["session"] = {
             "status": found.status,
@@ -337,7 +387,12 @@ class ClaudeCodePlanner(DevelopmentPlanner):
 
         cwd = prepare_runtime_dir(self._runtime_dir)
         argv = build_argv(
-            executable=self._executable,
+            # The exact absolute path resolved at construction. Not a bare
+            # program name: the sanitized environment below carries a minimal
+            # PATH on purpose, and a subprocess asked to find `claude` on that
+            # PATH would either fail or — worse — be steered by it. Selection is
+            # the host's, made once, and the argv carries the answer.
+            executable=str(self._executable),
             model=self._model,
             schema=PLANNER_RESULT_SCHEMA,
         )
@@ -426,7 +481,6 @@ class ClaudeCodePlanner(DevelopmentPlanner):
 
 __all__ = [
     "PROVIDER_ID",
-    "DEFAULT_EXECUTABLE",
     "DEFAULT_MODEL",
     "ClaudeCodePlanner",
     "build_argv",

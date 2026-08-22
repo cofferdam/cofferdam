@@ -36,21 +36,19 @@ import os
 import shutil
 from pathlib import Path
 from typing import List, Optional, Tuple
+from ..claudeauth.executable import (
+    EXECUTABLE_NAME,
+    SEARCH_DIRECTORIES,
+    find_executable as _shared_find_executable,
+)
 
 #: The version whose ``remote-control --help`` this module was written to.
 VERIFIED_CLI_VERSION = "2.1.221"
 
-#: The only program name this package will look for. Not configurable, for the
-#: same reason Lane B's is not: a configurable executable name is an executable
-#: field with extra steps.
-EXECUTABLE_NAME = "claude"
-
-#: Where to look, in order, before falling back to ``PATH``.
-SEARCH_DIRECTORIES: Tuple[str, ...] = (
-    "~/.local/bin",
-    "/usr/local/bin",
-    "/usr/bin",
-)
+# `EXECUTABLE_NAME` and `SEARCH_DIRECTORIES` are re-exported from
+# `claudeauth.executable`, which owns the one resolution policy since the M2M
+# planner-executable hotfix. They were byte-identical here; keeping a second
+# definition would be two constants to move in step.
 
 #: The subcommand. There is no second one.
 SUBCOMMAND = "remote-control"
@@ -101,16 +99,7 @@ def find_executable() -> Optional[Path]:
     claude`` points into a versioned directory that ``claude update`` replaces,
     so a pinned resolved path would rot on the next unrelated update.
     """
-    for directory in SEARCH_DIRECTORIES:
-        candidate = Path(os.path.expanduser(directory)) / EXECUTABLE_NAME
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate
-    found = shutil.which(EXECUTABLE_NAME)
-    if found:
-        candidate = Path(found)
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate
-    return None
+    return _shared_find_executable()
 
 
 def verify_executable(executable: Path) -> bool:
