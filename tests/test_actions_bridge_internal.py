@@ -345,9 +345,15 @@ class StructuralTests(unittest.TestCase):
         "send_followup",
         "cancel_task",
         "finish_task",
+        # M2M PR2 — four read-only operations. Named individually rather than
+        # counted, so adding a fifth is a deliberate edit here.
+        "read_operations",
+        "read_project_operations",
+        "read_operation_prompt",
+        "read_operation_result",
     )
 
-    def test_there_are_exactly_eleven_public_operations(self) -> None:
+    def test_the_public_operations_are_exactly_the_declared_ones(self) -> None:
         public = {
             name
             for name, value in inspect.getmembers(
@@ -436,6 +442,11 @@ class StructuralTests(unittest.TestCase):
                     # M2J PR4 — read-only project context, the one upstream
                     # route whose response is shaped to leave the host.
                     "/api/projects/{project_id}/context",
+                    # M2M PR2 — the four read-only operations routes.
+                    "/api/operations",
+                    "/api/operations/{project_id}",
+                    "/api/operations/{project_id}/prompt/{planner_request_id}",
+                    "/api/operations/{project_id}/result/{dispatch_id}",
                     "/api/task-projects",
                     "/api/tasks",
                     "/api/tasks/{task_id}",

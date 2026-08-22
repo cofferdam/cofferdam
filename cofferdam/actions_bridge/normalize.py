@@ -733,3 +733,192 @@ __all__ = [
     "task_row",
     "task_snapshot_view",
 ]
+
+
+# -- remote operations, read-only (M2M PR2) -----------------------------------
+#
+# The workstation already publishes the canonical projection, so these views
+# **re-shape nothing**: they select the fields the bridge is willing to publish
+# and drop everything else. That direction matters. A view that rebuilt the
+# phase, or recomputed `needs_person`, would be a second implementation of the
+# lifecycle logic living on the wrong side of the wire — exactly what M2M PR1's
+# projection exists to prevent. The Custom GPT consumes `phase`, `sentence`,
+# `needs_person` and `available_actions` as given.
+
+#: Bounds for the two large reads. A Custom GPT Action response has to stay
+#: renderable; a prompt longer than this is one to read on the workstation.
+MAX_OPERATION_PROMPT_CHARS = 12000
+MAX_OPERATION_RESULT_CHARS = 4000
+
+#: Exactly what an operations entry may carry outward. An allowlist rather than
+#: a denylist: a field added upstream is *not* published until somebody adds it
+#: here, which is the safe direction for a surface a model talks to.
+_OPERATION_FIELDS = (
+    "project_id",
+    "display_name",
+    "phase",
+    "sentence",
+    "needs_person",
+    "busy",
+    "settled",
+    "available_actions",
+)
+
+
+def _operation_entry(entry: Any) -> Optional[Dict[str, Any]]:
+    """One project's operational state, as the bridge publishes it."""
+    if not isinstance(entry, dict):
+        return None
+    project_id = entry.get("project_id")
+    if not isinstance(project_id, str) or not project_id:
+        return None
+
+    published: Dict[str, Any] = {
+        name: entry.get(name) for name in _OPERATION_FIELDS if name in entry
+    }
+    published.setdefault("available_actions", [])
+
+    # Handles, filtered. These are what a later control would be addressed by,
+    # and `because` is deliberately dropped: it names an internal row and column
+    # and is a debugging aid for the workstation, not something to publish.
+    handles = entry.get("handles")
+    if isinstance(handles, dict):
+        published["handles"] = {
+            name: handles.get(name)
+            for name in (
+                "planner_request_id", "dispatch_id", "task_id",
+                "publication_id", "prompt_available",
+            )
+            if name in handles
+        }
+
+    machine = entry.get("machine")
+    if isinstance(machine, dict):
+        publication = machine.get("publication")
+        published["machine"] = {
+            "planner_status": machine.get("planner_status"),
+            "approved": machine.get("approved"),
+            "worker_state": machine.get("worker_state"),
+            "restart": machine.get("restart"),
+            "worker_completion_is_not_acceptance": machine.get(
+                "worker_completion_is_not_acceptance", True
+            ),
+            "publication": _publication_view(publication),
+        }
+
+    claims = entry.get("claims")
+    if isinstance(claims, dict):
+        published["claims"] = {
+            "planner_summary": _text(claims.get("planner_summary"), 600),
+            "worker_report": _text(claims.get("worker_report"), 600),
+            # Restated on the way out. A client reading this block must be able
+            # to see, without cross-referencing, that it is model-authored.
+            "source": "model_authored",
+        }
+    return published
+
+
+def _publication_view(publication: Any) -> Optional[Dict[str, Any]]:
+    """Publication facts, without the remote URL or anything host-private."""
+    if not isinstance(publication, dict):
+        return None
+    pull_request = publication.get("pull_request")
+    return {
+        "state": publication.get("state"),
+        "repository": publication.get("repository"),
+        "branch": publication.get("branch"),
+        "base_branch": publication.get("base_branch"),
+        "commit": publication.get("commit"),
+        "pull_request": (
+            None
+            if not isinstance(pull_request, dict)
+            else {
+                "number": pull_request.get("number"),
+                "url": pull_request.get("url"),
+                "state": pull_request.get("state"),
+            }
+        ),
+        "failure": publication.get("failure"),
+    }
+
+
+def operations_overview_view(payload: Any) -> Dict[str, Any]:
+    """Every project, plus the subset that cannot move without a person.
+
+    ``attention`` is computed here from the already-published ``needs_person``
+    rather than re-derived, so the two can never disagree — and it exists so a
+    Custom GPT answering "what needs me?" does not have to filter client-side and
+    get the predicate subtly wrong.
+    """
+    entries = payload.get("projects") if isinstance(payload, dict) else None
+    projects = []
+    if isinstance(entries, list):
+        for entry in entries:
+            published = _operation_entry(entry)
+            if published is not None:
+                projects.append(published)
+    attention = [item for item in projects if item.get("needs_person")]
+    return {
+        "projects": projects,
+        "attention": attention,
+        "count": len(projects),
+        "attention_count": len(attention),
+    }
+
+
+def operations_project_view(payload: Any) -> Dict[str, Any]:
+    published = _operation_entry(payload)
+    return published if published is not None else {}
+
+
+def operation_prompt_view(payload: Any) -> Dict[str, Any]:
+    """The exact approved prompt, bounded.
+
+    ``matches_dispatched_digest`` is published unchanged and is the field that
+    matters: it answers *was the text Cofferdam sent the text that was
+    approved*, which "here is what is in the database" does not.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    text, clipped_here = clipped(payload.get("prompt"), MAX_OPERATION_PROMPT_CHARS)
+    return {
+        "project_id": payload.get("project_id"),
+        "planner_request_id": payload.get("planner_request_id"),
+        "dispatch_id": payload.get("dispatch_id"),
+        "prompt": text,
+        # Either side may have clipped it; the client needs to know that it is
+        # not looking at the whole thing.
+        "truncated": bool(payload.get("truncated")) or clipped_here,
+        "matches_dispatched_digest": bool(payload.get("matches_dispatched_digest")),
+        "approved_subject_fingerprint": payload.get("approved_subject_fingerprint"),
+    }
+
+
+def operation_result_view(payload: Any) -> Dict[str, Any]:
+    """Machine observations and model claims, still in two blocks."""
+    if not isinstance(payload, dict):
+        return {}
+    machine = payload.get("machine") if isinstance(payload.get("machine"), dict) else {}
+    claims = payload.get("claims") if isinstance(payload.get("claims"), dict) else {}
+    return {
+        "project_id": payload.get("project_id"),
+        "dispatch_id": payload.get("dispatch_id"),
+        "task_id": payload.get("task_id"),
+        "machine": {
+            "branch": machine.get("branch"),
+            "commit": machine.get("commit"),
+            "worker_state": machine.get("worker_state"),
+            "checks": machine.get("checks"),
+            "restart": machine.get("restart"),
+            "publication": _publication_view(machine.get("publication")),
+            "observed_by": "cofferdam",
+        },
+        "claims": {
+            "planner_summary": _text(claims.get("planner_summary"), 600),
+            "worker_report": _text(
+                claims.get("worker_report"), MAX_OPERATION_RESULT_CHARS
+            ),
+            "source": "model_authored",
+        },
+        "worker_completion_is_not_acceptance": True,
+    }

@@ -497,6 +497,153 @@ paths:
         "504":
           $ref: "#/components/responses/UpstreamTimeout"
 
+  /v1/operations:
+    get:
+      operationId: readOperations
+      summary: What is Cofferdam doing right now, across every project.
+      description: >-
+        The canonical operational view: one phase per project, a plain sentence,
+        whether it needs a person, and the handles later calls use. Use this
+        first for "what is happening" or "what needs me" — the attention list is
+        already filtered. Read-only.
+      x-openai-isConsequential: false
+      responses:
+        "200":
+          description: Every enabled project, most-needing-a-person first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationsOverview"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/operations/{project_id}:
+    get:
+      operationId: readProjectOperations
+      summary: What is happening for one project.
+      parameters:
+        # Inlined, never $ref-ed: the GPT Actions editor skips an operation whose
+        # parameter is a $ref. See getProjectContext for the full account.
+        - name: project_id
+          in: path
+          required: true
+          description: >-
+            A project_id from listProjects. Never a path or a folder name.
+          schema:
+            type: string
+            maxLength: 64
+            pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+      x-openai-isConsequential: false
+      responses:
+        "200":
+          description: One project's operational view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectOperations"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No such project on this workstation.
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/operations/{project_id}/prompt/{planner_request_id}:
+    get:
+      operationId: readOperationPrompt
+      summary: The exact development prompt that was approved and sent.
+      description: >-
+        The verbatim worker prompt for one operation. Deliberately not part of
+        the status response, because a status is polled and a prompt is large.
+        matches_dispatched_digest tells you whether the stored text still matches
+        what was actually dispatched — report it if false. Read-only.
+      x-openai-isConsequential: false
+      parameters:
+        # Inlined, never $ref-ed: the GPT Actions editor skips an operation whose
+        # parameter is a $ref. See getProjectContext for the full account.
+        - name: project_id
+          in: path
+          required: true
+          description: >-
+            A project_id from listProjects. Never a path or a folder name.
+          schema:
+            type: string
+            maxLength: 64
+            pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        - name: planner_request_id
+          in: path
+          required: true
+          description: >-
+            A planner_request_id taken from the handles block of readOperations. Never
+            constructed or guessed; a stale or foreign handle is a 404.
+          schema:
+            type: string
+            maxLength: 64
+            pattern: "^[a-z][a-z0-9]{1,15}_[0-9a-zA-Z]{16,32}$"
+      responses:
+        "200":
+          description: The exact approved prompt.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationPrompt"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: >-
+            No such operation for this project. A handle belonging to another
+            project is indistinguishable from one that does not exist.
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/operations/{project_id}/result/{dispatch_id}:
+    get:
+      operationId: readOperationResult
+      summary: What one operation produced, machine facts kept apart from claims.
+      description: >-
+        The machine block is what Cofferdam observed itself — branch, commit,
+        check exit status, pull request. The claims block is what the planner or
+        worker wrote. Never present a claim as an observation, and never report
+        success from prose alone. Read-only.
+      x-openai-isConsequential: false
+      parameters:
+        # Inlined, never $ref-ed: the GPT Actions editor skips an operation whose
+        # parameter is a $ref. See getProjectContext for the full account.
+        - name: project_id
+          in: path
+          required: true
+          description: >-
+            A project_id from listProjects. Never a path or a folder name.
+          schema:
+            type: string
+            maxLength: 64
+            pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        - name: dispatch_id
+          in: path
+          required: true
+          description: >-
+            A dispatch_id taken from the handles block of readOperations. Never
+            constructed or guessed; a stale or foreign handle is a 404.
+          schema:
+            type: string
+            maxLength: 64
+            pattern: "^[a-z][a-z0-9]{1,15}_[0-9a-zA-Z]{16,32}$"
+      responses:
+        "200":
+          description: Machine observations beside model claims.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No such operation for this project.
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
 components:
   securitySchemes:
     bridgeKey:
@@ -1129,6 +1276,205 @@ components:
               type: string
             detail:
               type: [string, "null"]
+
+    OperationPhase:
+      type: object
+      description: >-
+        One project's operational state. The phase, sentence, needs_person and
+        available_actions come from Cofferdam and must be used as given — do not
+        re-derive state from the machine block.
+      properties:
+        project_id:
+          type: string
+        display_name:
+          type: string
+        phase:
+          type: string
+          description: >-
+            One of idle, planner_preparing, awaiting_user_answer,
+            awaiting_approval, rejected, stopped, worker_queued, worker_running,
+            recovery_required, recovery_reconciled, worker_interrupted,
+            commit_ready, publishing, pr_ready, failed, cancelled,
+            auth_required, needs_attention.
+        sentence:
+          type: string
+          description: A plain sentence for a person. Prefer it over the phase name.
+        needs_person:
+          type: boolean
+        busy:
+          type: boolean
+        settled:
+          type: boolean
+        available_actions:
+          type: array
+          description: >-
+            Controls that would be meaningful in this phase. NONE of them is
+            implemented yet; this release is read-only. Do not claim you can
+            perform them.
+          items:
+            type: string
+        handles:
+          type: object
+          description: Durable ids for the prompt and result calls.
+          properties:
+            planner_request_id:
+              type: string
+            dispatch_id:
+              type: string
+            task_id:
+              type: string
+            publication_id:
+              type: string
+            prompt_available:
+              type: boolean
+        machine:
+          type: object
+          description: What Cofferdam observed itself. Never model prose.
+          properties:
+            planner_status:
+              type: string
+            approved:
+              type: boolean
+            worker_state:
+              type: string
+            restart:
+              type: object
+            worker_completion_is_not_acceptance:
+              type: boolean
+            publication:
+              $ref: "#/components/schemas/OperationPublication"
+        claims:
+          type: object
+          description: >-
+            What the planner or worker wrote. Model-authored. Never present this
+            as evidence that something worked.
+          properties:
+            planner_summary:
+              type: string
+            worker_report:
+              type: string
+            source:
+              type: string
+
+    OperationPublication:
+      type: object
+      nullable: true
+      properties:
+        state:
+          type: string
+        repository:
+          type: string
+        branch:
+          type: string
+        base_branch:
+          type: string
+        commit:
+          type: string
+        failure:
+          type: string
+          nullable: true
+        pull_request:
+          type: object
+          nullable: true
+          properties:
+            number:
+              type: integer
+            url:
+              type: string
+            state:
+              type: string
+
+    ProjectOperations:
+      $ref: "#/components/schemas/OperationPhase"
+
+    OperationsOverview:
+      type: object
+      properties:
+        projects:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperationPhase"
+        attention:
+          type: array
+          description: >-
+            The subset needing a person, already filtered by Cofferdam. Use this
+            for "what needs me" rather than filtering projects yourself.
+          items:
+            $ref: "#/components/schemas/OperationPhase"
+        count:
+          type: integer
+        attention_count:
+          type: integer
+
+    OperationPrompt:
+      type: object
+      properties:
+        project_id:
+          type: string
+        planner_request_id:
+          type: string
+        dispatch_id:
+          type: string
+          nullable: true
+        prompt:
+          type: string
+        truncated:
+          type: boolean
+        matches_dispatched_digest:
+          type: boolean
+          description: >-
+            False means the stored text no longer matches what was dispatched.
+            Say so rather than presenting it as the prompt that was sent.
+        approved_subject_fingerprint:
+          type: string
+          nullable: true
+
+    OperationResult:
+      type: object
+      properties:
+        project_id:
+          type: string
+        dispatch_id:
+          type: string
+        task_id:
+          type: string
+        worker_completion_is_not_acceptance:
+          type: boolean
+        machine:
+          type: object
+          description: Cofferdam's own observations.
+          properties:
+            branch:
+              type: string
+            commit:
+              type: string
+              nullable: true
+            worker_state:
+              type: string
+            observed_by:
+              type: string
+            checks:
+              type: object
+              nullable: true
+              properties:
+                observed:
+                  type: boolean
+                exit_zero:
+                  type: boolean
+                  nullable: true
+            restart:
+              type: object
+            publication:
+              $ref: "#/components/schemas/OperationPublication"
+        claims:
+          type: object
+          properties:
+            planner_summary:
+              type: string
+            worker_report:
+              type: string
+            source:
+              type: string
 
   responses:
     Unauthorized:

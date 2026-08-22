@@ -157,7 +157,7 @@ import secrets as _secrets
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import Depends, FastAPI, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
@@ -2838,6 +2838,177 @@ def create_app(
     async def list_task_projects() -> Dict[str, Any]:
         """Where tasks may run, by name. **No filesystem path is published.**"""
         return tasks.projects.to_dict()
+
+    # -- remote operations, read-only (M2M PR2) ------------------------------
+    #
+    # The canonical projection from M2M PR1, published on the same
+    # `require_task_caller` surface the Actions bridge already holds a credential
+    # for. Reusing that dependency rather than inventing a second one is the
+    # point: a new authentication path would be a new thing to get wrong, and
+    # these routes grant strictly less than the task routes beside them.
+    #
+    # **Every one is a GET and nothing here writes.** No planner row, no
+    # authority event, no task transition, no reconciliation, no publication.
+    # A test asserts that by snapshotting all five stores around a request.
+    #
+    # The planner database is opened *lazily* and only if it already exists, the
+    # same rule Mind's store follows: a host that has never run a planner never
+    # gains a file merely because something asked what was happening. With no
+    # database, every project truthfully reports `idle`.
+    _operations_cache: Dict[str, Any] = {}
+
+    def _operations() -> Any:
+        found = _operations_cache.get("service")
+        if found is not None:
+            return found
+        from .operations import OperationsService
+        from .planner.store import DATABASE_FILENAME, PlannerStore
+
+        directory = Path(config.state_dir) / "planner"
+        if not (directory / DATABASE_FILENAME).is_file():
+            return None
+        service = OperationsService(
+            planner_store=PlannerStore(directory), tasks=tasks
+        )
+        _operations_cache["service"] = service
+        return service
+
+    def _idle_projection(project_id: str) -> Dict[str, Any]:
+        """What a host with no planner history truthfully looks like."""
+        from .operations import phases as _phases
+        from .operations.view import AVAILABLE_ACTIONS, ProjectOperations
+
+        project = None
+        try:
+            project = tasks.projects.get(project_id)
+        except Exception:
+            project = None
+        phase = _phases.build(_phases.PHASE_IDLE, "no planner database")
+        return ProjectOperations(
+            project_id=project_id,
+            display_name=getattr(project, "display_name", None) or project_id,
+            phase=phase,
+            handles={"prompt_available": False},
+            machine={"worker_completion_is_not_acceptance": True},
+            claims={"source": "model_authored"},
+            actions=AVAILABLE_ACTIONS.get(phase.phase, ()),
+        ).to_dict()
+
+    @app.get("/api/operations", dependencies=[Depends(require_task_caller)])
+    async def read_operations() -> Dict[str, Any]:
+        """What Cofferdam is doing, for every enabled project.
+
+        Ordered by how much a person is needed, which is the projection's own
+        ordering rather than this route's opinion — see `operations.phases`.
+        """
+        service = _operations()
+        if service is None:
+            projects = [
+                _idle_projection(entry.project_id)
+                for entry in tasks.projects.enabled_projects()
+            ]
+        else:
+            projects = [item.to_dict() for item in service.overview()]
+        return {
+            "projects": projects,
+            "attention": [item for item in projects if item.get("needs_person")],
+            "count": len(projects),
+        }
+
+    @app.get(
+        "/api/operations/{project_id}",
+        dependencies=[Depends(require_task_caller)],
+    )
+    async def read_project_operations(project_id: str) -> Dict[str, Any]:
+        """One project's operational view. Refused for an unknown project."""
+        _require_known_project(project_id)
+        service = _operations()
+        if service is None:
+            return _idle_projection(project_id)
+        return service.project(project_id).to_dict()
+
+    @app.get(
+        "/api/operations/{project_id}/prompt/{planner_request_id}",
+        dependencies=[Depends(require_task_caller)],
+    )
+    async def read_operation_prompt(
+        project_id: str, planner_request_id: str
+    ) -> Dict[str, Any]:
+        """The exact approved prompt, by durable id, for this project only.
+
+        Separate from the status read because a prompt is large and a status is
+        polled. The project is part of the address, so a request id belonging to
+        another project is a 404 rather than somebody else's text.
+        """
+        from .operations import reads
+
+        _require_known_project(project_id)
+        service = _operations()
+        if service is None:
+            raise _operations_not_found(planner_request_id)
+        try:
+            return reads.prompt(
+                service._store,
+                project_id=project_id,
+                planner_request_id=planner_request_id,
+            ).to_dict()
+        except reads.OperationsNotFound as exc:
+            raise _operations_not_found(exc.detail) from exc
+
+    @app.get(
+        "/api/operations/{project_id}/result/{dispatch_id}",
+        dependencies=[Depends(require_task_caller)],
+    )
+    async def read_operation_result(
+        project_id: str, dispatch_id: str
+    ) -> Dict[str, Any]:
+        """What Cofferdam observed for one dispatch, beside what the model said."""
+        from .operations import reads
+
+        _require_known_project(project_id)
+        service = _operations()
+        if service is None:
+            raise _operations_not_found(dispatch_id)
+        try:
+            return reads.result(
+                service._store,
+                tasks,
+                project_id=project_id,
+                dispatch_id=dispatch_id,
+            ).to_dict()
+        except reads.OperationsNotFound as exc:
+            raise _operations_not_found(exc.detail) from exc
+
+    def _require_known_project(project_id: str) -> None:
+        """A project this host has enabled, or a refusal naming nothing else.
+
+        Disabled and unknown produce the same answer for the reason a foreign
+        handle does: the difference is only useful to somebody probing for what
+        exists.
+        """
+        try:
+            enabled = {
+                entry.project_id for entry in tasks.projects.enabled_projects()
+            }
+        except Exception:  # pragma: no cover - defensive
+            enabled = set()
+        if project_id not in enabled:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "project_unknown",
+                    "message": "No such project on this workstation.",
+                },
+            )
+
+    def _operations_not_found(detail: Optional[str]) -> HTTPException:
+        return HTTPException(
+            status_code=404,
+            detail={
+                "code": "operations_not_found",
+                "message": "No such operation for this project.",
+            },
+        )
 
     # -- workspaces and Working Context (M2J PR1) ----------------------------
     #

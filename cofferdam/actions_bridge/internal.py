@@ -79,6 +79,14 @@ ROUTE_TASK_FINISH = "/api/tasks/{task_id}/finish"
 #: knows the path and nothing about what comes back through it.
 ROUTE_PROJECT_CONTEXT = "/api/projects/{project_id}/context"
 
+#: M2M PR2. The read-only operations surface. Four GETs and nothing else --
+#: there is no operations route on this client that writes, and the workstation
+#: has none to call.
+ROUTE_OPERATIONS = "/api/operations"
+ROUTE_PROJECT_OPERATIONS = "/api/operations/{project_id}"
+ROUTE_OPERATION_PROMPT = "/api/operations/{project_id}/prompt/{planner_request_id}"
+ROUTE_OPERATION_RESULT = "/api/operations/{project_id}/result/{dispatch_id}"
+
 #: Every upstream route this bridge may ever reach, as templates. A test asserts
 #: that no other ``/api`` string appears in this package.
 ALLOWED_UPSTREAM_ROUTES: Tuple[str, ...] = (
@@ -92,6 +100,13 @@ ALLOWED_UPSTREAM_ROUTES: Tuple[str, ...] = (
     ROUTE_TASK_CANCEL,
     ROUTE_TASK_FINISH,
     ROUTE_PROJECT_CONTEXT,
+    # M2M PR2. Four read-only operations routes. Listed here for the same reason
+    # the others are: the allowlist is what stops a future method calling an
+    # upstream path nobody reviewed.
+    ROUTE_OPERATIONS,
+    ROUTE_PROJECT_OPERATIONS,
+    ROUTE_OPERATION_PROMPT,
+    ROUTE_OPERATION_RESULT,
 )
 
 # -- identifier patterns ------------------------------------------------------
@@ -325,6 +340,42 @@ class InternalTaskClient:
         """
         return self._call(
             "GET", ROUTE_PROJECT_CONTEXT.format(project_id=project_id)
+        )
+
+    def read_operations(self) -> Dict[str, Any]:
+        """What Cofferdam is doing, across every enabled project. One GET."""
+        return self._call("GET", ROUTE_OPERATIONS)
+
+    def read_project_operations(self, project_id: str) -> Dict[str, Any]:
+        return self._call(
+            "GET", ROUTE_PROJECT_OPERATIONS.format(project_id=project_id)
+        )
+
+    def read_operation_prompt(
+        self, project_id: str, planner_request_id: str
+    ) -> Dict[str, Any]:
+        """The exact approved prompt, addressed by project *and* durable id.
+
+        Both ids are validated by the bridge route before they arrive here, and
+        both are refused rather than escaped upstream -- percent-encoding a
+        hostile id turns a rejection into a request for something else, which is
+        the reasoning `_task_id` already gives for task ids.
+        """
+        return self._call(
+            "GET",
+            ROUTE_OPERATION_PROMPT.format(
+                project_id=project_id, planner_request_id=planner_request_id
+            ),
+        )
+
+    def read_operation_result(
+        self, project_id: str, dispatch_id: str
+    ) -> Dict[str, Any]:
+        return self._call(
+            "GET",
+            ROUTE_OPERATION_RESULT.format(
+                project_id=project_id, dispatch_id=dispatch_id
+            ),
         )
 
     def list_tasks(self, *, limit: int) -> Dict[str, Any]:

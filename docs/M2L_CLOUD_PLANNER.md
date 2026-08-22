@@ -1004,3 +1004,82 @@ a tap. **Availability, not authority**: nothing in this package can perform any 
 test.
 
 No route, no PWA, no Custom GPT Action. Those are next, and they consume this.
+
+---
+
+## Remote operations, read-only (M2M PR2)
+
+The projection from M2M PR1, reachable by the Custom GPT through the Actions Bridge. **Four GETs and
+nothing else.**
+
+### It reuses the existing ingress
+
+Same `require_bridge_key` bearer dependency, same `InternalClient`, same id validators, same response
+envelope, same safe headers. A second transport would have been a second authentication path to get
+wrong for no capability gained.
+
+Project *discovery* is not reimplemented either — `/v1/projects` already lists enabled projects by
+name with no path, and that remains the discovery call.
+
+### The four capabilities
+
+| bridge route | answers |
+|---|---|
+| `GET /v1/operations` | what is Cofferdam doing, everywhere — plus `attention` |
+| `GET /v1/operations/{project_id}` | what is happening for project X |
+| `GET /v1/operations/{project_id}/prompt/{planner_request_id}` | the exact approved prompt |
+| `GET /v1/operations/{project_id}/result/{dispatch_id}` | machine observations beside model claims |
+
+### Read-only, structurally
+
+Every route is a GET; the internal client has no operations method that writes; the workstation
+exposes no operations route that writes. A caller cannot approve, answer, cancel or publish through
+this surface because **there is nothing on the other end to reach** — asserted by routing every write
+verb at every path and requiring 405, and by checking each upstream call name begins `read_`.
+
+The phases still *declare* `available_actions`. That is availability, not authority: none is
+implemented.
+
+### The project is part of the address
+
+Both large reads take `project_id` **and** the handle, and refuse when the handle does not belong to
+that project. A foreign handle, a missing handle and a malformed handle all produce the **same** 404 —
+a caller that could tell them apart could enumerate another project's work by watching which error
+came back. Tests assert the *sameness*, not merely that each fails.
+
+Ids are refused rather than escaped. `_HANDLE_ID` has no slash, dot or percent, so a traversal
+attempt fails at the validator instead of being encoded into a legal-looking segment and forwarded.
+
+### Never "the latest"
+
+Both reads resolve a durable id and stop. A stale handle is a 404, never a silently different
+operation's prompt.
+
+### Why it is `result` and not `evidence`
+
+M2K reserves *evidence* for acceptance vocabulary, and an architecture guard refuses that word in any
+bridge path. This surface reports what a worker *execution* produced — a commit, a check exit status,
+a pull request — which is exactly the distinction PR1e already made when it named its check
+`project_check` rather than `check_id`. Borrowing the acceptance word here would make an execution
+observation look like a verdict, so the route is `/result/`.
+
+### The bridge re-derives nothing
+
+Views select fields from what the workstation published; they do not recompute `phase` or
+`needs_person`. A view that rebuilt the lifecycle would be a second implementation of it on the wrong
+side of the wire. The field list is an **allowlist**, so a field added upstream is not published
+until somebody adds it here — and `because`, which names an internal row and column, is deliberately
+dropped.
+
+### The prompt is not in a status read
+
+A status is polled; a prompt is large. The projection publishes `prompt_available` and the handle;
+the text comes from its own call. That call also reports `matches_dispatched_digest`, which answers
+*was the text Cofferdam sent the text that was approved* — a question "here is what is in the
+database" does not answer.
+
+### Wiring
+
+The planner database is opened lazily and only if it already exists, the rule Mind's store follows: a
+host that has never run a planner does not gain a file because something asked what was happening.
+With no database every project truthfully reports `idle`.
