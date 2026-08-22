@@ -2945,7 +2945,7 @@ def create_app(
         _require_known_project(project_id)
         service = _operations()
         if service is None:
-            raise _operations_not_found(planner_request_id)
+            _operations_not_found(planner_request_id)
         try:
             return reads.prompt(
                 service._store,
@@ -2953,7 +2953,7 @@ def create_app(
                 planner_request_id=planner_request_id,
             ).to_dict()
         except reads.OperationsNotFound as exc:
-            raise _operations_not_found(exc.detail) from exc
+            _operations_not_found(exc.detail)
 
     @app.get(
         "/api/operations/{project_id}/result/{dispatch_id}",
@@ -2968,7 +2968,7 @@ def create_app(
         _require_known_project(project_id)
         service = _operations()
         if service is None:
-            raise _operations_not_found(dispatch_id)
+            _operations_not_found(dispatch_id)
         try:
             return reads.result(
                 service._store,
@@ -2977,7 +2977,7 @@ def create_app(
                 dispatch_id=dispatch_id,
             ).to_dict()
         except reads.OperationsNotFound as exc:
-            raise _operations_not_found(exc.detail) from exc
+            _operations_not_found(exc.detail)
 
     def _require_known_project(project_id: str) -> None:
         """A project this host has enabled, or a refusal naming nothing else.
@@ -2993,21 +2993,29 @@ def create_app(
         except Exception:  # pragma: no cover - defensive
             enabled = set()
         if project_id not in enabled:
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "code": "project_unknown",
-                    "message": "No such project on this workstation.",
-                },
-            )
+            raise _operations_refusal("project_unknown",
+                                      "No such project on this workstation.")
 
-    def _operations_not_found(detail: Optional[str]) -> HTTPException:
-        return HTTPException(
-            status_code=404,
-            detail={
-                "code": "operations_not_found",
-                "message": "No such operation for this project.",
-            },
+    def _operations_refusal(code: str, message: str) -> ApiError:
+        """A refusal in the daemon's own envelope, not FastAPI's.
+
+        `ApiError` serializes to `{"error": {"code", "message", "detail"}}`,
+        which is the shape the Actions bridge parses to translate an upstream
+        code into its own vocabulary. A raw `HTTPException(detail={...})`
+        serializes to `{"detail": {...}}` instead, so the bridge finds no code,
+        falls through to its default, and publishes 409 `not_allowed_now` for
+        something the contract declares as a 404.
+
+        That is exactly what M2M PR2 shipped, and no unit test could see it:
+        the daemon returned a correct 404 and the bridge translated correctly
+        from what it was given. The defect lived only in the envelope between
+        them, and only a real bridge-to-daemon request exposes it.
+        """
+        raise ApiError(code=code, message=message, status_code=404)
+
+    def _operations_not_found(detail: Optional[str]) -> ApiError:
+        return _operations_refusal(
+            "operations_not_found", "No such operation for this project."
         )
 
     # -- workspaces and Working Context (M2J PR1) ----------------------------

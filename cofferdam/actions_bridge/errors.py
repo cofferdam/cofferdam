@@ -142,6 +142,17 @@ _UPSTREAM_NOT_FOUND = frozenset(
         "task_project_unknown",
         "task_clarification_unknown",
         "not_found",
+        # M2M PR2's read surface. Both were missing, and the fall-through did
+        # exactly what the note above warns about: an unknown project came back
+        # as `not_allowed_now` with a 409, while the published GPT contract
+        # declares 404 for it. Fail-closed and leaking nothing, but wrong -- and
+        # a remote client cannot tell "no such project" from "not right now".
+        #
+        # Found by running the real bridge against the real daemon, which is the
+        # only place it is visible: both sides are individually correct, and the
+        # defect lives in the translation between them.
+        "project_unknown",
+        "operations_not_found",
     }
 )
 
