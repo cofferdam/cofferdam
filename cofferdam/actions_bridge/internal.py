@@ -100,6 +100,13 @@ ALLOWED_UPSTREAM_ROUTES: Tuple[str, ...] = (
     ROUTE_TASK_CANCEL,
     ROUTE_TASK_FINISH,
     ROUTE_PROJECT_CONTEXT,
+    # M2M PR2. Four read-only operations routes. Listed here for the same reason
+    # the others are: the allowlist is what stops a future method calling an
+    # upstream path nobody reviewed.
+    ROUTE_OPERATIONS,
+    ROUTE_PROJECT_OPERATIONS,
+    ROUTE_OPERATION_PROMPT,
+    ROUTE_OPERATION_RESULT,
 )
 
 # -- identifier patterns ------------------------------------------------------
