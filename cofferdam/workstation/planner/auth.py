@@ -19,25 +19,27 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from ..claudeauth import cli as claude_auth_cli
+from ..claudeauth.executable import find_executable
 from . import session
 
 PROG = "python -m cofferdam.workstation.planner.auth"
 
 
 def _executable() -> Optional[Path]:
-    """The installed CLI, or nothing. The planner's own default, resolved here.
+    """The installed CLI, or nothing. One resolver, shared with everything else.
+
+    The M2M PR4 version of this function tried ``/usr/bin/claude`` and then a
+    hard-coded ``~/.local/bin/claude``, which was a *second* resolution policy —
+    subtly different from the one Remote Control, the CLI adapter and the worker
+    already agreed on, and wrong in the same way the provider's constant was.
+    It now calls the shared policy, so the session a person logs in is resolved
+    by exactly the same rule as the session the provider later runs.
 
     Deliberately not a configuration key and not an argument: the executable a
     Cofferdam-owned session signs into must not be selectable by anything that
     could be influenced from outside the host.
     """
-    from .providers.claude_code import DEFAULT_EXECUTABLE
-
-    candidate = Path(DEFAULT_EXECUTABLE)
-    if candidate.exists():
-        return candidate
-    fallback = Path.home() / ".local" / "bin" / "claude"
-    return fallback if fallback.exists() else None
+    return find_executable()
 
 
 def status_payload(state_dir: Path) -> dict:

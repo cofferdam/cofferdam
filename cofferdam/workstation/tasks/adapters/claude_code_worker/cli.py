@@ -130,17 +130,15 @@ import os
 import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from ....claudeauth.executable import (
+    EXECUTABLE_NAME,
+    SEARCH_DIRECTORIES,
+    find_executable as _shared_find_executable,
+)
 
 #: The version this profile was written against, recorded rather than required.
 VERIFIED_CLI_VERSION = "2.1.221"
 
-EXECUTABLE_NAME = "claude"
-
-SEARCH_DIRECTORIES: Tuple[str, ...] = (
-    "~/.local/bin",
-    "/usr/local/bin",
-    "/usr/bin",
-)
 
 #: The model a development step runs on. Code-owned: there is no parameter
 #: anywhere above this that selects a model, because "which model" is the first
@@ -305,16 +303,7 @@ GIT_ENVIRONMENT: Dict[str, str] = {
 
 def find_executable() -> Optional[Path]:
     """Locate the installed CLI, or return ``None``. Fixed order, fixed name."""
-    for directory in SEARCH_DIRECTORIES:
-        candidate = Path(os.path.expanduser(directory)) / EXECUTABLE_NAME
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate
-    found = shutil.which(EXECUTABLE_NAME)
-    if found:
-        candidate = Path(found)
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate
-    return None
+    return _shared_find_executable()
 
 
 def resolve_cli_directory(executable: Path) -> Path:
