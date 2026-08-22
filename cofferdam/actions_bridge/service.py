@@ -96,6 +96,10 @@ from .normalize import (
     delegation_for_project,
     display_ref,
     mutation_view,
+    operation_result_view,
+    operation_prompt_view,
+    operations_overview_view,
+    operations_project_view,
     projects_view,
     recent_tasks_view,
     task_snapshot_view,
@@ -142,9 +146,23 @@ OP_FINISH = "finishTask"
 #: GPT instructions; the operationId follows this file's camelCase convention.
 OP_PROJECT_CONTEXT = "getProjectContext"
 
+#: M2M PR2. Four read-only operations. Every one is a GET, none grants any
+#: authority the bridge did not already have, and there is deliberately no
+#: write among them -- the controls a phase declares as *available* are not
+#: implemented here and cannot be reached through this surface.
+OP_READ_OPERATIONS = "readOperations"
+OP_READ_PROJECT_OPERATIONS = "readProjectOperations"
+OP_READ_OPERATION_PROMPT = "readOperationPrompt"
+OP_READ_OPERATION_RESULT = "readOperationResult"
+
 #: A project id as the registry publishes one. No slash, no dot-dot, no percent
 #: — a traversal attempt is refused here rather than escaped and forwarded.
 _PROJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+#: A Cofferdam-minted durable handle: `plan_`/`dsp_`/`task_` plus a ULID. No
+#: slash, no dot, no percent -- a path traversal attempt fails the match rather
+#: than being escaped into a legal-looking segment.
+_HANDLE_ID = re.compile(r"^[a-z][a-z0-9]{1,15}_[0-9a-zA-Z]{16,32}$")
 
 OPERATION_IDS = (
     OP_HEALTH,
@@ -157,6 +175,10 @@ OPERATION_IDS = (
     OP_CANCEL,
     OP_FINISH,
     OP_PROJECT_CONTEXT,
+    OP_READ_OPERATIONS,
+    OP_READ_PROJECT_OPERATIONS,
+    OP_READ_OPERATION_PROMPT,
+    OP_READ_OPERATION_RESULT,
 )
 
 #: The operations that change something.
@@ -581,6 +603,35 @@ def create_bridge_app(
             )
         return value
 
+    def _handle_id(value: Any) -> str:
+        """A durable Cofferdam handle, or a 404. Refused rather than escaped.
+
+        One validator for planner request ids and dispatch ids: both are
+        Cofferdam-minted, both share the `prefix_ulid` grammar, and the character
+        class here has no slash, no dot and no percent, so a traversal attempt
+        fails at this line instead of being encoded into a legal-looking path
+        segment and forwarded upstream.
+
+        404 rather than 422, for the reason `_task_id` gives: a caller must not
+        be able to tell a malformed handle from one that belongs to somebody
+        else's project.
+        """
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value) > 64
+            or not _HANDLE_ID.match(value)
+        ):
+            raise BridgeError(
+                code=CODE_NOT_FOUND,
+                message=(
+                    "No such operation. Call readOperations to get current "
+                    "handles rather than reconstructing one."
+                ),
+                status_code=status_for(CODE_NOT_FOUND),
+            )
+        return value
+
     def _project_id(value: Any) -> str:
         """A project id, or a 404. Refused rather than escaped.
 
@@ -669,6 +720,76 @@ def create_bridge_app(
         _mark(request, OP_LIST_PROJECTS)
         payload = await run_in_threadpool(internal_client.list_projects)
         return _ok(projects_view(payload))
+
+    # -- 1b. remote operations, read-only (M2M PR2) ---------------------------
+    #
+    # The canonical projection from M2M PR1, reachable by the Custom GPT. These
+    # reuse `require_bridge_key`, the existing internal client and the existing
+    # id validators rather than introducing a second transport -- a new ingress
+    # would be a new authentication path to get wrong for no capability gained.
+    #
+    # **Read-only, and structurally so.** All four are GETs, the internal client
+    # has no operations method that writes, and the workstation exposes no
+    # operations route that writes. A caller cannot approve, answer, cancel,
+    # publish or merge through this surface because there is nothing on the
+    # other end to reach.
+
+    @app.get("/v1/operations", dependencies=[Depends(require_bridge_key)])
+    async def read_operations(request: Request):
+        """What is Cofferdam doing right now, across every enabled project."""
+        _mark(request, OP_READ_OPERATIONS)
+        payload = await run_in_threadpool(internal_client.read_operations)
+        return _ok(operations_overview_view(payload))
+
+    @app.get(
+        "/v1/operations/{project_id}", dependencies=[Depends(require_bridge_key)]
+    )
+    async def read_project_operations(request: Request, project_id: str):
+        """One project's operational view. Unknown or disabled is a 404."""
+        _mark(request, OP_READ_PROJECT_OPERATIONS)
+        resolved = _project_id(project_id)
+        payload = await run_in_threadpool(
+            internal_client.read_project_operations, resolved
+        )
+        return _ok(operations_project_view(payload))
+
+    @app.get(
+        "/v1/operations/{project_id}/prompt/{planner_request_id}",
+        dependencies=[Depends(require_bridge_key)],
+    )
+    async def read_operation_prompt(
+        request: Request, project_id: str, planner_request_id: str
+    ):
+        """The exact approved prompt, by project and durable id.
+
+        Both ids are validated here and refused rather than escaped. The project
+        is part of the address, so a request id belonging to another project
+        returns the same 404 as one that does not exist -- see the workstation
+        route for why those two must be indistinguishable.
+        """
+        _mark(request, OP_READ_OPERATION_PROMPT)
+        resolved = _project_id(project_id)
+        handle = _handle_id(planner_request_id)
+        payload = await run_in_threadpool(
+            internal_client.read_operation_prompt, resolved, handle
+        )
+        return _ok(operation_prompt_view(payload))
+
+    @app.get(
+        "/v1/operations/{project_id}/result/{dispatch_id}",
+        dependencies=[Depends(require_bridge_key)],
+    )
+    async def read_operation_result(
+        request: Request, project_id: str, dispatch_id: str
+    ):
+        """What Cofferdam observed for one dispatch, beside what the model said."""
+        _mark(request, OP_READ_OPERATION_RESULT)
+        resolved = _project_id(project_id)
+        handle = _handle_id(dispatch_id)
+        payload = await run_in_threadpool(
+            internal_client.read_operation_result, resolved, handle
+        )
+        return _ok(operation_result_view(payload))
 
     # -- 2. create_task -------------------------------------------------------
 

@@ -490,7 +490,12 @@ class RouteInventory(unittest.TestCase):
         self.assertEqual(
             assessment[0][1], "/api/tasks/{task_id}/turns/{turn_number}/assessment"
         )
-        self.assertEqual(len(routes), 80, "route count moved by more than the one GET")
+        # 80 at M2K PR8; 84 since M2M PR2 added four read-only operations
+        # routes. The number is not the assertion -- the assertion above is that
+        # exactly one *assessment* route exists and it is a GET. This total is a
+        # tripwire for an unnoticed surface change, so it moves when a reviewed
+        # PR adds routes and stays put otherwise.
+        self.assertEqual(len(routes), 84, "route count moved unexpectedly")
 
     def test_no_evaluation_or_criteria_mutation_route_exists(self):
         for method, path in self._routes():
@@ -521,8 +526,12 @@ class RouteInventory(unittest.TestCase):
                             any(getattr(k, "arg", None) == "dependencies" for k in decorator.keywords),
                         )
                     )
-        self.assertEqual(len(routes), 10)
-        self.assertEqual(sum(1 for _, auth in routes if auth), 9)
+        # 10 authenticated-plus-health at M2K PR8; 14 since M2M PR2 added four
+        # read-only operations routes, all authenticated. What this guard is
+        # really protecting is the line below: no M2K acceptance vocabulary on
+        # the bridge, ever.
+        self.assertEqual(len(routes), 14)
+        self.assertEqual(sum(1 for _, auth in routes if auth), 13)
         for path, _ in routes:
             for forbidden in ("assessment", "evaluat", "criteri", "evidence", "artifact", "claim"):
                 self.assertNotIn(forbidden, path, path)

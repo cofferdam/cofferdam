@@ -208,6 +208,118 @@ def project(
     }
 
 
+PLANNER_REQUEST_ID = "plan_01m0k000000000000000000000"
+DISPATCH_ID = "dsp_01m0k111111111111111111111"
+WORKER_PROMPT = "Implement subtract() in calc.py.\n"
+WORKER_CLAIM = "I added subtract() and every test passes."
+#: Things that must never appear in a bridge response. Planted upstream so the
+#: leakage sweep has something real to fail on.
+HOST_PATH = "/home/nrgis/cofferdam/state/worktrees/alpha"
+FAKE_TOKEN = "github_pat_11FAKEDOUBLE_DoNotExfiltrate0123456789"
+
+
+def operations_entry(**overrides: Any) -> Dict[str, Any]:
+    """One project's operational state, in the shape the workstation publishes."""
+    payload: Dict[str, Any] = {
+        "project_id": PROJECT_ID,
+        "display_name": "Alpha",
+        "phase": "pr_ready",
+        "sentence": "A pull request is open and ready for your review.",
+        "needs_person": True,
+        "busy": False,
+        "settled": True,
+        "rank": 8,
+        # Internal debugging aid. Must not be published outward.
+        "because": "publication.state=published",
+        "handles": {
+            "planner_request_id": PLANNER_REQUEST_ID,
+            "dispatch_id": DISPATCH_ID,
+            "task_id": TASK_ID,
+            "publication_id": "pub_01m0k2222222222222222222",
+            "prompt_available": True,
+        },
+        "machine": {
+            "planner_status": "succeeded",
+            "planner_action": "PREPARE_WORKER_PROMPT",
+            "approved": True,
+            "worker_state": "completed",
+            "restart": {"occurred": False},
+            "worker_completion_is_not_acceptance": True,
+            "publication": {
+                "state": "published",
+                "repository": "cofferdam/publisher-smoke",
+                "branch": "cofferdam/worker/" + TASK_ID,
+                "base_branch": "main",
+                "commit": "a" * 40,
+                "pull_request": {
+                    "number": 5,
+                    "url": "https://github.com/cofferdam/publisher-smoke/pull/5",
+                    "state": "open",
+                },
+                "failure": None,
+            },
+        },
+        "claims": {
+            "planner_summary": "add subtract()",
+            "worker_report": WORKER_CLAIM,
+            "source": "model_authored",
+        },
+        "available_actions": ["open_pull_request", "inspect_result"],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def operation_prompt(**overrides: Any) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "project_id": PROJECT_ID,
+        "planner_request_id": PLANNER_REQUEST_ID,
+        "dispatch_id": DISPATCH_ID,
+        "prompt": WORKER_PROMPT,
+        "truncated": False,
+        "matches_dispatched_digest": True,
+        "approved_subject_fingerprint": "f" * 64,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def operation_result(**overrides: Any) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "project_id": PROJECT_ID,
+        "dispatch_id": DISPATCH_ID,
+        "task_id": TASK_ID,
+        "machine": {
+            "branch": "cofferdam/worker/" + TASK_ID,
+            "commit": "a" * 40,
+            "worker_state": "completed",
+            "checks": {"observed": True, "exit_zero": True},
+            "restart": {"occurred": False},
+            "publication": {
+                "state": "published",
+                "repository": "cofferdam/publisher-smoke",
+                "branch": "cofferdam/worker/" + TASK_ID,
+                "base_branch": "main",
+                "pull_request": {
+                    "number": 5,
+                    "url": "https://github.com/cofferdam/publisher-smoke/pull/5",
+                    "state": "open",
+                },
+                "failure": None,
+            },
+            "observed_by": "cofferdam",
+        },
+        "claims": {
+            "planner_summary": "add subtract()",
+            "worker_report": WORKER_CLAIM,
+            "source": "model_authored",
+        },
+        "worker_completion_is_not_acceptance": True,
+    }
+    payload.update(overrides)
+    return payload
+
+
 def upstream_error(code: str, message: str = "refused") -> BridgeError:
     """The refusal the real client would raise for an upstream error code."""
     bridge_code = from_upstream_code(code)
@@ -245,6 +357,14 @@ class FakeInternalClient:
             "created": True,
             "_status": 201,
         }
+        self.operations_payload: Dict[str, Any] = {
+            "projects": [operations_entry()],
+            "attention": [],
+            "count": 1,
+        }
+        self.project_operations_payload: Dict[str, Any] = operations_entry()
+        self.operation_prompt_payload: Dict[str, Any] = operation_prompt()
+        self.operation_result_payload: Dict[str, Any] = operation_result()
         #: Set to a ``BridgeError`` to make the next call of that name raise.
         self.raises: Dict[str, BridgeError] = {}
         #: Counts of how many times each operation actually ran.
@@ -265,6 +385,36 @@ class FakeInternalClient:
     def list_projects(self) -> Dict[str, Any]:
         self._record("list_projects")
         return copy.deepcopy(self.projects_payload)
+
+    # -- remote operations, read-only (M2M PR2) ------------------------------
+
+    def read_operations(self) -> Dict[str, Any]:
+        self._record("read_operations")
+        return copy.deepcopy(self.operations_payload)
+
+    def read_project_operations(self, project_id: str) -> Dict[str, Any]:
+        self._record("read_project_operations", project_id=project_id)
+        return copy.deepcopy(self.project_operations_payload)
+
+    def read_operation_prompt(
+        self, project_id: str, planner_request_id: str
+    ) -> Dict[str, Any]:
+        self._record(
+            "read_operation_prompt",
+            project_id=project_id,
+            planner_request_id=planner_request_id,
+        )
+        return copy.deepcopy(self.operation_prompt_payload)
+
+    def read_operation_result(
+        self, project_id: str, dispatch_id: str
+    ) -> Dict[str, Any]:
+        self._record(
+            "read_operation_result",
+            project_id=project_id,
+            dispatch_id=dispatch_id,
+        )
+        return copy.deepcopy(self.operation_result_payload)
 
     def list_tasks(self, *, limit: int) -> Dict[str, Any]:
         self._record("list_tasks", limit=limit)
