@@ -53,6 +53,15 @@ PHASE_PLANNER_PREPARING = "planner_preparing"
 #: The model asked a question and nobody has answered it.
 PHASE_AWAITING_USER_ANSWER = "awaiting_user_answer"
 
+#: A person answered that exact question, and the planner turn ended there.
+#:
+#: Terminal, and deliberately so. Recording an answer is one durable authority
+#: event: it does not rerun the planner, does not approve anything and dispatches
+#: nothing (see :mod:`..planner.authority_service`). So the answered request is
+#: finished and the next step is a *new* development request, which is why this
+#: is settled rather than a second kind of waiting.
+PHASE_ANSWERED = "answered"
+
 #: A worker prompt is prepared and waiting for a person to approve or reject it.
 PHASE_AWAITING_APPROVAL = "awaiting_approval"
 
@@ -103,6 +112,7 @@ PHASES: Tuple[str, ...] = (
     PHASE_IDLE,
     PHASE_PLANNER_PREPARING,
     PHASE_AWAITING_USER_ANSWER,
+    PHASE_ANSWERED,
     PHASE_AWAITING_APPROVAL,
     PHASE_REJECTED,
     PHASE_STOPPED,
@@ -141,8 +151,21 @@ NEEDS_PERSON: frozenset = frozenset(
 )
 
 #: Nothing further will happen without new instruction.
+#:
+#: :data:`PHASE_ANSWERED` belongs here for the same reason :data:`PHASE_REJECTED`
+#: does: a person made the decision the gate was waiting for, and no component is
+#: left holding anything. An answered question that stayed unsettled would keep
+#: asking for an answer that had already been given, and would block the next
+#: development request forever.
 SETTLED: frozenset = frozenset(
-    {PHASE_IDLE, PHASE_REJECTED, PHASE_STOPPED, PHASE_CANCELLED, PHASE_PR_READY}
+    {
+        PHASE_IDLE,
+        PHASE_ANSWERED,
+        PHASE_REJECTED,
+        PHASE_STOPPED,
+        PHASE_CANCELLED,
+        PHASE_PR_READY,
+    }
 )
 
 #: How urgently a person is needed. Lower sorts first.
@@ -167,9 +190,10 @@ _RANK: Dict[str, int] = {
     PHASE_PLANNER_PREPARING: 12,
     PHASE_RECOVERY_RECONCILED: 13,
     PHASE_REJECTED: 14,
-    PHASE_STOPPED: 15,
-    PHASE_CANCELLED: 16,
-    PHASE_IDLE: 17,
+    PHASE_ANSWERED: 15,
+    PHASE_STOPPED: 16,
+    PHASE_CANCELLED: 17,
+    PHASE_IDLE: 18,
 }
 
 
@@ -186,6 +210,7 @@ SENTENCES: Dict[str, str] = {
     PHASE_IDLE: "Nothing in progress.",
     PHASE_PLANNER_PREPARING: "Working out what to do.",
     PHASE_AWAITING_USER_ANSWER: "Waiting for your answer to a question.",
+    PHASE_ANSWERED: "You answered the planner's question. Nothing ran.",
     PHASE_AWAITING_APPROVAL: "A development step is prepared and waiting for your approval.",
     PHASE_REJECTED: "You rejected the prepared step. Nothing ran.",
     PHASE_STOPPED: "The planner decided not to proceed, and explained why.",
@@ -329,6 +354,16 @@ def derive(
         return build(PHASE_AWAITING_USER_ANSWER, "task.state=waiting_for_user")
 
     # -- the human gate --------------------------------------------------
+    #
+    # The durable authority event outranks the planner action that produced the
+    # gate, in all three cases. `planner_action` is what the model decided; an
+    # authority row is what a *person* decided afterwards, and the person is
+    # later. Reading the planner action first would report a question as still
+    # open after it had been answered — the defect this branch exists to fix.
+    if authority_action == "answer":
+        # One answer, and the turn ends. Nothing was replanned, approved,
+        # dispatched or executed by recording it.
+        return build(PHASE_ANSWERED, "authority.action=answer")
     if authority_action == "reject":
         return build(PHASE_REJECTED, "authority.action=reject")
     if authority_action == "approve":
@@ -357,6 +392,7 @@ __all__ = [
     "BUSY",
     "NEEDS_PERSON",
     "PHASES",
+    "PHASE_ANSWERED",
     "PHASE_AUTH_REQUIRED",
     "PHASE_AWAITING_APPROVAL",
     "PHASE_AWAITING_USER_ANSWER",

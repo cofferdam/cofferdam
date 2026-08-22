@@ -335,6 +335,32 @@ class IngressHarness(unittest.TestCase):
             "/api/operations/" + (project_id or self.ACTIVE), headers=self.bridge_auth
         )
 
+    def answer_on_the_workstation(self, planner_request_id: str, answer: str):
+        """Answer a question the way a person actually does: locally.
+
+        There is no remote answer Action and this does not add one — it reaches
+        the same `PlannerAuthorityService` a workstation-side caller would, over
+        the daemon's own planner database. The subject fingerprint is read from
+        the gate rather than typed, because an answer is authority for *this*
+        persisted question and the service refuses a stale one.
+        """
+        from cofferdam.workstation.planner import (
+            AuthorityProvenance,
+            PlannerAuthorityService,
+            PlannerStore,
+        )
+
+        service = PlannerAuthorityService(
+            store=PlannerStore(Path(self.config.state_dir) / "planner")
+        )
+        gate = service.gate(planner_request_id)
+        return service.answer_planner_question(
+            planner_request_id,
+            answer=answer,
+            expected_subject_fingerprint=gate.subject_fingerprint,
+            provenance=AuthorityProvenance.internal_test(),
+        )
+
     def planner_database(self) -> Path:
         return Path(self.config.state_dir) / "planner" / "planner.sqlite3"
 
@@ -899,6 +925,7 @@ class UnresolvedWorkRefusesACompetingRequest(IngressHarness):
             frozenset(
                 {
                     phases.PHASE_IDLE,
+                    phases.PHASE_ANSWERED,
                     phases.PHASE_REJECTED,
                     phases.PHASE_STOPPED,
                     phases.PHASE_CANCELLED,
@@ -906,6 +933,58 @@ class UnresolvedWorkRefusesACompetingRequest(IngressHarness):
                 }
             ),
         )
+
+    def test_an_answered_question_no_longer_blocks_a_new_request(self):
+        """The production failure, end to end through the real HTTP surface.
+
+        An old `ASK_USER` request had a durable answer recorded through the
+        canonical local primitive, and every later development request was still
+        refused `development_request_not_allowed_now`. The ingress was right to
+        trust the phase; the phase was wrong.
+
+        Nothing about `_require_no_unresolved_step` is special-cased here — the
+        rule is unchanged and the projection now tells it the truth.
+        """
+        from cofferdam.workstation.operations import phases
+
+        self.planner.result = ask_user_result()
+        handle = self.submit().json()["planner_request_id"]
+        self.assertEqual(self.operations().json()["phase"], "awaiting_user_answer")
+
+        self.answer_on_the_workstation(handle, "use the existing bearer boundary")
+
+        settled = self.operations().json()
+        self.assertEqual(settled["phase"], phases.PHASE_ANSWERED)
+        self.assertTrue(settled["settled"])
+        self.assertFalse(settled["needs_person"])
+        self.assertNotIn("answer", settled["available_actions"])
+
+        self.planner.result = FakePlanner().result
+        response = self.submit(client_request_id="gpt-after-answer-01")
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(len(self.planner.calls), 2)
+        self.assertNotEqual(response.json()["planner_request_id"], handle)
+
+    def test_recording_the_answer_did_not_invoke_the_planner(self):
+        """Answering is one durable event. The second call is the new request."""
+        self.planner.result = ask_user_result()
+        handle = self.submit().json()["planner_request_id"]
+        self.answer_on_the_workstation(handle, "reuse the bearer boundary")
+        self.assertEqual(len(self.planner.calls), 1)
+        self.assertEqual(self.rows("planner_worker_dispatches"), [])
+
+    def test_an_unanswered_question_still_blocks(self):
+        """The opposite regression: settling must need a real answer."""
+        self.planner.result = ask_user_result()
+        self.submit()
+        response = self.submit(client_request_id="gpt-still-open-01")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["error"]["code"], "development_request_not_allowed_now"
+        )
+        detail = json.loads(response.json()["error"]["detail"])
+        self.assertEqual(detail["phase"], "awaiting_user_answer")
+        self.assertEqual(len(self.planner.calls), 1)
 
     def test_another_projects_unresolved_work_does_not_block_this_one(self):
         self.submit()

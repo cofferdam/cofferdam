@@ -961,10 +961,10 @@ disagree with. `test_the_same_read_twice_reflects_a_change_in_between` is the pr
 
 ### The phases
 
-`idle` · `planner_preparing` · `awaiting_user_answer` · `awaiting_approval` · `rejected` · `stopped`
-· `worker_queued` · `worker_running` · `recovery_required` · `recovery_reconciled` ·
-`worker_interrupted` · `commit_ready` · `publishing` · `pr_ready` · `failed` · `cancelled` ·
-`auth_required` · `needs_attention`
+`idle` · `planner_preparing` · `awaiting_user_answer` · `answered` · `awaiting_approval` ·
+`rejected` · `stopped` · `worker_queued` · `worker_running` · `recovery_required` ·
+`recovery_reconciled` · `worker_interrupted` · `commit_ready` · `publishing` · `pr_ready` ·
+`failed` · `cancelled` · `auth_required` · `needs_attention`
 
 These do not duplicate the vocabularies they read. `worker_running` is not a copy of Task Core's
 `running`; it is the *rendering* of it, in a vocabulary that also has room for "waiting for you to
@@ -972,6 +972,15 @@ approve a prompt" — which Task Core has no concept of, because no task exists 
 
 Derivation is **latest-fact-first**: a published dispatch is not also "awaiting approval" because an
 approval row still exists. Every phase carries `because`, naming the row that produced it.
+
+**A durable authority event outranks the planner action that produced its gate**, in all three
+cases. The planner action is what the model decided; an authority row is what a *person* decided
+afterwards, and the person is later. `answer` exists as its own terminal phase for exactly that
+reason: an answered `ASK_USER` request keeps `planner_action: ASK_USER` forever — recording an
+answer deliberately does not rerun the planner — so reading the action first reported a question as
+still open after it had been answered, and pinned the project out of `SETTLED` permanently.
+`answered` means *a person answered this exact persisted question and nothing ran*: no replan, no
+approval, no dispatch, no execution. The next step is a new development request.
 
 ### Ordered by attention, not by time
 
@@ -1178,8 +1187,8 @@ A project whose current phase is not in `phases.SETTLED` refuses a new request w
 handles so a caller can go and read the operation that is actually current. Never a fallback to "the
 latest".
 
-The discriminator is the projection's own settled set — `idle`, `rejected`, `stopped`, `cancelled`,
-`pr_ready` — rather than a second opinion about what "finished" means. That deliberately refuses over
+The discriminator is the projection's own settled set — `idle`, `answered`, `rejected`, `stopped`,
+`cancelled`, `pr_ready` — rather than a second opinion about what "finished" means. That deliberately refuses over
 a `failed` or `interrupted` step too: those need a person to look, not to be planned over. Concurrency
 is not designed in this build and the ingress is the wrong layer to invent it in.
 
@@ -1227,7 +1236,9 @@ other order would refuse every retry of the thing it had just accepted.
 ### The three results
 
 **`ASK_USER`** — the question is persisted, the phase is `awaiting_user_answer`, and the exact text is
-readable afterwards through `readOperationQuestion`. No answer path is added.
+readable afterwards through `readOperationQuestion`. No *remote* answer path is added: answering is
+`PlannerAuthorityService.answer_planner_question` on the workstation, and once that durable event
+exists the phase becomes `answered` and settles.
 
 **`PREPARE_WORKER_PROMPT`** — the exact prompt is persisted, the phase is `awaiting_approval`, and the
 gate `derive_gate` produces is `confirmation` / `awaiting_confirmation` with the PR1d subject
