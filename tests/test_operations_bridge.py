@@ -474,3 +474,131 @@ class NothingHostPrivateIsEverPublished(BridgeHarness):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+# -- the translation between the two sides ------------------------------------
+
+
+class EveryRefusalCodeTheRoutesEmitIsTranslated(unittest.TestCase):
+    """The gap between two individually-correct sides.
+
+    The workstation routes refuse with their own codes; the bridge maps upstream
+    codes to its own closed vocabulary. Both were right in isolation, and the
+    first real end-to-end run showed an unknown project arriving as a 409
+    `not_allowed_now` while the published GPT contract declares 404 — because the
+    two new codes were never added to the map.
+
+    Unit tests could not see it: the workstation suite asserts the refusal, the
+    bridge suite fakes the upstream, and neither runs the translation. So this
+    test reads the codes out of the **route source** and checks each one against
+    the real translator, which is the narrowest place the two sides meet.
+    """
+
+    def test_the_routes_emit_only_codes_the_bridge_can_translate(self):
+        """Every refusal code the operations routes construct must translate.
+
+        Read out of the parsed tree, not grepped: the first version matched a
+        `"code": "..."` literal and stopped matching the moment the refusal moved
+        into a helper, which would have made this guard silently vacuous.
+        """
+        import ast
+        from pathlib import Path
+
+        from cofferdam.actions_bridge.errors import from_upstream_code, status_for
+
+        tree = ast.parse(
+            (
+                Path(__file__).resolve().parents[1]
+                / "cofferdam" / "workstation" / "service.py"
+            ).read_text(encoding="utf-8")
+        )
+        codes = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+            if name == "_operations_refusal" and node.args:
+                first = node.args[0]
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    codes.add(first.value)
+
+        self.assertTrue(codes, "no operations refusal codes were found")
+        for code in sorted(codes):
+            with self.subTest(code=code):
+                bridge_code = from_upstream_code(code)
+                self.assertEqual(
+                    bridge_code, "not_found",
+                    f"{code} falls through to {bridge_code}; add it to "
+                    "_UPSTREAM_NOT_FOUND in actions_bridge/errors.py",
+                )
+                self.assertEqual(status_for(bridge_code), 404, code)
+
+    def test_the_routes_use_the_daemon_error_envelope(self):
+        """The envelope, not just the code — this is what actually broke.
+
+        `ApiError` serializes to `{"error": {"code": ...}}`, which the bridge
+        parses. FastAPI's own exception serializes to `{"detail": {...}}`, the
+        bridge finds no code, and a 404 becomes a 409 `not_allowed_now`. Both
+        sides were individually correct; only the envelope between them was not.
+
+        Checked structurally, over the parsed tree. A text scan matches the
+        prose above, which is the third time that trap has caught a guard in
+        this repository.
+        """
+        import ast
+        from pathlib import Path
+
+        tree = ast.parse(
+            (
+                Path(__file__).resolve().parents[1]
+                / "cofferdam" / "workstation" / "service.py"
+            ).read_text(encoding="utf-8")
+        )
+        operations = []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
+                node.name.startswith("read_operation")
+                or node.name.startswith("_operations")
+                or node.name == "_require_known_project"
+            ):
+                operations.append(node)
+        self.assertTrue(operations, "the operations routes were not found")
+
+        raised = set()
+        for function in operations:
+            for node in ast.walk(function):
+                if isinstance(node, ast.Call):
+                    name = getattr(node.func, "id", None) or getattr(
+                        node.func, "attr", None
+                    )
+                    if name in ("HTTPException", "ApiError"):
+                        raised.add(name)
+        self.assertNotIn(
+            "HTTPException", raised,
+            "an operations route raises HTTPException; the bridge cannot read "
+            "its envelope. Use ApiError.",
+        )
+        self.assertIn("ApiError", raised)
+
+    def test_the_contract_declares_the_status_the_bridge_returns(self):
+        """The published schema and the runtime must agree."""
+        import yaml
+        from pathlib import Path
+
+        from cofferdam.actions_bridge.errors import from_upstream_code, status_for
+
+        schema = yaml.safe_load(
+            (
+                Path(__file__).resolve().parents[1]
+                / "docs" / "custom-gpt" / "openapi.yaml"
+            ).read_text(encoding="utf-8")
+        )
+        actual = str(status_for(from_upstream_code("project_unknown")))
+        for path in (
+            "/v1/operations/{project_id}",
+            "/v1/operations/{project_id}/prompt/{planner_request_id}",
+            "/v1/operations/{project_id}/result/{dispatch_id}",
+        ):
+            with self.subTest(path=path):
+                declared = set(schema["paths"][path]["get"]["responses"])
+                self.assertIn(actual, declared, f"{path} does not declare {actual}")
