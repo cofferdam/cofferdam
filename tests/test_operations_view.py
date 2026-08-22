@@ -143,6 +143,17 @@ class OperationsHarness(unittest.TestCase):
         )
         return request_id, gate.subject_fingerprint
 
+    def answered(self, project_id="alpha", answer="the calculator module"):
+        """A question, then a real answer through the canonical primitive."""
+        request_id = self.planner_done(project_id, action=ACTION_ASK_USER)
+        gate = self.authority.gate(request_id)
+        self.authority.answer_planner_question(
+            request_id, answer=answer,
+            expected_subject_fingerprint=gate.subject_fingerprint,
+            provenance=self.who,
+        )
+        return request_id
+
     def rejected(self, project_id="alpha"):
         request_id = self.planner_done(project_id)
         gate = self.authority.gate(request_id)
@@ -229,6 +240,7 @@ class ThePhaseIsProjectedFromDurableFacts(OperationsHarness):
     def test_a_prepared_prompt_awaits_approval(self):
         self.planner_done()
         self.assertEqual(self.phase_of(), phases.PHASE_AWAITING_APPROVAL)
+
 
     def test_a_planner_stop_is_not_a_failure(self):
         self.planner_done(action=ACTION_STOP)
@@ -327,6 +339,77 @@ class ThePhaseIsProjectedFromDurableFacts(OperationsHarness):
         self.dispatched(task_state="running")
         because = self.ops.project("alpha").phase.because
         self.assertIn("task.state=running", because)
+
+
+# -- the human gate outranks the planner action it was built from -------------
+
+
+class AnsweringAQuestionSettlesIt(OperationsHarness):
+    """The production defect: an answered question stayed `awaiting_user_answer`.
+
+    `derive` handled `reject` and `approve` and had no branch for `answer`, so an
+    ASK_USER request fell through to the planner action — which is still
+    `ASK_USER` forever, because recording an answer deliberately does not rerun
+    the planner. The project was pinned in a phase that needed a person for a
+    decision that person had already made, and `_require_no_unresolved_step`
+    refused every later development request on that basis.
+
+    The pair below is the regression: the same request, before and after one
+    durable authority event, with nothing else changed.
+    """
+
+    def test_an_unanswered_question_still_needs_a_person(self):
+        self.planner_done(action=ACTION_ASK_USER)
+        found = self.ops.project("alpha")
+        self.assertEqual(found.phase.phase, phases.PHASE_AWAITING_USER_ANSWER)
+        self.assertTrue(found.phase.needs_person)
+        self.assertFalse(found.phase.settled)
+        self.assertIn(opsview.ACTION_ANSWER, found.actions)
+
+    def test_a_durable_answer_settles_the_question(self):
+        self.answered()
+        found = self.ops.project("alpha")
+        self.assertEqual(found.phase.phase, phases.PHASE_ANSWERED)
+        self.assertFalse(found.phase.needs_person)
+        self.assertFalse(found.phase.busy)
+        self.assertTrue(found.phase.settled)
+
+    def test_the_answer_control_is_not_offered_twice(self):
+        """Answering again is a conflict refusal, so it is not a button."""
+        self.answered()
+        found = self.ops.project("alpha")
+        self.assertNotIn(opsview.ACTION_ANSWER, found.actions)
+        self.assertIn(opsview.ACTION_INSPECT_RESULT, found.actions)
+
+    def test_the_authority_row_is_what_decided_it(self):
+        """Traceable to the row, not to the planner action it supersedes."""
+        self.answered()
+        found = self.ops.project("alpha")
+        self.assertEqual(found.phase.because, "authority.action=answer")
+        # The planner action is unchanged and still visible as a machine fact.
+        self.assertEqual(found.machine["planner_action"], ACTION_ASK_USER)
+        self.assertEqual(found.machine["planner_status"], "succeeded")
+
+    def test_an_answer_is_not_an_approval_and_dispatches_nothing(self):
+        request_id = self.answered()
+        found = self.ops.project("alpha")
+        self.assertFalse(found.machine["approved"])
+        self.assertIsNone(found.handles["dispatch_id"])
+        self.assertIsNone(found.handles["task_id"])
+        self.assertIsNone(self.store.dispatch(request_id))
+        self.assertIsNone(found.machine["worker_state"])
+
+    def test_recording_the_answer_did_not_create_a_second_planner_request(self):
+        """Answering is one durable event, never a new planner turn."""
+        request_id = self.answered()
+        found = self.store.recent_for_project("alpha", limit=10)
+        self.assertEqual([record.planner_request_id for record in found], [request_id])
+
+    def test_an_answered_project_sorts_below_one_that_needs_a_person(self):
+        self.answered("alpha")
+        self.planner_done("beta", action=ACTION_ASK_USER)
+        order = [found.project_id for found in self.ops.overview()]
+        self.assertEqual(order, ["beta", "alpha"])
 
 
 # -- no state of its own ------------------------------------------------------
@@ -557,6 +640,43 @@ class ThePhaseVocabularyIsComplete(unittest.TestCase):
 
     def test_no_phase_is_both_busy_and_settled(self):
         self.assertEqual(phases.BUSY & phases.SETTLED, frozenset())
+
+    def test_only_pr_ready_is_both_settled_and_needs_a_person(self):
+        """The one deliberate overlap, pinned so a second one is a decision.
+
+        An open pull request is settled — Cofferdam will do nothing more without
+        instruction — and still wants a human to review it. Every other settled
+        phase, `answered` included, is finished in both senses.
+        """
+        self.assertEqual(
+            phases.SETTLED & phases.NEEDS_PERSON, frozenset({phases.PHASE_PR_READY})
+        )
+
+    def test_answered_is_a_settled_terminal_phase(self):
+        self.assertIn(phases.PHASE_ANSWERED, phases.PHASES)
+        self.assertIn(phases.PHASE_ANSWERED, phases.SETTLED)
+        self.assertNotIn(phases.PHASE_ANSWERED, phases.BUSY)
+        self.assertNotIn(phases.PHASE_ANSWERED, phases.NEEDS_PERSON)
+
+    def test_the_answered_sentence_claims_nothing_ran(self):
+        """It must not imply a replan, an approval or a dispatch."""
+        sentence = phases.SENTENCES[phases.PHASE_ANSWERED].lower()
+        for forbidden in ("approv", "dispatch", "replan", "running", "started"):
+            self.assertNotIn(forbidden, sentence, forbidden)
+        self.assertIn("nothing ran", sentence)
+
+    def test_a_settled_phase_offers_no_control_that_would_advance_it(self):
+        advancing = {
+            opsview.ACTION_ANSWER, opsview.ACTION_APPROVE, opsview.ACTION_REJECT,
+            opsview.ACTION_PUBLISH, opsview.ACTION_RECONCILE, opsview.ACTION_CANCEL,
+        }
+        for phase in phases.SETTLED:
+            if phase == phases.PHASE_PR_READY:
+                # An open pull request is settled *here* and still has a control:
+                # opening it is navigation, not a Cofferdam state change.
+                continue
+            offered = set(opsview.AVAILABLE_ACTIONS[phase])
+            self.assertEqual(offered & advancing, set(), phase)
 
     def test_the_action_vocabulary_is_closed(self):
         known = {

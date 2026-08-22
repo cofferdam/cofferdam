@@ -77,6 +77,12 @@ AVAILABLE_ACTIONS: Dict[str, tuple] = {
     phases.PHASE_IDLE: (),
     phases.PHASE_PLANNER_PREPARING: (ACTION_CANCEL,),
     phases.PHASE_AWAITING_USER_ANSWER: (ACTION_ANSWER, ACTION_INSPECT_RESULT),
+    # Answered, and deliberately without `answer`: the question this request
+    # holds already has a durable answer, and offering the control again would
+    # render a button whose only outcome is a conflict refusal. There is no
+    # replan, continue or dispatch control here either — the next step is a new
+    # development request, which is not an action on this operation.
+    phases.PHASE_ANSWERED: (ACTION_INSPECT_RESULT,),
     phases.PHASE_AWAITING_APPROVAL: (
         ACTION_APPROVE, ACTION_REJECT, ACTION_INSPECT_PROMPT, ACTION_INSPECT_RESULT,
     ),
