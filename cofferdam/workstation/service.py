@@ -664,6 +664,15 @@ _DEVELOPMENT_STATUS = {
     "development_request_abandoned": 409,
     "development_request_refused": 409,
     "planner_unavailable": 503,
+    # The planner's own provider session. 503 for the same reason
+    # `planner_unavailable` is -- this workstation cannot plan right now, which
+    # is a property of the host and not of the caller or the project. Kept as
+    # two codes rather than one because they are two different sentences with
+    # two different fixes, and a person reading the second needs to know their
+    # earlier login stopped working rather than that they never did one.
+    "planner_auth_required": 503,
+    "planner_session_expired": 503,
+    "planner_session_error": 503,
     "planner_store_unavailable": 500,
 }
 
@@ -3123,7 +3132,15 @@ def create_app(
         ingress = DevelopmentRequestIngress(
             project_context=project_context_service,
             planner_store=store,
-            planner=planner if planner is not None else ClaudeCodePlanner(),
+            planner=(
+                planner
+                if planner is not None
+                # Given the host's state directory and nothing else. That is what
+                # points it at `<state>/claude-planner/config` -- its own session,
+                # not the operator's and not the worker's -- and the provider
+                # refuses rather than running if that session is not signed in.
+                else ClaudeCodePlanner(state_dir=Path(config.state_dir))
+            ),
             operations=_operations(create=True),
             clock=_utc_now,
         )

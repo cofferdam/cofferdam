@@ -747,6 +747,16 @@ paths:
           $ref: "#/components/responses/RateLimited"
         "502":
           $ref: "#/components/responses/UpstreamUnavailable"
+        "503":
+          description: >-
+            Cofferdam's development planner has its own Claude sign-in and it is
+            not usable. planner_auth_required means it has never been signed in;
+            planner_session_expired means it stopped working. Retrying will not
+            help. Tell the user to run the planner sign-in on their workstation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "504":
           description: >-
             Still planning. Planning takes longer than one call allows, so this
@@ -1384,6 +1394,8 @@ components:
                 - too_large
                 - upstream_timeout
                 - upstream_unavailable
+                - planner_auth_required
+                - planner_session_expired
                 - not_implemented
                 - internal_error
             message:

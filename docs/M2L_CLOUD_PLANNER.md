@@ -1256,9 +1256,148 @@ whether something may run locally, and this one decides whether a remote caller 
 call. Off means the route refuses, no planner database is created, and the read surface answers
 exactly as it does today.
 
-### Rollback note
+## The planner's own Claude session (M2M PR4)
 
-Schema v6 is additive and every v5 row reads back unchanged, but the store is **forward-only**: a v5
-build opening a v6 database raises `PlannerStoreUnavailable`. Rolling a deployment back past this
-change is therefore a pair — the slot *and* a restored pre-v6 `planner.sqlite3` — on any host that has
-run a development request. A host that never has is unaffected, because the file will not exist.
+Three Claude sessions on this host, and the planner may reach exactly one.
+
+| session | directory | who uses it |
+|---|---|---|
+| the operator's | `~/.claude` | the person, at a terminal |
+| the worker's | `<state>/claude-worker/config` | a contained worker with tools |
+| the planner's | `<state>/claude-planner/config` | the development planner, and nothing else |
+
+### The defect this closed
+
+Until this PR, `ClaudeCodePlanner._run_subprocess` passed **no `env` argument**. The CLI inherited
+the daemon's environment — `HOME` included — and therefore authenticated as *the operator*. While the
+only caller was a hand-run test that was untidy. The moment a remote Custom GPT request could trigger
+the invocation it became an authority hole: a request arriving over the network would spend a human's
+personal subscription session, rotate their token, and leave nothing saying it had.
+
+### Why not just share the worker's
+
+Because that is the same defect with a nearer neighbour. The worker's credential exists so a
+*contained worker with tools* can act; the planner has no tools and a completely different blast
+radius. One credential serving both would mean an expired planner locking out the worker, a rotation
+during a long worker run clobbered by a planning call, and no way to revoke one without revoking the
+other. Two namespaces, two logins, two locks.
+
+### One implementation, three namespaces
+
+PR1g wrote all of the machinery — the 0700 rule, the permission check, the status vocabulary, the
+`flock`, the failure classification, the environment construction — and it was right the first time.
+What it was not was reusable: every function derived its directory from one module constant.
+
+So it moved to `cofferdam/workstation/claude_session.py`, parameterised by a
+`ClaudeSessionNamespace`, and `worker/session.py` became a binding that keeps its own public API
+byte-for-byte. **Nothing about the worker's behaviour changed** and PR1g's tests exercise the shared
+implementation through that binding unmodified. `planner/session.py` is the second binding. The login
+flow moved the same way, to `claude_auth_cli.py`.
+
+### The boundary is the environment, not a check
+
+There is no code anywhere that says "do not read the operator's credential". There is a function that
+builds the **whole** environment from constants and one namespace's own paths:
+
+```
+PATH               /usr/bin:/bin
+HOME               <state>/claude-planner          not the operator's home
+CLAUDE_CONFIG_DIR  <state>/claude-planner/config   not the worker's, not ~/.claude
+NO_COLOR, TERM
+```
+
+Five keys, and the absences are structural. `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and
+`CLAUDE_CODE_OAUTH_TOKEN` are not filtered out of an inherited mapping — nothing is inherited, so
+there is nothing to filter. A `~/.claude` lookup has nowhere to resolve to but this namespace.
+
+The one `extra` parameter cannot reintroduce any of them: the named keys are applied last and win.
+
+### Fail closed, before anything is spent
+
+`DevelopmentRequestIngress.submit` checks the session **before it claims the idempotency key**, so an
+unauthenticated planner refuses having created no planner row, no receipt and no process:
+
+| condition | workstation code | HTTP | bridge code |
+|---|---|---|---|
+| no CLI on the host | `planner_unavailable` | 503 | `upstream_unavailable` |
+| never signed in / unprepared / unsafe mode | `planner_auth_required` | 503 | `planner_auth_required` |
+| signed in, no longer authenticates | `planner_session_expired` | 503 | `planner_session_expired` |
+| provider cannot prove it has a session | `planner_auth_required` | 503 | `planner_auth_required` |
+
+Two bridge codes rather than one, because a person reads them differently: *set this up* against
+*this stopped working*. Neither is `unauthorized` (that is the caller's bridge key) and neither is
+`upstream_unavailable` (that says "try later" for something no amount of waiting fixes).
+
+A mid-run expiry is caught too: a non-zero exit whose output matches the CLI's own auth wording
+becomes a session refusal rather than a `PlannerInvocationFailed`. The provider's stderr is **not**
+forwarded — it names the config root it was pointed at, which is a host path.
+
+There is no branch in which the run proceeds against some other credential.
+
+### The human bootstrap
+
+```bash
+python -m cofferdam.workstation.planner.auth status
+python -m cofferdam.workstation.planner.auth login
+python -m cofferdam.workstation.planner.auth status
+```
+
+`login` hands the terminal to the real `claude auth login` with `CLAUDE_CONFIG_DIR` pointed at the
+planner's root. Cofferdam does not type a password, drive a browser, handle a cookie or read the token
+that comes back. It cannot log the operator out, cannot touch `~/.claude`, and cannot rotate the
+worker's credential. `status` prints existence, mode and the CLI's own three non-secret auth fields —
+never a path and never a token, because nothing in the module ever opens the credential file.
+
+The worker's equivalent is unchanged: `python -m cofferdam.workstation.worker.auth`.
+
+## Deployment: when `planner.sqlite3` appears, and what a rollback needs
+
+Stated precisely because it must not stay tribal knowledge. **This PR does not solve deployment; it
+documents it.**
+
+### When the file appears or migrates
+
+| event | does `planner.sqlite3` appear or migrate? |
+|---|---|
+| daemon starts, `enable_development_planner` **off** | **No.** The ingress is never built, and the store is opened only if the file already exists. |
+| daemon starts, planner **on**, no previous file | **Yes — at startup.** `_development_ingress()` is built during `create_app` and opens the store with `create=True`. |
+| daemon starts, planner **on**, existing v5 file | **Yes — migrated to v6 at startup**, before the first request is served. |
+| any operations read, planner off or on | No creation. Reads open the store only if the file already exists. |
+| first `createDevelopmentRequest` | No further migration; the schema is already current. |
+
+So on a host with planning enabled, **merely starting the new daemon migrates the store to v6** — it
+does not wait for a request. That is deliberate: the startup reconcile has to run before anything can
+claim an idempotency key. It is also the fact that matters for rollback.
+
+### The exact point slot B @ v5 can no longer read the store
+
+At the **first start of the new daemon with `enable_development_planner` on**. `PlannerStore._initialize`
+reads the stored version *before* any DDL and raises `PlannerStoreUnavailable` for a database written
+by a newer build — forward-only by design, because an older build writing rows a newer schema defined
+is how a rollback becomes data loss.
+
+Consequence on a rolled-back v5 slot: `/api/operations*` construct the store and therefore fail, and
+the Custom GPT's read surface fails with them. Nothing is corrupted; the older build simply refuses to
+touch the file.
+
+### What must be paired with the future A/B activation
+
+1. A copy of `<state>/planner/planner.sqlite3` — **and its `-wal` and `-shm` siblings** — taken
+   *before* the new daemon starts. That is the only v5-readable copy that will exist afterwards.
+2. The state backup and the slot flip are one operation. A slot rollback without the paired restore
+   leaves a v5 runtime pointed at a v6 file.
+
+### What must be restored if we roll back after the first real development request
+
+Both, together:
+
+- **the slot**, back to B @ `83ff1dd`; and
+- **`planner.sqlite3`**, from the pre-v6 copy.
+
+Restoring the snapshot discards every planner request, authority event, dispatch, reconciliation and
+publication recorded since it was taken — which, after a real development request, includes at least
+one planner row and its ingress receipt. There is no partial path: v6 rows cannot be read by v5, and
+downgrading the schema in place is not implemented and should not be.
+
+A host that has **never** enabled the planner is unaffected. The file does not exist, and slot B reads
+exactly what it reads today.

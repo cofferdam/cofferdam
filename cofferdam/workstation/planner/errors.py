@@ -42,6 +42,51 @@ class PlannerInvocationFailed(PlannerError):
     reason_code = "planner_invocation_failed"
 
 
+# -- the planner's own provider session (M2M PR4) ------------------------------
+#
+# Kept apart from :class:`PlannerUnavailable` because they are three different
+# sentences with three different fixes, and collapsing them is how somebody ends
+# up debugging their code when the truth is that a session needs a login:
+#
+#   PlannerUnavailable    there is no CLI on this host        — install it
+#   PlannerAuthRequired   there is a CLI, no planner session  — log the planner in
+#   PlannerSessionExpired there was a session, it is dead     — log it in again
+#
+# All three are refusals to *start*. None of them is a project failure, a worker
+# failure or a code failure, and none of them may ever be answered by reaching
+# for a credential that belongs to somebody else — see
+# :mod:`cofferdam.workstation.planner.session`.
+
+
+class PlannerSessionError(PlannerError):
+    """Base for the planner's own provider-session refusals."""
+
+    reason_code = "planner_session_error"
+
+
+class PlannerAuthRequired(PlannerSessionError):
+    """The planner has its own Claude session and nobody has logged it in.
+
+    A person must run the one-time bootstrap. Deliberately distinct from the
+    worker's equivalent: they are two sessions and two logins, and telling
+    somebody the worker needs signing in when it is the planner sends them to fix
+    a thing that is not broken.
+    """
+
+    reason_code = "planner_auth_required"
+
+
+class PlannerSessionExpired(PlannerSessionError):
+    """The planner's session existed and can no longer authenticate.
+
+    Distinct from :class:`PlannerAuthRequired` because the two are distinguishable
+    from the CLI's own words and a person reads them differently — "set this up"
+    against "this stopped working". There is no fallback in either case.
+    """
+
+    reason_code = "planner_session_expired"
+
+
 class PlannerTimeout(PlannerError):
     """The provider did not answer inside the bound this host allows."""
 
@@ -226,7 +271,10 @@ class PlannerIngressAbandoned(PlannerIngressError):
 
 
 __all__ = [
+    "PlannerAuthRequired",
     "PlannerError",
+    "PlannerSessionError",
+    "PlannerSessionExpired",
     "PlannerIngressAbandoned",
     "PlannerIngressConflict",
     "PlannerIngressError",

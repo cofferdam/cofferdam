@@ -64,14 +64,17 @@ from typing import Any, Dict, Optional
 
 from ..operations import phases
 from .errors import (
+    PlannerAuthRequired,
     PlannerIngressAbandoned,
     PlannerIngressConflict,
     PlannerIngressInFlight,
     PlannerIngressInvalid,
     PlannerIngressNotAllowedNow,
+    PlannerSessionExpired,
     PlannerUnavailable,
 )
 from .service import PlannerService
+from .session import STATUS_SESSION_EXPIRED, PlannerSessionUnavailable
 from .store import IngressKey
 
 #: The whole external request vocabulary. Three fields.
@@ -327,23 +330,48 @@ class DevelopmentRequestIngress:
     def _require_usable_planner(self) -> None:
         """Refuse a host that cannot plan, before anything durable happens.
 
+        Two checks, in order, and both before the receipt is claimed:
+
+        1. **Is there a CLI at all?** ``PlannerUnavailable``.
+        2. **Does the planner's own session authenticate?**
+           ``PlannerAuthRequired`` or ``PlannerSessionExpired``.
+
         Checked here rather than left to fail during the invocation for a
         specific reason: a planner row that failed is not settled, so it would
         leave the project refusing every later remote request until somebody
         looked at a failure whose only cause was a credential this host never
-        had. A refusal that creates no row is the honest answer to "there is no
-        planner here".
+        had. A refusal that creates no row is the honest answer.
+
+        **There is no third branch in which the run proceeds.** The planner is
+        never handed the operator's credential, the worker's, or an inherited
+        environment — see :mod:`~.session`. A session that cannot authenticate
+        produces a refusal that names the login somebody must run, and that is
+        the only outcome.
         """
         available = getattr(self._planner, "available", None)
         if available is not None and not available():
-            reason = getattr(self._planner, "unavailable_reason", lambda: None)()
             raise PlannerUnavailable(
                 "no development planner is usable on this workstation",
                 # Code-owned words only. `unavailable_reason` names the
                 # executable's path, which is exactly the kind of host-private
                 # value a refusal must not carry outward.
-                detail="planner_not_configured" if reason else None,
+                detail="planner_not_configured",
             )
+
+        require = getattr(self._planner, "require_session", None)
+        if require is None:
+            # A provider that cannot describe a session of its own does not get
+            # one assumed for it. This is the fail-closed direction: a double or
+            # a future provider without the capability is refused rather than run
+            # against whatever credential the process happens to hold.
+            raise PlannerAuthRequired(
+                "this planner cannot prove it has a session of its own",
+                detail="planner_session_unsupported",
+            )
+        try:
+            require()
+        except PlannerSessionUnavailable as refusal:
+            raise _session_refusal(refusal) from None
 
     def _require_no_unresolved_step(self, project_id: str) -> None:
         """One development thread per project, and the phase decides.
@@ -448,6 +476,27 @@ AUTHORITY_BOUNDARY = (
 )
 
 
+def _session_refusal(refusal: PlannerSessionUnavailable) -> PlannerAuthRequired:
+    """Translate a session status into the planner's own typed refusal.
+
+    Two outward codes rather than one, because a person reads them differently:
+    ``planner_session_expired`` means *this stopped working*, and
+    ``planner_auth_required`` means *this was never set up*. Everything that is
+    not specifically an expiry — unprepared, never logged in, unsafe
+    permissions, no CLI in the namespace — is the second, which is the
+    conservative direction: it tells somebody to run the bootstrap, and the
+    bootstrap reports the real state.
+
+    The message is the session's own code-owned sentence. The upstream
+    ``detail`` is dropped: it can name the config root, which is a host path.
+    """
+    if refusal.status == STATUS_SESSION_EXPIRED:
+        return PlannerSessionExpired(str(refusal), detail=refusal.status)
+    # The status word itself, which is a closed code-owned vocabulary with no
+    # host value in it -- `unprepared`, `login_required`, `permissions_unsafe`.
+    return PlannerAuthRequired(str(refusal), detail=refusal.status)
+
+
 # -- validation ---------------------------------------------------------------
 
 
@@ -520,6 +569,8 @@ def _refuse_control_characters(text: str, what: str) -> None:
 
 __all__ = [
     "AUTHORITY_BOUNDARY",
+    "PlannerAuthRequired",
+    "PlannerSessionExpired",
     "MAX_INSTRUCTION_CHARS",
     "MAX_RESEARCH_NOTES_CHARS",
     "REQUEST_FIELDS",

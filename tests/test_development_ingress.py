@@ -51,6 +51,7 @@ from cofferdam.workstation.planner.errors import (
     PlannerInvocationFailed,
     PlannerUnavailable,
 )
+from cofferdam.workstation.planner import session as planner_session
 from cofferdam.workstation.planner.protocol import (
     DevelopmentPlanner,
     PlannerCapabilities,
@@ -72,11 +73,26 @@ INSTRUCTION = "Plan the next step for the remote status screen."
 
 
 class FakePlanner(DevelopmentPlanner):
-    """A planner that answers instantly, counts calls, and runs nothing."""
+    """A planner that answers instantly, counts calls, and runs nothing.
+
+    It models a **session** as well as a result, because the credential boundary
+    is part of the contract the ingress depends on: a provider that cannot prove
+    it has a session of its own must be refused, and a fake without one would
+    quietly test the wrong thing. ``session`` is the status the real
+    :mod:`~cofferdam.workstation.planner.session` would report.
+    """
 
     planner_id = "fake-planner"
 
-    def __init__(self, *, result=None, raises=None, available=True) -> None:
+    def __init__(
+        self,
+        *,
+        result=None,
+        raises=None,
+        available=True,
+        session=planner_session.STATUS_READY,
+        state_dir=None,
+    ) -> None:
         self.result = result or PlannerResult(
             action=ACTION_PREPARE_WORKER_PROMPT,
             summary="add the bounded read, then stop for approval",
@@ -86,7 +102,26 @@ class FakePlanner(DevelopmentPlanner):
         )
         self.raises = raises
         self._available = available
+        self.session = session
+        self.state_dir = state_dir
         self.calls = []
+        #: Every time the ingress asked whether the session is usable. Counted so
+        #: a test can assert the check happened *before* the invocation rather
+        #: than merely that a refusal came back.
+        self.session_checks = 0
+
+    # -- the credential boundary the real provider implements
+    def require_session(self):
+        self.session_checks += 1
+        if self.session != planner_session.STATUS_READY:
+            raise planner_session.PlannerSessionUnavailable(
+                planner_session.NAMESPACE.sentence(self.session),
+                status=self.session,
+                detail="the planner session directory is at /var/lib/secret/place",
+            )
+        if self.state_dir is None:
+            return Path("/planner/config")
+        return planner_session.config_directory(self.state_dir)
 
     def capabilities(self) -> PlannerCapabilities:
         return PlannerCapabilities(

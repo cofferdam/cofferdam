@@ -62,6 +62,18 @@ CODE_TOO_LARGE = "too_large"
 CODE_UPSTREAM_TIMEOUT = "upstream_timeout"
 #: Cofferdam could not be reached, or answered something the bridge cannot read.
 CODE_UPSTREAM_UNAVAILABLE = "upstream_unavailable"
+#: M2M PR4. The workstation's *development planner* has its own Claude session,
+#: separate from the operator's and from the worker's, and it is not signed in.
+#:
+#: Deliberately not `unauthorized`, which is about the caller's bridge key, and
+#: deliberately not `upstream_unavailable`, which says "try later" for something
+#: no amount of waiting fixes. A person has to run one command on the
+#: workstation, and the message says so.
+CODE_PLANNER_AUTH_REQUIRED = "planner_auth_required"
+#: The same session, previously signed in and no longer able to authenticate.
+#: Two codes rather than one because a person reads them differently — "set this
+#: up" against "this stopped working" — and the CLI can tell them apart.
+CODE_PLANNER_SESSION_EXPIRED = "planner_session_expired"
 #: A capability that exists in the contract and not in this build. Today only
 #: the artifact operations, which are absent rather than stubbed.
 CODE_NOT_IMPLEMENTED = "not_implemented"
@@ -81,6 +93,8 @@ ERROR_CODES = (
     CODE_TOO_LARGE,
     CODE_UPSTREAM_TIMEOUT,
     CODE_UPSTREAM_UNAVAILABLE,
+    CODE_PLANNER_AUTH_REQUIRED,
+    CODE_PLANNER_SESSION_EXPIRED,
     CODE_NOT_IMPLEMENTED,
     CODE_INTERNAL,
 )
@@ -222,15 +236,25 @@ _UPSTREAM_CONFLICT = frozenset(
 #: cloud call.
 _UPSTREAM_IN_FLIGHT = frozenset({"development_request_in_flight"})
 
-#: M2M PR4. The workstation cannot plan at all right now — no planner is
-#: configured, or its session will not authenticate. Deliberately *not* a
-#: project refusal and not a caller error: mapping it to either would send
-#: somebody looking for a typo in a project name when the fix is on the
-#: workstation. `upstream_unavailable` is the existing code for "this side is
-#: fine and the far side cannot serve you".
+#: M2M PR4. The workstation has no planner at all — none installed, or the
+#: capability switched off. Deliberately *not* a project refusal and not a caller
+#: error: mapping it to either would send somebody looking for a typo in a
+#: project name when the fix is on the workstation.
 _UPSTREAM_PLANNER_UNAVAILABLE = frozenset(
     {"planner_unavailable", "development_planner_disabled"}
 )
+
+#: M2M PR4. The planner exists and its own Claude session will not authenticate.
+#: Passed through under its own name rather than folded into the set above,
+#: because "there is no planner here" and "the planner needs signing in" are
+#: fixed by different actions and the second is a one-command fix.
+_UPSTREAM_PLANNER_AUTH = {
+    "planner_auth_required": CODE_PLANNER_AUTH_REQUIRED,
+    "planner_session_expired": CODE_PLANNER_SESSION_EXPIRED,
+    # A provider that cannot describe a session of its own is refused as
+    # "needs setting up", which is the conservative direction.
+    "planner_session_error": CODE_PLANNER_AUTH_REQUIRED,
+}
 
 _UPSTREAM_UNSUPPORTED_SHAPE = frozenset(
     {
@@ -271,6 +295,8 @@ def from_upstream_code(code: Any) -> str:
         return CODE_IDEMPOTENCY_CONFLICT
     if code in _UPSTREAM_IN_FLIGHT:
         return CODE_REQUEST_IN_FLIGHT
+    if code in _UPSTREAM_PLANNER_AUTH:
+        return _UPSTREAM_PLANNER_AUTH[code]
     if code in _UPSTREAM_PLANNER_UNAVAILABLE:
         return CODE_UPSTREAM_UNAVAILABLE
     if code in _UPSTREAM_UNSUPPORTED_SHAPE:
@@ -296,6 +322,10 @@ _STATUS_FOR_CODE: Dict[str, int] = {
     CODE_TOO_LARGE: 413,
     CODE_UPSTREAM_TIMEOUT: 504,
     CODE_UPSTREAM_UNAVAILABLE: 502,
+    # 503 rather than 502: the far side is reachable and working, and is telling
+    # this one that a human action is outstanding. Retrying will not change it.
+    CODE_PLANNER_AUTH_REQUIRED: 503,
+    CODE_PLANNER_SESSION_EXPIRED: 503,
     CODE_NOT_IMPLEMENTED: 501,
     CODE_INTERNAL: 500,
 }

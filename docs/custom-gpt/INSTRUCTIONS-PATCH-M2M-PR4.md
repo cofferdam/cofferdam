@@ -11,12 +11,23 @@ Nothing in this file is applied by this PR.
 ## Order of operations at deployment time
 
 1. Deploy the bridge and daemon carrying this change.
-2. Set `enable_development_planner` on the workstation, and confirm the planner session
-   authenticates. Until then the route answers `502 upstream_unavailable`.
-3. Paste the updated `docs/custom-gpt/openapi.yaml` into the GPT editor's Actions panel.
-4. Confirm the editor lists **sixteen** operations, `createDevelopmentRequest` among them, and that
+2. Set `enable_development_planner` on the workstation.
+3. **Sign the planner's own Claude session in.** It is a separate session from your personal one and
+   from the worker's, and it has never been logged in:
+
+   ```bash
+   python -m cofferdam.workstation.planner.auth status
+   python -m cofferdam.workstation.planner.auth login
+   python -m cofferdam.workstation.planner.auth status
+   ```
+
+   Until that reports `"status": "ready"` and `"usable": true`, `createDevelopmentRequest` answers
+   `503 planner_auth_required` and invokes nothing. With no planner installed at all it answers
+   `502 upstream_unavailable` instead.
+4. Paste the updated `docs/custom-gpt/openapi.yaml` into the GPT editor's Actions panel.
+5. Confirm the editor lists **sixteen** operations, `createDevelopmentRequest` among them, and that
    it is marked as requiring confirmation.
-5. Only then apply the two patches below.
+6. Only then apply the patches below.
 
 ---
 
@@ -106,8 +117,11 @@ Read `phase` and `sentence`. Do not work out the state yourself from the other f
 - `409 request_in_flight` — that request is being planned right now. Wait, then retry the identical
   request.
 - `409 idempotency_conflict` — you reused an id for a different request. Use a new one.
-- `502` — this workstation cannot plan right now. That is the workstation, not the project and not
-  the user's request.
+- `503 planner_auth_required` / `503 planner_session_expired` — Cofferdam's development planner has
+  its own Claude sign-in and it is not usable. Retrying will not help and it is nothing to do with
+  the user's request. Tell them to run the planner sign-in on their workstation, and say which of the
+  two it is: never signed in, or stopped working.
+- `502` — this workstation has no planner at all. Also the workstation, not the project.
 - `404` — no such project. Call `readOperations` for current project ids.
 
 ### What this Action never leads to

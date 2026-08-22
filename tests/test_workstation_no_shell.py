@@ -212,24 +212,31 @@ class NoShellExecutionTests(unittest.TestCase):
                 # `tests/test_git_range_capture.py` assert that from the callable
                 # surface.
                 continue
-            if path.name == "session.py" and path.parent.name == "worker":
-                # M2L PR1g. One call: `claude auth status` against Cofferdam's
-                # own config root, to answer "is the worker signed in" without
-                # reading a credential. Narrower than the Git probes above — a
-                # two-element constant argv with no interpolation, `shell=False`,
-                # an environment built from four literal keys, `stdin=DEVNULL`, a
-                # timeout, and only three named fields kept from the output.
+            if path.name == "session.py" and path.parent.name == "claudeauth":
+                # M2L PR1g, moved here by M2M PR4 when the planner needed a
+                # session of its own and the alternative was a second copy of
+                # this file. One call: `claude auth status` against a
+                # Cofferdam-owned config root, to answer "is this session signed
+                # in" without reading a credential. Narrower than the Git probes
+                # above — a two-element constant argv with no interpolation,
+                # `shell=False`, an environment built from five literal keys by
+                # `environment()`, `stdin=DEVNULL`, a timeout, and only three
+                # named fields kept from the output.
                 # `TheNarrowSubprocessExemptions` below asserts each of those
                 # rather than trusting this comment.
+                #
+                # The worker's and planner's `session.py` bindings are *not*
+                # exempt and do not need to be: they contain no `subprocess.`.
                 continue
-            if path.name == "auth.py" and path.parent.name == "worker":
-                # M2L PR1g. The one-time operator login, and the only file here
-                # that inherits an environment — deliberately, because an
-                # interactive sign-in legitimately needs a terminal, a display
-                # and a browser opener. It is an operator-invoked entry point,
-                # never imported by the daemon (asserted below), and the two
-                # variables that decide *which account session* is touched are
-                # overridden rather than inherited.
+            if path.name == "cli.py" and path.parent.name == "claudeauth":
+                # M2L PR1g, likewise shared by M2M PR4. The one-time operator
+                # login, and the only file here that inherits an environment —
+                # deliberately, because an interactive sign-in legitimately needs
+                # a terminal, a display and a browser opener. It is an
+                # operator-invoked entry point, never imported by the daemon
+                # (asserted below), and every variable that decides *which
+                # account session* is touched is overridden or removed by
+                # `login_environment` rather than inherited.
                 continue
             if path.parent.name == "publisher" and path.name in ("github.py", "remote.py"):
                 # M2L PR1h. The host-owned Git publisher, and the *only* files
@@ -253,34 +260,65 @@ class NoShellExecutionTests(unittest.TestCase):
                 offenders.append(path.name)
         self.assertEqual(offenders, [], f"subprocess used outside adapter code: {offenders}")
 
-    def test_the_worker_session_probe_is_as_narrow_as_its_exemption_claims(self):
+    def test_the_session_probe_is_as_narrow_as_its_exemption_claims(self):
         """The bound on PR1g's exemption, asserted from the source that runs.
 
         An allowlist entry is worth what its justification is worth, so the
         claims in the comment above are checked here instead of being believed.
+
+        Reads the shared implementation, which is what actually spawns. Both the
+        worker's binding and the planner's route here, so one assertion covers
+        both sessions rather than one per component drifting apart.
         """
         import inspect
 
-        from cofferdam.workstation.worker import session
+        from cofferdam.workstation.claudeauth import session as claude_session
 
-        source = inspect.getsource(session.probe)
+        source = inspect.getsource(claude_session.probe)
         self.assertIn('"auth", "status"', source)
         self.assertIn("stdin=subprocess.DEVNULL", source)
         self.assertIn("timeout=timeout", source)
         self.assertNotIn("shell=True", source)
         self.assertNotIn("Popen", source)
-        # The environment is four literal keys, not `os.environ`.
+        # Built, not inherited: the environment comes from `environment()`.
         self.assertNotIn("os.environ", source)
-        self.assertIn('"PATH": "/usr/bin:/bin"', source)
+        self.assertIn("env=environment(", source)
 
-    def test_the_worker_auth_tool_is_never_imported_by_the_daemon(self):
-        """Its broader exemption is only defensible because nothing loads it."""
+        built = inspect.getsource(claude_session.environment)
+        self.assertNotIn("os.environ", built)
+        self.assertIn('"PATH": path', built)
+        self.assertIn('"CLAUDE_CONFIG_DIR"', built)
+
+    def test_both_bindings_route_through_the_one_exempt_implementation(self):
+        """Neither `session.py` binding spawns anything of its own."""
+        from pathlib import Path as _Path
+
+        for module in (
+            "cofferdam/workstation/worker/session.py",
+            "cofferdam/workstation/planner/session.py",
+            "cofferdam/workstation/worker/auth.py",
+            "cofferdam/workstation/planner/auth.py",
+        ):
+            with self.subTest(module=module):
+                source = (
+                    _Path(__file__).resolve().parents[1] / module
+                ).read_text(encoding="utf-8")
+                self.assertNotIn("subprocess.", source)
+
+    def test_the_auth_tool_is_never_imported_by_the_daemon(self):
+        """Its broader exemption is only defensible because nothing loads it.
+
+        Covers the shared flow and both bindings. The bindings exist to be run
+        as ``__main__`` by a person; if the daemon ever imported one, the
+        environment-inheriting login path would be reachable from a process that
+        serves requests.
+        """
         import ast
 
         root = Path(__file__).resolve().parents[1] / "cofferdam"
         importers = []
         for path in root.rglob("*.py"):
-            if path.name == "auth.py" and path.parent.name == "worker":
+            if path.name == "auth.py" and path.parent.name in ("worker", "planner"):
                 continue
             # Parsed, not grepped. The first version searched raw text and was
             # tripped by a docstring in an unrelated module that merely *named*
@@ -294,13 +332,21 @@ class NoShellExecutionTests(unittest.TestCase):
                 if isinstance(node, ast.ImportFrom):
                     module = node.module or ""
                     names = {alias.name for alias in node.names}
-                    if module.endswith("worker.auth") or (
-                        module.endswith("worker") and "auth" in names
+                    if (
+                        module.endswith("worker.auth")
+                        or module.endswith("planner.auth")
+                        or module.endswith("claudeauth.cli")
+                        or (
+                            module.endswith(("worker", "planner", "workstation"))
+                            and names & {"auth"}
+                        )
                     ):
                         importers.append(str(path.relative_to(root)))
                 elif isinstance(node, ast.Import):
                     for alias in node.names:
-                        if alias.name.endswith("worker.auth"):
+                        if alias.name.endswith(
+                            ("worker.auth", "planner.auth", "claudeauth.cli")
+                        ):
                             importers.append(str(path.relative_to(root)))
         self.assertEqual(importers, [], f"the login tool is imported by {importers}")
 
@@ -314,9 +360,11 @@ class NoShellExecutionTests(unittest.TestCase):
         """
         import ast
 
-        from cofferdam.workstation.worker import auth
+        from cofferdam.workstation.claudeauth import cli as claude_auth_cli
 
-        tree = ast.parse(Path(auth.__file__).read_text(encoding="utf-8"))
+        tree = ast.parse(
+            Path(claude_auth_cli.__file__).read_text(encoding="utf-8")
+        )
         for node in ast.walk(tree):
             # Drop every docstring so prose cannot satisfy or fail this test.
             if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef)):
