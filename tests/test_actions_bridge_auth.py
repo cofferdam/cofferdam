@@ -194,7 +194,10 @@ class BridgeAuthTests(unittest.TestCase):
                 "/v1/tasks/{task_id}/finish",
             },
         )
-        self.assertEqual(len(OPERATION_IDS), 10)
+        # 10 through M2J PR4; 14 since M2M PR2 added four read-only
+        # operations. The count is a tripwire for an unreviewed surface change,
+        # so it moves with a reviewed PR and stays put otherwise.
+        self.assertEqual(len(OPERATION_IDS), 14)
 
     def test_there_is_no_generic_proxy_path(self) -> None:
         """Not refused — absent. Each of these is a 404 with no handler."""

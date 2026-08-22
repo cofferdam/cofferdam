@@ -54,22 +54,34 @@ if TestClient is not None:
         upstream_error,
     )
 
-KEY = "test-bridge-key-0123456789abcdef"
+KEY = "bridge-test-key-not-a-real-credential-0002"
 
 
 @unittest.skipIf(TestClient is None, "workstation extras are not installed")
 class BridgeHarness(unittest.TestCase):
     def setUp(self):
+        import dataclasses
         import tempfile
         from pathlib import Path
 
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.upstream = FakeInternalClient()
-        config = load_bridge_config(
-            home=Path(self._tmp.name), external_key=KEY, internal_base_url="http://x"
+        # The same construction the other bridge suites use, including the
+        # generous limits: a suite that walks four routes several times over is
+        # not the traffic the limiter exists to stop, and letting it trip would
+        # turn these assertions into flaky ones.
+        self.config = dataclasses.replace(
+            load_bridge_config(Path(self._tmp.name)),
+            rate_limit_per_minute=100000,
+            rate_limit_burst=100000,
+            mutation_rate_limit_per_minute=100000,
+            mutation_rate_limit_burst=100000,
         )
-        self.app = create_bridge_app(config=config, internal_client=self.upstream)
+        self.upstream = FakeInternalClient()
+        self.app = create_bridge_app(
+            self.config, external_key=KEY, internal_client=self.upstream
+        )
+        self.addCleanup(self.app.state.idempotency.close)
         self.client = TestClient(self.app)
 
     def get(self, path, *, key=KEY):
